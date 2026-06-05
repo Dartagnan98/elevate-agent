@@ -65,6 +65,31 @@ Then `_osa_send_via(phone, draft, service)` sends, **preferring the `imsg` CLI**
 | History source | `~/Library/Messages/chat.db` | proven past transport |
 | IDS cache | `~/Library/IdentityServices/idstatuscache.plist` | what `ids-capability` reads; `com.apple.madrid` service = iMessage |
 
+## Sending from the foreground app (the Automation wall)
+
+macOS only grants **Automation → Messages** to a **foreground GUI app**, never a
+headless/background process. Both the launchd gateway AND the Elevate backend's
+python worker are headless, so running `imsg` there **hangs** (AppleEvent
+timeout). osascript "works" from there only because it can't force SMS anyway.
+
+Fix: the send is handed to the **foreground Electron process**, which can hold
+Automation (entitlement + a one-time "Elevate wants to control Messages" prompt).
+
+- Backend (`sender._imsg_send_via`): when `ELEVATE_SMS_VIA_APP=1` (set by the
+  desktop app for its backend), it does NOT run imsg. It drops
+  `~/.elevate/sms-outbox/<id>.req.json` `{to,text,service}` and polls for
+  `<id>.res.json` (45s).
+- Electron main (`desktop/src/main.js` `startSmsOutboxWatcher`): watches that
+  dir, runs `imsg send --service ...` in the GUI process, writes the result.
+- Entitlement `com.apple.security.automation.apple-events` +
+  `NSAppleEventsUsageDescription` (Info.plist) are required for a hardened-
+  runtime app to send Apple Events — **build-time, needs re-sign**. Ships via
+  `release:mac`; can't be hot-patched into the installed `app.asar`.
+- The launchd gateway `tick(skip_channels={"sms"})` so it never claims sms.
+- Known fragility: Messages.app can wedge under rapid sends (`AppleEvent timed
+  out -1712`) — quit+reopen Messages to clear. macOS updates can change the
+  Automation/AppleScript surface.
+
 ## Where it connects
 
 Leads **Approve** → `update_source_task_state(action="approve")` flips the

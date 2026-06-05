@@ -3954,6 +3954,32 @@ def _thread_draft_template_state(source_id: str, task_id: str, source_dir: Path)
     return {}
 
 
+def _fire_approve_tick(task_id: str) -> None:
+    """Drain the sender ONCE, in the current process, right after an approve.
+
+    Runs in a daemon thread so the HTTP response isn't blocked on the send
+    (10-90s). CRITICAL: this must run inside the Elevate app (dashboard)
+    process, where macOS Automation→Messages can be granted — the launchd
+    gateway daemon cannot send via Messages (no GUI prompt for Automation), so
+    the app must own the actual delivery. Disable with ELEVATE_APPROVE_AUTO_TICK=0.
+    """
+    if os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") in ("0", "false", "no"):
+        return
+    import threading
+
+    def _tick() -> None:
+        try:
+            from elevate_cli import sender as _sender
+
+            _sender.tick(batch=int(os.getenv("ELEVATE_APPROVE_TICK_BATCH", "1")))
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
+    threading.Thread(target=_tick, name=f"approve-tick-{str(task_id)[:24]}", daemon=True).start()
+
+
 def update_source_task_state(
     source_id: str,
     task_id: str,
@@ -4019,6 +4045,13 @@ def update_source_task_state(
             )
         if flipped is not None:
             _write_source_ui_state(source_dir, state)
+            # Send NOW, in THIS process. The approve API runs inside the Elevate
+            # app (dashboard), which can hold macOS Automation→Messages — the
+            # launchd gateway daemon CANNOT (no GUI prompt), so leaving the send
+            # to the gateway's periodic tick fails the permission check. Firing
+            # here keeps the send in the app context. Best-effort + threaded so
+            # the HTTP response isn't blocked.
+            _fire_approve_tick(task_id)
         else:
             _approve_atomic(source_id, task_id, existing, source_dir, state)
     else:
@@ -4139,19 +4172,7 @@ def _approve_atomic(
             _write_source_ui_state(source_dir, state)
 
     # Fire the sender immediately so the UI experience is "click → sent."
-    # Background thread so the HTTP response isn't blocked on the agent
-    # subprocess (10-90s for an LLM dispatch). Tick once with a small batch
-    # so unrelated queued rows don't get drained on every approve.
-    if os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") not in ("0", "false", "no"):
-        import threading
-        def _tick() -> None:
-            try:
-                from elevate_cli import sender as _sender
-                _sender.tick(batch=int(os.getenv("ELEVATE_APPROVE_TICK_BATCH", "1")))
-            except Exception as _exc:
-                import traceback
-                traceback.print_exc()
-        threading.Thread(target=_tick, name=f"approve-tick-{task_id[:24]}", daemon=True).start()
+    _fire_approve_tick(task_id)
 
 
 def _lofty_lead_name(lead: JsonRecord) -> str:

@@ -13420,7 +13420,11 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
 
         if tick_count % SENDER_TICK_EVERY == 0:
             try:
-                outbound_sender.tick(batch=20)
+                # SMS is delivered by the Elevate app (dashboard) approve-tick —
+                # the launchd gateway can't hold macOS Automation→Messages, so it
+                # must NOT claim sms rows (it would fail the permission check and
+                # churn them through retries). Email/social still go here.
+                outbound_sender.tick(batch=20, skip_channels={"sms"})
             except Exception as e:
                 logger.debug("Sender tick error: %s", e)
 

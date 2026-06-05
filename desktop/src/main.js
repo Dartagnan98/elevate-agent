@@ -536,6 +536,10 @@ async function ensureBackend() {
 
   const baseEnv = {
     ELEVATE_DESKTOP_APP: "1",
+    // SMS sends go via the sms-outbox spool drained by THIS foreground app
+    // (the headless backend can't hold macOS Automation→Messages). See
+    // startSmsOutboxWatcher + cli/elevate_cli/sender._imsg_send_via_app.
+    ELEVATE_SMS_VIA_APP: "1",
     ...(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
   };
   markStartup("backend:spawn", path.basename(launcher.command));
@@ -1235,11 +1239,80 @@ app.on("open-url", (event, url) => {
   handleDeepLink(url);
 });
 
+// ── SMS outbox: deliver approved SMS from the FOREGROUND app ──────────────────
+// The headless backend can't get macOS Automation→Messages, so it can't run
+// `imsg`. This GUI process can (entitlement + one-time "control Messages"
+// prompt). The backend drops a <id>.req.json into ~/.elevate/sms-outbox/ with
+// {to,text,service}; we run imsg here and write <id>.res.json with the result.
+// See cli/docs/mac-sms-transport.md.
+let smsImsgPath = null;
+function resolveImsg() {
+  if (smsImsgPath !== null) return smsImsgPath;
+  const candidates = ["/opt/homebrew/bin/imsg", "/usr/local/bin/imsg"];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) { smsImsgPath = c; return c; } } catch {}
+  }
+  try {
+    const found = execFileSync("/usr/bin/env", ["bash", "-lc", "command -v imsg"], {
+      encoding: "utf8",
+    }).trim();
+    smsImsgPath = found || "";
+  } catch { smsImsgPath = ""; }
+  return smsImsgPath;
+}
+
+function startSmsOutboxWatcher() {
+  const dir = path.join(os.homedir(), ".elevate", "sms-outbox");
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  const inFlight = new Set();
+  const drain = () => {
+    let files;
+    try { files = fs.readdirSync(dir); } catch { return; }
+    for (const f of files) {
+      if (!f.endsWith(".req.json") || inFlight.has(f)) continue;
+      inFlight.add(f);
+      const id = f.slice(0, -".req.json".length);
+      const reqPath = path.join(dir, f);
+      const resPath = path.join(dir, `${id}.res.json`);
+      let req;
+      try { req = JSON.parse(fs.readFileSync(reqPath, "utf8")); }
+      catch { try { fs.unlinkSync(reqPath); } catch {} inFlight.delete(f); continue; }
+      // Remove the request first so a crash can't reprocess/duplicate a send.
+      try { fs.unlinkSync(reqPath); } catch {}
+      const imsg = resolveImsg();
+      const writeRes = (obj) => {
+        try {
+          const tmp = `${resPath}.tmp`;
+          fs.writeFileSync(tmp, JSON.stringify(obj));
+          fs.renameSync(tmp, resPath);
+        } catch {}
+        inFlight.delete(f);
+      };
+      if (!imsg) { writeRes({ ok: false, error: "imsg not installed" }); continue; }
+      const svc = String(req.service || "sms").toLowerCase() === "imessage" ? "imessage" : "sms";
+      const args = ["send", "--to", String(req.to || ""), "--text", String(req.text || ""), "--service", svc, "--json"];
+      const child = spawn(imsg, args, { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "", err = "";
+      const killer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 30000);
+      child.stdout.on("data", (d) => { out += d; });
+      child.stderr.on("data", (d) => { err += d; });
+      child.on("close", (code) => {
+        clearTimeout(killer);
+        writeRes({ ok: code === 0, code, stdout: out.slice(-500), error: code === 0 ? null : (err || out).slice(-300) });
+      });
+      child.on("error", (e) => { clearTimeout(killer); writeRes({ ok: false, error: String(e).slice(-300) }); });
+    }
+  };
+  setInterval(drain, 1500);
+  log.info("[sms-outbox] watcher started:", dir);
+}
+
 app.whenReady().then(async () => {
   // Secondary instance already handed off to the primary and is quitting.
   if (!isPrimaryInstance) return;
   markStartup("electron:ready");
   await startDesktop();
+  startSmsOutboxWatcher();
   kickoffUpdates();
   // A deep link that launched the app fires open-url before the window exists;
   // replay it now that startDesktop() has created mainWindow.

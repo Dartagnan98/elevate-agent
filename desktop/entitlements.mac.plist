@@ -6,5 +6,10 @@
   <true/>
   <key>com.apple.security.device.audio-input</key>
   <true/>
+  <!-- Send Apple Events to Messages so the FOREGROUND app can deliver SMS via
+       imsg. The headless backend process can't be granted Automation; the GUI
+       app can (one-time "Elevate wants to control Messages" prompt). -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

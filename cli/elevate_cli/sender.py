@@ -489,6 +489,55 @@ def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tu
     return (str(row[0] or ""), int(row[1] or 0))
 
 
+_SMS_OUTBOX_DIR = os.path.expanduser("~/.elevate/sms-outbox")
+
+
+def _imsg_send_via_app(phone: str, draft: str, svc: str) -> tuple[int, str, str]:
+    """Hand the send to the FOREGROUND Elevate app via the sms-outbox spool.
+
+    Running `imsg` from this (headless backend) process hangs — macOS won't grant
+    Automation→Messages to a non-foreground process. The Electron GUI process
+    (which CAN hold Automation) watches ~/.elevate/sms-outbox, runs imsg, and
+    writes back the result. We drop a request and poll for the response. Used
+    when ELEVATE_SMS_VIA_APP is set (the dashboard sets it). See
+    cli/docs/mac-sms-transport.md.
+    """
+    import time as _time
+
+    os.makedirs(_SMS_OUTBOX_DIR, exist_ok=True)
+    rid = uuid.uuid4().hex
+    req_path = os.path.join(_SMS_OUTBOX_DIR, f"{rid}.req.json")
+    res_path = os.path.join(_SMS_OUTBOX_DIR, f"{rid}.res.json")
+    tmp = req_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"to": phone, "text": draft, "service": svc}, fh)
+    os.replace(tmp, req_path)
+    _log.info("sender.imsg_app spooled service=%s phone=%s id=%s", svc, phone, rid)
+    deadline = _time.time() + 45
+    while _time.time() < deadline:
+        if os.path.exists(res_path):
+            try:
+                with open(res_path, encoding="utf-8") as fh:
+                    res = json.load(fh)
+            except Exception:  # noqa: BLE001
+                res = None
+            try:
+                os.remove(res_path)
+            except Exception:  # noqa: BLE001
+                pass
+            if isinstance(res, dict) and res.get("ok"):
+                return (0, str(res.get("stdout") or '{"status":"sent"}'), "")
+            err = (res or {}).get("error") if isinstance(res, dict) else "no result"
+            return (1, "", f"app-send failed: {err}")
+        _time.sleep(0.4)
+    # No response — the GUI app may not be running. Clean up the request.
+    try:
+        os.remove(req_path)
+    except Exception:  # noqa: BLE001
+        pass
+    return (124, "", "app-send timed out (Elevate app not draining sms-outbox?)")
+
+
 def _imsg_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, str] | None:
     """Send via the `imsg` CLI, forcing the carrier transport.
 
@@ -498,11 +547,17 @@ def _imsg_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str,
     OWN Full Disk Access grant, so it works even when the host app process
     can't read chat.db. Returns (rc, stdout, stderr), or None when `imsg`
     isn't installed (caller falls back to osascript).
+
+    When ELEVATE_SMS_VIA_APP is set (the dashboard backend), the send is handed
+    to the foreground Elevate app instead of run here — a headless process can't
+    hold macOS Automation→Messages, so running imsg here just hangs.
     """
+    svc = "imessage" if str(service_type).lower() == "imessage" else "sms"
+    if os.getenv("ELEVATE_SMS_VIA_APP", "").strip().lower() in ("1", "true", "yes"):
+        return _imsg_send_via_app(phone, draft, svc)
     imsg = shutil.which("imsg")
     if not imsg:
         return None
-    svc = "imessage" if str(service_type).lower() == "imessage" else "sms"
     try:
         result = subprocess.run(
             [imsg, "send", "--to", phone, "--text", draft, "--service", svc, "--json"],
@@ -733,12 +788,16 @@ def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
     return outreach_db.mark_sent(queue_id, pmid)
 
 
-def tick(*, batch: int = 10) -> dict[str, Any]:
+def tick(*, batch: int = 10, skip_channels: "set[str] | None" = None) -> dict[str, Any]:
     """Claim up to `batch` due rows and dispatch each. Returns counts.
-    Called by the sender-tick cron every 2 minutes."""
+
+    ``skip_channels`` excludes channels from this tick. The launchd gateway
+    passes ``{"sms"}`` because Mac Messages sends require Automation permission
+    that only the Elevate app process can hold — SMS is delivered by the app's
+    approve-tick, not the daemon. The app's tick passes no skip (handles all)."""
     started = time.time()
     counts = {"claimed": 0, "sent": 0, "retrying": 0, "failed": 0}
-    rows = outreach_db.claim_due_sends(limit=batch)
+    rows = outreach_db.claim_due_sends(limit=batch, skip_channels=skip_channels)
     counts["claimed"] = len(rows)
     for row in rows:
         result = dispatch_one(row) or {}

@@ -816,25 +816,47 @@ def list_recent_sends(
     return [s for s in (_row_to_send(r) for r in rows) if s is not None]
 
 
-def claim_due_sends(limit: int = 10) -> list[dict[str, Any]]:
+def claim_due_sends(
+    limit: int = 10, *, skip_channels: "set[str] | None" = None
+) -> list[dict[str, Any]]:
     """Atomically claim up to `limit` due rows: status in (queued, retrying)
     AND (next_retry_at IS NULL OR next_retry_at <= now). Flips claimed rows to
     'sending' inside one transaction so two ticks cannot race for the same row.
+
+    ``skip_channels`` excludes those channels from the claim — the launchd
+    gateway passes ``{"sms"}`` because Messages sends must run in the Elevate app
+    process (Automation permission), not the daemon. Those rows stay queued for
+    the app's approve-tick to deliver.
     """
     now = _now()
+    skip = {str(c) for c in (skip_channels or set())}
     claimed: list[dict[str, Any]] = []
     with connect() as conn:
         with transaction(conn):
-            rows = conn.execute(
-                f"""
-                SELECT * FROM send_queue
-                WHERE status IN ('{SEND_STATUS_QUEUED}', '{SEND_STATUS_RETRYING}')
-                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                ORDER BY created_at
-                LIMIT ?
-                """,
-                (now, limit),
-            ).fetchall()
+            if skip:
+                placeholders = ",".join("?" for _ in skip)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM send_queue
+                    WHERE status IN ('{SEND_STATUS_QUEUED}', '{SEND_STATUS_RETRYING}')
+                      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                      AND channel NOT IN ({placeholders})
+                    ORDER BY created_at
+                    LIMIT ?
+                    """,
+                    (now, *sorted(skip), limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM send_queue
+                    WHERE status IN ('{SEND_STATUS_QUEUED}', '{SEND_STATUS_RETRYING}')
+                      AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                    ORDER BY created_at
+                    LIMIT ?
+                    """,
+                    (now, limit),
+                ).fetchall()
             for row in rows:
                 conn.execute(
                     "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",

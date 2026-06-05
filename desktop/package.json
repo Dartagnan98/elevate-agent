@@ -86,7 +86,8 @@
       "entitlementsInherit": "entitlements.mac.plist",
       "notarize": true,
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Elevate uses the microphone for voice input in chat."
+        "NSMicrophoneUsageDescription": "Elevate uses the microphone for voice input in chat.",
+        "NSAppleEventsUsageDescription": "Elevate sends approved text messages through the Messages app on your Mac."
       },
       "target": [
         {
