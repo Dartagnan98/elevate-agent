@@ -4705,6 +4705,41 @@ class AIAgent:
 
 
 
+    def _plan_mode_suffix(self) -> str:
+        """Per-call instruction injected while the session is in plan mode.
+
+        Shapes the agent so the *full* plan goes to the Plan panel (via the
+        `todo` tool) while the chat reply stays a short brief — instead of
+        dumping the whole step list inline. Read at API-call time (not cached)
+        because plan mode toggles mid-session via /plan and /run.
+        """
+        try:
+            from tools.approval import get_permission_mode
+            if get_permission_mode() != "plan":
+                return ""
+        except Exception:
+            return ""
+        has_todo = "todo" in getattr(self, "valid_tool_names", set())
+        plan_tool_line = (
+            "Write the plan by calling the `todo` tool with concrete, ordered "
+            "steps — this is what renders in the user's Plan panel. Keep each "
+            "step a short imperative phrase."
+            if has_todo
+            else "Lay out the plan as a concise ordered list."
+        )
+        return (
+            "## PLAN MODE IS ACTIVE\n"
+            "You are researching read-only; edits, commands, sends, and "
+            "delegation are blocked until the user types /run.\n"
+            f"- {plan_tool_line}\n"
+            "- In your chat reply, give ONLY a short brief (2–4 sentences): the "
+            "approach, the key decision/trade-off, and anything you need "
+            "confirmed. Do NOT restate the full step list in chat — it already "
+            "shows in the Plan panel.\n"
+            "- End the brief by telling the user to review the plan and type "
+            "**/run** to approve and execute."
+        )
+
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
@@ -9433,6 +9468,9 @@ class AIAgent:
             effective_system = self._cached_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            _plan_suffix = self._plan_mode_suffix()
+            if _plan_suffix:
+                effective_system = (effective_system + "\n\n" + _plan_suffix).strip()
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
             if self.prefill_messages:
@@ -10233,6 +10271,9 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            _plan_suffix = self._plan_mode_suffix()
+            if _plan_suffix:
+                effective_system = (effective_system + "\n\n" + _plan_suffix).strip()
             # NOTE: Plugin context from pre_llm_call hooks is injected into the
             # user message (see injection block above), NOT the system prompt.
             # This is intentional — system prompt modifications break the prompt
