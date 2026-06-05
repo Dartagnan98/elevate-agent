@@ -229,16 +229,110 @@ function LbKpi({ label, value, breakdown, delta, deltaTone }: LbKpiProps) {
 // ─────────────────────────────────────────────────────────────────
 // Source alert
 // ─────────────────────────────────────────────────────────────────
+// macOS deep-link straight to System Settings → Privacy & Security → Full Disk
+// Access. Electron's setWindowOpenHandler shell.openExternal's any non-backend
+// URL, so window.open(this) opens the real pane. The legacy
+// `com.apple.preference.security?Privacy_AllFiles` anchor only worked on the old
+// System Preferences (≤ Monterey); System Settings (Ventura+) uses the
+// PrivacySecurity.extension pane id below, which actually scrolls to the section.
+const FDA_SETTINGS_URL =
+  "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles";
+
 function LbSourceAlert({ blocked }: { blocked: LeadsChannel[] }) {
   if (blocked.length === 0) return null;
+  const top = blocked[0];
+  const isFda = top.kind === "imessage" || /full disk access/i.test(top.note || "");
   return (
     <div className="lb-alert">
       <span className="lb-alert-icon"><AlertTriangle /></span>
-      <span className="lb-alert-label">A lead source needs access.</span>
-      <span className="lb-alert-detail">
-        <strong>{blocked[0].name}:</strong> {blocked[0].note}
+      <span className="lb-alert-label">
+        {isFda ? "Apple Messages needs Full Disk Access." : "A lead source needs access."}
       </span>
-      <Link to="/config#connectors" className="lb-alert-action">Open Settings</Link>
+      <span className="lb-alert-detail">
+        {isFda
+          ? "Open System Settings → Privacy & Security → Full Disk Access, turn ON Elevate (click + to add it if it's not listed), then quit and reopen Elevate."
+          : <><strong>{top.name}:</strong> {top.note}</>}
+      </span>
+      {isFda ? (
+        <button
+          type="button"
+          className="lb-alert-action"
+          onClick={() => window.open(FDA_SETTINGS_URL)}
+        >
+          Open Full Disk Access
+        </button>
+      ) : (
+        <Link to="/config#connectors" className="lb-alert-action">Open Settings</Link>
+      )}
+    </div>
+  );
+}
+
+// Apple Messages inbound/outbound toggles. Inbound = read chat.db as a lead
+// source (needs Full Disk Access — this is what drives the access banner).
+// Outbound = send approved texts through Messages (no FDA needed). They are
+// independent: you can send outreach without importing your message history.
+function LbToggle({
+  on, label, hint, onClick,
+}: { on: boolean; label: string; hint: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={hint}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 8,
+        border: "1px solid var(--border, #2a2a2e)", borderRadius: 8,
+        background: "transparent", color: "inherit", padding: "6px 10px",
+        cursor: "pointer", font: "inherit",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 30, height: 18, borderRadius: 999, position: "relative",
+          background: on ? "var(--accent-good, #4c9a6a)" : "var(--border, #3a3a3e)",
+          transition: "background .15s",
+        }}
+      >
+        <span style={{
+          position: "absolute", top: 2, left: on ? 14 : 2, width: 14, height: 14,
+          borderRadius: 999, background: "#fff", transition: "left .15s",
+        }} />
+      </span>
+      <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.15, textAlign: "left" }}>
+        <span style={{ fontWeight: 600, fontSize: 12 }}>{label}</span>
+        <span style={{ opacity: 0.6, fontSize: 11 }}>{on ? "on" : "off"}</span>
+      </span>
+    </button>
+  );
+}
+
+function AppleMessagesToggleBar({
+  appleMessages, onToggle,
+}: {
+  appleMessages?: { inbound: boolean; outbound: boolean; blocked?: boolean; note?: string };
+  onToggle?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
+}) {
+  if (!appleMessages || !onToggle) return null;
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+      padding: "8px 0", marginBottom: 4,
+    }}>
+      <span style={{ fontWeight: 600, fontSize: 12, opacity: 0.8 }}>Apple Messages</span>
+      <LbToggle
+        on={appleMessages.inbound}
+        label="Inbound (read replies)"
+        hint="Read your Mac Messages as a lead source. Needs Full Disk Access for Elevate."
+        onClick={() => void onToggle("inbound", !appleMessages.inbound)}
+      />
+      <LbToggle
+        on={appleMessages.outbound}
+        label="Outbound (send texts)"
+        hint="Send approved texts through Messages. No Full Disk Access required."
+        onClick={() => void onToggle("outbound", !appleMessages.outbound)}
+      />
     </div>
   );
 }
@@ -1435,6 +1529,8 @@ export interface LeadsBoardProps {
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
   onSentRefresh?: (includePending: boolean) => Promise<void>;
+  appleMessages?: { inbound: boolean; outbound: boolean; blocked?: boolean; note?: string };
+  onToggleDirection?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
 }
 
 export function LeadsBoard(props: LeadsBoardProps) {
@@ -1557,7 +1653,27 @@ export function LeadsBoard(props: LeadsBoardProps) {
               <LbKpi label="Next agent run" value={k.nextRun} breakdown="Hot Leads Watcher" delta="" deltaTone="" />
             </section>
 
-            <LbSourceAlert blocked={blocked} />
+            <AppleMessagesToggleBar
+              appleMessages={props.appleMessages}
+              onToggle={props.onToggleDirection}
+            />
+            {props.appleMessages
+              ? (props.appleMessages.blocked ? (
+                  <LbSourceAlert
+                    blocked={[{
+                      id: "imessage",
+                      name: "Apple Messages",
+                      kind: "imessage",
+                      status: "blocked",
+                      uncontacted: 0,
+                      contacted: 0,
+                      records: 0,
+                      note: props.appleMessages.note
+                        || "Open System Settings → Privacy & Security → Full Disk Access, turn ON Elevate, then quit and reopen Elevate.",
+                    }]}
+                  />
+                ) : null)
+              : <LbSourceAlert blocked={blocked} />}
             <ActionQueue
               drafts={drafts}
               pipeline={pipeline}

@@ -120,6 +120,20 @@ export function LeadsDesignShell() {
     [sentRaw],
   );
 
+  const handleToggleDirection = useCallback(
+    async (dir: "inbound" | "outbound", value: boolean) => {
+      try {
+        await api.setAppleMessagesDirections({ [dir]: value });
+        // Refresh the inbox so the banner + toggle reflect new server state
+        // (inbound off clears the FDA banner; inbound on re-checks access).
+        await data.refresh({ force: true });
+      } catch (err) {
+        console.error("apple messages direction toggle failed", err);
+      }
+    },
+    [data],
+  );
+
   const handleDraftAction = useCallback(
     async (action: LeadsDraftAction, draft: LeadsDraft) => {
       if (!draft.sourceId || !draft.taskId) return;
@@ -171,6 +185,8 @@ export function LeadsDesignShell() {
           onRefresh={() => void data.refresh({ force: true })}
           templateMutations={templateMutations}
           onSentRefresh={refreshSent}
+          appleMessages={inbox?.appleMessages}
+          onToggleDirection={handleToggleDirection}
         />
       )}
     </div>

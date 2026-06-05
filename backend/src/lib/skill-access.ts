@@ -29,14 +29,23 @@ export function requiredEntitlements(manifest: Record<string, unknown>): string[
   return [...new Set(required)];
 }
 
-export function userCanAccessSkill(user: StoreUser, skill: StoreSkill): boolean {
+// Generic tier + entitlement gate for any catalog item carrying
+// { tier_required, manifest } — skills and automations share the same rules.
+export function userCanAccessGated(
+  user: StoreUser,
+  item: { tier_required: string; manifest: Record<string, unknown> },
+): boolean {
   const userRank = TIER_RANK[user.tier] ?? 0;
-  const requiredRank = TIER_RANK[skill.tier_required] ?? 999;
+  const requiredRank = TIER_RANK[item.tier_required] ?? 999;
   if (userRank < requiredRank) return false;
 
-  const required = requiredEntitlements(skill.manifest);
+  const required = requiredEntitlements(item.manifest);
   if (required.length === 0) return true;
 
   const granted = new Set(user.entitlements || []);
   return required.every((entitlement) => granted.has(entitlement));
+}
+
+export function userCanAccessSkill(user: StoreUser, skill: StoreSkill): boolean {
+  return userCanAccessGated(user, skill);
 }

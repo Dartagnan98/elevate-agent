@@ -47,6 +47,21 @@ from elevate_cli.data.connection import connect
 
 logger = logging.getLogger(__name__)
 
+
+def _board_kwargs() -> dict:
+    """Per-account Xposure board URLs for the agent prompt (Interior BC default)."""
+    from elevate_cli.xposure_board import board_config
+
+    b = board_config()
+    return {
+        "login_url": b["login_url"],
+        "members_url": b["members_url"],
+        "portal_base": b["portal_base"],
+        "contacts_url": b["contacts_url"],
+        "dologin_url": b["dologin_url"],
+    }
+
+
 SOURCE_ID = "xposure-pcs-views"
 
 _DEFAULT_LOOKBACK_DAYS = 90
@@ -139,7 +154,7 @@ each buyer's Client View one-way mirror per saved search, and append a \
 JSONL record per buyer-per-search to disk.
 
 CREDENTIALS (already in your environment)
-- Login URL: https://iam.interiorbc.ca/idp/login
+- Login URL: {login_url}
 - Username env: MLS_USERNAME = "{username}"
 - Password env: MLS_PASSWORD = "{password}"
 
@@ -168,7 +183,7 @@ OUTPUT
    ]}}
 
 STEPS
-1. browser_navigate to https://iam.interiorbc.ca/idp/login.
+1. browser_navigate to {login_url}.
 2. Use browser_snapshot to get refs, then browser_type the username and \
    password into the matching fields and browser_click the login button.
 3. If an MFA / "verification code" prompt appears:
@@ -177,11 +192,12 @@ STEPS
       `bash: cat {mfa_file}` — a background process writes the 6-digit \
       code there.
    c. Type the code into the OTP input and submit.
-4. Wait until URL contains members.interiorbc.ca, then click the \
-   "AOIR Xposure" app tile (text matches /aoir xposure|^xposure$/i). \
-   If the SAML hop stalls, browser_navigate directly to \
-   https://xposureapp.com.
-5. After AOIR Xposure opens, go to the Clients / Contacts page so the visible \
+4. Complete the SSO hop. If an intermediate members portal ({members_url}) \
+   appears with an "Xposure" app tile (text matches /aoir xposure|^xposure$/i), \
+   click it; otherwise the login SSOs straight into Xposure. End up on the \
+   Xposure portal at {portal_base}. If the hop stalls, browser_navigate \
+   directly to {contacts_url}.
+5. After the Xposure portal opens, go to the Clients / Contacts page so the visible \
    browser shows the `#pcs-contacts-table` DataTable. You may use a tiny \
    browser_console check to confirm the table exists, but DO NOT return the \
    full buyer/search/listing records through browser_console or browser_cdp.
@@ -189,13 +205,13 @@ STEPS
    `{writer_command}`
    This command attaches to the same visible browser on CDP port 9222, reads \
    the Xposure DataTables model directly, fetches each Client View with \
-   `POST https://interiorrealtors.xposureapp.com/pcs/air/DoLogin`, parses the \
+   `POST {dologin_url}`, parses the \
    HTML with `DOMParser`, iterates `.listing-container` cards, and appends the \
    JSONL records directly to `{snapshot_path}`.
 7. Watch the command stdout. It prints compact JSON with `records_appended`, \
    `contacts_matched`, `searches_seen`, and `listings_seen`. If it says the \
    contacts table is not ready, navigate back to \
-   https://interiorrealtors.xposureapp.com/portal/air/Contacts, wait until \
+   {contacts_url}, wait until \
    the table renders, and run the same command once more.
 8. DO NOT create `/tmp/xposure_append_server.py`; DO NOT start a localhost \
    append server; DO NOT fetch `127.0.0.1` or `localhost` from the Xposure \
@@ -269,6 +285,7 @@ def build_agent_session_prompt(
         target_file=str(target_file),
         writer_command=writer_command,
         mfa_file=_MFA_FILE,
+        **_board_kwargs(),
     )
     sync_cmd = _local_sync_command(
         "xposure-pcs-views",
@@ -358,6 +375,7 @@ def _run_scraper(emails: list[str], *, skip: bool, headless: bool = False) -> di
         target_file=str(target_file),
         writer_command=_local_cdp_writer_command(target_file),
         mfa_file=_MFA_FILE,
+        **_board_kwargs(),
     )
 
     # Cap MFA polling inside the agent run window. Per-buyer wall-clock is

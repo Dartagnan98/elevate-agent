@@ -1389,6 +1389,17 @@ export interface SourceInboxResponse {
   skippedDrafts?: SourceInboxDraft[];
   privateSearchBuyers?: BuyerWatchlistEntry[];
   leadSections?: Record<string, LeadSectionSummary>;
+  appleMessages?: AppleMessagesDirections;
+}
+
+export interface AppleMessagesDirections {
+  // inbound = read chat.db as a lead source (needs Full Disk Access)
+  inbound: boolean;
+  // outbound = send approved texts through Messages (no FDA needed)
+  outbound: boolean;
+  // true only when inbound is enabled AND chat.db read is blocked
+  blocked?: boolean;
+  note?: string;
 }
 
 export interface TodayHourBucket {

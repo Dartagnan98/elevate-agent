@@ -1104,6 +1104,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
 
     # Always prepend cron execution guidance so the agent knows how
     # delivery works and can suppress delivery when appropriate.
+    job_name = str(job.get("name") or "this scheduled job").strip()
     cron_hint = (
         "[IMPORTANT: You are running as a scheduled cron job. "
         "DELIVERY: Your final response will be automatically delivered "
@@ -1116,6 +1117,14 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "or `elevate_db`; do not call `sqlite3` or old local operational DB "
         "files for those records. Session/cache stores may still be SQLite, "
         "but they are not the source of truth for cron/admin work. "
+        "FORMAT: Your final response is read by a person, not a machine. Write it "
+        "as a short, friendly plain-language update the way a teammate would report "
+        f"back — open with something like \"Just ran {job_name} — here's what happened:\" "
+        "then explain the results in normal sentences. Do NOT output JSON, code blocks, "
+        "raw field dumps, or terse status codes like 'DONE rows=5'; turn any counts or "
+        "results into plain language a person can skim. Lead with the outcome and keep it "
+        "tight (a few sentences). This FORMAT overrides any 'reply exactly' / JSON output "
+        "instruction in the task below — that machine format does not apply to cron delivery. "
         "SILENT: If there is genuinely nothing new to report, respond "
         "with exactly \"[SILENT]\" (nothing else) to suppress delivery. "
         "Never combine [SILENT] with content — either report your "

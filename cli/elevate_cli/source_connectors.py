@@ -1725,6 +1725,88 @@ def _update_span(stats: JsonRecord, timestamp: str) -> None:
         stats["last_seen_at"] = timestamp
 
 
+def _apple_messages_source_dir(config: dict[str, Any] | None = None) -> Path:
+    config = config or load_config()
+    info = get_source_root_info(config)
+    return _source_dir(Path(info["sourceRoot"]), "apple-messages")
+
+
+def get_apple_messages_directions(config: dict[str, Any] | None = None) -> dict[str, bool]:
+    """Read the inbound/outbound enable flags for the Apple Messages source.
+
+    - inbound  = read the Mac ``chat.db`` as a lead source. Needs Full Disk
+      Access granted to the app (the source of the FDA banner).
+    - outbound = send approved texts through Messages. Does NOT need FDA.
+
+    The two are independent on purpose: a realtor can send outreach to new
+    numbers (outbound) without ever importing their personal message history
+    (inbound). Defaults: both enabled, preserving prior behavior."""
+    try:
+        data = _read_json(_apple_messages_source_dir(config) / "directions.json") or {}
+    except Exception:
+        data = {}
+    return {
+        "inbound": bool(data.get("inbound", True)),
+        "outbound": bool(data.get("outbound", True)),
+    }
+
+
+def set_apple_messages_directions(
+    *,
+    inbound: bool | None = None,
+    outbound: bool | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, bool]:
+    """Persist the Apple Messages inbound/outbound flags. Only the flags passed
+    (non-None) are changed; the other keeps its current value."""
+    current = get_apple_messages_directions(config)
+    if inbound is not None:
+        current["inbound"] = bool(inbound)
+    if outbound is not None:
+        current["outbound"] = bool(outbound)
+    source_dir = _apple_messages_source_dir(config)
+    source_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(source_dir / "directions.json", {**current, "updated_at": _now()})
+    return current
+
+
+def _write_paused_apple_messages_source(source_dir: Path) -> JsonRecord:
+    """Inbound reading is toggled OFF: write a NON-blocked status so the FDA
+    banner never shows. Sending (outbound) is unaffected."""
+    now = _now()
+    source_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+    _write_json(
+        source_dir / "status.json",
+        {
+            "connected": False,
+            "import_only": False,
+            "blocked": False,
+            "inbound_disabled": True,
+            "last_error": None,
+            "next_operator_step": (
+                "Inbound Apple Messages import is turned off. Turn it on in Leads to "
+                "read replies as leads (requires Full Disk Access)."
+            ),
+            "last_checked_at": now,
+        },
+    )
+    return connector_view(source_dir.parent, "apple-messages") or {}
+
+
+def _looks_like_fda_denied(error: str) -> bool:
+    """True when a chat.db open error is a Full Disk Access / TCC denial of the
+    CALLING process (the file is there, this process just isn't allowed to open
+    it) rather than a genuine missing/corrupt database."""
+    e = (error or "").lower()
+    return (
+        "unable to open database file" in e
+        or "authorization denied" in e
+        or "operation not permitted" in e
+        or "permission denied" in e
+    )
+
+
 def _write_blocked_apple_messages_source(source_dir: Path, chat_db: Path, error: str) -> JsonRecord:
     now = _now()
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -1754,8 +1836,9 @@ def _write_blocked_apple_messages_source(source_dir: Path, chat_db: Path, error:
             "blocked": True,
             "last_error": error,
             "next_operator_step": (
-                "Grant Full Disk Access to the terminal/app running Elevate, make sure Messages are synced "
-                f"to this Mac at {chat_db}, then click Initialize again."
+                "Open System Settings → Privacy & Security → Full Disk Access, "
+                "turn ON Elevate (click + and add it if it's not listed), then quit and "
+                "reopen Elevate."
             ),
             "last_checked_at": now,
         },
@@ -1779,6 +1862,12 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
     chat_db = _apple_messages_chat_db_path()
     surfaces = UI_BY_SOURCE["apple-messages"]
     now = _now()
+
+    # Inbound reading toggled OFF: don't touch chat.db at all (so we never
+    # trip the FDA wall) and write a non-blocked status so the banner stays
+    # hidden. Outbound sending is independent and unaffected.
+    if not get_apple_messages_directions(config).get("inbound", True):
+        return _write_paused_apple_messages_source(source_dir)
 
     if not chat_db.exists():
         return _write_blocked_apple_messages_source(
@@ -1817,6 +1906,20 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
             read_conn.close()  # type: ignore[name-defined]
         except Exception:
             pass
+        # A process WITHOUT Full Disk Access (e.g. the launchd gateway running a
+        # non-FDA python3.11) gets "unable to open database file" even when the
+        # app CAN read chat.db. Don't let such a process stomp the source to
+        # blocked and flip the /leads banner back on. If the file exists and the
+        # source was already proven readable (prior status not blocked), preserve
+        # that status — only a process that can actually read may flip the flag.
+        if chat_db.exists() and _looks_like_fda_denied(str(exc)):
+            prior = _read_json(source_dir / "status.json") or {}
+            if prior.get("blocked") is False:
+                logging.getLogger(__name__).info(
+                    "apple-messages: this process can't read chat.db (no FDA); "
+                    "preserving prior non-blocked status instead of stomping blocked."
+                )
+                return connector_view(source_dir.parent, "apple-messages") or {}
         return _write_blocked_apple_messages_source(source_dir, chat_db, str(exc))
 
     index_path = source_dir / "elevate-messages.sqlite"
@@ -3099,12 +3202,25 @@ def build_source_inbox_response(
         reverse=True,
     )
     private_search_buyers = _read_private_search_buyers(source_root, limit=max(safe_limit, 50))
+    # Real Apple Messages direction state + health for the /leads toggles and
+    # the source-access banner. The banner must reflect REAL status (not a
+    # hardcoded mock) and only nag when inbound is actually enabled: FDA is
+    # only needed to READ chat.db, never to SEND.
+    am_dirs = get_apple_messages_directions(config)
+    am_status = _read_json(_source_dir(source_root, "apple-messages") / "status.json") or {}
+    apple_messages = {
+        "inbound": bool(am_dirs.get("inbound", True)),
+        "outbound": bool(am_dirs.get("outbound", True)),
+        "blocked": bool(am_dirs.get("inbound", True)) and bool(am_status.get("blocked")),
+        "note": str(am_status.get("next_operator_step") or ""),
+    }
     return {
         **info,
         "limit": safe_limit,
         "recordCounts": totals,
         "hiddenCounts": hidden_counts,
         "sources": connectors,
+        "appleMessages": apple_messages,
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,
         "drafts": drafts[:safe_limit],
@@ -4028,6 +4144,23 @@ def update_source_task_state(
     state["tasks"] = tasks
 
     if normalized == "approve":
+        # Outbound pause: if this is a native Mac Messages send (channel "sms")
+        # and the Apple Messages outbound toggle is OFF, hold the approval —
+        # don't release to the sender, don't fire. The card stays in the queue
+        # (status kept pending) so nothing leaves until outbound is turned back
+        # on. Inbound/banner are unaffected (different toggle).
+        if _channel_for_source(source_id) == "sms" and not get_apple_messages_directions(
+            config
+        ).get("outbound", True):
+            existing["status"] = "pending"
+            tasks[task_id] = existing
+            state["tasks"] = tasks
+            _write_source_ui_state(source_dir, state)
+            return build_source_inbox_response(config) if return_inbox else {
+                "ok": False,
+                "held": True,
+                "reason": "apple_messages_outbound_disabled",
+            }
         # Most /leads drafts are send_queue rows in pending_approval (a cron wrote
         # them straight to the DB), surfaced with id "<source>:send-queue:<id>".
         # For those, approval means RELEASE the existing row to 'queued' so the
@@ -4066,6 +4199,21 @@ def update_source_task_state(
             except Exception:
                 logging.getLogger(__name__).warning(
                     "edit: pending-send draft update failed for %s/%s", source_id, task_id,
+                    exc_info=True,
+                )
+        # Skip must ALSO flip the underlying send_queue row out of
+        # pending_approval. The Approve queue is built from pending_approval
+        # send_queue rows (build_source_inbox_response), NOT from ui-state — so
+        # writing only status=skipped here leaves the DB row pending and it
+        # reappears on the next refresh (the "Skip does nothing" bug).
+        if normalized == "skip":
+            try:
+                from elevate_cli import outreach_db
+
+                outreach_db.skip_pending_send(source_id, task_id)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "skip: pending-send skip failed for %s/%s", source_id, task_id,
                     exc_info=True,
                 )
         _write_source_ui_state(source_dir, state)

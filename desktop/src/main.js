@@ -8,7 +8,7 @@ const {
   shell,
   screen,
 } = require("electron");
-const { execFileSync, spawn } = require("child_process");
+const { execFileSync, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -411,6 +411,62 @@ function resolveElevateLauncher() {
   return null;
 }
 
+// Run an `elevate gateway <...>` command using the SAME resolved CLI launcher as
+// the dashboard (just swap the "dashboard" subcommand for "gateway"). Returns the
+// spawnSync result (status/stdout/stderr captured).
+function runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs = 90000 } = {}) {
+  const idx = launcher.args.indexOf("dashboard");
+  const prefix = idx >= 0 ? launcher.args.slice(0, idx) : [];
+  const args = [...prefix, "gateway", ...gwArgs];
+  return spawnSync(launcher.command, args, {
+    cwd: launcher.cwd,
+    env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
+    timeout: timeoutMs,
+    encoding: "utf8",
+  });
+}
+
+// Self-heal the gateway launchd service. The gateway runs the cron ticker that
+// SEEDS + runs each account's lead/admin automations + heartbeats. If onboarding
+// never installed it (the silent "no automations, no heartbeats" failure mode),
+// install it now. Only installs when missing/unloaded so a healthy gateway is
+// never restarted. Best-effort, non-blocking, logged. macOS only.
+function ensureGatewayInstalled(launcher, baseEnv) {
+  if (process.platform !== "darwin") return;
+  try {
+    const plist = path.join(
+      os.homedir(),
+      "Library",
+      "LaunchAgents",
+      "ai.elevate.gateway.plist",
+    );
+    let loaded = false;
+    try {
+      const uid = typeof process.getuid === "function" ? process.getuid() : "";
+      const probe = spawnSync(
+        "launchctl",
+        ["print", `gui/${uid}/ai.elevate.gateway`],
+        { encoding: "utf8", timeout: 8000 },
+      );
+      loaded = probe.status === 0;
+    } catch (e) {
+      loaded = false;
+    }
+    if (fileExists(plist) && loaded) {
+      appendBackendLog("[gateway] self-heal: healthy (plist present + loaded)\n");
+      return;
+    }
+    appendBackendLog(
+      `[gateway] self-heal: plist=${fileExists(plist)} loaded=${loaded} -> installing\n`,
+    );
+    const res = runGatewayCommand(launcher, baseEnv, ["install"]);
+    const out = String(res.stdout || res.stderr || "").trim().slice(-400);
+    appendBackendLog(`[gateway] self-heal install rc=${res.status}\n${out}\n`);
+  } catch (e) {
+    appendBackendLog(`[gateway] self-heal error: ${e}\n`);
+  }
+}
+
 function request(pathname, timeoutMs = 2000, port = backendPort) {
   return new Promise((resolve) => {
     const req = http.get(
@@ -560,6 +616,17 @@ async function ensureBackend() {
 
   const ready = await waitForBackend();
   markStartup(ready ? "backend:ready" : "backend:timeout");
+
+  // Self-heal the gateway service (cron ticker that seeds + runs automations +
+  // heartbeats). Deferred so it never blocks UI startup. Idempotent.
+  setTimeout(() => {
+    try {
+      ensureGatewayInstalled(launcher, baseEnv);
+    } catch (e) {
+      appendBackendLog(`[gateway] self-heal threw: ${e}\n`);
+    }
+  }, 8000);
+
   return ready;
 }
 

@@ -684,6 +684,7 @@ SEND_STATUS_SENDING = "sending"
 SEND_STATUS_SENT = "sent"
 SEND_STATUS_RETRYING = "retrying"
 SEND_STATUS_FAILED = "failed"
+SEND_STATUS_SKIPPED = "skipped"
 
 
 def make_idempotency_key(source_id: str, thread_id: str, task_id: str, revision: int = 0) -> str:
@@ -953,6 +954,40 @@ def update_pending_send_draft(
             conn.execute(
                 "UPDATE send_queue SET payload_json=?, updated_at=? WHERE id=?",
                 (json.dumps(payload, ensure_ascii=False), now, row["id"]),
+            )
+        out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    return _row_to_send(out)
+
+
+def skip_pending_send(
+    source_id: str, task_id: str
+) -> dict[str, Any] | None:
+    """Flip a ``pending_approval`` send_queue row to ``skipped`` so it leaves the
+    /leads Approve queue. The queue is built from send_queue rows in
+    ``pending_approval`` (build_source_inbox_response), so Skip MUST change the DB
+    row — writing only the source-dir ui-state status leaves the row pending and it
+    reappears on next refresh. Mirror of ``approve_pending_send`` for the skip path.
+    Match by (source_id, task_id|id), skip the latest pending one. Returns the
+    updated row, or None when there's no pending row to skip."""
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                SELECT * FROM send_queue
+                 WHERE status = 'pending_approval'
+                   AND source_id = ?
+                   AND (task_id = ? OR id = ?)
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (source_id, task_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
+                (SEND_STATUS_SKIPPED, now, row["id"]),
             )
         out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
     return _row_to_send(out)

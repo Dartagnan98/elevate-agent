@@ -455,7 +455,10 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         SOURCE_CONNECTION_BLUEPRINTS,
         _discover_composio_views,
         _profiles_from_threads,
+        _read_json,
+        _source_dir,
         connector_view,
+        get_apple_messages_directions,
         get_source_root_info,
     )
 
@@ -924,6 +927,15 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         skipped_count=len(skipped_drafts),
     )
 
+    am_dirs = get_apple_messages_directions(None)
+    am_status = _read_json(_source_dir(source_root, "apple-messages") / "status.json") or {}
+    apple_messages = {
+        "inbound": bool(am_dirs.get("inbound", True)),
+        "outbound": bool(am_dirs.get("outbound", True)),
+        "blocked": bool(am_dirs.get("inbound", True)) and bool(am_status.get("blocked")),
+        "note": str(am_status.get("next_operator_step") or ""),
+    }
+
     return {
         **info,
         "limit": safe_limit,
@@ -931,6 +943,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         "hiddenCounts": hidden_counts,
         "leadSections": lead_sections,
         "sources": connectors,
+        "appleMessages": apple_messages,
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,
         "drafts": drafts[:safe_limit],

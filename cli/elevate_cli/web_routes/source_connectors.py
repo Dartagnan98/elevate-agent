@@ -27,6 +27,11 @@ class SourceInboxProfileAction(BaseModel):
     status: str | None = None
 
 
+class AppleMessagesDirections(BaseModel):
+    inbound: bool | None = None
+    outbound: bool | None = None
+
+
 def create_source_connectors_router(*, log: logging.Logger | None = None) -> APIRouter:
     """Build routes for source connectors, source inbox, and sender controls."""
     router = APIRouter()
@@ -198,6 +203,39 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         except Exception as exc:
             _log.exception("POST /api/source-inbox/draft failed")
             raise HTTPException(status_code=500, detail=f"Source draft update failed: {exc}")
+
+    @router.get("/api/source-inbox/apple-messages/directions")
+    async def get_apple_messages_directions_route():
+        try:
+            from elevate_cli.source_connectors import get_apple_messages_directions
+
+            return get_apple_messages_directions(None)
+        except Exception as exc:
+            _log.exception("GET apple-messages/directions failed")
+            raise HTTPException(status_code=500, detail=f"Failed to read directions: {exc}")
+
+    @router.post("/api/source-inbox/apple-messages/directions")
+    async def set_apple_messages_directions_route(body: AppleMessagesDirections):
+        try:
+            from elevate_cli.source_connectors import (
+                initialize_apple_messages_source,
+                set_apple_messages_directions,
+            )
+
+            result = set_apple_messages_directions(
+                inbound=body.inbound, outbound=body.outbound
+            )
+            # Re-run init so status.json (and the banner) reflect the new inbound
+            # state immediately: turning inbound off writes a non-blocked paused
+            # status; turning it on re-checks chat.db access. Best-effort.
+            try:
+                initialize_apple_messages_source()
+            except Exception:
+                _log.warning("apple-messages re-init after toggle failed", exc_info=True)
+            return result
+        except Exception as exc:
+            _log.exception("POST apple-messages/directions failed")
+            raise HTTPException(status_code=500, detail=f"Failed to set directions: {exc}")
 
 
     @router.get("/api/source-inbox/draft/{source_id}/{thread_id}/{task_id}/send-status")

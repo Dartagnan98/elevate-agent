@@ -278,7 +278,7 @@ Services portal via the browser_use toolset. Your only job is to log in, \
 open the Clients tab, and dump the full buyer table as JSONL to disk.
 
 CREDENTIALS (already in your environment but quoted here for clarity)
-- Login URL: https://iam.interiorbc.ca/idp/login
+- Login URL: {login_url}
 - Username env: MLS_USERNAME = "{username}"
 - Password env: MLS_PASSWORD = "{password}"
 
@@ -288,7 +288,7 @@ OUTPUT
   {{"id": "stable Xposure row/client id or deterministic row key",
    "name": "...", "email": "...", "phone": "...", "searches": [...],
    "lastActivity": "...", "dateEntered": "...", "city": "...",
-   "profileUrl": "https://xposureapp.com/..."}}
+   "profileUrl": "{portal_base}/..."}}
 - Truncate the file at the start of the run.
 
 STEPS
@@ -301,13 +301,13 @@ STEPS
    b. Poll the file {mfa_file} for up to 120 seconds — a background process \
       writes the 6-digit code there. Read it with bash: `cat {mfa_file}`.
    c. Once you have the code, browser_type it into the OTP input and submit.
-4. Wait until the URL contains members.interiorbc.ca, then look for the \
-   "AOIR Xposure" app tile (text matches /aoir xposure|^xposure$/i) and \
-   browser_click it. It opens the xposure portal (may load in the same tab \
-   after SAML hop). browser_navigate directly to https://xposureapp.com if \
-   the SAML hop stalls.
-5. Once inside xposureapp.com, find and click the "Clients" nav link. The \
-   URL should end up at /Contacts.
+4. Complete the SSO hop. Some boards land on an intermediate members portal \
+   ({members_url}) showing an "Xposure" app tile (text matches \
+   /aoir xposure|^xposure$/i) — browser_click it. Others SSO straight into the \
+   Xposure portal. Either way, end up on the Xposure portal at {portal_base}. \
+   If the SSO hop stalls, browser_navigate directly to {contacts_url}.
+5. Once inside the Xposure portal ({portal_base}), find and click the "Clients" \
+   nav link if you are not already there. The URL should end up at /Contacts.
 6. The clients table has id "pcs-contacts-table". Set its DataTables \
    length dropdown (select[name=\"pcs-contacts-table_length\"]) to "All" \
    using browser_console with a JavaScript expression. Wait ~10 seconds for \
@@ -347,11 +347,18 @@ def build_agent_session_prompt() -> str:
     lead events, and pcs_buyers rows.
     """
     _load_premium_env()
+    from elevate_cli.xposure_board import board_config
+
+    board = board_config()
     scraper_prompt = _AGENT_PROMPT_TEMPLATE.format(
         username=os.environ.get("MLS_USERNAME", "").strip() or "<missing MLS_USERNAME>",
         password=os.environ.get("MLS_PASSWORD", "").strip() or "<missing MLS_PASSWORD>",
         output_path=str(_scraper_output_path()),
         mfa_file=_MFA_FILE,
+        login_url=board["login_url"],
+        members_url=board["members_url"],
+        portal_base=board["portal_base"],
+        contacts_url=board["contacts_url"],
     )
     sync_cmd = _local_sync_command("xposure-pcs", env_flag="ELEVATE_XPOSURE_SKIP_SCRAPER")
     verify_cmd = _local_counts_command({

@@ -447,10 +447,28 @@ def load_surface_registry() -> Dict[str, Dict[str, Any]]:
         except Exception:
             reg = {}
     changed = not path.exists()
-    for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
-        if surface not in reg:
-            reg[surface] = {**spec, "builtin": True, "created_by": "system"}
-            changed = True
+    # Built-in surface KEYS are stable (leads, admin); only pay the backend fetch
+    # when one is actually missing (first seed). Backend mode honours the gate: seed
+    # ONLY the surfaces the entitled kit returned. Offline mode (kit is None) falls
+    # back to the full bundled SURFACE_HEARTBEAT_DEFAULTS.
+    missing = [s for s in SURFACE_HEARTBEAT_DEFAULTS if s not in reg]
+    if missing:
+        kit = _backend_kit()
+        if kit is not None:
+            hb = kit.get("heartbeats") or {}
+            for surface in missing:
+                spec = hb.get(surface)
+                if spec:  # entitled → seed; unentitled surface is skipped (gate)
+                    reg[surface] = {**spec, "builtin": True, "created_by": "system"}
+                    changed = True
+        else:
+            for surface in missing:  # offline fallback → bundled built-ins
+                reg[surface] = {
+                    **SURFACE_HEARTBEAT_DEFAULTS[surface],
+                    "builtin": True,
+                    "created_by": "system",
+                }
+                changed = True
     if changed:
         _write_surface_registry(reg)
     return reg
@@ -613,7 +631,56 @@ SURFACE_AUTOMATION_DEFAULTS: List[Dict[str, Any]] = [
             "send directly."
         ),
     },
+    {
+        "name": "Social Content Engine", "surface": "marketing", "schedule": "20 7 * * 1",
+        "skill": "local/social-content-engine",
+        "prompt": (
+            "Run the social-content-engine skill (weekly content engine for the connected "
+            "real estate agent).\n\n"
+            "Steps:\n"
+            "1. Pull last-30-day post metrics from every connected social platform "
+            "(Instagram, TikTok, YouTube, Facebook, LinkedIn) using the bundled native fetchers.\n"
+            "2. Aggregate + rank with scripts/aggregate.py.\n"
+            "3. Research current real-estate content trends in the agent's market via the last30days skill.\n"
+            "4. Read inbox + CRM signals with scripts/read_signals.py to ground ideas in real client questions.\n"
+            "5. Generate 5-10 content ideas. Each one MUST cite at least one of metric / trend / signal.\n"
+            "6. Queue each idea with scripts/queue_idea.py — ideas land in /social-media for human approval.\n"
+            "7. Append a run summary to social-runs.jsonl.\n\n"
+            "Never publish. Never invent metrics. Real-estate scope only. The human approves on /social-media."
+        ),
+    },
+    {
+        "name": "Market Stats Watcher", "surface": "marketing", "schedule": "0 7 * * 1",
+        "skill": "real-estate/market-stats-watcher",
+        "prompt": (
+            "Run the market-stats-watcher skill. Pull fresh market-stat emails and route "
+            "useful market context into the real estate knowledge/admin workflow. Do not send messages."
+        ),
+    },
 ]
+
+
+# ─── Backend-distributed kit resolvers ───────────────────────────────────────
+# The lead/admin kit (heartbeats + automations) is a premium, entitlement-gated
+# download served by the backend (parallel to skills). At seed time we prefer the
+# backend kit; if the backend is unreachable / there's no license, we fall back to
+# the bundled SURFACE_*_DEFAULTS so offline + already-entitled accounts still seed.
+# A reachable-but-empty reply (unentitled) returns empty collections — NOT None —
+# so the entitlement gate is honoured (seed nothing rather than fall back).
+def _backend_kit() -> Optional[Dict[str, Any]]:
+    try:
+        from elevate_cli import cloud_automations
+
+        return cloud_automations.fetch_kit()
+    except Exception:
+        return None
+
+
+def _effective_automation_specs() -> List[Dict[str, Any]]:
+    kit = _backend_kit()
+    if kit is not None:
+        return kit.get("automations") or []
+    return SURFACE_AUTOMATION_DEFAULTS
 
 
 def ensure_surface_automations() -> List[Dict[str, Any]]:
@@ -630,7 +697,7 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
     once tagged.
     """
     out: List[Dict[str, Any]] = []
-    for spec in SURFACE_AUTOMATION_DEFAULTS:
+    for spec in _effective_automation_specs():
         name = spec["name"]
         existing = next(
             (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),

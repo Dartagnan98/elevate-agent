@@ -1619,6 +1619,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceId, taskId, action, draftText, returnInbox: options?.returnInbox ?? true }),
     }),
+  getAppleMessagesDirections: () =>
+    fetchJSON<{ inbound: boolean; outbound: boolean }>(
+      "/api/source-inbox/apple-messages/directions",
+    ),
+  setAppleMessagesDirections: (body: { inbound?: boolean; outbound?: boolean }) =>
+    fetchJSON<{ inbound: boolean; outbound: boolean }>(
+      "/api/source-inbox/apple-messages/directions",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   updateSourceInboxProfile: (
     profileId: string,
     status: SourceInboxProfileStatus | null,

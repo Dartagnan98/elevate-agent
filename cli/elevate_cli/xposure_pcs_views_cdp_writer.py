@@ -20,8 +20,11 @@ from typing import Any
 
 import websockets
 
+from elevate_cli.xposure_board import board_config, portal_host
 
-CONTACTS_URL = "https://interiorrealtors.xposureapp.com/portal/air/Contacts"
+
+def _contacts_url() -> str:
+    return board_config()["contacts_url"]
 
 
 class CdpError(RuntimeError):
@@ -79,7 +82,7 @@ def _pick_page_target(cdp_url: str) -> dict[str, Any]:
     pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
     if not pages:
         raise CdpError("no debuggable browser page found on CDP endpoint")
-    for needle in ("interiorrealtors.xposureapp.com", "xposureapp.com"):
+    for needle in (portal_host(), "xposureapp.com"):
         for page in pages:
             if needle in str(page.get("url") or ""):
                 return page
@@ -121,7 +124,7 @@ async def _evaluate(
 async def _wait_for_contacts(cdp: CdpClient, *, timeout_seconds: int = 90) -> dict[str, Any]:
     await cdp.call("Page.enable")
     await cdp.call("Runtime.enable")
-    await cdp.call("Page.navigate", {"url": CONTACTS_URL})
+    await cdp.call("Page.navigate", {"url": _contacts_url()})
     expression = f"""
 new Promise((resolve) => {{
   const started = Date.now();
@@ -155,9 +158,11 @@ new Promise((resolve) => {{
 
 def _scrape_expression(emails: list[str]) -> str:
     wanted_json = json.dumps(sorted({email.strip().lower() for email in emails if email.strip()}))
+    dologin_url = board_config()["dologin_url"]
     return f"""
 (async () => {{
   const wanted = new Set({wanted_json});
+  const DOLOGIN_URL = {json.dumps(dologin_url)};
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
   const intFromText = (value) => {{
@@ -261,7 +266,7 @@ def _scrape_expression(emails: list[str]) -> str:
       ['pcsResultVisibility', '1'],
       ['returnAction', 'contacts'],
     ]);
-    const resp = await fetch('https://interiorrealtors.xposureapp.com/pcs/air/DoLogin', {{
+    const resp = await fetch(DOLOGIN_URL, {{
       method: 'POST',
       body: params,
       credentials: 'include',

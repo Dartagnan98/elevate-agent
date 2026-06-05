@@ -52,6 +52,23 @@ export type StoreSkill = {
   created_at: string;
 };
 
+export type StoreAutomation = {
+  name: string;
+  surface: string;
+  kind: "heartbeat" | "automation";
+  schedule: string;
+  skill: string;
+  prompt: string;
+  deliver: string;
+  spec: Record<string, unknown>;
+  tier_required: "pro" | "builder";
+  manifest: Record<string, unknown>;
+  version: number;
+  enabled: boolean;
+  updated_at: string;
+  created_at: string;
+};
+
 type SkillInvocation = {
   user_id: string;
   skill_name: string;
@@ -216,6 +233,30 @@ export async function getEnabledSkill(name: string): Promise<StoreSkill | null> 
     .maybeSingle();
   if (error) throw error;
   return (data as StoreSkill) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// automations (premium lead/admin kit, distributed like skills)
+// ---------------------------------------------------------------------------
+export async function listEnabledAutomations(): Promise<StoreAutomation[]> {
+  const { data, error } = await supabase()
+    .from("automations")
+    .select("*")
+    .eq("enabled", true)
+    .order("name", { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as StoreAutomation[];
+}
+
+export async function getEnabledAutomation(name: string): Promise<StoreAutomation | null> {
+  const { data, error } = await supabase()
+    .from("automations")
+    .select("*")
+    .eq("name", name)
+    .eq("enabled", true)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as StoreAutomation) ?? null;
 }
 
 // ---------------------------------------------------------------------------
