@@ -127,7 +127,7 @@
   /* Responsive chat column — scales with the app window (like Claude). Default
      cap; the user can override live by dragging the resize handle, which sets
      --chat-layout-width-user (see ChatPage). */
-  --chat-layout-width: var(--chat-layout-width-user, min(1750px, 95vw));
+  --chat-layout-width: var(--chat-layout-width-user, min(2000px, 96vw));
   --chat-surface: var(--bg-2);
   --chat-surface-strong: var(--bg-3);
   --chat-surface-soft: var(--bg-soft);

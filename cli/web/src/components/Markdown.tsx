@@ -379,14 +379,18 @@ function Block({
         ...block.rows.map((r) => r.length),
       );
       return (
-        <div className="my-1 overflow-x-auto rounded-md border border-border">
-          <table className="w-full border-collapse text-[0.85em]">
+        // overflow-x-auto + a content-sized table (w-max) means columns size to
+        // their content instead of squeezing into the chat width and stacking.
+        // When the table is wider than the chat column it scrolls left/right;
+        // when it's narrower it still fills the width (min-w-full).
+        <div className="my-1 max-w-full overflow-x-auto rounded-md border border-border">
+          <table className="w-max min-w-full border-collapse text-[0.85em]">
             <thead>
               <tr className="bg-foreground/[0.04]">
                 {Array.from({ length: cols }, (_, c) => (
                   <th
                     key={c}
-                    className="border-b border-border px-2.5 py-1.5 text-left font-semibold whitespace-nowrap"
+                    className="whitespace-nowrap border-b border-border px-2.5 py-1.5 text-left font-semibold"
                   >
                     <InlineContent
                       text={block.headers[c] ?? ""}
@@ -402,7 +406,10 @@ function Block({
                   {Array.from({ length: cols }, (_, c) => (
                     <td
                       key={c}
-                      className="px-2.5 py-1.5 align-top border-r border-border/40 last:border-r-0"
+                      // Cap each cell so one long value (a pitch, an address)
+                      // wraps within a sane column instead of forcing a giant
+                      // single line — the whole table still scrolls if needed.
+                      className="max-w-[26rem] border-r border-border/40 px-2.5 py-1.5 align-top last:border-r-0"
                     >
                       <InlineContent
                         text={row[c] ?? ""}
