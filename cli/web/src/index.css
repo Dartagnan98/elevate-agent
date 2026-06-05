@@ -998,8 +998,11 @@ html .font-courier {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 46px;
-  padding: 0 18px 0 22px;
+  /* Taller + top padding so the breadcrumb's vertical center lines up with the
+     sidebar logo (which sits lower due to the sidebar gap + header padding) and
+     the traffic lights. */
+  height: 59px;
+  padding: 13px 18px 0 22px;
   -webkit-app-region: drag;
   flex-shrink: 0;
 }
