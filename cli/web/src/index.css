@@ -549,7 +549,7 @@ html .font-courier {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 12px 12px 8px 14px;
+  padding: 7px 12px 8px 14px;
   -webkit-app-region: drag;
   flex-shrink: 0;
 }
@@ -1001,8 +1001,8 @@ html .font-courier {
   /* Taller + top padding so the breadcrumb's vertical center lines up with the
      sidebar logo (which sits lower due to the sidebar gap + header padding) and
      the traffic lights. */
-  height: 59px;
-  padding: 13px 18px 0 22px;
+  height: 54px;
+  padding: 8px 18px 0 22px;
   -webkit-app-region: drag;
   flex-shrink: 0;
 }
