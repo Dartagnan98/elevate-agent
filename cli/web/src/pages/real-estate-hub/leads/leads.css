@@ -3414,6 +3414,12 @@
     color: var(--fg-muted);
     font-weight: 500;
   }
+  .lb-draft-save {
+    flex-shrink: 0;
+    margin-left: 8px;
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--fg);
+  }
   .lb-link {
     appearance: none;
     background: transparent;

@@ -4011,7 +4011,7 @@ def update_source_task_state(
         try:
             from elevate_cli import outreach_db
 
-            flipped = outreach_db.approve_pending_send(source_id, task_id)
+            flipped = outreach_db.approve_pending_send(source_id, task_id, draft_text=draft_text or None)
         except Exception:
             logging.getLogger(__name__).warning(
                 "approve: pending-send release failed for %s/%s", source_id, task_id,
@@ -4022,6 +4022,19 @@ def update_source_task_state(
         else:
             _approve_atomic(source_id, task_id, existing, source_dir, state)
     else:
+        # An edit (Save) must also land on the underlying send_queue row — where
+        # the real outbound payload lives — not just the source-dir UI state, or
+        # a later Approve would still send the original template.
+        if normalized == "edit" and draft_text:
+            try:
+                from elevate_cli import outreach_db
+
+                outreach_db.update_pending_send_draft(source_id, task_id, draft_text)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "edit: pending-send draft update failed for %s/%s", source_id, task_id,
+                    exc_info=True,
+                )
         _write_source_ui_state(source_dir, state)
 
     return build_source_inbox_response(config) if return_inbox else {"ok": True}

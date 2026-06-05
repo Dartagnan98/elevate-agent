@@ -124,7 +124,11 @@ export function LeadsDesignShell() {
     async (action: LeadsDraftAction, draft: LeadsDraft) => {
       if (!draft.sourceId || !draft.taskId) return;
       try {
-        const res = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action);
+        // draft.body carries the edited text from the card (approve/edit must
+        // send what's in the textarea, not the original template).
+        const res = await api.updateSourceInboxDraft(
+          draft.sourceId, draft.taskId, action, draft.body ?? "",
+        );
         setSourceInbox(res);
       } catch (err) {
         console.error("draft action failed", err);

@@ -844,13 +844,20 @@ def claim_due_sends(limit: int = 10) -> list[dict[str, Any]]:
     return claimed
 
 
-def approve_pending_send(source_id: str, task_id: str) -> dict[str, Any] | None:
+def approve_pending_send(
+    source_id: str, task_id: str, draft_text: str | None = None
+) -> dict[str, Any] | None:
     """Flip a ``pending_approval`` send_queue row to ``queued`` so the sender picks
     it up. The /leads Approve button surfaces send_queue rows as drafts (id
     ``<source>:send-queue:<queue_id>``, taskId = the row's task_id or id), but the
     approve path historically only touched source-dir tasks — so these never queued
     and never sent. Match by (source_id, task_id|id) and release the latest pending
-    one. Returns the queued row, or None if there's no pending row to release."""
+    one. Returns the queued row, or None if there's no pending row to release.
+
+    When ``draft_text`` is supplied (the operator edited the message in the
+    approval queue), the row's ``payload_json.draft_text`` is updated BEFORE
+    releasing — otherwise the sender delivers the original template, not the edit.
+    Empty/whitespace draft_text is ignored so it can never blank a real draft."""
     now = _now()
     with connect() as conn:
         with transaction(conn):
@@ -867,9 +874,63 @@ def approve_pending_send(source_id: str, task_id: str) -> dict[str, Any] | None:
             ).fetchone()
             if row is None:
                 return None
+            new_payload_json = None
+            if draft_text and str(draft_text).strip():
+                try:
+                    payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+                except Exception:  # noqa: BLE001
+                    payload = {}
+                if isinstance(payload, dict):
+                    payload["draft_text"] = str(draft_text)
+                    new_payload_json = json.dumps(payload, ensure_ascii=False)
+            if new_payload_json is not None:
+                conn.execute(
+                    "UPDATE send_queue SET status=?, payload_json=?, updated_at=? WHERE id=?",
+                    (SEND_STATUS_QUEUED, new_payload_json, now, row["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
+                    (SEND_STATUS_QUEUED, now, row["id"]),
+                )
+        out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    return _row_to_send(out)
+
+
+def update_pending_send_draft(
+    source_id: str, task_id: str, draft_text: str
+) -> dict[str, Any] | None:
+    """Persist an edited draft onto a ``pending_approval`` send_queue row WITHOUT
+    releasing it (the /leads Save button / edit action). Returns the updated row,
+    or None when no pending row matches. Ignores empty/whitespace text."""
+    if not draft_text or not str(draft_text).strip():
+        return None
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                SELECT * FROM send_queue
+                 WHERE status = 'pending_approval'
+                   AND source_id = ?
+                   AND (task_id = ? OR id = ?)
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                (source_id, task_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+            except Exception:  # noqa: BLE001
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["draft_text"] = str(draft_text)
             conn.execute(
-                "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
-                (SEND_STATUS_QUEUED, now, row["id"]),
+                "UPDATE send_queue SET payload_json=?, updated_at=? WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), now, row["id"]),
             )
         out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
     return _row_to_send(out)

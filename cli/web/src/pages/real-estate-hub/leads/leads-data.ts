@@ -50,7 +50,7 @@ export interface LeadsDraft {
   taskId?: string;
 }
 
-export type LeadsDraftAction = "approve" | "skip" | "restore";
+export type LeadsDraftAction = "approve" | "skip" | "restore" | "edit";
 
 export interface LeadsHotEntry {
   id: string;

@@ -260,6 +260,10 @@ function DraftRow({
 }) {
   const [editText, setEditText] = useState(draft.body);
   useEffect(() => { setEditText(draft.body); }, [draft.id, draft.body]);
+  const dirty = editText.trim() !== draft.body.trim();
+  // Always act on the CURRENT edited text — approving with the original body was
+  // dropping every edit. Saving persists the edit (action "edit") without sending.
+  const editedDraft = { ...draft, body: editText };
   return (
     <div className={"lb-draft" + (selected ? " selected" : "") + (expanded ? " expanded" : "")}>
       <button type="button" className="lb-draft-check" onClick={onToggle} aria-label="Select draft">
@@ -283,11 +287,22 @@ function DraftRow({
               onChange={(e) => setEditText(e.target.value)}
               rows={Math.max(3, Math.ceil(editText.length / 70))}
               onClick={(e) => e.stopPropagation()}
+              onBlur={(e) => { e.stopPropagation(); if (dirty && onAction) onAction("edit", editedDraft); }}
             />
             <div className="lb-draft-expand-foot">
               <span className="lb-draft-template-link">
                 Generated from <strong>Warm intro</strong> template · <button type="button" className="lb-link" onClick={(e) => { e.stopPropagation(); onEditTemplate?.(); }}>edit template</button>
               </span>
+              {dirty && (
+                <button
+                  type="button"
+                  className="lb-btn ghost sm lb-draft-save"
+                  disabled={busy || !onAction}
+                  onClick={(e) => { e.stopPropagation(); onAction?.("edit", editedDraft); }}
+                >
+                  {busy ? "…" : "Save"}
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -307,7 +322,7 @@ function DraftRow({
           type="button"
           className="lb-btn primary sm"
           disabled={busy || !onAction}
-          onClick={(e) => { e.stopPropagation(); onAction?.("approve", draft); }}
+          onClick={(e) => { e.stopPropagation(); onAction?.("approve", editedDraft); }}
         >
           {busy ? "…" : "Approve"}
         </button>
