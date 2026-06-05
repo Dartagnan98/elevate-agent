@@ -304,33 +304,38 @@ def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 _CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
 
 
+# Outreach-safe default transport. SMS reaches every phone (iPhone + Android);
+# iMessage silently fails for non-Apple numbers. For COLD outreach to new
+# numbers there is no message history to read, so the only safe default is SMS.
+# We upgrade to iMessage ONLY on proven iMessage history. Override with
+# ELEVATE_OUTREACH_DEFAULT_TRANSPORT=imessage to restore the old blue-first
+# behaviour (not recommended for outreach).
+def _outreach_default_transport() -> str:
+    val = (os.getenv("ELEVATE_OUTREACH_DEFAULT_TRANSPORT", "") or "").strip().lower()
+    return "iMessage" if val in ("imessage", "imsg") else "SMS"
+
+
 def _detect_preferred_transport(phone: str) -> str:
-    """Pick `iMessage` or `SMS` from chat.db history.
+    """Pick `iMessage` or `SMS` for a recipient.
 
-    Per-handle: look at the most recent outbound message to that handle
-    where `error=0 AND is_sent=1`. Returns "iMessage" only when the last
-    successful send was iMessage; ANY other successful service (SMS or
-    **RCS**) returns "SMS". If no successful history exists, default to
-    "iMessage" (Apple's own default), and the caller's post-send verify
-    falls back to SMS on a delivery failure.
+    Returns "iMessage" ONLY when this handle has a proven successful iMessage
+    in chat.db history. Every other case — SMS/RCS history, NO history (a cold
+    outreach number), or chat.db unreadable — routes SMS, the outreach-safe
+    default that reaches every phone.
 
-    Why RCS → SMS: RCS contacts are Android users. macOS Messages.app can
-    *receive* RCS (mirrored from a paired iPhone, which is why RCS rows
-    appear in chat.db) but CANNOT *send* RCS via osascript — there is no
-    RCS service to target. Sending those numbers iMessage silently fails
-    (they're not on iMessage); sending them SMS actually reaches them. So
-    a recipient whose last good message was RCS must be sent SMS, not
-    iMessage. Treating RCS as iMessage (the old behaviour) is exactly why
-    Android leads "sent" but never arrived.
+    This is deliberately SMS-first. Cold outreach targets numbers with no
+    history, and iMessage to a non-Apple number silently fails (error 22,
+    "sent" but never delivered). RCS contacts are Android users — macOS can
+    *receive* RCS (mirrored from a paired iPhone) but cannot *send* it, so
+    those route SMS too. Only when we have positive proof a number is on
+    iMessage do we use the blue bubble.
 
-    chat.db.error column meanings the dispatcher cares about:
-        0  → no error (delivered / queued OK)
-        22 → "Not Delivered" — recipient unreachable on iMessage
-    A row with error != 0 means that service genuinely didn't work for
-    this recipient last time, so we down-rank it.
+    chat.db.error: 0 = delivered/queued OK, 22 = "Not Delivered" (unreachable
+    on iMessage). We only count error=0 is_sent=1 rows as proof.
     """
+    default = _outreach_default_transport()
     if not os.path.exists(_CHAT_DB_PATH):
-        return "iMessage"
+        return default
     import sqlite3 as _sqlite3
     try:
         conn = _sqlite3.connect(f"file:{_CHAT_DB_PATH}?mode=ro", uri=True, timeout=5)
@@ -345,7 +350,10 @@ def _detect_preferred_transport(phone: str) -> str:
         finally:
             conn.close()
     except Exception:
-        return "iMessage"
+        # chat.db unreadable (e.g. FDA not effective in this process). Never
+        # silently fall to iMessage — that's the failure that sends blue
+        # bubbles to Android. Use the outreach-safe default.
+        return default
     if row and row[0]:
         svc = str(row[0]).strip().lower()
         # iMessage is the only blue-bubble transport the Mac can send. Every
@@ -355,7 +363,9 @@ def _detect_preferred_transport(phone: str) -> str:
         if svc == "imessage":
             return "iMessage"
         return "SMS"
-    return "iMessage"
+    # No successful history for this handle = a cold/new number. Outreach-safe
+    # default (SMS) rather than guessing iMessage.
+    return default
 
 
 def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tuple[str, int] | None:
@@ -396,11 +406,49 @@ def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tu
     return (str(row[0] or ""), int(row[1] or 0))
 
 
-def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, str]:
-    """Run a single osascript send via the named service ('iMessage' or 'SMS').
+def _imsg_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, str] | None:
+    """Send via the `imsg` CLI, forcing the carrier transport.
 
-    Returns (returncode, stdout, stderr). Caller decides what to do.
+    `imsg send --service sms` reliably forces a green-bubble SMS (osascript's
+    `service type = SMS` is silently re-routed to iMessage by Messages for any
+    iMessage-capable handle, which is the core bug). `imsg` also carries its
+    OWN Full Disk Access grant, so it works even when the host app process
+    can't read chat.db. Returns (rc, stdout, stderr), or None when `imsg`
+    isn't installed (caller falls back to osascript).
     """
+    imsg = shutil.which("imsg")
+    if not imsg:
+        return None
+    svc = "imessage" if str(service_type).lower() == "imessage" else "sms"
+    try:
+        result = subprocess.run(
+            [imsg, "send", "--to", phone, "--text", draft, "--service", svc, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return (124, "", "imsg timed out")
+    _log.info(
+        "sender.imsg_send service=%s phone=%s rc=%s out=%r",
+        svc, phone, result.returncode,
+        (result.stdout or result.stderr or "").strip()[:200],
+    )
+    return (result.returncode, result.stdout or "", result.stderr or "")
+
+
+def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, str]:
+    """Send one message via the named service ('iMessage' or 'SMS').
+
+    Prefers the `imsg` CLI (forces the transport + has its own FDA); falls back
+    to osascript when `imsg` isn't installed. Returns (returncode, stdout,
+    stderr). Caller decides what to do.
+    """
+    via_imsg = _imsg_send_via(phone, draft, service_type)
+    if via_imsg is not None:
+        return via_imsg
+
     def _q(s: str) -> str:
         return s.replace("\\", "\\\\").replace("\"", "\\\"")
     script = (
@@ -419,6 +467,11 @@ def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, 
         )
     except subprocess.TimeoutExpired:
         return (124, "", "osascript timed out")
+    _log.info(
+        "sender.osa_send service=%s phone=%s rc=%s stderr=%r",
+        service_type, phone, result.returncode,
+        (result.stderr or "").strip()[:200],
+    )
     return (result.returncode, result.stdout or "", result.stderr or "")
 
 
@@ -450,6 +503,10 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
 
     force_sms = os.getenv("ELEVATE_FORCE_SMS", "").lower() in ("1", "true", "yes")
     detected = "SMS" if force_sms else _detect_preferred_transport(phone)
+    _log.info(
+        "sender.messages_native phone=%s detected=%s force_sms=%s",
+        phone, detected, force_sms,
+    )
     started = time.time()
 
     def _attempt(service_type: str) -> tuple[str, dict[str, Any]] | None:
