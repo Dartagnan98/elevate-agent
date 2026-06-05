@@ -964,7 +964,7 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
-              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[calc(var(--sidebar-w)+var(--sidebar-gap)*2)] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col p-[var(--sidebar-gap)]",
+              "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-[calc(var(--sidebar-w)+var(--sidebar-gap)*2)] max-w-[calc(100vw-1.5rem)] min-h-0 flex-col px-[var(--sidebar-gap)] pb-[var(--sidebar-gap)] pt-1",
               "bg-transparent",
               "transition-transform duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
