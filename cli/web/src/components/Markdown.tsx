@@ -1,4 +1,5 @@
-import { useMemo, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { Check, Copy } from "lucide-react";
 
 /**
  * Lightweight markdown renderer for LLM output.
@@ -33,6 +34,127 @@ export function Markdown({
       ))}
       {blocks.length === 0 && caret}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Copyable code box                                                  */
+/* ------------------------------------------------------------------ */
+
+function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+    return;
+  }
+  fallbackCopy(text);
+}
+
+function fallbackCopy(text: string) {
+  if (typeof document === "undefined") return;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "true");
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    /* ignore */
+  }
+  document.body.removeChild(ta);
+}
+
+/**
+ * A code box with a hover copy button. `inline` renders a compact box that can
+ * sit inside a line (used for collapsed/inline multi-backtick spans); the
+ * default is a full-width fenced block.
+ */
+function CodeBlock({
+  content,
+  lang,
+  caret,
+  inline,
+}: {
+  content: string;
+  lang?: string;
+  caret?: ReactNode;
+  inline?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(() => {
+    copyToClipboard(content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }, [content]);
+
+  return (
+    <div
+      className={`group relative ${inline ? "my-0.5 inline-block max-w-full align-top" : "my-1 block"}`}
+    >
+      <pre
+        className={`overflow-x-auto rounded-md border border-border bg-foreground/[0.06] py-2.5 pl-3 pr-9 text-xs font-mono leading-relaxed text-foreground ${inline ? "whitespace-pre-wrap" : ""}`}
+      >
+        {lang ? (
+          <span className="mb-1 block select-none text-[10px] uppercase tracking-wide text-foreground/40">
+            {lang}
+          </span>
+        ) : null}
+        <code className="text-foreground">
+          {content}
+          {caret}
+        </code>
+      </pre>
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={copied ? "Copied" : "Copy code"}
+        title={copied ? "Copied" : "Copy"}
+        className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded-md border border-border bg-background/60 text-foreground/55 opacity-0 transition-opacity hover:bg-foreground/[0.08] hover:text-foreground group-hover:opacity-100 focus:opacity-100"
+      >
+        {copied ? (
+          <Check className="h-3.5 w-3.5 text-success" />
+        ) : (
+          <Copy className="h-3.5 w-3.5" />
+        )}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A compact copyable code box that is valid inside a paragraph (<span>-based,
+ * never <div>/<pre>, so it doesn't break <p> nesting). Used for inline commands
+ * and collapsed fenced snippets.
+ */
+function InlineCodeBox({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(() => {
+    copyToClipboard(content);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }, [content]);
+
+  return (
+    <span className="my-0.5 inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-foreground/[0.06] py-0.5 pl-2 pr-1 align-middle">
+      <span className="overflow-x-auto whitespace-pre font-mono text-[0.85em] text-foreground">
+        {content}
+      </span>
+      <button
+        type="button"
+        onClick={onCopy}
+        aria-label={copied ? "Copied" : "Copy"}
+        title={copied ? "Copied" : "Copy"}
+        className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-foreground/50 transition-colors hover:bg-foreground/[0.1] hover:text-foreground"
+      >
+        {copied ? (
+          <Check className="h-3 w-3 text-success" />
+        ) : (
+          <Copy className="h-3 w-3" />
+        )}
+      </button>
+    </span>
   );
 }
 
@@ -84,13 +206,13 @@ function parseBlocks(text: string): BlockNode[] {
   while (i < lines.length) {
     const line = lines[i];
 
-    // Fenced code block
-    const fenceMatch = line.match(/^```(\w*)/);
+    // Fenced code block — allow leading whitespace so list-nested fences work.
+    const fenceMatch = line.match(/^\s*```(\w*)\s*$/);
     if (fenceMatch) {
       const lang = fenceMatch[1] || "";
       const codeLines: string[] = [];
       i++;
-      while (i < lines.length && !lines[i].startsWith("```")) {
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
         codeLines.push(lines[i]);
         i++;
       }
@@ -207,12 +329,7 @@ function Block({
   switch (block.type) {
     case "code":
       return (
-        <pre className="rounded-md bg-foreground/[0.06] border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto text-foreground">
-          <code className="text-foreground">
-            {block.content}
-            {caret}
-          </code>
-        </pre>
+        <CodeBlock content={block.content} lang={block.lang} caret={caret} />
       );
 
     case "heading": {
@@ -319,16 +436,35 @@ function Block({
 type InlineNode =
   | { type: "text"; content: string }
   | { type: "code"; content: string }
+  | { type: "codebox"; content: string }
   | { type: "bold"; content: string }
   | { type: "italic"; content: string }
   | { type: "link"; text: string; href: string }
   | { type: "br" };
 
+// Language tokens that can prefix a collapsed fenced block (e.g. a
+// ```text\nCODE``` whose newline got eaten becomes "```text CODE```").
+const KNOWN_LANGS = new Set([
+  "text", "plaintext", "txt", "bash", "sh", "shell", "zsh", "console",
+  "json", "js", "javascript", "ts", "typescript", "tsx", "jsx", "python",
+  "py", "html", "css", "yaml", "yml", "sql", "md", "markdown", "go", "rust",
+  "java", "c", "cpp", "diff", "xml", "http", "env", "ini", "toml",
+]);
+
+// A `code` span counts as a copyable "command box" when it reads like a shell
+// command / multi-token snippet (has whitespace) rather than a bare identifier.
+function looksLikeCommand(content: string): boolean {
+  return /\s/.test(content.trim()) && content.trim().length >= 4;
+}
+
 function parseInline(text: string): InlineNode[] {
   const nodes: InlineNode[] = [];
-  // Pattern priority: code > link > bold > italic > bare URL > line break
+  // Pattern priority: fenced/multi-backtick code box > inline code > link >
+  // bold > italic > bare URL > line break. The first group greedily captures
+  // any run of 1+ backticks so collapsed ```fences``` (whose newlines were
+  // eaten) still render as a box instead of leaking stray backticks.
   const pattern =
-    /(`[^`]+`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
+    /(```+[^`]*?```+|``[^`]+?``|`[^`]+?`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -338,8 +474,22 @@ function parseInline(text: string): InlineNode[] {
     }
 
     if (match[1]) {
-      // Inline code
-      nodes.push({ type: "code", content: match[1].slice(1, -1) });
+      const raw = match[1];
+      const fence = (raw.match(/^`+/)?.[0].length) ?? 1;
+      let inner = raw.slice(fence, raw.length - fence);
+      if (fence >= 2) {
+        // Collapsed/multi-backtick fence — render as a copyable box. Strip a
+        // leading language token if one survived the newline collapse.
+        inner = inner.trim();
+        const lead = inner.match(/^([a-zA-Z][\w+-]*)\s+([\s\S]+)$/);
+        if (lead && KNOWN_LANGS.has(lead[1].toLowerCase())) inner = lead[2];
+        nodes.push({ type: "codebox", content: inner });
+      } else if (looksLikeCommand(inner)) {
+        // Single-backtick command/snippet — give it a copy box too.
+        nodes.push({ type: "codebox", content: inner });
+      } else {
+        nodes.push({ type: "code", content: inner });
+      }
     } else if (match[2]) {
       // [text](url) link
       nodes.push({ type: "link", text: match[3], href: match[4] });
@@ -397,6 +547,8 @@ function InlineContent({
                 {node.content}
               </code>
             );
+          case "codebox":
+            return <InlineCodeBox key={i} content={node.content} />;
           case "bold":
             return (
               <strong key={i} className="font-semibold">
