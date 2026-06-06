@@ -2,6 +2,40 @@
 
 Instructions for AI coding assistants and developers working on the elevate codebase.
 
+## Database Architecture (READ THIS FIRST — avoid the SQLite trap)
+
+The codebase reads like SQLite in many places, but the runtime is **mostly
+Postgres**. Don't plan around SQLite for operational data. The split:
+
+- **Operational data → embedded Postgres.** Contacts, deals, dispatch, kanban,
+  outreach, templates, automations, heartbeats, memory relations — all live in
+  per-account Postgres DBs (`elevate_op_<account_key>`, embedded `pgserver`).
+  **Important:** access goes through `elevate_cli/data/connection.py`, a
+  **SQLite-compatibility shim** (`PgConnection`/`PgCursor`) over pooled
+  `psycopg`. It keeps `?` placeholders, `sqlite3.Row` access, and `INSERT OR
+  IGNORE`, and the comments say "sqlite-compat" — but it EXECUTES ON POSTGRES.
+  So `?`-placeholder SQL and `sqlite`-flavoured comments here are **not** a sign
+  to use SQLite. Schema changes go in `migrations_pg/` (Postgres), mirrored to
+  `migrations/` (legacy SQLite) only when needed.
+
+- **Session / chat state → still real SQLite** (`~/.elevate/state.db` via
+  `elevate_state.py` `SessionDB`). Messages, todos, and the plan panel read
+  here. This is the legacy store slated to move to Postgres; until then, session
+  state genuinely IS SQLite.
+
+- **Apple iMessage + Contacts → SQLite, read-only and correct.** `sender.py`,
+  `apple_contacts.py`, `source_connectors.py` open macOS `chat.db` / Contacts.
+  These are Apple's own SQLite files — do not "migrate" them.
+
+- **Migration tooling** (`data/_pg_data_migrate.py`, `_pg_drift_check.py`)
+  references SQLite legitimately — it moves old SQLite data into Postgres on
+  first boot.
+
+Rule of thumb: if you're touching operational data, target **Postgres** and the
+`connection.py` shim; treat `?` placeholders + "sqlite" comments there as legacy
+style, not a backend. Only `state.db` (session state) and the Apple DBs are
+actually SQLite.
+
 ## Development Environment
 
 ```bash
@@ -25,7 +59,7 @@ elevate/
 ├── model_tools.py        # Tool orchestration, discover_builtin_tools(), handle_function_call()
 ├── toolsets.py           # Toolset definitions, _ELEVATE_CORE_TOOLS list
 ├── cli.py                # ElevateCLI class — interactive CLI orchestrator (~11k LOC)
-├── elevate_state.py       # SessionDB — SQLite session store (FTS5 search)
+├── elevate_state.py       # SessionDB — SQLite session store (state.db). Operational data is Postgres (see Database Architecture above)
 ├── elevate_constants.py   # get_elevate_home(), display_elevate_home() — profile-aware paths
 ├── elevate_logging.py     # setup_logging() — agent.log / errors.log / gateway.log (profile-aware)
 ├── batch_runner.py       # Parallel batch processing

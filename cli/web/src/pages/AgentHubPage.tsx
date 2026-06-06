@@ -19,6 +19,7 @@ import type {
   EnvVarInfo,
   HarnessSnapshot,
 } from "@/lib/api";
+import type { TelegramPendingEntry } from "@/lib/api-types";
 import { isoTimeAgo, timeAgo } from "@/lib/utils";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -229,6 +230,122 @@ function RunwayTile({
     <Link to={item.to ?? "/config"} className="hub-runway-tile">
       {inner}
     </Link>
+  );
+}
+
+// Always-accessible channel pairing approver. Lists pending codes from the bot
+// and lets you paste/approve a code directly — no onboarding wizard needed.
+function PairingApprovalBlock() {
+  const [pending, setPending] = useState<TelegramPendingEntry[]>([]);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const resp = await api.listTelegramPairings();
+      setPending(resp.pending ?? []);
+    } catch {
+      /* gateway may be down — leave list empty */
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const t = window.setInterval(() => void refresh(), 5000);
+    return () => window.clearInterval(t);
+  }, [refresh]);
+
+  const approve = useCallback(
+    async (raw: string) => {
+      const value = raw.trim();
+      if (!value || busy) return;
+      setBusy(true);
+      setNote(null);
+      try {
+        await api.approveTelegramPairing(value);
+        setNote(`Approved ${value}`);
+        setCode("");
+        await refresh();
+      } catch (e) {
+        setNote((e as Error)?.message ?? "Could not approve that code");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, refresh],
+  );
+
+  return (
+    <div className="hub-block">
+      <div className="hub-block-head">
+        <div className="hub-block-title">
+          Pair a channel
+          {pending.length > 0 ? (
+            <span className="hub-block-meta mono"> · {pending.length} waiting</span>
+          ) : null}
+        </div>
+        <Link to="/agent-onboarding?run=1" className="hub-link">Setup wizard</Link>
+      </div>
+
+      {pending.length > 0 ? (
+        <div className="hub-runway" style={{ marginBottom: 10 }}>
+          {pending.map((p) => (
+            <div key={p.code} className="hub-runway-tile" style={{ cursor: "default" }}>
+              <div className="hub-runway-top">
+                <span className="hub-runway-label">{p.user_name || "Unknown user"}</span>
+              </div>
+              <div className="hub-runway-detail mono">{p.platform} · {p.code}</div>
+              <button
+                type="button"
+                className="hub-btn sm"
+                style={{ marginTop: 8 }}
+                disabled={busy}
+                onClick={() => void approve(p.code)}
+              >
+                Approve
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="hub-runway-detail" style={{ marginBottom: 8 }}>
+          No codes waiting. DM <span className="mono">/start</span> to your bot, then
+          paste the code it replies with below.
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") void approve(code); }}
+          placeholder="Paste pairing code"
+          spellCheck={false}
+          className="mono"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "var(--bg-2)",
+            border: "1px solid var(--border)",
+            color: "var(--fg)",
+            outline: "none",
+            fontSize: "13px",
+          }}
+        />
+        <button
+          type="button"
+          className="hub-btn"
+          disabled={busy || !code.trim()}
+          onClick={() => void approve(code)}
+        >
+          {busy ? "Approving…" : "Approve code"}
+        </button>
+      </div>
+      {note ? <div className="hub-runway-detail mono" style={{ marginTop: 6 }}>{note}</div> : null}
+    </div>
   );
 }
 
@@ -1169,10 +1286,10 @@ export default function AgentHubPage() {
         icon: "people",
         label: "Messaging",
         detail: pendingPairings
-          ? `${pendingPairings} pairing code${pendingPairings === 1 ? "" : "s"} waiting`
+          ? `${pendingPairings} pairing code${pendingPairings === 1 ? "" : "s"} waiting — approve below`
           : `${configuredPlatforms} connector${configuredPlatforms === 1 ? "" : "s"} configured`,
         state: pendingPairings ? "review" : configuredPlatforms ? "ready" : "blank",
-        to: "/today",
+        to: "/hub",
       },
       {
         id: "memory",
@@ -1396,6 +1513,9 @@ export default function AgentHubPage() {
               ))}
             </div>
           </div>
+
+          {/* Pairing approval — always-accessible approver for channel codes */}
+          <PairingApprovalBlock />
 
           {/* agent orchestration */}
           <div className="hub-block">
