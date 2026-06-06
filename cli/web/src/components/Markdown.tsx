@@ -94,7 +94,7 @@ function CodeBlock({
       className={`group relative ${inline ? "my-0.5 inline-block max-w-full align-top" : "my-1 block"}`}
     >
       <pre
-        className={`overflow-x-auto rounded-md border border-border bg-foreground/[0.06] py-2.5 pl-3 pr-9 text-xs font-mono leading-relaxed text-foreground ${inline ? "whitespace-pre-wrap" : ""}`}
+        className={`overflow-x-auto rounded-md border border-[var(--chat-border)] bg-[var(--chat-surface-strong)] py-2.5 pl-3 pr-9 text-xs font-mono leading-relaxed text-[var(--chat-text)] selection:bg-[#5d5d5d] selection:text-white [&_*]:selection:bg-[#5d5d5d] [&_*]:selection:text-white ${inline ? "whitespace-pre-wrap" : ""}`}
       >
         {lang ? (
           <span className="mb-1 block select-none text-[10px] uppercase tracking-wide text-foreground/40">

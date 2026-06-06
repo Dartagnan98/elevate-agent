@@ -3149,7 +3149,7 @@ export default function ChatPage() {
 
   const startPreviewResize = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
-      if (sidePanel !== "preview") return;
+      if (sidePanel === "none") return;
       event.preventDefault();
 
       const target = event.currentTarget;
@@ -6122,7 +6122,9 @@ export default function ChatPage() {
   // fixed width and no resize handle.
   const isPreviewPanel = sidePanel === "preview";
   const previewPanelLayoutStyle = {
-    ...(isPreviewPanel ? { "--preview-panel-width": previewPanelWidthPx } : {}),
+    // Every side panel (Preview / Plan / Files / Tasks / Artifacts) shares the
+    // same drag-resizable width var, so they're all resizable, not just Preview.
+    "--preview-panel-width": previewPanelWidthPx,
     ...(chatWidth ? { "--chat-layout-width-user": `${chatWidth}px` } : {}),
   } as CSSProperties;
   // Plan/Files data is keyed by the PERSISTED session id (where the message
@@ -6612,9 +6614,7 @@ export default function ChatPage() {
               : "w-0 overflow-hidden",
           )}
           style={
-            wideOpen
-              ? { width: isPreviewPanel ? "var(--preview-panel-width)" : "22.5rem" }
-              : undefined
+            wideOpen ? { width: "var(--preview-panel-width)" } : undefined
           }
         >
           <div
@@ -6625,7 +6625,7 @@ export default function ChatPage() {
                 : "max-h-[calc(100dvh-2.5rem)] overflow-hidden",
             )}
           >
-            {isPreviewPanel && (
+            {wideOpen && (
               <button
                 aria-label="Resize panel"
                 className="absolute -left-5 top-6 z-20 flex h-[calc(100%-3rem)] w-11 touch-none cursor-col-resize items-center justify-center rounded-full text-[var(--chat-muted)] transition hover:text-[var(--chat-text)]"

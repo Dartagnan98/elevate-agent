@@ -324,6 +324,13 @@ export function PlanPanel({
   const [planTitle, setPlanTitle] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Poll while the panel is open so a plan the agent writes mid-turn appears
+  // live — no need to close and reopen the panel.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 2500);
+    return () => window.clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (!sessionId) {
@@ -358,7 +365,7 @@ export function PlanPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId, refreshSignal]);
+  }, [sessionId, refreshSignal, tick]);
 
   const total = todos?.length ?? 0;
   const completed = todos?.filter((t) => t.status === "completed").length ?? 0;
@@ -730,6 +737,12 @@ export function FilesPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // Poll while open so files written mid-turn appear without reopening.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 4000);
+    return () => window.clearInterval(t);
+  }, []);
 
   useEffect(() => {
     if (!sessionId) {
@@ -754,7 +767,7 @@ export function FilesPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, tick]);
 
   const total = files?.length ?? 0;
 

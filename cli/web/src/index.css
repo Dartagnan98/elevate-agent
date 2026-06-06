@@ -1335,12 +1335,12 @@ html .font-courier {
    Overrides any accent-tinted ::selection so highlighting doesn't flash
    different colors across the app. */
 ::selection {
-  background: #5d5d5d;
-  color: #ffffff;
+  background: #5d5d5d !important;
+  color: #ffffff !important;
 }
 ::-moz-selection {
-  background: #5d5d5d;
-  color: #ffffff;
+  background: #5d5d5d !important;
+  color: #ffffff !important;
 }
 
 .status-line {
