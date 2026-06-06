@@ -8018,6 +8018,17 @@ function buildBreakdownSteps(
   const merged: BreakdownStep[] = [];
   for (const step of raw) {
     const prev = merged[merged.length - 1];
+    // Drop a reasoning trace whose text duplicates the one right before it —
+    // streaming can emit the same reasoning summary twice (a delta + a final),
+    // which otherwise renders the whole block twice.
+    if (
+      step.type === "trace" &&
+      prev &&
+      prev.type === "trace" &&
+      prev.text === step.text
+    ) {
+      continue;
+    }
     if (
       step.type === "tool" &&
       prev &&
@@ -8060,7 +8071,14 @@ function splitReasoningSections(text: string): ReasoningSection[] {
   for (let i = 1; i < parts.length; i += 2) {
     const header = (parts[i] || "").trim();
     const body = (parts[i + 1] || "").trim();
-    if (header || body) sections.push({ header: header || undefined, body });
+    if (!header && !body) continue;
+    // Skip a section identical to the previous one — models sometimes restate
+    // the same "**Header** body" verbatim, which doubled it on screen.
+    const prev = sections[sections.length - 1];
+    if (prev && prev.header === (header || undefined) && prev.body === body) {
+      continue;
+    }
+    sections.push({ header: header || undefined, body });
   }
   return sections.length ? sections : [{ body: t.trim() }];
 }

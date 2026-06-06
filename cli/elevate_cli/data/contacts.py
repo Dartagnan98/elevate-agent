@@ -656,6 +656,74 @@ def close_to_admin(
     }
 
 
+def set_lead_profile_favorite(
+    conn: sqlite3.Connection,
+    profile_id: str,
+    *,
+    favorite: bool,
+    contact_id: str | None = None,
+    actor: str = "operator:leads-ui",
+) -> dict[str, Any]:
+    """Set or clear the /leads favorite flag for a source-inbox profile.
+
+    This is intentionally UI-scoped. It does not change heat, follow-up,
+    pipeline status, outreach approval, or CRM/source state.
+    """
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profile_id is required")
+
+    cid = str(contact_id or "").strip() or None
+    now = now_iso()
+    if favorite:
+        conn.execute(
+            """
+            INSERT INTO lead_profile_flags (
+                profile_id, contact_id, favorite, favorited_at, favorited_by, updated_at
+            ) VALUES (?, ?, 1, ?, ?, ?)
+            ON CONFLICT (profile_id) DO UPDATE SET
+                contact_id = COALESCE(EXCLUDED.contact_id, lead_profile_flags.contact_id),
+                favorite = 1,
+                favorited_at = COALESCE(lead_profile_flags.favorited_at, EXCLUDED.favorited_at),
+                favorited_by = EXCLUDED.favorited_by,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (pid, cid, now, actor, now),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO lead_profile_flags (
+                profile_id, contact_id, favorite, favorited_at, favorited_by, updated_at
+            ) VALUES (?, ?, 0, NULL, ?, ?)
+            ON CONFLICT (profile_id) DO UPDATE SET
+                contact_id = COALESCE(EXCLUDED.contact_id, lead_profile_flags.contact_id),
+                favorite = 0,
+                favorited_at = NULL,
+                favorited_by = EXCLUDED.favorited_by,
+                updated_at = EXCLUDED.updated_at
+            """,
+            (pid, cid, actor, now),
+        )
+
+    row = conn.execute(
+        """
+        SELECT profile_id, contact_id, favorite, favorited_at, favorited_by, updated_at
+        FROM lead_profile_flags
+        WHERE profile_id = ?
+        """,
+        (pid,),
+    ).fetchone()
+    return {
+        "profileId": row["profile_id"],
+        "contactId": row["contact_id"],
+        "favorite": bool(row["favorite"]),
+        "favoritedAt": row["favorited_at"],
+        "favoritedBy": row["favorited_by"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def set_pipeline_status(
     conn: sqlite3.Connection,
     contact_id: str,

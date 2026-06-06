@@ -27,6 +27,13 @@ class SourceInboxProfileAction(BaseModel):
     status: str | None = None
 
 
+class SourceInboxFavoriteAction(BaseModel):
+    profileId: str
+    favorite: bool
+    contactId: str | None = None
+    returnInbox: bool = True
+
+
 class AppleMessagesDirections(BaseModel):
     inbound: bool | None = None
     outbound: bool | None = None
@@ -181,6 +188,27 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         except Exception as exc:
             _log.exception("POST /api/source-inbox/profile failed")
             raise HTTPException(status_code=500, detail=f"Profile update failed: {exc}")
+
+
+    @router.post("/api/source-inbox/profile/favorite")
+    async def update_source_inbox_profile_favorite(body: SourceInboxFavoriteAction):
+        try:
+            from elevate_cli.source_connectors import update_profile_favorite
+
+            update_profile_favorite(
+                body.profileId,
+                favorite=body.favorite,
+                contact_id=body.contactId,
+                return_inbox=False,
+            )
+            if not body.returnInbox:
+                return {"ok": True}
+            return _source_inbox_response()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("POST /api/source-inbox/profile/favorite failed")
+            raise HTTPException(status_code=500, detail=f"Favorite update failed: {exc}")
 
 
     @router.post("/api/source-inbox/draft")

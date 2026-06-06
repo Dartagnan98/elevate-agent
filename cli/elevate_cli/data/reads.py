@@ -112,6 +112,7 @@ _LEAD_SECTION_DEFS = {
     "messages": ("Messages", "open conversations"),
     "drafts": ("Drafts", "approval queue"),
     "skipped": ("Skipped", "recently skipped approval queue"),
+    "favorites": ("Favorites", "lead_profile_flags.favorite"),
 }
 
 _SUPPRESSED_PIPELINE_STATUSES = {"dead", "closed_seller", "closed_buyer"}
@@ -225,6 +226,7 @@ def _finalize_lead_sections(
         ),
         "drafts": drafts_count,
         "skipped": skipped_count,
+        "favorites": len(sections["favorites"]["profileIds"]),
     }
     for section_id, section in sections.items():
         section["count"] = int(explicit_counts.get(section_id, 0))
@@ -499,6 +501,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         "needsFollowUpContacts": 0,
         "buyerSearchContacts": 0,
         "listingActiveContacts": 0,
+        "favoriteProfiles": 0,
     }
 
     with connect() as conn:
@@ -848,6 +851,12 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         for contact_id in profile.get("contactIds", [])
         if str(contact_id or "").strip()
     })
+    profile_ids = [
+        str(profile.get("id") or "")
+        for profile in profiles
+        if str(profile.get("id") or "").strip()
+    ]
+    profile_flags_by_id: dict[str, Any] = {}
     for profile in profiles:
         profile_section_ids: set[str] = set()
         for contact_id in profile.get("contactIds", []):
@@ -893,6 +902,17 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                     "status": row["pipeline_status"],
                     "updated_at": row["pipeline_status_set_at"],
                 }
+        if profile_ids:
+            placeholders = ",".join("?" for _ in profile_ids)
+            for row in conn.execute(
+                f"""
+                SELECT profile_id, contact_id, favorite, favorited_at
+                FROM lead_profile_flags
+                WHERE profile_id IN ({placeholders})
+                """,
+                profile_ids,
+            ).fetchall():
+                profile_flags_by_id[str(row["profile_id"])] = row
         private_search_buyers = db_private_search_buyers(
             conn,
             limit=max(safe_limit, 50),
@@ -907,6 +927,25 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
                 break
         profile["status"] = db_status.get("status") if db_status else None
         profile["statusUpdatedAt"] = db_status.get("updated_at") if db_status else None
+        flag = profile_flags_by_id.get(str(profile.get("id") or ""))
+        is_favorite = bool(flag and flag["favorite"])
+        profile["favorite"] = is_favorite
+        profile["favoritedAt"] = flag["favorited_at"] if flag else None
+        if is_favorite:
+            profile["leadSectionIds"] = sorted({
+                *[str(x) for x in profile.get("leadSectionIds", []) if x],
+                "favorites",
+            })
+            _add_section_item(
+                lead_sections,
+                "favorites",
+                profile_id=profile.get("id"),
+            )
+            for contact_id in profile.get("contactIds", []):
+                _add_section_item(lead_sections, "favorites", contact_id=contact_id)
+            for thread_id in profile.get("threadIds", []):
+                _add_section_item(lead_sections, "favorites", thread_id=thread_id)
+    totals["favoriteProfiles"] = len(lead_sections["favorites"]["profileIds"])
     for buyer in private_search_buyers:
         section_ids = sorted({
             *[str(x) for x in buyer.get("leadSectionIds", []) if x],

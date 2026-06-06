@@ -3963,6 +3963,32 @@ def update_profile_state(
     return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
 
+def update_profile_favorite(
+    profile_id: str,
+    *,
+    favorite: bool,
+    contact_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    return_inbox: bool = True,
+) -> JsonRecord:
+    """Persist the operator-set /leads favorite flag for a profile."""
+    pid = str(profile_id or "").strip()
+    if not pid:
+        raise ValueError("profileId is required")
+
+    from elevate_cli.data import connect, set_lead_profile_favorite
+
+    with connect() as conn:
+        set_lead_profile_favorite(
+            conn,
+            pid,
+            favorite=bool(favorite),
+            contact_id=contact_id,
+            actor="operator:leads-ui",
+        )
+    return build_source_inbox_response(config or load_config()) if return_inbox else {"ok": True}
+
+
 def update_source_thread_state(
     source_id: str,
     thread_id: str,
