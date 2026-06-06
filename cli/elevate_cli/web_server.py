@@ -4667,6 +4667,53 @@ async def get_session_todos(session_id: str):
     }
 
 
+@app.get("/api/sessions/{session_id}/plan")
+async def get_session_plan(session_id: str):
+    """The full detailed plan for a session (chat Plan panel).
+
+    The agent calls the `present_plan` tool with a rich Markdown plan; its
+    result is stored untruncated in the message history. We walk newest-first
+    for the most recent `present_plan` result and return its markdown so the
+    panel can render it (the tool stream caps results, so we read it here).
+    """
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        messages = db.get_messages(sid)
+    finally:
+        db.close()
+
+    plan_md = ""
+    title = ""
+    updated_at = None
+    for msg in reversed(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or '"plan"' not in content:
+            continue
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("plan"), str) and data["plan"].strip():
+            plan_md = data["plan"]
+            title = str(data.get("title") or "").strip()
+            updated_at = msg.get("created_at") or msg.get("timestamp")
+            break
+
+    return {
+        "session_id": sid,
+        "plan": plan_md,
+        "title": title,
+        "updated_at": updated_at,
+    }
+
+
 _SESSION_FILE_ARG_KEYS = (
     "path", "file_path", "target_file", "filename", "file", "notebook_path",
 )

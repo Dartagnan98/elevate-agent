@@ -2727,6 +2727,9 @@ export default function ChatPage() {
   // as the WHICH; plan/tasks/files are derived/fetched panels.
   const [sidePanel, setSidePanel] = useState<SidePanelMode>("none");
   const [planRefreshSignal, setPlanRefreshSignal] = useState(0);
+  // True once the agent has presented a plan (present_plan tool) this turn —
+  // gates the "Approve & run" bar so it never shows before a plan exists.
+  const [planReadyForApproval, setPlanReadyForApproval] = useState(false);
   const planAutoOpenDisabledRef = useRef(false);
   const lastTodoSigRef = useRef<string>("");
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
@@ -3078,6 +3081,11 @@ export default function ChatPage() {
     setSidePanel(mode);
   }, []);
 
+  // The approval bar only belongs while plan mode is on; clear it on exit.
+  useEffect(() => {
+    if (permissionModeId !== "plan") setPlanReadyForApproval(false);
+  }, [permissionModeId]);
+
   const closeSidePanel = useCallback(() => {
     setSidePanel((current) => {
       if (current === "plan") planAutoOpenDisabledRef.current = true;
@@ -3212,14 +3220,17 @@ export default function ChatPage() {
     [chatWidth],
   );
 
-  // Auto-open the Plan panel when the agent writes/updates a todo list, unless
-  // the user dismissed it this session. The tool stream is just the trigger;
-  // PlanPanel refetches the untruncated list from /api/sessions/:id/todos.
+  // Auto-open the Plan panel when the agent presents a plan (present_plan) or
+  // writes a todo list, unless the user dismissed it. The tool stream is just
+  // the trigger; PlanPanel refetches the untruncated plan/list from the API.
+  // A present_plan also arms the "Approve & run" bar.
   useEffect(() => {
     let latest: ToolEntry | undefined;
+    let isPlan = false;
     for (let i = tools.length - 1; i >= 0; i--) {
-      if (tools[i].name === "todo") {
+      if (tools[i].name === "present_plan" || tools[i].name === "todo") {
         latest = tools[i];
+        isPlan = tools[i].name === "present_plan";
         break;
       }
     }
@@ -3228,6 +3239,7 @@ export default function ChatPage() {
     if (sig === lastTodoSigRef.current) return;
     lastTodoSigRef.current = sig;
     setPlanRefreshSignal((value) => value + 1);
+    if (isPlan && latest.status !== "error") setPlanReadyForApproval(true);
     if (!planAutoOpenDisabledRef.current && sidePanel === "none") {
       openSidePanel("plan");
     }
@@ -5292,6 +5304,9 @@ export default function ChatPage() {
       if (richLayerRef.current) richLayerRef.current.style.transform = "translateY(0px)";
       setBanner(null);
       setAgentMenuOpen(false);
+      // Sending a message (refine or execute) retires the current plan-ready
+      // bar until the agent presents a fresh plan.
+      setPlanReadyForApproval(false);
 
       const historyArtifacts = artifacts.length ? [] : artifactsFromMessages(messages);
       const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
@@ -6370,11 +6385,7 @@ export default function ChatPage() {
               >
                 <span className="h-16 w-1 rounded-full bg-transparent" />
               </button>
-              {permissionModeId === "plan" &&
-                !busy &&
-                messages.length > 0 &&
-                messages[messages.length - 1]?.role === "assistant" &&
-                !!messages[messages.length - 1]?.content?.trim() && (
+              {permissionModeId === "plan" && !busy && planReadyForApproval && (
                   <div className="mb-2 flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
                     <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
                     <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">

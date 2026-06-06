@@ -25,6 +25,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
+import { Markdown } from "@/components/Markdown";
 import { cn } from "@/lib/utils";
 
 export type SidePanelMode = "none" | "preview" | "artifacts" | "plan" | "tasks" | "files";
@@ -319,25 +320,37 @@ export function PlanPanel({
   onClose: () => void;
 }) {
   const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  const [planMd, setPlanMd] = useState<string>("");
+  const [planTitle, setPlanTitle] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!sessionId) {
       setTodos([]);
+      setPlanMd("");
       return;
     }
     let cancelled = false;
     setLoading(true);
-    api
-      .getSessionTodos(sessionId)
-      .then((response) => {
+    Promise.allSettled([
+      api.getSessionPlan(sessionId),
+      api.getSessionTodos(sessionId),
+    ])
+      .then(([planRes, todoRes]) => {
         if (cancelled) return;
-        setTodos(Array.isArray(response.todos) ? response.todos : []);
-        setError(null);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (planRes.status === "fulfilled") {
+          setPlanMd(planRes.value.plan || "");
+          setPlanTitle(planRes.value.title || "");
+        }
+        if (todoRes.status === "fulfilled") {
+          setTodos(Array.isArray(todoRes.value.todos) ? todoRes.value.todos : []);
+        }
+        if (planRes.status === "rejected" && todoRes.status === "rejected") {
+          setError((planRes.reason as Error)?.message ?? "Failed to load plan");
+        } else {
+          setError(null);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -350,12 +363,20 @@ export function PlanPanel({
   const total = todos?.length ?? 0;
   const completed = todos?.filter((t) => t.status === "completed").length ?? 0;
   const pct = total ? Math.round((completed / total) * 100) : 0;
+  const hasPlan = planMd.trim().length > 0;
+  const isEmpty = !hasPlan && total === 0;
 
   return (
     <PanelShell
       icon={<ListChecks className="h-4.5 w-4.5" />}
       title="Plan"
-      subtitle={total ? `${completed} of ${total} done` : "Task list for this session"}
+      subtitle={
+        hasPlan
+          ? planTitle || "Proposed plan"
+          : total
+            ? `${completed} of ${total} done`
+            : "Plan for this session"
+      }
       onClose={onClose}
     >
       {total > 0 ? (
@@ -368,26 +389,42 @@ export function PlanPanel({
           </div>
         </div>
       ) : null}
-      {loading && todos === null ? (
+      {loading && todos === null && !hasPlan ? (
         <div className="flex flex-col gap-3 p-4">
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-4 w-full animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
           ))}
         </div>
-      ) : error ? (
+      ) : error && isEmpty ? (
         <PanelError message={error} />
-      ) : total === 0 ? (
+      ) : isEmpty ? (
         <PanelEmpty
           icon={<ListChecks className="h-5 w-5" />}
           title="No plan yet"
-          body="Claude writes the plan here as it works through a multi-step task."
+          body="In plan mode the agent writes its full plan here for you to review and approve."
         />
       ) : (
-        <ul className="flex flex-col gap-0.5 p-2">
-          {todos!.map((item, index) => (
-            <PlanRow key={item.id || `todo-${index}`} item={item} />
-          ))}
-        </ul>
+        <div className="flex flex-col">
+          {hasPlan ? (
+            <div className="chat-message-prose border-b border-[var(--chat-border)] px-4 py-3 text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_table]:text-[12px]">
+              <Markdown content={planMd} />
+            </div>
+          ) : null}
+          {total > 0 ? (
+            <>
+              {hasPlan ? (
+                <PanelSectionLabel>
+                  <span className="px-2 pt-2">Checklist</span>
+                </PanelSectionLabel>
+              ) : null}
+              <ul className="flex flex-col gap-0.5 p-2">
+                {todos!.map((item, index) => (
+                  <PlanRow key={item.id || `todo-${index}`} item={item} />
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </div>
       )}
     </PanelShell>
   );

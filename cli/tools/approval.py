@@ -663,7 +663,7 @@ PLAN_MODE_READ_ONLY_TOOLS = frozenset({
     "vision_analyze",                       # image analysis, no state change
     "session_search", "skill_view", "skills_list",  # session / skill inspection
     "ha_get_state", "ha_list_entities", "ha_list_services",  # home-assistant reads
-    "todo", "clarify",                      # planning + asking the user
+    "todo", "clarify", "present_plan",      # planning + asking the user
 })
 _PLAN_MEMORY_READ_ACTIONS = frozenset(
     {"get", "search", "recall", "list", "view", "read", "show"}

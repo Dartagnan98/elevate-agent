@@ -2157,6 +2157,13 @@ export interface SessionTodosResponse {
   };
 }
 
+export interface SessionPlanResponse {
+  session_id: string;
+  plan: string;
+  title: string;
+  updated_at?: number | string | null;
+}
+
 export interface FileTreeNode {
   name: string;
   type: "dir" | "file";

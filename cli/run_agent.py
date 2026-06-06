@@ -4719,26 +4719,37 @@ class AIAgent:
                 return ""
         except Exception:
             return ""
-        has_todo = "todo" in getattr(self, "valid_tool_names", set())
-        plan_tool_line = (
-            "Write the plan by calling the `todo` tool with concrete, ordered "
-            "steps — this is what renders in the user's Plan panel. Keep each "
-            "step a short imperative phrase."
-            if has_todo
-            else "Lay out the plan as a concise ordered list."
-        )
+        tools = getattr(self, "valid_tool_names", set())
+        if "present_plan" in tools:
+            plan_tool_line = (
+                "Call the `present_plan` tool with your FULL, detailed plan as "
+                "Markdown — this is the spec that renders in the user's Plan "
+                "panel. Include: a short overview (approach + key trade-off); "
+                "numbered steps where EACH step states exactly what you'll do, "
+                "which files/tools/endpoints/commands, the inputs and outputs, "
+                "and its acceptance criteria; a 'Considerations & risks' "
+                "section; and an 'Open questions' section for anything you need "
+                "confirmed. Be thorough and concrete — not a checklist."
+            )
+        elif "todo" in tools:
+            plan_tool_line = (
+                "Write the plan via the `todo` tool with concrete, ordered "
+                "steps — it renders in the Plan panel."
+            )
+        else:
+            plan_tool_line = "Lay out the full plan as a detailed ordered list."
         return (
             "## PLAN MODE IS ACTIVE\n"
             "You are researching read-only; edits, commands, sends, and "
-            "delegation are blocked until the user types /run.\n"
+            "delegation are blocked until the user approves.\n"
             f"- {plan_tool_line}\n"
             "- In your chat reply, give ONLY a short brief (2–4 sentences): the "
             "approach, the key decision/trade-off, and anything you need "
-            "confirmed. Do NOT restate the full step list in chat — it already "
-            "shows in the Plan panel.\n"
+            "confirmed. Do NOT restate the full plan in chat — the detailed "
+            "plan lives in the Plan panel.\n"
             "- End the brief by saying the plan is ready for review. The user "
-            "approves it with the **Approve & run** button (you do not need to "
-            "ask them to type a command); when approved you'll execute it."
+            "approves it with the **Approve & run** button (no command needed); "
+            "when approved you'll execute it."
         )
 
     def _build_system_prompt(self, system_message: str = None) -> str:
