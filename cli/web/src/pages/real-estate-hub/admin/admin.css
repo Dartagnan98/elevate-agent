@@ -6,7 +6,7 @@
 .app::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 
 /* Theme tokens */
-::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+::selection { background: #5d5d5d; color: #fff; }
 .mono { font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
 
 :root {

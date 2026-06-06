@@ -37,6 +37,7 @@ from elevate_cli.data import (
     record_inbound,
     record_outbound,
     set_heat,
+    set_lead_profile_favorite,
     set_pipeline_status,
     shadow_read,
     upsert_contact,
@@ -222,6 +223,54 @@ def test_source_inbox_lead_sections_follow_contact_cells():
     assert sections["buyer_search"]["contactIds"] == [contact["id"]]
     assert sections["listing_active"]["count"] == 1
     assert sections["listing_active"]["contactIds"] == [contact["id"]]
+
+
+def test_source_inbox_profiles_include_favorites_section():
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Favorite Buyer",
+            primary_email="fav@example.com",
+            source_key="lofty:fav",
+        )
+        conv = get_or_create_conversation(
+            conn,
+            contact_id=contact["id"],
+            source_id="apple-messages",
+            channel="imessage",
+            thread_key="fav-thread",
+        )
+        record_inbound(
+            conn,
+            contact_id=contact["id"],
+            conversation_id=conv["id"],
+            channel="imessage",
+            body="Can we see this one?",
+            source_id="apple-messages",
+            thread_key="fav-thread",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        bump_conversation_counters(
+            conn,
+            conv["id"],
+            direction="inbound",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        set_lead_profile_favorite(
+            conn,
+            "email:fav@example.com",
+            favorite=True,
+            contact_id=contact["id"],
+        )
+
+    response = db_source_inbox_response(limit=16)
+    profile = response["profiles"][0]
+    assert profile["favorite"] is True
+    assert profile["favoritedAt"]
+    assert "favorites" in profile["leadSectionIds"]
+    assert response["leadSections"]["favorites"]["count"] == 1
+    assert response["leadSections"]["favorites"]["profileIds"] == ["email:fav@example.com"]
+    assert response["leadSections"]["favorites"]["contactIds"] == [contact["id"]]
 
 
 def test_source_inbox_profiles_show_pipeline_status_and_hide_dead():

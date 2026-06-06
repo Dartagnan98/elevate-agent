@@ -125,6 +125,27 @@ def test_restore_source_task_removes_skipped_state(tmp_path, monkeypatch):
     assert "task-1" not in state["tasks"]
 
 
+def test_update_profile_favorite_persists_flag(monkeypatch):
+    from elevate_cli import source_connectors as sc
+    from elevate_cli.data import connect
+
+    monkeypatch.setattr(sc, "build_source_inbox_response", lambda config=None: {"ok": True})
+
+    result = sc.update_profile_favorite(
+        "thread:apple-messages:t-1",
+        favorite=True,
+        return_inbox=False,
+    )
+
+    assert result == {"ok": True}
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT favorite FROM lead_profile_flags WHERE profile_id=?",
+            ("thread:apple-messages:t-1",),
+        ).fetchone()
+    assert row["favorite"] == 1
+
+
 def test_approve_atomic_records_template_attempt_and_enqueue_payload(tmp_path, monkeypatch):
     from elevate_cli import outreach_db
     from elevate_cli import source_connectors as sc
