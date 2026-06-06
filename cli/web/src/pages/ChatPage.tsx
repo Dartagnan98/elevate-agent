@@ -2509,6 +2509,25 @@ function bestSidePreviewArtifact(artifacts: ArtifactEntry[]): ArtifactEntry | nu
   return best;
 }
 
+// Natural-language "make a plan" detection — when the user asks for a plan we
+// auto-switch the session into plan mode (flip the pill) so the agent researches
+// read-only and presents a plan, no manual toggle needed.
+function looksLikePlanRequest(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  if (/^plan\b/.test(t)) return true;
+  if (
+    /\b(make|create|draft|write|build|outline|propose|sketch|prepare|put together|come up with|give me|lay out|map out|work out)\s+(me\s+)?(a|an|the|your|out)?\s*plan\b/.test(
+      t,
+    )
+  )
+    return true;
+  if (/\bplan\s+(out\b|how\b|for\s+how\b|this\b|it\b|the\s+(steps|approach|rollout|build|work|project))/.test(t))
+    return true;
+  if (/\b(a|the|your)\s+plan\b[\s\S]*\b(before|first|for\s+approval|to\s+review)\b/.test(t))
+    return true;
+  return false;
+}
+
 function isOpenPreviewIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksToOpen =
@@ -5400,6 +5419,24 @@ export default function ChatPage() {
         return;
       }
 
+      // Natural-language plan request → auto-enter plan mode for this turn so
+      // the agent researches read-only and presents a plan. Persist it before
+      // the agent runs so the backend turn sees the mode; flips the pill too.
+      if (permissionModeId !== "plan" && looksLikePlanRequest(trimmed)) {
+        try {
+          await gw.request(
+            "config.set",
+            { key: "permission_mode", value: "plan", session_id: targetSessionId },
+            8_000,
+          );
+          setPermissionModeId("plan");
+          planAutoOpenDisabledRef.current = false;
+          setStatusText("Plan mode — drafting a plan for your approval");
+        } catch {
+          /* non-fatal: fall through and run normally */
+        }
+      }
+
       await submitGatewayPrompt(
         trimmed,
         routedText,
@@ -5410,7 +5447,7 @@ export default function ChatPage() {
       );
       pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, busy, createSessionForSend, draftChat, gw, hasReadyAttachment, messages, openArtifactPreview, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, busy, createSessionForSend, draftChat, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
