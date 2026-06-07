@@ -1,17 +1,22 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "1.1.23",
+  "version": "1.1.24",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "pack:mac": "electron-builder --mac dir",
     "build:mac": "electron-builder --mac dmg zip --x64 --arm64",
+    "preflight:apple": "node scripts/preflight-apple-release.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
     "ship:mac": "node scripts/ship-to-hetzner.js",
-    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && npm run finalize:mac && npm run ship:mac"
+    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && npm run finalize:mac && npm run ship:mac",
+    "release:apple": "npm run preflight:apple && npm run release:mac"
   },
   "build": {
     "appId": "com.elevationrealestate.elevate",
@@ -37,7 +42,8 @@
           "**/*",
           "!**/__pycache__/**",
           "!**/*.pyc",
-          "!**/*.pyo"
+          "!**/*.pyo",
+          "!**/.DS_Store"
         ]
       },
       {
@@ -87,7 +93,8 @@
       "notarize": true,
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Elevate uses the microphone for voice input in chat.",
-        "NSAppleEventsUsageDescription": "Elevate sends approved text messages through the Messages app on your Mac."
+        "NSAppleEventsUsageDescription": "Elevate sends approved text messages through the Messages app on your Mac.",
+        "NSHumanReadableCopyright": "(c) 2026 Elevation Real Estate. All rights reserved."
       },
       "target": [
         {
@@ -111,12 +118,15 @@
     }
   },
   "devDependencies": {
-    "electron": "^38.4.0",
+    "electron": "^39.8.10",
     "electron-builder": "^26.0.12",
     "js-yaml": "^4.1.1"
   },
   "dependencies": {
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.3"
+  },
+  "overrides": {
+    "tmp": "^0.2.7"
   }
 }
