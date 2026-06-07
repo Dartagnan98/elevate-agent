@@ -31,6 +31,7 @@ class CronJobCreate(BaseModel):
     workdir: Optional[str] = None
     expected_readiness_version: Optional[str] = None
     backfill_pending: bool = False
+    metadata: Optional[dict] = None
 
 
 class CronJobUpdate(BaseModel):
@@ -148,6 +149,7 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
                 workdir=body.workdir,
                 expected_readiness_version=body.expected_readiness_version,
                 backfill_pending=body.backfill_pending,
+                metadata=body.metadata,
             )
             return job
         except ValueError as e:

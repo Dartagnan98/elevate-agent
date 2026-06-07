@@ -11,7 +11,6 @@ import {
   Pencil,
   Play,
   Plus,
-  Repeat,
   Trash2,
   X,
 } from "lucide-react";
@@ -22,11 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ListSkeleton } from "@/components/ui/skeleton";
-import { Markdown } from "@/components/Markdown";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
@@ -35,11 +30,9 @@ import { cn } from "@/lib/utils";
 /*  Heartbeat = a scheduled self-prompt (cortextOS-style).            */
 /*  The realtor sets an interval + instructions; the agent wakes on    */
 /*  that clock, runs the instructions in a fresh session, and reports  */
-/*  back into this feed. Each heartbeat is a cron job tagged with      */
-/*  origin.type === "heartbeat" so it stays out of the power cron page.*/
+/*  back into this feed. Each heartbeat is a cron job tagged as one of */
+/*  Elevate's native heartbeat origins so it stays out of page clutter.*/
 /* ------------------------------------------------------------------ */
-
-const HEARTBEAT_ORIGIN = { type: "heartbeat", source: "desktop-heartbeat" };
 
 interface IntervalPreset {
   key: string;
@@ -47,6 +40,8 @@ interface IntervalPreset {
   schedule: string;
   minutes: number;
 }
+
+type ReportMode = "quiet" | "notify";
 
 const INTERVAL_PRESETS: IntervalPreset[] = [
   { key: "15m", label: "15 min", schedule: "every 15m", minutes: 15 },
@@ -67,8 +62,9 @@ interface FormValues {
   dailyTime: string; // "HH:MM"
   customSchedule: string;
   instructions: string;
-  agent: string; // Agent Hub agent id that runs it ("" = default agent)
+  agent: string; // Agent Hub agent id that owns/runs it
   deliver: string; // result routing: local | telegram | discord | slack | email
+  reportMode: ReportMode;
 }
 
 const EMPTY_FORM: FormValues = {
@@ -79,6 +75,7 @@ const EMPTY_FORM: FormValues = {
   instructions: "",
   agent: "",
   deliver: "local",
+  reportMode: "quiet",
 };
 
 const DELIVER_OPTIONS: { value: string; label: string }[] = [
@@ -89,8 +86,84 @@ const DELIVER_OPTIONS: { value: string; label: string }[] = [
   { value: "email", label: "Email" },
 ];
 
+const REPORT_MODE_OPTIONS: { value: ReportMode; label: string }[] = [
+  { value: "quiet", label: "Only important changes" },
+  { value: "notify", label: "Every run" },
+];
+
+function preferredAgentId(agents: AgentHubAgent[]): string {
+  const enabled = agents.filter((agent) => agent.enabled);
+  return (
+    enabled.find((agent) => agent.role === "orchestrator")?.id ||
+    enabled.find((agent) => agent.id === "executive-assistant")?.id ||
+    enabled[0]?.id ||
+    ""
+  );
+}
+
 function isHeartbeat(job: CronJob): boolean {
-  return !!job.origin && job.origin.type === "heartbeat";
+  const type = String(job.origin?.type || "");
+  return type === "heartbeat" || type === "surface-heartbeat" || type === "cortext-native-loop";
+}
+
+function heartbeatSurfaceKey(job: CronJob): string {
+  const origin = job.origin || {};
+  const surface = origin.surface;
+  return typeof surface === "string" ? surface : "";
+}
+
+function heartbeatAgentId(job: CronJob, surface?: HeartbeatSurface | null): string {
+  if (job.agent) return job.agent;
+  const cfgAgent = surface?.config?.agent;
+  if (typeof cfgAgent === "string" && cfgAgent) return cfgAgent;
+  const originAgent = job.origin?.agent;
+  return typeof originAgent === "string" ? originAgent : "";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function normalizeReportMode(value: unknown): ReportMode | null {
+  const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  if (["notify", "notifying", "always", "always-notify", "every-run", "report"].includes(raw)) {
+    return "notify";
+  }
+  if (["quiet", "silent", "changes", "change-only", "important", "important-only"].includes(raw)) {
+    return "quiet";
+  }
+  return null;
+}
+
+function heartbeatReportMode(job: CronJob, surface?: HeartbeatSurface | null): ReportMode {
+  const metadata = asRecord(job.metadata);
+  const origin = asRecord(job.origin);
+  const config = asRecord(surface?.config);
+  return (
+    normalizeReportMode(metadata.heartbeat_report_mode) ||
+    normalizeReportMode(metadata.report_mode) ||
+    normalizeReportMode(metadata.notification_mode) ||
+    normalizeReportMode(origin.heartbeat_report_mode) ||
+    normalizeReportMode(origin.report_mode) ||
+    normalizeReportMode(origin.notification_mode) ||
+    normalizeReportMode(config.heartbeat_report_mode) ||
+    normalizeReportMode(config.report_mode) ||
+    normalizeReportMode(config.notification_mode) ||
+    "quiet"
+  );
+}
+
+function reportModeLabel(mode: ReportMode): string {
+  return mode === "notify" ? "Every run" : "Only important changes";
+}
+
+function withHeartbeatReportMode(
+  metadata: Record<string, unknown> | undefined,
+  mode: ReportMode,
+): Record<string, unknown> {
+  return { ...(metadata || {}), heartbeat_report_mode: mode };
 }
 
 function scheduleFromForm(v: FormValues): string {
@@ -105,9 +178,8 @@ function scheduleFromForm(v: FormValues): string {
   return preset ? preset.schedule : "";
 }
 
-function formFromJob(job: CronJob): FormValues {
-  const sched = job.schedule || ({} as CronJob["schedule"]);
-  const display = job.schedule_display || sched.display || "";
+function formScheduleParts(schedule?: CronJob["schedule"], display = "") {
+  const sched = schedule || ({} as CronJob["schedule"]);
   let intervalKey = "custom";
   let dailyTime = "08:00";
   let customSchedule = display;
@@ -131,15 +203,49 @@ function formFromJob(job: CronJob): FormValues {
     }
   }
 
+  return { intervalKey, dailyTime, customSchedule };
+}
+
+function formFromJob(job: CronJob, surface?: HeartbeatSurface | null): FormValues {
+  if (surface?.config) {
+    const cfg = surface.config;
+    const scheduleParts = formScheduleParts(job.schedule, cfg.cadence || job.schedule_display);
+    return {
+      name: job.name || "",
+      ...scheduleParts,
+      instructions: cfg.goal || job.prompt || "",
+      agent: heartbeatAgentId(job, surface),
+      deliver: job.deliver || cfg.deliver || "local",
+      reportMode: heartbeatReportMode(job, surface),
+    };
+  }
+
+  const sched = job.schedule || ({} as CronJob["schedule"]);
+  const display = job.schedule_display || sched.display || "";
+  const scheduleParts = formScheduleParts(sched, display);
+
   return {
     name: job.name || "",
-    intervalKey,
-    dailyTime,
-    customSchedule,
+    ...scheduleParts,
     instructions: job.prompt || "",
-    agent: job.agent || "",
+    agent: heartbeatAgentId(job),
     deliver: job.deliver || "local",
+    reportMode: heartbeatReportMode(job),
   };
+}
+
+function surfaceLastSummary(surface?: HeartbeatSurface | null): string {
+  const last = surface?.lastRun;
+  return String(last?.summary || last?.found || "").trim();
+}
+
+function surfaceLastRunAt(surface?: HeartbeatSurface | null): string | null {
+  return surface?.lastRun?.ran_at || null;
+}
+
+function surfaceLearnings(surface?: HeartbeatSurface | null): string {
+  const learnings = String(surface?.learnings || "").trim();
+  return learnings && !/\(none yet/i.test(learnings) ? learnings : "";
 }
 
 function formatRelative(iso?: string | null): string {
@@ -190,268 +296,6 @@ function statusTone(status?: string | null): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Surface heartbeats (per-account work + experiment loop per surface)*/
-/* ------------------------------------------------------------------ */
-
-const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-/** Best-effort human rendering of a 5-field cron cadence string. */
-function prettyCron(expr?: string | null): string {
-  const raw = (expr || "").trim();
-  if (!raw) return "—";
-  const parts = raw.split(/\s+/);
-  if (parts.length !== 5) return raw;
-  const [min, hr, dom, mon, dow] = parts;
-
-  const times = (): string | null => {
-    // Only render times when both minute and hour are concrete lists.
-    if (/[*/-]/.test(hr)) return null;
-    if (min !== "0" && /[*/-]/.test(min)) return null;
-    const hours = hr.split(",");
-    const mm = min === "0" || min === "*" ? "00" : min.padStart(2, "0");
-    const fmt = hours
-      .map((h) => `${h.padStart(2, "0")}:${mm}`)
-      .join(", ");
-    return fmt;
-  };
-
-  const t = times();
-  if (dom === "*" && mon === "*" && dow === "*" && t) {
-    return `Daily at ${t}`;
-  }
-  if (dom === "*" && mon === "*" && dow !== "*" && t) {
-    const days = dow
-      .split(",")
-      .map((d) => DOW[Number(d) % 7] ?? d)
-      .join(", ");
-    return `${days} at ${t}`;
-  }
-  return raw;
-}
-
-function titleCase(s: string): string {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-}
-
-/** One automation row: name, schedule, last-run, and an enable/disable toggle
- *  reusing the SAME Switch the heartbeat enable uses. Off reads muted. */
-function AutomationRow({
-  automation,
-  onToggle,
-  busy,
-}: {
-  automation: HeartbeatSurface["automations"][number];
-  onToggle: (jobId: string, enabled: boolean) => void;
-  busy: boolean;
-}) {
-  const on = automation.enabled;
-  return (
-    <li
-      className={cn(
-        "flex items-center justify-between gap-3 rounded-md bg-secondary/30 p-2",
-        !on && "opacity-70",
-      )}
-    >
-      <div className="min-w-0">
-        <p
-          className={cn(
-            "truncate text-xs font-medium",
-            on ? "text-foreground/90" : "text-muted-foreground",
-          )}
-        >
-          {automation.name}
-        </p>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-          <span className="inline-flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            {prettyCron(automation.schedule) === "—" && automation.schedule
-              ? automation.schedule
-              : prettyCron(automation.schedule)}
-          </span>
-          <span>last run {formatRelative(automation.last_run_at)}</span>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-        <Switch
-          checked={on}
-          disabled={busy}
-          onCheckedChange={(next) => onToggle(automation.id, next)}
-          aria-label={on ? `Disable ${automation.name}` : `Enable ${automation.name}`}
-        />
-      </div>
-    </li>
-  );
-}
-
-function SurfaceCard({
-  surface,
-  onToggle,
-  busy,
-  onToggleAutomation,
-  automationBusyIds,
-}: {
-  surface: HeartbeatSurface;
-  onToggle: (surface: string, enabled: boolean) => void;
-  busy: boolean;
-  onToggleAutomation: (jobId: string, enabled: boolean) => void;
-  automationBusyIds: Set<string>;
-}) {
-  const [showLearnings, setShowLearnings] = useState(false);
-  const cfg = surface.config;
-  const last = surface.lastRun;
-  const enabled = cfg?.enabled !== false;
-  const automations = surface.automations || [];
-
-  const lastSummary = (last?.summary || last?.found || "").trim();
-  const lastRanAt = last?.ran_at || null;
-
-  const learnings = (surface.learnings || "").trim();
-  // Treat the seed placeholder as "no learnings yet" for the collapsed state.
-  const hasLearnings =
-    learnings.length > 0 && !/\(none yet/i.test(learnings);
-
-  const toggle = (
-    <div className="flex shrink-0 items-center gap-2">
-      {busy && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-      <Switch
-        checked={enabled}
-        disabled={busy}
-        onCheckedChange={(next) => onToggle(surface.surface, next)}
-        aria-label={enabled ? "Disable this heartbeat" : "Enable this heartbeat"}
-      />
-    </div>
-  );
-
-  // Per-surface automations (the "kit" cron jobs). Each has its own toggle and
-  // independent enabled state. Render nothing when the surface has none.
-  const automationsBlock =
-    automations.length > 0 ? (
-      <div className="space-y-1.5">
-        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
-          Automations
-        </span>
-        <ul className="space-y-1.5">
-          {automations.map((a) => (
-            <AutomationRow
-              key={a.id}
-              automation={a}
-              onToggle={onToggleAutomation}
-              busy={automationBusyIds.has(a.id)}
-            />
-          ))}
-        </ul>
-      </div>
-    ) : null;
-
-  // OFF state: surface heartbeats ship opt-in. Show a muted, paused card with a
-  // one-line nudge and the toggle to turn it on — no run/experiment detail.
-  if (!enabled) {
-    return (
-      <Card className="opacity-80">
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <CardTitle className="text-muted-foreground">
-                  {titleCase(surface.surface)}
-                </CardTitle>
-                <Badge variant="secondary">off</Badge>
-              </div>
-              <p className="mt-1.5 text-xs text-muted-foreground">
-                Off — enable to run on cadence ({prettyCron(cfg?.cadence)}).
-              </p>
-            </div>
-            {toggle}
-          </div>
-          {cfg?.goal && (
-            <p className="mt-1 text-xs leading-5 text-muted-foreground/80">{cfg.goal}</p>
-          )}
-        </CardHeader>
-        {automationsBlock && (
-          <CardContent className="space-y-4 pt-0">{automationsBlock}</CardContent>
-        )}
-      </Card>
-    );
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <CardTitle>{titleCase(surface.surface)}</CardTitle>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                {prettyCron(cfg?.cadence)}
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <Repeat className="h-3 w-3" />
-                {surface.runCount} {surface.runCount === 1 ? "run" : "runs"}
-              </span>
-            </div>
-          </div>
-          {toggle}
-        </div>
-        {cfg?.goal && (
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">{cfg.goal}</p>
-        )}
-      </CardHeader>
-
-      <CardContent className="space-y-4">
-        {/* Last run */}
-        <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
-              Last run
-            </span>
-            <span className="text-[11px] text-muted-foreground">
-              {formatRelative(lastRanAt)}
-            </span>
-          </div>
-          {lastSummary ? (
-            <p className="whitespace-pre-wrap text-xs leading-5 text-foreground/90">
-              {lastSummary}
-            </p>
-          ) : (
-            <p className="text-xs italic text-muted-foreground/70">
-              No runs yet — fires on its cadence.
-            </p>
-          )}
-        </div>
-
-        {/* Learnings */}
-        {hasLearnings && (
-          <div className="space-y-1.5">
-            <button
-              type="button"
-              onClick={() => setShowLearnings((v) => !v)}
-              className="flex w-full items-center gap-1.5 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80 hover:text-foreground"
-            >
-              {showLearnings ? (
-                <ChevronDown className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" />
-              )}
-              Learnings
-            </button>
-            {showLearnings && (
-              <div className="rounded-md border border-border bg-secondary/20 p-3">
-                <Markdown content={learnings} />
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Automations — per-surface "kit" cron jobs, each toggled on its own */}
-        {automationsBlock}
-      </CardContent>
-    </Card>
-  );
-}
-
-/* ------------------------------------------------------------------ */
 /*  Shared form (create + inline edit)                                 */
 /* ------------------------------------------------------------------ */
 
@@ -463,6 +307,8 @@ function HeartbeatForm({
   submitLabel,
   busy,
   agents,
+  deliverOptions = DELIVER_OPTIONS,
+  showActions = true,
 }: {
   value: FormValues;
   onChange: (next: FormValues) => void;
@@ -471,6 +317,8 @@ function HeartbeatForm({
   submitLabel: string;
   busy: boolean;
   agents: AgentHubAgent[];
+  deliverOptions?: { value: string; label: string }[];
+  showActions?: boolean;
 }) {
   const set = (patch: Partial<FormValues>) => onChange({ ...value, ...patch });
 
@@ -553,22 +401,36 @@ function HeartbeatForm({
         />
       </div>
 
-      <div className="flex flex-col gap-3 sm:flex-row">
+      <div className="flex flex-col gap-3 lg:flex-row">
         <div className="flex-1 space-y-1.5">
-          <Label htmlFor="hb-agent">Run as agent</Label>
+          <Label htmlFor="hb-agent">Which agent is this for?</Label>
           <Select
             id="hb-agent"
             value={value.agent}
             onValueChange={(v) => set({ agent: v })}
           >
-            <SelectOption value="">Default agent</SelectOption>
+            <SelectOption value="">Choose agent</SelectOption>
             {agents
               .filter((a) => a.enabled)
               .map((a) => (
                 <SelectOption key={a.id} value={a.id}>
                   {a.name}
                 </SelectOption>
-              ))}
+            ))}
+          </Select>
+        </div>
+        <div className="flex-1 space-y-1.5">
+          <Label htmlFor="hb-report-mode">Report mode</Label>
+          <Select
+            id="hb-report-mode"
+            value={value.reportMode}
+            onValueChange={(v) => set({ reportMode: normalizeReportMode(v) || "quiet" })}
+          >
+            {REPORT_MODE_OPTIONS.map((mode) => (
+              <SelectOption key={mode.value} value={mode.value}>
+                {mode.label}
+              </SelectOption>
+            ))}
           </Select>
         </div>
         <div className="flex-1 space-y-1.5">
@@ -578,7 +440,7 @@ function HeartbeatForm({
             value={value.deliver}
             onValueChange={(v) => set({ deliver: v })}
           >
-            {DELIVER_OPTIONS.map((d) => (
+            {deliverOptions.map((d) => (
               <SelectOption key={d.value} value={d.value}>
                 {d.label}
               </SelectOption>
@@ -588,9 +450,9 @@ function HeartbeatForm({
       </div>
       {value.deliver !== "local" && (
         <p className="text-[11px] text-muted-foreground">
-          {(() => {
-            const a = agents.find((x) => x.id === value.agent);
-            const who = a?.name || "the default agent";
+        {(() => {
+          const a = agents.find((x) => x.id === value.agent);
+            const who = a?.name || "the selected agent";
             if (
               value.deliver === "telegram" &&
               a?.telegramLane &&
@@ -603,21 +465,23 @@ function HeartbeatForm({
         </p>
       )}
 
-      <div className="flex items-center gap-2">
-        <Button onClick={onSubmit} disabled={busy}>
-          {busy ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Plus className="h-4 w-4" />
-          )}
-          {submitLabel}
-        </Button>
-        {onCancel && (
-          <Button variant="ghost" onClick={onCancel} disabled={busy}>
-            Cancel
+      {showActions && (
+        <div className="flex items-center gap-2">
+          <Button onClick={onSubmit} disabled={busy}>
+            {busy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Plus className="h-4 w-4" />
+            )}
+            {submitLabel}
           </Button>
-        )}
-      </div>
+          {onCancel && (
+            <Button variant="ghost" onClick={onCancel} disabled={busy}>
+              Cancel
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -630,28 +494,33 @@ export default function HeartbeatPage() {
   const { toast, showToast } = useToast();
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
+  const [surfaceByKey, setSurfaceByKey] = useState<Record<string, HeartbeatSurface>>({});
   const [searchParams, setSearchParams] = useSearchParams();
   const agentParam = searchParams.get("agent") ?? "";
   const [agentFilter, setAgentFilter] = useState(agentParam);
-  const [surfaces, setSurfaces] = useState<HeartbeatSurface[]>([]);
-  const [surfacesLoaded, setSurfacesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [createForm, setCreateForm] = useState<FormValues>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<FormValues>(EMPTY_FORM);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
-  const [togglingSurfaces, setTogglingSurfaces] = useState<Set<string>>(new Set());
-  const [togglingAutomations, setTogglingAutomations] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const all = await api.getCronJobs({ refresh: true });
+      const [all, surfaceResp] = await Promise.all([
+        api.getCronJobs({ refresh: true }),
+        api.getHeartbeatSurfaces({ refresh: true }).catch(() => ({ surfaces: [] })),
+      ]);
       setJobs(all.filter(isHeartbeat));
+      const nextSurfaceByKey: Record<string, HeartbeatSurface> = {};
+      for (const surface of surfaceResp.surfaces || []) {
+        nextSurfaceByKey[surface.surface] = surface;
+      }
+      setSurfaceByKey(nextSurfaceByKey);
     } catch (e) {
-      // Surface only on first load; background polls fail silently.
+      // Toast only on direct actions; background polls fail silently.
       setJobs((prev) => prev);
     } finally {
       setLoading(false);
@@ -669,7 +538,7 @@ export default function HeartbeatPage() {
     setAgentFilter(agentParam);
   }, [agentParam]);
 
-  // Agent Hub agents power the "Run as agent" picker. Telegram delivery routes
+  // Agent Hub agents power the heartbeat owner picker. Telegram delivery routes
   // to the chosen agent's own bot (per-agent ELEVATE_AGENT_<id>_TELEGRAM_*).
   useEffect(() => {
     api
@@ -678,88 +547,13 @@ export default function HeartbeatPage() {
       .catch(() => setAgents([]));
   }, []);
 
-  // Surface heartbeats: per-account work+experiment loop per surface
-  // (Admin, Leads). Read-only view of config/last-run/learnings/experiments.
-  const refreshSurfaces = useCallback(async () => {
-    try {
-      const resp = await api.getHeartbeatSurfaces({ refresh: true });
-      setSurfaces(resp.surfaces || []);
-    } catch {
-      // background poll — keep last good state
-    } finally {
-      setSurfacesLoaded(true);
-    }
-  }, []);
-
   useEffect(() => {
-    refreshSurfaces();
-    const id = window.setInterval(refreshSurfaces, 30000);
-    return () => window.clearInterval(id);
-  }, [refreshSurfaces]);
-
-  // Opt-in toggle: surface heartbeats ship OFF; the realtor turns one on here.
-  // Optimistic flip on the local config, then reconcile with the authoritative
-  // server state (the cron job) on refetch.
-  const handleSurfaceToggle = useCallback(
-    async (surfaceName: string, enabled: boolean) => {
-      setTogglingSurfaces((prev) => new Set(prev).add(surfaceName));
-      setSurfaces((prev) =>
-        prev.map((s) =>
-          s.surface === surfaceName
-            ? { ...s, config: { ...(s.config || {}), enabled } }
-            : s,
-        ),
-      );
-      try {
-        await api.setHeartbeatSurfaceEnabled(surfaceName, enabled);
-        showToast(
-          `${titleCase(surfaceName)} heartbeat ${enabled ? "on" : "off"}`,
-          "success",
-        );
-      } catch (e) {
-        showToast(`Couldn't update: ${e}`, "error");
-      } finally {
-        setTogglingSurfaces((prev) => {
-          const next = new Set(prev);
-          next.delete(surfaceName);
-          return next;
-        });
-        await refreshSurfaces();
-      }
-    },
-    [refreshSurfaces, showToast],
-  );
-
-  // Per-automation opt-in toggle. Same shape as the surface toggle: optimistic
-  // flip on the local automation row, then reconcile with the authoritative
-  // server state (the cron job) on refetch.
-  const handleAutomationToggle = useCallback(
-    async (jobId: string, enabled: boolean) => {
-      setTogglingAutomations((prev) => new Set(prev).add(jobId));
-      setSurfaces((prev) =>
-        prev.map((s) => ({
-          ...s,
-          automations: (s.automations || []).map((a) =>
-            a.id === jobId ? { ...a, enabled } : a,
-          ),
-        })),
-      );
-      try {
-        await api.setHeartbeatAutomationEnabled(jobId, enabled);
-        showToast(`Automation ${enabled ? "on" : "off"}`, "success");
-      } catch (e) {
-        showToast(`Couldn't update: ${e}`, "error");
-      } finally {
-        setTogglingAutomations((prev) => {
-          const next = new Set(prev);
-          next.delete(jobId);
-          return next;
-        });
-        await refreshSurfaces();
-      }
-    },
-    [refreshSurfaces, showToast],
-  );
+    setCreateForm((prev) => {
+      if (prev.agent || !agents.length) return prev;
+      const agent = preferredAgentId(agents);
+      return agent ? { ...prev, agent } : prev;
+    });
+  }, [agents]);
 
   const markBusy = (id: string, on: boolean) =>
     setBusyIds((prev) => {
@@ -779,6 +573,8 @@ export default function HeartbeatPage() {
 
   const handleCreate = async () => {
     const schedule = scheduleFromForm(createForm);
+    const title =
+      createForm.name.trim() || createForm.instructions.trim().split(/\s+/).slice(0, 4).join(" ");
     if (!createForm.instructions.trim()) {
       showToast("Add instructions for the heartbeat", "error");
       return;
@@ -787,18 +583,24 @@ export default function HeartbeatPage() {
       showToast("Pick an interval", "error");
       return;
     }
+    if (agents.length && !createForm.agent.trim()) {
+      showToast("Pick the agent that runs this heartbeat", "error");
+      return;
+    }
     setCreating(true);
     try {
       await api.createCronJob({
         prompt: createForm.instructions.trim(),
         schedule,
-        name: createForm.name.trim() || createForm.instructions.trim().slice(0, 40),
+        name: title,
         deliver: createForm.deliver || "local",
-        agent: createForm.agent || undefined,
-        origin: HEARTBEAT_ORIGIN,
+        agent: createForm.agent || "",
+        metadata: withHeartbeatReportMode(undefined, createForm.reportMode),
+        origin: { type: "heartbeat", source: "heartbeat-page" },
       });
-      showToast("Heartbeat created ✓", "success");
-      setCreateForm(EMPTY_FORM);
+      showToast("Heartbeat created", "success");
+      const defaultAgent = preferredAgentId(agents);
+      setCreateForm(defaultAgent ? { ...EMPTY_FORM, agent: defaultAgent } : EMPTY_FORM);
       await refresh();
     } catch (e) {
       showToast(`Couldn't create heartbeat: ${e}`, "error");
@@ -809,7 +611,7 @@ export default function HeartbeatPage() {
 
   const beginEdit = (job: CronJob) => {
     setEditingId(job.id);
-    setEditForm(formFromJob(job));
+    setEditForm(formFromJob(job, surfaceByKey[heartbeatSurfaceKey(job)]));
   };
 
   const handleSaveEdit = async () => {
@@ -825,13 +627,32 @@ export default function HeartbeatPage() {
     }
     markBusy(editingId, true);
     try {
-      await api.updateCronJob(editingId, {
-        name: editForm.name.trim() || editForm.instructions.trim().slice(0, 40),
-        prompt: editForm.instructions.trim(),
-        schedule,
-        deliver: editForm.deliver || "local",
-        agent: editForm.agent || null,
-      });
+      const job = jobs.find((candidate) => candidate.id === editingId);
+      const surfaceKey = job ? heartbeatSurfaceKey(job) : "";
+      if (surfaceKey) {
+        await api.patchHeartbeatSurfaceConfig(surfaceKey, {
+          goal: editForm.instructions.trim(),
+          cadence: schedule,
+          agent: editForm.agent || "",
+          heartbeat_report_mode: editForm.reportMode,
+        });
+        await api.setHeartbeatSurfaceRoute(surfaceKey, editForm.deliver || "local");
+        const metadata = withHeartbeatReportMode(asRecord(job?.metadata), editForm.reportMode);
+        await api.updateCronJob(editingId, {
+          name: editForm.name.trim() || editForm.instructions.trim().slice(0, 40),
+          metadata,
+        });
+      } else {
+        const metadata = withHeartbeatReportMode(asRecord(job?.metadata), editForm.reportMode);
+        await api.updateCronJob(editingId, {
+          name: editForm.name.trim() || editForm.instructions.trim().slice(0, 40),
+          prompt: editForm.instructions.trim(),
+          schedule,
+          deliver: editForm.deliver || "local",
+          agent: editForm.agent || null,
+          metadata,
+        });
+      }
       showToast("Saved ✓", "success");
       setEditingId(null);
       await refresh();
@@ -869,11 +690,16 @@ export default function HeartbeatPage() {
   };
 
   const handleDelete = async (job: CronJob) => {
+    const name = job.name || "this heartbeat";
+    if (!window.confirm(`Delete "${name}"? This removes the heartbeat schedule only.`)) {
+      return;
+    }
     markBusy(job.id, true);
     try {
       await api.deleteCronJob(job.id);
       showToast("Deleted", "success");
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      if (editingId === job.id) setEditingId(null);
     } catch (e) {
       showToast(`Couldn't delete: ${e}`, "error");
     } finally {
@@ -906,8 +732,12 @@ export default function HeartbeatPage() {
   );
 
   const filteredJobs = useMemo(
-    () => jobs.filter((job) => !agentFilter || (job.agent ?? "") === agentFilter),
-    [agentFilter, jobs],
+    () =>
+      jobs.filter((job) => {
+        const surface = surfaceByKey[heartbeatSurfaceKey(job)];
+        return !agentFilter || heartbeatAgentId(job, surface) === agentFilter;
+      }),
+    [agentFilter, jobs, surfaceByKey],
   );
 
   const sorted = useMemo(
@@ -915,6 +745,8 @@ export default function HeartbeatPage() {
       [...filteredJobs].sort((a, b) => (a.name || a.prompt).localeCompare(b.name || b.prompt)),
     [filteredJobs],
   );
+
+  const heartbeatCount = sorted.length;
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-6 pb-16">
@@ -925,40 +757,10 @@ export default function HeartbeatPage() {
           <Activity className="h-5 w-5 text-foreground" />
           <h1 className="text-lg font-semibold text-foreground">Heartbeat</h1>
         </div>
-        <p className="text-sm text-muted-foreground">
-          Scheduled check-ins. Set an interval and what to look at — your agent
-          wakes on that clock, runs it, and reports back here.
-        </p>
       </header>
 
-      {/* Surface heartbeats — always-on, self-improving per surface */}
-      {surfacesLoaded && surfaces.length > 0 && (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="text-sm font-semibold text-foreground">Surfaces</h2>
-            <p className="text-xs text-muted-foreground">
-              Each surface runs its own work loop on a cadence, compounding what it
-              learns each run.
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {surfaces.map((s) => (
-              <SurfaceCard
-                key={s.surface}
-                surface={s}
-                onToggle={handleSurfaceToggle}
-                busy={togglingSurfaces.has(s.surface)}
-                onToggleAutomation={handleAutomationToggle}
-                automationBusyIds={togglingAutomations}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Create */}
       <section className="rounded-lg border border-border bg-card/40 p-4">
-        <h2 className="mb-3 text-sm font-semibold text-foreground">New heartbeat</h2>
+        <h2 className="mb-3 text-sm font-semibold text-foreground">Create heartbeat</h2>
         <HeartbeatForm
           value={createForm}
           onChange={setCreateForm}
@@ -969,34 +771,39 @@ export default function HeartbeatPage() {
         />
       </section>
 
-      {/* List */}
       <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-foreground">
-            Active heartbeats{sorted.length ? ` (${sorted.length})` : ""}
-          </h2>
-          <Select value={agentFilter} onValueChange={updateAgentFilter}>
-            <SelectOption value="">All agents</SelectOption>
-            {agents.map((agent) => (
-              <SelectOption key={agent.id} value={agent.id}>
-                {agent.name}
-              </SelectOption>
-            ))}
-          </Select>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <h2 className="text-sm font-semibold text-foreground">
+              Heartbeats{heartbeatCount ? ` (${heartbeatCount})` : ""}
+            </h2>
+          </div>
+          <div className="w-full sm:w-44">
+            <Select value={agentFilter} onValueChange={updateAgentFilter}>
+              <SelectOption value="">All agents</SelectOption>
+              {agents.map((agent) => (
+                <SelectOption key={agent.id} value={agent.id}>
+                  {agent.name}
+                </SelectOption>
+              ))}
+            </Select>
+          </div>
         </div>
 
         {loading ? (
-          <ListSkeleton rows={5} />
-        ) : sorted.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-            No heartbeats yet. Create one above.
-          </div>
-        ) : (
-          sorted.map((job) => {
+              <ListSkeleton rows={3} />
+            ) : (
+              sorted.map((job) => {
             const busy = busyIds.has(job.id);
             const isEditing = editingId === job.id;
             const isOpen = expanded.has(job.id);
-            const summary = (job.last_summary || "").trim();
+            const surface = surfaceByKey[heartbeatSurfaceKey(job)];
+            const summary = surfaceLastSummary(surface) || (job.last_summary || "").trim();
+            const learnings = surfaceLearnings(surface);
+            const lastRunAt = surfaceLastRunAt(surface) || job.last_run_at;
+            const agentId = heartbeatAgentId(job, surface);
+            const agentName = agents.find((a) => a.id === agentId)?.name || agentId;
+            const reportMode = heartbeatReportMode(job, surface);
             return (
               <div
                 key={job.id}
@@ -1048,18 +855,21 @@ export default function HeartbeatPage() {
                             <Clock className="h-3 w-3" />
                             {prettySchedule(job)}
                           </span>
+                          {agentId && (
+                            <span>
+                              {agentName}
+                            </span>
+                          )}
                           {job.deliver && job.deliver !== "local" && (
                             <span className="text-foreground/70">
                               → {job.deliver}
-                              {job.agent
-                                ? ` · ${agents.find((a) => a.id === job.agent)?.name || job.agent}`
-                                : ""}
                             </span>
                           )}
+                          <span>{reportModeLabel(reportMode)}</span>
                           <span>
                             last run{" "}
                             <span className={statusTone(job.last_status)}>
-                              {formatRelative(job.last_run_at)}
+                              {formatRelative(lastRunAt)}
                               {job.last_status ? ` · ${job.last_status}` : ""}
                             </span>
                           </span>
@@ -1140,12 +950,40 @@ export default function HeartbeatPage() {
                         No report yet — runs on schedule, or hit play to run now.
                       </p>
                     )}
+
+                    {learnings && (
+                      <button
+                        type="button"
+                        onClick={() => toggleExpanded(`${job.id}:learnings`)}
+                        className="mt-2 flex w-full items-start gap-1.5 rounded-md bg-secondary/20 p-2.5 text-left"
+                      >
+                        {expanded.has(`${job.id}:learnings`) ? (
+                          <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        )}
+                        <span
+                          className={cn(
+                            "whitespace-pre-wrap text-xs text-muted-foreground",
+                            !expanded.has(`${job.id}:learnings`) && "line-clamp-2",
+                          )}
+                        >
+                          {learnings}
+                        </span>
+                      </button>
+                    )}
                   </>
                 )}
               </div>
             );
-          })
-        )}
+              })
+            )}
+
+            {!loading && sorted.length === 0 && (
+              <div className="rounded-lg border border-dashed border-border bg-card/20 p-8 text-center text-sm text-muted-foreground">
+                No heartbeats yet. Create one above.
+              </div>
+            )}
       </section>
     </div>
   );

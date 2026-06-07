@@ -106,7 +106,6 @@ const loadSessionsPage = () => import("@/pages/SessionsPage");
 const loadLogsPage = () => import("@/pages/LogsPage");
 const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
-const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
 const loadOverviewPage = () => import("@/pages/OverviewPage");
 const loadCommsPage = () => import("@/pages/CommsPage");
@@ -139,7 +138,6 @@ const SessionsPage = lazy(loadSessionsPage);
 const LogsPage = lazy(loadLogsPage);
 const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
-const HeartbeatPage = lazy(loadHeartbeatPage);
 const ExperimentsPage = lazy(loadExperimentsPage);
 const OverviewPage = lazy(loadOverviewPage);
 const CommsPage = lazy(loadCommsPage);
@@ -175,7 +173,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/analytics": loadAnalyticsPage,
   "/logs": loadLogsPage,
   "/cron": loadCronPage,
-  "/heartbeat": loadHeartbeatPage,
+  "/heartbeat": loadCronPage,
   "/experiments": loadExperimentsPage,
   "/overview": loadOverviewPage,
   "/comms": loadCommsPage,
@@ -398,6 +396,10 @@ function AdminRedirect() {
   return <Navigate to="/admin" replace />;
 }
 
+function HeartbeatRedirect() {
+  return <Navigate to="/cron?kind=heartbeats" replace />;
+}
+
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -415,7 +417,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/analytics": AnalyticsPage,
   "/logs": LogsPage,
   "/cron": CronPage,
-  "/heartbeat": HeartbeatPage,
+  "/heartbeat": HeartbeatRedirect,
   "/experiments": ExperimentsPage,
   "/overview": OverviewPage,
   "/comms": CommsPage,
@@ -458,7 +460,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: BarChart3,
   },
   { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
-  { path: "/cron", labelKey: "cron", label: "Cron", icon: Clock },
+  { path: "/cron", labelKey: "cron", label: "Automations", icon: Clock },
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
@@ -1108,14 +1110,30 @@ function sessionTitle(session: SessionInfo): string {
   return session.preview?.trim() || "Untitled chat";
 }
 
+const SIDEBAR_ACTIVE_STALE_SECONDS = 120;
+const SIDEBAR_CRON_RECENT_EMPTY_SECONDS = 120;
+const CRON_SESSION_ID_RE = /^cron_([^_]+)_\d{8}_\d{6}$/;
+
+function sessionActivitySeconds(session: SessionInfo): number {
+  return session.last_active || session.started_at || 0;
+}
+
+function isFreshActiveSession(
+  session: SessionInfo,
+  nowSec = Date.now() / 1000,
+): boolean {
+  if (!session.is_active) return false;
+  const lastActive = sessionActivitySeconds(session);
+  return lastActive > 0 && nowSec - lastActive < SIDEBAR_ACTIVE_STALE_SECONDS;
+}
+
 function cronJobIdFromSession(session: SessionInfo): string | null {
-  if ((session.source ?? "") !== "cron") return null;
-  if (!session.id?.startsWith("cron_")) return null;
-  return session.id.replace(/^cron_/, "").split("_", 1)[0] ?? null;
+  if (!isCronSession(session)) return null;
+  return session.id.match(CRON_SESSION_ID_RE)?.[1] ?? null;
 }
 
 function isCronSession(session: SessionInfo): boolean {
-  return cronJobIdFromSession(session) !== null;
+  return (session.source ?? "") === "cron" || session.id?.startsWith("cron_");
 }
 
 function isDetachedAutomationSession(session: SessionInfo): boolean {
@@ -1136,9 +1154,9 @@ function isSidebarAutomationSession(session: SessionInfo): boolean {
 function shouldShowCronSession(session: SessionInfo, nowSec: number): boolean {
   if (!isCronSession(session)) return false;
   if ((session.message_count ?? 0) > 0) return true;
-  if (session.is_active) return true;
+  if (isFreshActiveSession(session, nowSec)) return true;
   const startedAt = session.started_at ?? session.last_active ?? 0;
-  return startedAt > 0 && nowSec - startedAt < 120;
+  return startedAt > 0 && nowSec - startedAt < SIDEBAR_CRON_RECENT_EMPTY_SECONDS;
 }
 
 function isSidebarRelevantSession(session: SessionInfo, nowSec: number): boolean {
@@ -1146,7 +1164,7 @@ function isSidebarRelevantSession(session: SessionInfo, nowSec: number): boolean
   if (isCronSession(session)) return shouldShowCronSession(session, nowSec);
   if ((session.message_count ?? 0) > 0) return true;
   const startedAt = session.started_at ?? 0;
-  return session.is_active && nowSec - startedAt < 10;
+  return isFreshActiveSession(session, nowSec) && nowSec - startedAt < 10;
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
@@ -1286,6 +1304,23 @@ function DesktopSidebar({
       /* ignore */
     }
   }, [automationsOpen]);
+  const [agentMoreOpen, setAgentMoreOpen] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("elevate.sidebar.agentMore.v1") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "elevate.sidebar.agentMore.v1",
+        agentMoreOpen ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [agentMoreOpen]);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
@@ -1618,26 +1653,38 @@ function DesktopSidebar({
     // Most-recent first, but a running chat floats to the top immediately —
     // its last_active is stale until the turn finishes, so sort on is_active first.
     .sort((a, b) => {
-      if (!!a.is_active !== !!b.is_active) return a.is_active ? -1 : 1;
-      return (b.last_active ?? 0) - (a.last_active ?? 0);
+      const nowSec = Date.now() / 1000;
+      const aRunning = isFreshActiveSession(a, nowSec);
+      const bRunning = isFreshActiveSession(b, nowSec);
+      if (aRunning !== bRunning) return aRunning ? -1 : 1;
+      return sessionActivitySeconds(b) - sessionActivitySeconds(a);
     })
     .slice(0, 18);
+  const cronJobIds = useMemo(() => new Set(cronJobs.map((job) => job.id)), [cronJobs]);
+  const cronJobIdByLastSessionId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const job of cronJobs) {
+      if (job.last_session_id) map.set(job.last_session_id, job.id);
+    }
+    return map;
+  }, [cronJobs]);
   const cronSessionsByJobId = useMemo(() => {
     const map = new Map<string, SessionInfo[]>();
     const nowSec = Date.now() / 1000;
     for (const session of sessions) {
-      const jobId = cronJobIdFromSession(session);
+      const jobId = cronJobIdFromSession(session) ?? cronJobIdByLastSessionId.get(session.id);
       if (!jobId) continue;
+      if (!cronJobIds.has(jobId)) continue;
       if (!shouldShowCronSession(session, nowSec)) continue;
       const list = map.get(jobId) ?? [];
       list.push(session);
       map.set(jobId, list);
     }
     for (const list of map.values()) {
-      list.sort((a, b) => (b.last_active ?? 0) - (a.last_active ?? 0));
+      list.sort((a, b) => sessionActivitySeconds(b) - sessionActivitySeconds(a));
     }
     return map;
-  }, [sessions]);
+  }, [cronJobIdByLastSessionId, cronJobIds, sessions]);
   const latestCronSessionByJobId = useMemo(() => {
     const map = new Map<string, SessionInfo>();
     for (const [jobId, list] of cronSessionsByJobId) {
@@ -1647,39 +1694,42 @@ function DesktopSidebar({
   }, [cronSessionsByJobId]);
   const runningCronJobIds = useMemo(() => {
     const ids = new Set<string>();
+    const nowSec = Date.now() / 1000;
     for (const [jobId, session] of latestCronSessionByJobId) {
-      if (session.is_active) ids.add(jobId);
+      if (isFreshActiveSession(session, nowSec)) ids.add(jobId);
     }
     return ids;
   }, [latestCronSessionByJobId]);
   const realEstateDashboard = hasRealEstateDashboard(realEstatePacks);
-  const realEstateNavItems: NavItem[] = [];
+  const agentPrimaryNavItems: NavItem[] = [];
   if (realEstateDashboard) {
-    realEstateNavItems.push({ icon: Home, label: "Today", path: "/today" });
+    agentPrimaryNavItems.push({ icon: Home, label: "Today", path: "/today" });
   }
   if (realEstatePacks.realEstateSales) {
-    realEstateNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+    agentPrimaryNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
   }
   if (realEstatePacks.realEstateAdmin) {
-    realEstateNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });
+    agentPrimaryNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });
   }
   if (realEstatePacks.realEstateMarketing) {
-    realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
+    agentPrimaryNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
-  // Agents = the Agent Hub (single config page): identity + skills + the cortextOS loops.
-  realEstateNavItems.push({ icon: BarChart3, label: "Overview", path: "/overview" });
-  realEstateNavItems.push({ icon: Bot, label: "Agents", path: "/hub" });
-  // Heartbeat = the simple scheduled check-in surface; Automations = power cron.
-  realEstateNavItems.push({ icon: Activity, label: "Heartbeat", path: "/heartbeat" });
-  // Experiments = autoresearch view of the surface heartbeat improvement loops.
-  realEstateNavItems.push({ icon: FlaskConical, label: "Experiments", path: "/experiments" });
-  // Tasks = dispatch work to surfaces (kanban); Approvals = decisions board.
-  realEstateNavItems.push({ icon: KanbanSquare, label: "Tasks", path: "/tasks" });
-  realEstateNavItems.push({ icon: CheckCheck, label: "Approvals", path: "/approvals" });
-  realEstateNavItems.push({ icon: MessageSquare, label: "Comms", path: "/comms" });
-  realEstateNavItems.push({ icon: Activity, label: "Activity", path: "/activity" });
-  // Automations lives in this (now "Agent") section — always shown.
-  realEstateNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
+  // Automations is the single scheduled-runs home; heartbeat check-ins are filtered there.
+  agentPrimaryNavItems.push({ icon: Clock, label: "Automations", path: "/cron" });
+  const agentMoreNavItems: NavItem[] = [
+    { icon: BarChart3, label: "Overview", path: "/overview" },
+    { icon: Bot, label: "Agents", path: "/hub" },
+    { icon: FlaskConical, label: "Experiments", path: "/experiments" },
+    { icon: KanbanSquare, label: "Tasks", path: "/tasks" },
+    { icon: CheckCheck, label: "Approvals", path: "/approvals" },
+    { icon: MessageSquare, label: "Comms", path: "/comms" },
+    { icon: Activity, label: "Activity", path: "/activity" },
+  ];
+  const agentMoreActive = agentMoreNavItems.some((item) =>
+    location.pathname === item.path || location.pathname.startsWith(`${item.path}/`),
+  );
+  const showAgentMoreItems = agentMoreOpen || agentMoreActive;
+  const realEstateNavItems = [...agentPrimaryNavItems, ...agentMoreNavItems];
   const toolsNavItems: NavItem[] = [
     { icon: Puzzle, label: "Skills", path: "/skills" },
     { icon: Brain, label: "Memory graph", path: "/memory" },
@@ -2007,10 +2057,7 @@ function DesktopSidebar({
             </SidebarSectionLabel>
             {!collapsedSections.realEstate && (
               <div className="space-y-0.5">
-                {/* Single "Agent" section: Today/Leads/Admin/Social Media +
-                    Automations. (Agent Hub, Memory, Skills live in Tools;
-                    Tasks removed. No separate "Real estate" section.) */}
-                {realEstateNavItems.map((item) => (
+                {agentPrimaryNavItems.map((item) => (
                   <SidebarAction
                     key={item.path}
                     icon={item.icon}
@@ -2020,6 +2067,22 @@ function DesktopSidebar({
                     onPreload={onPreloadRoute}
                   />
                 ))}
+                <SidebarMoreToggle
+                  active={agentMoreActive}
+                  open={showAgentMoreItems}
+                  onToggle={() => setAgentMoreOpen((prev) => !prev)}
+                />
+                {showAgentMoreItems &&
+                  agentMoreNavItems.map((item) => (
+                    <SidebarAction
+                      key={item.path}
+                      icon={item.icon}
+                      label={item.label}
+                      path={item.path}
+                      onNavigate={go}
+                      onPreload={onPreloadRoute}
+                    />
+                  ))}
               </div>
             )}
           </div>
@@ -2239,6 +2302,29 @@ function sidebarActionClass(active: boolean, primary = false) {
     "nav-row focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-midground",
     primary && "font-medium",
     active && "active",
+  );
+}
+
+function SidebarMoreToggle({
+  active,
+  onToggle,
+  open,
+}: {
+  active: boolean;
+  onToggle: () => void;
+  open: boolean;
+}) {
+  const Icon = open ? ChevronDown : ChevronRight;
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={onToggle}
+      className={cn(sidebarActionClass(active), "nav-row-more")}
+    >
+      <Icon />
+      <span className="min-w-0 truncate">More</span>
+    </button>
   );
 }
 
@@ -2468,6 +2554,7 @@ function SessionListItem({
     location.pathname === "/chat" &&
     new URLSearchParams(location.search).get("resume") === session.id;
   const title = displayTitle ?? sessionTitle(session);
+  const running = isFreshActiveSession(session);
 
   useEffect(() => {
     if (isRenaming) renameRef.current?.focus();
@@ -2503,7 +2590,7 @@ function SessionListItem({
       role="button"
       tabIndex={0}
       title={title}
-      data-status={unread ? "needs-perms" : Date.now() - (session.last_active ?? 0) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
+      data-status={unread ? "needs-perms" : running ? "working" : Date.now() - sessionActivitySeconds(session) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
       className={cn(
         "session-row",
         active && "active",
@@ -2522,14 +2609,14 @@ function SessionListItem({
         <SessionStatusDot
           lastActive={session.last_active}
           unread={unread}
-          running={session.is_active}
+          running={running}
         />
         </span>
         <span className="title">{title}</span>
-        <span className="age">{compactSessionAge(session.last_active)}</span>
+        <span className="age">{compactSessionAge(sessionActivitySeconds(session))}</span>
         <span className="sr-only">
-          {title} · {session.is_active ? "running, " : ""}
-          {session.source ?? "local"} {timeAgo(session.last_active)}
+          {title} · {running ? "running, " : ""}
+          {session.source ?? "local"} {timeAgo(sessionActivitySeconds(session))}
         </span>
       </NavLink>
       <div className="session-actions hidden min-[0px]:flex">
@@ -2671,30 +2758,32 @@ function AutomationsSection({
               </div>
               {isExpanded && (
                 <div className="session-list mb-1 mt-0.5">
-                  {recentRuns.length > 0 ? recentRuns.map((session) => {
-                    const runLabel =
-                      session.preview?.trim() ||
-                      (session.title && session.title.trim() !== "Untitled"
-                        ? session.title.trim()
-                        : "") ||
-                      `Run · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`;
-                    return (
-                    <button
-                      key={session.id}
-                      type="button"
-                      onClick={() => onOpenSession(session)}
-                      className="session-row"
-                      data-status="done"
-                      title={`${runLabel} · ${new Date((session.last_active ?? 0) * 1000).toLocaleString()}`}
-                    >
-                      <span className="status-cell">
-                        <span className="dot done" />
-                      </span>
-                      <span className="title">{runLabel}</span>
-                      <span className="age">{compactSessionAge(session.last_active ?? 0)}</span>
-                    </button>
-                    );
-                  }) : (
+	                  {recentRuns.length > 0 ? recentRuns.map((session) => {
+	                    const runAt = sessionActivitySeconds(session);
+	                    const runIsActive = isFreshActiveSession(session);
+	                    const runLabel =
+	                      session.preview?.trim() ||
+	                      (session.title && session.title.trim() !== "Untitled"
+	                        ? session.title.trim()
+	                        : "") ||
+	                      `Run · ${new Date(runAt * 1000).toLocaleString()}`;
+	                    return (
+	                    <button
+	                      key={session.id}
+	                      type="button"
+	                      onClick={() => onOpenSession(session)}
+	                      className="session-row"
+	                      data-status={runIsActive ? "working" : "done"}
+	                      title={`${runLabel} · ${new Date(runAt * 1000).toLocaleString()}`}
+	                    >
+	                      <span className="status-cell">
+	                        <span className={cn("dot", runIsActive ? "warn" : "done")} />
+	                      </span>
+	                      <span className="title">{runLabel}</span>
+	                      <span className="age">{compactSessionAge(runAt)}</span>
+	                    </button>
+	                    );
+	                  }) : (
                     <div className="session-row auto-empty" data-status="inactive">
                       <span className="status-cell">
                         <span className="dot idle" />

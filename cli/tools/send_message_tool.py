@@ -539,6 +539,7 @@ async def _send_via_adapter(
     thread_id=None,
     media_files=None,
     force_document=False,
+    agent_id=None,
 ):
     """Send a message via a live gateway adapter, with a standalone fallback
     for out-of-process callers (e.g. cron running separately from the gateway).
@@ -565,7 +566,12 @@ async def _send_via_adapter(
             adapter = None
         if adapter is not None:
             try:
-                metadata = {"thread_id": thread_id} if thread_id else None
+                metadata = {}
+                if thread_id:
+                    metadata["thread_id"] = thread_id
+                if agent_id:
+                    metadata["agent_id"] = str(agent_id)
+                metadata = metadata or None
                 result = await adapter.send(chat_id=chat_id, content=chunk, metadata=metadata)
             except asyncio.CancelledError:
                 raise
@@ -619,7 +625,16 @@ async def _send_via_adapter(
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False):
+async def _send_to_platform(
+    platform,
+    pconfig,
+    chat_id,
+    message,
+    thread_id=None,
+    media_files=None,
+    force_document=False,
+    agent_id=None,
+):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -687,10 +702,19 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.TELEGRAM:
         last_result = None
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
+        telegram_token = pconfig.token
+        if agent_id:
+            extra = getattr(pconfig, "extra", {}) or {}
+            agent_bots = extra.get("agent_bots") if isinstance(extra, dict) else None
+            bot_config = agent_bots.get(str(agent_id)) if isinstance(agent_bots, dict) else None
+            if isinstance(bot_config, dict):
+                telegram_token = str(bot_config.get("token") or "").strip() or telegram_token
+            elif bot_config:
+                telegram_token = str(bot_config).strip() or telegram_token
         for i, chunk in enumerate(chunks):
             is_last = (i == len(chunks) - 1)
             result = await _send_telegram(
-                pconfig.token,
+                telegram_token,
                 chat_id,
                 chunk,
                 media_files=media_files if is_last else [],

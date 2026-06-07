@@ -23,6 +23,120 @@ from elevate_cli.config import get_config_path, get_elevate_home, get_env_value,
 from gateway.status import get_running_pid, read_runtime_status
 
 
+SHARED_AGENT_SKILLS: tuple[str, ...] = (
+    "tasks",
+    "human-tasks",
+    "comms",
+    "activity-channel",
+    "approvals",
+    "worker-agents",
+    "delegation-matrix",
+    "delivery-routing",
+    "guardrails-reference",
+    "memory",
+    "knowledge-base",
+    "surface-heartbeat",
+    "autoresearch",
+    "cortextos-theta-wave",
+    "nano-pdf",
+    "powerpoint",
+    "baoyu-infographic",
+    "architecture-diagram",
+    "photo-cleanup",
+)
+
+AGENT_ARTIFACT_SKILLS: tuple[str, ...] = (
+    "nano-pdf",
+    "powerpoint",
+    "baoyu-infographic",
+    "architecture-diagram",
+    "photo-cleanup",
+)
+
+
+_COMMON_NATIVE_RUNTIME: dict[str, Any] = {
+    "runtime_type": "native",
+    "timezone": "America/Vancouver",
+    "context_warning_threshold": 70,
+    "context_handoff_threshold": 88,
+    "codex_context_cap": 160000,
+}
+
+_COMMON_SAFETY_RULES: dict[str, Any] = {
+    "approval_mode": "confirm_external_send",
+    "always_ask": [
+        "external_send",
+        "destructive_action",
+        "financial",
+        "legal",
+        "data_deletion",
+        "credential_change",
+    ],
+    "never_ask": ["local_read", "status_check", "summarize", "draft_only"],
+}
+
+_COMMON_LIFECYCLE: dict[str, Any] = {
+    "startup_delay": 0,
+    "max_session_seconds": 5400,
+    "max_crashes_per_day": 3,
+    "crash_window_seconds": 86400,
+    "crash_window_max": 3,
+    "telegram_polling": True,
+}
+
+_COMMON_ECOSYSTEM: dict[str, Any] = {
+    "local_version_control": False,
+    "upstream_sync": False,
+    "catalog_browse": False,
+    "community_publish": False,
+}
+
+
+def _native_agent_config(
+    *,
+    vibe: str,
+    work_style: str,
+    autonomy_rules: str,
+    communication_style: str,
+    day_mode: str,
+    night_mode: str,
+    core_truths: str,
+    memory_scopes: list[str],
+    lifecycle: dict[str, Any] | None = None,
+    ecosystem: dict[str, Any] | None = None,
+    runtime: dict[str, Any] | None = None,
+    safety: dict[str, Any] | None = None,
+    handoff_policy: str = "summary_only",
+) -> dict[str, Any]:
+    return {
+        "runtime": {**copy.deepcopy(_COMMON_NATIVE_RUNTIME), **(runtime or {})},
+        "safety": {**copy.deepcopy(_COMMON_SAFETY_RULES), **(safety or {})},
+        "identity": {
+            "vibe": vibe,
+            "work_style": work_style,
+        },
+        "soul": {
+            "autonomy_rules": autonomy_rules,
+            "communication_style": communication_style,
+            "day_mode": day_mode,
+            "night_mode": night_mode,
+            "day_mode_start": "08:00",
+            "day_mode_end": "18:00",
+            "core_truths": core_truths,
+        },
+        "lifecycle": {**copy.deepcopy(_COMMON_LIFECYCLE), **(lifecycle or {})},
+        "ecosystem": {**copy.deepcopy(_COMMON_ECOSYSTEM), **(ecosystem or {})},
+        "memory": {
+            "mode": "agent_scoped",
+            "scopes": list(memory_scopes),
+            "sources": ["agent-hub-default", "elevate-native"],
+            "recall_policy": "agent_scoped_recent",
+            "write_policy": "append_events",
+            "handoff_policy": handoff_policy,
+        },
+    }
+
+
 DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
     {
         "id": "executive-assistant",
@@ -32,11 +146,42 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "api_server", "webhook", "cron"],
+        "skills": [
+            "agent-management",
+            "auto-skill",
+            "cron-management",
+            "env-management",
+            "goal-management",
+            "heartbeat",
+            "morning-review",
+            "evening-review",
+            "weekly-review",
+            "system-diagnostics",
+            "oauth-rotation",
+            "onboarding",
+        ],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "skills"],
         "prompt": "All-in-one front desk and coordinator. Route work to specialist agents when a narrower agent owns the task, and synthesize final answers when work crosses domains.",
+        "routing": {
+            "owns": ["fleet coordination", "agent routing", "approval triage", "cross-domain synthesis"],
+            "handoff_targets": ["admin", "outreach", "ads", "marketing", "social-media", "analyst", "theta-wave"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Calm orchestrator",
+            work_style="Route work to the right specialist, keep approvals visible, and synthesize cross-agent results.",
+            autonomy_rules="May coordinate agents, create draft tasks, run safe status checks, and summarize. External sends, deletion, deployments, financial/legal work, and credential changes require approval.",
+            communication_style="Practical, blocker-first, and concise.",
+            day_mode="Assign goals, inspect queues, wake stuck agents, and keep the human decision list short.",
+            night_mode="Review safe backlog, prepare summaries, and avoid external delivery without approval.",
+            core_truths="Executive Assistant is the orchestrator/default agent. Use Elevate-native Agent Hub, Tasks, Comms, Activity, Approvals, memory, heartbeats, cron jobs, and handoffs. Do not rely on daemon, IPC, PM2, PTY injection, or file inbox behavior.",
+            memory_scopes=["executive-assistant", "orchestration", "approvals", "fleet"],
+        ),
     },
     {
         "id": "admin",
@@ -46,12 +191,36 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "cron"],
-        "skills": ["admin-agent", "deal-matcher", "admin-result-writer"],
+        "skills": [
+            "admin-agent",
+            "deal-matcher",
+            "admin-result-writer",
+            "calendar-management",
+            "email-triage",
+            "pending-items-summary",
+        ],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "deals_overview", "elevate_db", "admin_deal"],
         "prompt": "Own Admin workflow orchestration. Coordinate worker skills, write back to SQLite, and route human confirmations through the Admin Telegram lane.",
+        "routing": {
+            "owns": ["deal files", "forms", "signatures", "calendar conflicts", "admin callbacks", "closing tasks"],
+            "handoff_targets": ["executive-assistant", "outreach", "marketing"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Calm practical operator",
+            work_style="Turn ambiguous admin work into visible tasks, evidence, and concise handoff results.",
+            autonomy_rules="Drafting, local organization, status checks, and evidence gathering are allowed. External sends, deletion, financial/legal work, deployments, and credential changes require approval.",
+            communication_style="Blocker-first, concise, and operational.",
+            day_mode="Review task queues, deadline risks, waiting-human items, and active operational blockers.",
+            night_mode="Process safe queued work, prepare summaries, and avoid external sends unless approved.",
+            core_truths="Admin owns operational follow-through. Use native Tasks, Comms, Activity, Approvals, memory, heartbeats, and handoffs.",
+            memory_scopes=["admin", "operations", "tasks", "approvals"],
+        ),
     },
     {
         "id": "outreach",
@@ -61,11 +230,29 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "webhook"],
+        "skills": ["lead-scorer", "outreach-lanes", "relationship-review"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "messaging"],
         "prompt": "Own lead follow-up, relationship notes, nurture timing, and client touchpoint drafts. Hand transaction/file tasks to Admin and broad routing back to Executive Assistant.",
+        "routing": {
+            "owns": ["lead follow-up", "relationship notes", "client touchpoints", "nurture timing"],
+            "handoff_targets": ["executive-assistant", "admin", "marketing"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Relationship-minded follow-up operator",
+            work_style="Spot lead signals, draft next touches, and hand off admin work quickly.",
+            autonomy_rules="May inspect lead context, draft messages, create internal follow-up tasks, and summarize. External sends and sensitive actions require approval.",
+            communication_style="Warm, clear, and specific about next touch timing.",
+            day_mode="Review new/changed leads, overdue follow-ups, showings, and relationship notes.",
+            night_mode="Prepare draft-only follow-ups and safe summaries.",
+            core_truths="Outreach owns lead and relationship momentum. It drafts and routes; approved channels handle real delivery.",
+            memory_scopes=["outreach", "leads", "relationships", "follow-up"],
+        ),
     },
     {
         "id": "ads",
@@ -75,11 +262,29 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "cron"],
+        "skills": ["prompt-engineering", "baoyu-infographic", "brief-generation", "signal-scoring"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo"],
         "prompt": "Own paid ads, campaign angles, listing promotion, audience/offer framing, and ad creative briefs. Hand operational checklist work to Admin.",
+        "routing": {
+            "owns": ["paid ads", "campaign angles", "audience framing", "ad creative briefs"],
+            "handoff_targets": ["executive-assistant", "marketing", "social-media", "admin"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Direct-response campaign thinker",
+            work_style="Turn listings and offers into sharp campaign briefs, creative angles, and tests.",
+            autonomy_rules="May draft campaign strategy, creative briefs, and internal tests. Budget changes, external publishing, legal/financial claims, and deployment require approval.",
+            communication_style="Angle-first, concise, and evidence-aware.",
+            day_mode="Review campaign needs, lead signals, listing priorities, and creative blockers.",
+            night_mode="Prepare draft briefs and experiment notes without publishing.",
+            core_truths="Ads owns paid strategy and creative briefs; delivery and spend changes stay behind approval gates.",
+            memory_scopes=["ads", "campaigns", "creative", "experiments"],
+        ),
     },
     {
         "id": "marketing",
@@ -89,11 +294,29 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "cron"],
+        "skills": ["marketing", "seller-updates", "brief-generation", "baoyu-infographic", "powerpoint", "nano-pdf"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo"],
         "prompt": "Own listing marketing, seller update drafts, email campaigns, creative direction, and launch assets. Hand checklist/status work to Admin and paid optimization to Ads.",
+        "routing": {
+            "owns": ["listing marketing", "seller updates", "email campaigns", "launch assets", "creative direction"],
+            "handoff_targets": ["executive-assistant", "ads", "social-media", "admin"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Creative listing marketer",
+            work_style="Package listing stories into seller updates, launch assets, and polished marketing drafts.",
+            autonomy_rules="May create drafts, PDFs, graphics briefs, presentation outlines, and internal launch checklists. External sends and publication require approval.",
+            communication_style="Polished, practical, and seller-aware.",
+            day_mode="Review listing needs, seller updates, campaign drafts, and creative blockers.",
+            night_mode="Prepare draft assets and summaries only.",
+            core_truths="Marketing owns creative packaging and seller-facing drafts; final delivery stays approval-gated.",
+            memory_scopes=["marketing", "listings", "seller-updates", "creative"],
+        ),
     },
     {
         "id": "social-media",
@@ -103,11 +326,92 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram"],
+        "skills": ["social-content-engine", "baoyu-infographic", "brief-generation"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo"],
         "prompt": "Own organic social hooks, captions, posting ideas, short-form content, and platform adaptation. Hand paid campaign strategy to Ads.",
+        "routing": {
+            "owns": ["organic social", "caption hooks", "content repurposing", "platform adaptation"],
+            "handoff_targets": ["executive-assistant", "ads", "marketing"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
         "metadata": {
             "telegram_bot_token_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
             "telegram_target_env": "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL",
         },
+        **_native_agent_config(
+            vibe="Fast organic content operator",
+            work_style="Turn listing and relationship context into hooks, captions, and platform-specific drafts.",
+            autonomy_rules="May draft social content, adapt posts, and prepare creative notes. Posting externally requires approval.",
+            communication_style="Punchy, clear, and platform-aware.",
+            day_mode="Review listing/context changes, content needs, and posting ideas.",
+            night_mode="Prepare draft-only content and repurposing ideas.",
+            core_truths="Social Media owns organic content drafts and repurposing; publishing stays approval-gated.",
+            memory_scopes=["social-media", "organic-social", "content", "creative"],
+            lifecycle={"max_session_seconds": 3600},
+        ),
+    },
+    {
+        "id": "analyst",
+        "name": "Analyst",
+        "role": "analyst",
+        "description": "System signals, research, catalog review, and actionable native task summaries.",
+        "enabled": True,
+        "platforms": ["local"],
+        "session_sources": ["cli", "cron"],
+        "skills": ["autoresearch", "catalog-browse", "system-diagnostics", "theta-wave", "surface-heartbeat"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "skills", "todo"],
+        "prompt": "Own system-health analysis, research deltas, catalog review, and concise evidence-backed summaries. Feed Theta Wave when loops need challenge or improvement.",
+        "routing": {
+            "owns": ["system-health", "metrics", "research", "catalog-review"],
+            "handoff_targets": ["executive-assistant", "theta-wave"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "normal",
+        },
+        **_native_agent_config(
+            vibe="Curious systems analyst",
+            work_style="Inspect evidence, summarize the important signal, and hand off only actionable deltas.",
+            autonomy_rules="May inspect local/native system state and summarize. Must ask before external sends, deployments, deletion, or credential work.",
+            communication_style="Evidence first, terse, with uncertainty called out.",
+            day_mode="Review signals, task queues, upstream/catalog changes, and system health.",
+            night_mode="Prepare summaries and low-risk research notes.",
+            core_truths="Analyst improves visibility. It does not operate daemon sessions or create duplicate stores.",
+            memory_scopes=["analyst", "system-health", "catalog", "research"],
+            lifecycle={"telegram_polling": False},
+            ecosystem={"local_version_control": True, "catalog_browse": True},
+            handoff_policy="facts_only",
+        ),
+    },
+    {
+        "id": "theta-wave",
+        "name": "Theta Wave",
+        "role": "system-review",
+        "description": "Challenges weak loops, stale assumptions, and system regressions using Elevate-native experiments.",
+        "enabled": True,
+        "platforms": ["local"],
+        "session_sources": ["cli", "cron"],
+        "skills": ["theta-wave", "surface-heartbeat", "system-diagnostics", "cortextos-theta-wave"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo"],
+        "prompt": "Own fleet self-improvement review. Classify stale, converged, successful, or underperforming loops and propose or author native experiment-cycle changes when policy allows.",
+        "routing": {
+            "owns": ["theta-wave", "system-review", "experiments", "fleet-improvement"],
+            "handoff_targets": ["executive-assistant", "analyst"],
+            "escalation_target": "executive-assistant",
+            "default_priority": "high",
+        },
+        **_native_agent_config(
+            vibe="Contrarian reviewer",
+            work_style="Challenge assumptions, classify weak loops, and propose concrete native fixes.",
+            autonomy_rules="May review, classify, and propose. Must ask before modifying live workflows, deleting data, deploying, or sending externally.",
+            communication_style="Direct, specific, and improvement-oriented.",
+            day_mode="Review agent loops, failures, stale goals, and missed handoffs.",
+            night_mode="Prepare challenge notes and safe improvement proposals.",
+            core_truths="Theta Wave improves the fleet through Elevate-native loops, not daemon restarts or PM2 sessions.",
+            memory_scopes=["theta-wave", "system-review", "experiments", "fleet-improvement"],
+            lifecycle={"telegram_polling": False},
+            ecosystem={"local_version_control": True, "catalog_browse": True},
+            runtime={"context_warning_threshold": 72, "context_handoff_threshold": 90},
+        ),
     },
 )
 
@@ -740,6 +1044,106 @@ def _persisted_agents(config: dict[str, Any]) -> tuple[dict[str, Any], list[dict
     return hub_cfg, raw_agents
 
 
+def _agent_value_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _merge_agent_list_field(raw: dict[str, Any], field: str, *defaults: Any) -> list[str]:
+    before = _as_list(raw.get(field))
+    merged = _merge_unique(*defaults, before)
+    raw[field] = merged
+    before_set = set(before)
+    return [item for item in merged if item not in before_set]
+
+
+def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any) -> None:
+    if not isinstance(defaults, dict):
+        return
+    section = raw.get(field)
+    if not isinstance(section, dict):
+        section = {}
+    section = copy.deepcopy(section)
+    for key, default_value in defaults.items():
+        if key in {"owns", "handoff_targets", "always_ask", "never_ask", "scopes", "sources"}:
+            section[key] = _merge_unique(default_value, section.get(key))
+            continue
+        if key not in section or _agent_value_missing(section.get(key)):
+            section[key] = copy.deepcopy(default_value)
+    raw[field] = section
+
+
+def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: bool = True) -> dict[str, Any]:
+    """Persist the current built-in Agent Hub defaults into saved config.
+
+    Agent Hub reads are already merged with ``DEFAULT_AGENT_DEFS`` at runtime, but
+    shipped updates also need to repair existing configs so the dashboard, cron
+    worker, and future profile exports all see the same current agent/skill set.
+    This function is intentionally additive for existing built-ins: it preserves
+    disabled state and custom text while adding newly bundled skills, routing,
+    lifecycle, safety, memory, and native Cortext-style agent defaults.
+    """
+    from elevate_cli.config import save_config
+
+    if config is None:
+        config = load_config()
+    hub_cfg, raw_agents = _persisted_agents(config)
+    before_agents = copy.deepcopy(raw_agents)
+    created: list[str] = []
+    updated: list[dict[str, Any]] = []
+    default_agent_before = str(hub_cfg.get("default_agent") or "").strip()
+    if not default_agent_before:
+        hub_cfg["default_agent"] = "executive-assistant"
+
+    by_id: dict[str, dict[str, Any]] = {
+        _agent_config_id(item): item
+        for item in raw_agents
+        if isinstance(item, dict) and _agent_config_id(item)
+    }
+    for default in DEFAULT_AGENT_DEFS:
+        agent_id = _slug(str(default.get("id") or ""))
+        if not agent_id:
+            continue
+        raw = by_id.get(agent_id)
+        if raw is None:
+            new_agent = copy.deepcopy(default)
+            new_agent["skills"] = _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"))
+            raw_agents.append(new_agent)
+            by_id[agent_id] = new_agent
+            created.append(agent_id)
+            continue
+
+        before = copy.deepcopy(raw)
+        raw["id"] = agent_id
+        for field in ("name", "role", "description", "prompt"):
+            if _agent_value_missing(raw.get(field)) and not _agent_value_missing(default.get(field)):
+                raw[field] = copy.deepcopy(default.get(field))
+        if "enabled" not in raw:
+            raw["enabled"] = bool(default.get("enabled", True))
+        added_skills = _merge_agent_list_field(raw, "skills", SHARED_AGENT_SKILLS, default.get("skills"))
+        _merge_agent_list_field(raw, "toolsets", default.get("toolsets"))
+        _merge_agent_list_field(raw, "platforms", default.get("platforms"))
+        _merge_agent_list_field(raw, "session_sources", default.get("session_sources"))
+        for section in ("runtime", "routing", "safety", "identity", "soul", "lifecycle", "ecosystem", "memory"):
+            _merge_agent_section_defaults(raw, section, default.get(section))
+        raw["metadata"] = _sanitize_agent_metadata(raw.get("metadata"), base=default.get("metadata"))
+        _validate_agent_config(raw)
+        if raw != before:
+            updated.append({"id": agent_id, "addedSkills": added_skills})
+
+    changed = raw_agents != before_agents or hub_cfg.get("default_agent") != default_agent_before
+    hub_cfg["agents"] = raw_agents
+    config["agent_hub"] = hub_cfg
+    if changed and save:
+        save_config(config)
+    return {
+        "changed": changed,
+        "created": created,
+        "updated": updated,
+        "count": len([item for item in raw_agents if isinstance(item, dict)]),
+        "defaultAgent": hub_cfg.get("default_agent") or "executive-assistant",
+    }
+
+
 def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     """Apply an in-place patch to a single agent in the saved config.
 
@@ -914,6 +1318,69 @@ def agent_lifecycle_defaults(agent_id: str, config: dict[str, Any] | None = None
     agent = get_agent_def(agent_id, config=config)
     lifecycle = agent.get("lifecycle") if isinstance(agent, dict) else None
     return _normalize_lifecycle(lifecycle)
+
+
+def agent_effective_skills(
+    agent_id: str,
+    extra_skills: Any = None,
+    config: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return the skills an agent-owned run should preload.
+
+    Agent Hub owns the agent-level baseline; a cron/heartbeat/handoff can still
+    add run-specific skills. Unknown/no-agent runs keep only the explicit
+    run-specific skills so legacy generic cron jobs do not inherit agent
+    behavior accidentally.
+    """
+    agent = get_agent_def(agent_id, config=config)
+    if not isinstance(agent, dict):
+        return _merge_unique(extra_skills)
+    return _merge_unique(agent.get("skills"), extra_skills)
+
+
+def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> str:
+    """Build a concise Agent Hub context block for scheduled agent runs."""
+    agent = get_agent_def(agent_id, config=config)
+    if not isinstance(agent, dict):
+        return ""
+    clean_id = _slug(str(agent.get("id") or agent_id or ""))
+    routing = agent.get("routing") if isinstance(agent.get("routing"), dict) else {}
+    owns = _as_list(routing.get("owns"))
+    handoff_targets = _as_list(routing.get("handoff_targets"))
+    escalation = str(routing.get("escalation_target") or "executive-assistant").strip()
+    artifact_skills = [skill for skill in AGENT_ARTIFACT_SKILLS if skill in _as_list(agent.get("skills"))]
+
+    lines = [
+        "[AGENT HUB CONTEXT]",
+        f"You are running as agent: {agent.get('name') or clean_id} ({clean_id}).",
+    ]
+    role = str(agent.get("role") or "").strip()
+    description = str(agent.get("description") or "").strip()
+    prompt = str(agent.get("prompt") or "").strip()
+    if role:
+        lines.append(f"Role: {role}.")
+    if description:
+        lines.append(f"Specialization: {description}")
+    if owns:
+        lines.append(f"Owned work areas: {', '.join(owns)}.")
+    if handoff_targets:
+        lines.append(f"Handoff targets: {', '.join(handoff_targets)}.")
+    if escalation:
+        lines.append(f"Escalation/default coordinator: {escalation}.")
+    lines.append(
+        "Default behavior: if the task is outside this agent's specialization, "
+        "create or recommend an Elevate-native handoff/task for the best owning "
+        "agent instead of trying to silently own that specialist work."
+    )
+    if artifact_skills:
+        lines.append(
+            "Shared artifact capability: this agent may produce or coordinate "
+            f"PDFs, presentations, diagrams, and graphics using {', '.join(artifact_skills)}."
+        )
+    if prompt:
+        lines.append(f"Agent instruction: {prompt}")
+    lines.append("[/AGENT HUB CONTEXT]")
+    return "\n".join(lines)
 
 
 def _utc_iso() -> str:
@@ -1271,7 +1738,7 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
             "enabled": bool(raw.get("enabled", True)),
             "platforms": _merge_unique(default.get("platforms"), raw.get("platforms")),
             "session_sources": _merge_unique(default.get("session_sources"), raw.get("session_sources")),
-            "skills": _merge_unique(default.get("skills"), raw.get("skills")),
+            "skills": _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"), raw.get("skills")),
             "toolsets": _merge_unique(default.get("toolsets"), raw.get("toolsets")),
             "prompt": str(
                 raw.get("prompt") or raw.get("system_prompt") or default.get("prompt") or ""
@@ -2409,6 +2876,8 @@ def _agent_summaries(
                 "status": status,
                 "session_count": session_count,
                 "active_session_count": active_count,
+                "sharedSkills": list(SHARED_AGENT_SKILLS),
+                "artifactSkills": list(AGENT_ARTIFACT_SKILLS),
                 "toolsets": agent["toolsets"] or global_toolsets,
                 "has_prompt": bool(agent.get("prompt")),
                 "telegramLane": telegram_lane,

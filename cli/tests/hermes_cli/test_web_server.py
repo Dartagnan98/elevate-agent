@@ -204,6 +204,105 @@ class TestWebServerEndpoints:
         assert by_id["exp-proposed"]["status"] == "proposed"
         assert by_id["exp-proposed"]["direction"] == "lower"
 
+    def test_heartbeat_surface_config_patch_updates_config_and_job(self):
+        from cron.jobs import create_job, load_jobs
+        from elevate_constants import get_account_data_dir
+
+        surface = "admin-edit-test"
+        surface_dir = get_account_data_dir() / "heartbeats" / surface
+        surface_dir.mkdir(parents=True)
+        (surface_dir / "config.json").write_text(
+            json.dumps({"enabled": True, "goal": "Old admin loop", "cadence": "30 7 * * *"}),
+            encoding="utf-8",
+        )
+        job = create_job(
+            prompt="Run the admin heartbeat.",
+            schedule="30 7 * * *",
+            name="Admin Heartbeat",
+            skill="real-estate/surface-heartbeat",
+            deliver="local",
+            origin={"type": "surface-heartbeat", "surface": surface, "source": "user"},
+            workdir=str(surface_dir),
+        )
+
+        resp = self.client.patch(
+            f"/api/heartbeats/surfaces/{surface}/config",
+            json={
+                "goal": "Scan admin work and report blockers.",
+                "cadence": "every 2h",
+                "agent": "executive-assistant",
+                "model": "gpt-5.1",
+                "timezone": "America/Vancouver",
+                "heartbeat_report_mode": "notify",
+                "approval_rules": {
+                    "always_ask": ["deployment", "data-deletion"],
+                    "never_ask": ["external-comms"],
+                },
+            },
+        )
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["config"]["goal"] == "Scan admin work and report blockers."
+        assert payload["config"]["cadence"] == "every 2h"
+        assert payload["config"]["agent"] == "executive-assistant"
+        assert payload["config"]["model"] == "gpt-5.1"
+        saved_config = json.loads((surface_dir / "config.json").read_text(encoding="utf-8"))
+        assert saved_config["timezone"] == "America/Vancouver"
+        assert saved_config["heartbeat_report_mode"] == "notify"
+        assert saved_config["approval_rules"]["always_ask"] == ["deployment", "data-deletion"]
+
+        updated_job = next(j for j in load_jobs() if j["id"] == job["id"])
+        assert updated_job["agent"] == "executive-assistant"
+        assert updated_job["model"] == "gpt-5.1"
+        assert updated_job["metadata"]["heartbeat_report_mode"] == "notify"
+        assert updated_job["schedule"]["kind"] == "interval"
+        assert updated_job["schedule"]["minutes"] == 120
+        assert updated_job["schedule_display"] == "every 120m"
+
+    def test_heartbeat_surface_snapshot_infers_matching_agent(self):
+        from cron.jobs import create_job
+        from elevate_constants import get_account_data_dir
+
+        surface = "admin"
+        surface_dir = get_account_data_dir() / "heartbeats" / surface
+        surface_dir.mkdir(parents=True)
+        (surface_dir / "config.json").write_text(
+            json.dumps({"enabled": True, "goal": "Admin loop", "cadence": "30 7 * * *"}),
+            encoding="utf-8",
+        )
+        create_job(
+            prompt="Run the admin heartbeat.",
+            schedule="30 7 * * *",
+            name="Admin Heartbeat",
+            skill="real-estate/surface-heartbeat",
+            deliver="local",
+            origin={"type": "surface-heartbeat", "surface": surface, "source": "user"},
+            workdir=str(surface_dir),
+        )
+
+        resp = self.client.get("/api/heartbeats/surfaces")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        admin = next(item for item in payload["surfaces"] if item["surface"] == "admin")
+        assert admin["config"]["agent"] == "admin"
+
+    def test_heartbeat_surface_config_patch_rejects_invalid_cadence(self):
+        from elevate_constants import get_account_data_dir
+
+        surface_dir = get_account_data_dir() / "heartbeats" / "invalid-cadence-test"
+        surface_dir.mkdir(parents=True)
+        (surface_dir / "config.json").write_text("{}", encoding="utf-8")
+
+        resp = self.client.patch(
+            "/api/heartbeats/surfaces/invalid-cadence-test/config",
+            json={"goal": "Check admin work.", "cadence": "whenever the moon says"},
+        )
+
+        assert resp.status_code == 400
+        assert "invalid cadence" in resp.json()["detail"]
+
     def test_update_session_title(self):
         from elevate_state import SessionDB
 

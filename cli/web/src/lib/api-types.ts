@@ -2028,6 +2028,8 @@ export interface AgentHubAgent {
   platforms: string[];
   session_sources: string[];
   skills: string[];
+  sharedSkills?: string[];
+  artifactSkills?: string[];
   toolsets: string[];
   runtime: AgentRuntimeConfig;
   routing: AgentRoutingConfig;
@@ -2596,6 +2598,7 @@ export interface CronJob {
   last_status?: string | null;
   last_summary?: string | null;
   last_session_id?: string | null;
+  metadata?: Record<string, unknown>;
   origin?: { type?: string; source?: string; [k: string]: unknown } | null;
 }
 
@@ -2632,6 +2635,7 @@ export interface CronJobCreateRequest {
   workdir?: string | null;
   expected_readiness_version?: string | null;
   backfill_pending?: boolean;
+  metadata?: Record<string, unknown>;
   origin?: { type?: string; source?: string; [k: string]: unknown } | null;
 }
 
@@ -2859,6 +2863,19 @@ export interface HeartbeatSurfaceConfig {
   goal?: string;
   cadence?: string;
   enabled?: boolean;
+  agent?: string;
+  deliver?: string;
+  model?: string;
+  timezone?: string;
+  day_mode_start?: string;
+  day_mode_end?: string;
+  communication_style?: string;
+  approval_rules?: {
+    always_ask?: string[];
+    never_ask?: string[];
+  };
+  max_session_seconds?: number;
+  heartbeat_report_mode?: "quiet" | "notify" | string;
   experiment?: HeartbeatSurfaceExperimentConfig;
   created_by?: string;
   created_at?: string;
@@ -2941,6 +2958,7 @@ export interface HeartbeatSurfacesResponse {
 export interface HeartbeatExperimentCycle {
   name: string;
   surface: string;
+  agent?: string;
   metric: string;
   metric_type: string;
   direction: "higher" | "lower" | string;
@@ -2956,6 +2974,7 @@ export interface HeartbeatExperimentCycle {
 export interface HeartbeatExperiment {
   id: string;
   surface: string;
+  agent?: string;
   status: "running" | "completed" | "proposed" | string;
   decision: "keep" | "discard" | null;
   hypothesis: string;
@@ -2982,6 +3001,7 @@ export interface HeartbeatExperimentStats {
 
 export interface HeartbeatExperimentSurface {
   surface: string;
+  agent?: string;
   cycles: HeartbeatExperimentCycle[];
   experiments: HeartbeatExperiment[];
   learnings: string;

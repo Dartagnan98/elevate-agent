@@ -825,6 +825,40 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
         return None
 
 
+def seed_profile_agent_hub(profile_dir: Path, quiet: bool = False) -> Optional[dict]:
+    """Repair bundled Agent Hub defaults inside a profile via subprocess."""
+    project_root = Path(__file__).parent.parent.resolve()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json; from elevate_cli.agent_hub import reconcile_agent_hub_defaults; "
+                "r = reconcile_agent_hub_defaults(); print(json.dumps(r))",
+            ],
+            env={**os.environ, "ELEVATE_HOME": str(profile_dir)},
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return json.loads(result.stdout.strip())
+        if not quiet:
+            print(f"⚠ Agent Hub seeding returned exit code {result.returncode}")
+            if result.stderr.strip():
+                print(f"  {result.stderr.strip()[:200]}")
+        return None
+    except subprocess.TimeoutExpired:
+        if not quiet:
+            print("⚠ Agent Hub seeding timed out (60s)")
+        return None
+    except Exception as e:
+        if not quiet:
+            print(f"⚠ Agent Hub seeding failed: {e}")
+        return None
+
+
 def delete_profile(name: str, yes: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service.
 

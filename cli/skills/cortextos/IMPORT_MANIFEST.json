@@ -1,0 +1,719 @@
+{
+  "collisions": [
+    {
+      "existing": "real-estate/theta-wave/SKILL.md",
+      "name": "theta-wave",
+      "runtime_name": "cortextos-theta-wave",
+      "source": "community/skills/theta-wave"
+    }
+  ],
+  "compatibility_wrappers": [
+    {
+      "destination": "oauth-rotation",
+      "name": "oauth-rotation",
+      "runtime_name": "oauth-rotation",
+      "source": "<compatibility-wrapper>"
+    }
+  ],
+  "duplicate_sources": {
+    "activity-channel": [
+      "community/agents/research-agent/.claude/skills/activity-channel/SKILL.md",
+      "community/agents/security/.claude/skills/activity-channel/SKILL.md",
+      "templates/agent/.claude/skills/activity-channel/SKILL.md",
+      "templates/analyst/.claude/skills/activity-channel/SKILL.md",
+      "templates/orchestrator/.claude/skills/activity-channel/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/activity-channel/SKILL.md"
+    ],
+    "agent-browser": [
+      "community/agents/security/.claude/skills/agent-browser/SKILL.md",
+      "templates/agent/.claude/skills/agent-browser/SKILL.md",
+      "templates/analyst/.claude/skills/agent-browser/SKILL.md",
+      "templates/orchestrator/.claude/skills/agent-browser/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/agent-browser/SKILL.md"
+    ],
+    "agent-management": [
+      "community/agents/research-agent/.claude/skills/agent-management/SKILL.md",
+      "community/agents/security/.claude/skills/agent-management/SKILL.md",
+      "templates/agent/.claude/skills/agent-management/SKILL.md",
+      "templates/analyst/.claude/skills/agent-management/SKILL.md",
+      "templates/orchestrator/.claude/skills/agent-management/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/agent-management/SKILL.md"
+    ],
+    "approvals": [
+      "community/agents/research-agent/.claude/skills/approvals/SKILL.md",
+      "community/agents/security/.claude/skills/approvals/SKILL.md",
+      "templates/agent/.claude/skills/approvals/SKILL.md",
+      "templates/analyst/.claude/skills/approvals/SKILL.md",
+      "templates/orchestrator/.claude/skills/approvals/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/approvals/SKILL.md"
+    ],
+    "auto-skill": [
+      "community/agents/security/.claude/skills/auto-skill/SKILL.md",
+      "templates/agent/.claude/skills/auto-skill/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/auto-skill/SKILL.md"
+    ],
+    "autoresearch": [
+      "community/agents/research-agent/.claude/skills/autoresearch/SKILL.md",
+      "community/agents/security/.claude/skills/autoresearch/SKILL.md",
+      "templates/agent/.claude/skills/autoresearch/SKILL.md",
+      "templates/analyst/.claude/skills/autoresearch/SKILL.md",
+      "templates/orchestrator/.claude/skills/autoresearch/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/autoresearch/SKILL.md"
+    ],
+    "bus-reference": [
+      "community/agents/security/.claude/skills/bus-reference/SKILL.md",
+      "templates/agent/.claude/skills/bus-reference/SKILL.md",
+      "templates/analyst/.claude/skills/bus-reference/SKILL.md",
+      "templates/orchestrator/.claude/skills/bus-reference/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/bus-reference/SKILL.md"
+    ],
+    "catalog-browse": [
+      "templates/analyst/.claude/skills/catalog-browse/SKILL.md"
+    ],
+    "comms": [
+      "skills/comms/SKILL.md",
+      "community/agents/research-agent/.claude/skills/comms/SKILL.md",
+      "community/agents/security/.claude/skills/comms/SKILL.md",
+      "templates/agent/.claude/skills/comms/SKILL.md",
+      "templates/analyst/.claude/skills/comms/SKILL.md",
+      "templates/orchestrator/.claude/skills/comms/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/comms/SKILL.md"
+    ],
+    "community-publish": [
+      "templates/analyst/.claude/skills/community-publish/SKILL.md"
+    ],
+    "cron-management": [
+      "skills/cron-management/SKILL.md",
+      "community/agents/research-agent/.claude/skills/cron-management/SKILL.md",
+      "community/agents/security/.claude/skills/cron-management/SKILL.md",
+      "templates/agent/.claude/skills/cron-management/SKILL.md",
+      "templates/analyst/.claude/skills/cron-management/SKILL.md",
+      "templates/orchestrator/.claude/skills/cron-management/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/cron-management/SKILL.md"
+    ],
+    "delegation-matrix": [
+      "templates/m2c1-worker/.claude/skills/delegation-matrix/SKILL.md"
+    ],
+    "env-management": [
+      "community/agents/security/.claude/skills/env-management/SKILL.md",
+      "templates/agent/.claude/skills/env-management/SKILL.md",
+      "templates/analyst/.claude/skills/env-management/SKILL.md",
+      "templates/orchestrator/.claude/skills/env-management/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/env-management/SKILL.md"
+    ],
+    "evening-review": [
+      "templates/orchestrator/.claude/skills/evening-review/SKILL.md"
+    ],
+    "event-logging": [
+      "community/agents/research-agent/.claude/skills/event-logging/SKILL.md",
+      "community/agents/security/.claude/skills/event-logging/SKILL.md",
+      "templates/agent/.claude/skills/event-logging/SKILL.md",
+      "templates/analyst/.claude/skills/event-logging/SKILL.md",
+      "templates/orchestrator/.claude/skills/event-logging/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/event-logging/SKILL.md"
+    ],
+    "goal-management": [
+      "templates/orchestrator/.claude/skills/goal-management/SKILL.md"
+    ],
+    "guardrails-reference": [
+      "community/agents/security/.claude/skills/guardrails-reference/SKILL.md",
+      "templates/agent/.claude/skills/guardrails-reference/SKILL.md",
+      "templates/analyst/.claude/skills/guardrails-reference/SKILL.md",
+      "templates/orchestrator/.claude/skills/guardrails-reference/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/guardrails-reference/SKILL.md"
+    ],
+    "heartbeat": [
+      "community/agents/research-agent/.claude/skills/heartbeat/SKILL.md",
+      "community/agents/security/.claude/skills/heartbeat/SKILL.md",
+      "templates/agent/.claude/skills/heartbeat/SKILL.md",
+      "templates/analyst/.claude/skills/heartbeat/SKILL.md",
+      "templates/orchestrator/.claude/skills/heartbeat/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/heartbeat/SKILL.md"
+    ],
+    "human-tasks": [
+      "community/agents/research-agent/.claude/skills/human-tasks/SKILL.md",
+      "community/agents/security/.claude/skills/human-tasks/SKILL.md",
+      "templates/agent/.claude/skills/human-tasks/SKILL.md",
+      "templates/analyst/.claude/skills/human-tasks/SKILL.md",
+      "templates/orchestrator/.claude/skills/human-tasks/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/human-tasks/SKILL.md"
+    ],
+    "knowledge-base": [
+      "community/agents/research-agent/.claude/skills/knowledge-base/SKILL.md",
+      "community/agents/security/.claude/skills/knowledge-base/SKILL.md",
+      "templates/agent/.claude/skills/knowledge-base/SKILL.md",
+      "templates/analyst/.claude/skills/knowledge-base/SKILL.md",
+      "templates/orchestrator/.claude/skills/knowledge-base/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/knowledge-base/SKILL.md"
+    ],
+    "local-version-control": [
+      "templates/analyst/.claude/skills/local-version-control/SKILL.md"
+    ],
+    "m2c1-worker": [
+      "community/agents/research-agent/.claude/skills/m2c1-worker/SKILL.md",
+      "community/agents/security/.claude/skills/m2c1-worker/SKILL.md",
+      "templates/agent/.claude/skills/m2c1-worker/SKILL.md",
+      "templates/analyst/.claude/skills/m2c1-worker/SKILL.md",
+      "templates/m2c1-worker/.claude/skills/m2c1-worker/SKILL.md",
+      "templates/orchestrator/.claude/skills/m2c1-worker/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/m2c1-worker/SKILL.md"
+    ],
+    "memory": [
+      "community/agents/research-agent/.claude/skills/memory/SKILL.md",
+      "templates/agent/.claude/skills/memory/SKILL.md",
+      "templates/analyst/.claude/skills/memory/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/memory/SKILL.md"
+    ],
+    "morning-review": [
+      "templates/orchestrator/.claude/skills/morning-review/SKILL.md"
+    ],
+    "nighttime-mode": [
+      "templates/orchestrator/.claude/skills/nighttime-mode/SKILL.md"
+    ],
+    "onboarding": [
+      "community/agents/research-agent/.claude/skills/onboarding/SKILL.md",
+      "community/agents/security/.claude/skills/onboarding/SKILL.md",
+      "templates/agent/.claude/skills/onboarding/SKILL.md",
+      "templates/analyst/.claude/skills/onboarding/SKILL.md",
+      "templates/orchestrator/.claude/skills/onboarding/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/onboarding/SKILL.md"
+    ],
+    "soul-philosophy": [
+      "community/agents/security/.claude/skills/soul-philosophy/SKILL.md",
+      "templates/agent/.claude/skills/soul-philosophy/SKILL.md",
+      "templates/analyst/.claude/skills/soul-philosophy/SKILL.md",
+      "templates/orchestrator/.claude/skills/soul-philosophy/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/soul-philosophy/SKILL.md"
+    ],
+    "system-diagnostics": [
+      "community/agents/research-agent/.claude/skills/system-diagnostics/SKILL.md",
+      "community/agents/security/.claude/skills/system-diagnostics/SKILL.md",
+      "templates/agent/.claude/skills/system-diagnostics/SKILL.md",
+      "templates/analyst/.claude/skills/system-diagnostics/SKILL.md",
+      "templates/orchestrator/.claude/skills/system-diagnostics/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/system-diagnostics/SKILL.md"
+    ],
+    "tasks": [
+      "community/agents/research-agent/.claude/skills/tasks/SKILL.md",
+      "community/agents/security/.claude/skills/tasks/SKILL.md",
+      "templates/agent/.claude/skills/tasks/SKILL.md",
+      "templates/analyst/.claude/skills/tasks/SKILL.md",
+      "templates/orchestrator/.claude/skills/tasks/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/tasks/SKILL.md"
+    ],
+    "theta-wave": [
+      "templates/analyst/.claude/skills/theta-wave/SKILL.md",
+      "templates/orchestrator/.claude/skills/theta-wave/SKILL.md"
+    ],
+    "tool-registration": [
+      "community/agents/security/.claude/skills/tool-registration/SKILL.md",
+      "templates/agent/.claude/skills/tool-registration/SKILL.md",
+      "templates/analyst/.claude/skills/tool-registration/SKILL.md",
+      "templates/orchestrator/.claude/skills/tool-registration/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/tool-registration/SKILL.md"
+    ],
+    "upstream-sync": [
+      "templates/analyst/.claude/skills/upstream-sync/SKILL.md"
+    ],
+    "weekly-review": [
+      "templates/orchestrator/.claude/skills/weekly-review/SKILL.md"
+    ],
+    "worker-agents": [
+      "community/agents/research-agent/.claude/skills/worker-agents/SKILL.md",
+      "community/agents/security/.claude/skills/worker-agents/SKILL.md",
+      "templates/agent/.claude/skills/worker-agents/SKILL.md",
+      "templates/analyst/.claude/skills/worker-agents/SKILL.md",
+      "templates/orchestrator/.claude/skills/worker-agents/SKILL.md",
+      "templates/agent-codex/plugins/cortextos-agent-skills/skills/worker-agents/SKILL.md"
+    ]
+  },
+  "generated_at": "2026-06-07T18:49:51.657491+00:00",
+  "imported": [
+    {
+      "destination": "activity-channel",
+      "exact_name": true,
+      "name": "activity-channel",
+      "runtime_name": "activity-channel",
+      "source": "community/skills/activity-channel"
+    },
+    {
+      "destination": "agent-browser",
+      "exact_name": true,
+      "name": "agent-browser",
+      "runtime_name": "agent-browser",
+      "source": "community/agents/research-agent/.claude/skills/agent-browser"
+    },
+    {
+      "destination": "agent-management",
+      "exact_name": true,
+      "name": "agent-management",
+      "runtime_name": "agent-management",
+      "source": "community/skills/agent-management"
+    },
+    {
+      "destination": "agent-migration",
+      "exact_name": true,
+      "name": "agent-migration",
+      "runtime_name": "agent-migration",
+      "source": "templates/orchestrator/.claude/skills/agent-migration"
+    },
+    {
+      "destination": "agentcard-purchase",
+      "exact_name": true,
+      "name": "agentcard-purchase",
+      "runtime_name": "agentcard-purchase",
+      "source": "community/skills/agentcard-purchase"
+    },
+    {
+      "destination": "agentic-crm-setup",
+      "exact_name": true,
+      "name": "agentic-crm-setup",
+      "runtime_name": "agentic-crm-setup",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/agentic-crm-setup"
+    },
+    {
+      "destination": "approvals",
+      "exact_name": true,
+      "name": "approvals",
+      "runtime_name": "approvals",
+      "source": "community/skills/approvals"
+    },
+    {
+      "destination": "auto-skill",
+      "exact_name": true,
+      "name": "auto-skill",
+      "runtime_name": "auto-skill",
+      "source": "community/agents/research-agent/.claude/skills/auto-skill"
+    },
+    {
+      "destination": "autoresearch",
+      "exact_name": true,
+      "name": "autoresearch",
+      "runtime_name": "autoresearch",
+      "source": "community/skills/autoresearch"
+    },
+    {
+      "destination": "brief-generation",
+      "exact_name": true,
+      "name": "brief-generation",
+      "runtime_name": "brief-generation",
+      "source": "community/agents/research-agent/.claude/skills/brief-generation"
+    },
+    {
+      "destination": "bus-reference",
+      "exact_name": true,
+      "name": "bus-reference",
+      "runtime_name": "bus-reference",
+      "source": "community/agents/research-agent/.claude/skills/bus-reference"
+    },
+    {
+      "destination": "business-news-monitor",
+      "exact_name": true,
+      "name": "business-news-monitor",
+      "runtime_name": "business-news-monitor",
+      "source": "skills/business-news-monitor"
+    },
+    {
+      "destination": "calendar-management",
+      "exact_name": true,
+      "name": "calendar-management",
+      "runtime_name": "calendar-management",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/calendar-management"
+    },
+    {
+      "destination": "catalog-browse",
+      "exact_name": true,
+      "name": "catalog-browse",
+      "runtime_name": "catalog-browse",
+      "source": "community/skills/catalog-browse"
+    },
+    {
+      "destination": "claude-api-helper",
+      "exact_name": true,
+      "name": "claude-api-helper",
+      "runtime_name": "claude-api-helper",
+      "source": "skills/claude-api-helper"
+    },
+    {
+      "destination": "comms",
+      "exact_name": true,
+      "name": "comms",
+      "runtime_name": "comms",
+      "source": "community/skills/comms"
+    },
+    {
+      "destination": "community-publish",
+      "exact_name": true,
+      "name": "community-publish",
+      "runtime_name": "community-publish",
+      "source": "community/skills/community-publish"
+    },
+    {
+      "destination": "crm-management",
+      "exact_name": true,
+      "name": "crm-management",
+      "runtime_name": "crm-management",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/crm-management"
+    },
+    {
+      "destination": "cron-management",
+      "exact_name": true,
+      "name": "cron-management",
+      "runtime_name": "cron-management",
+      "source": "community/skills/cron-management"
+    },
+    {
+      "destination": "delegation-matrix",
+      "exact_name": true,
+      "name": "delegation-matrix",
+      "runtime_name": "delegation-matrix",
+      "source": "community/skills/delegation-matrix"
+    },
+    {
+      "destination": "delivery-routing",
+      "exact_name": true,
+      "name": "delivery-routing",
+      "runtime_name": "delivery-routing",
+      "source": "community/agents/research-agent/.claude/skills/delivery-routing"
+    },
+    {
+      "destination": "ecosystem-monitoring",
+      "exact_name": true,
+      "name": "ecosystem-monitoring",
+      "runtime_name": "ecosystem-monitoring",
+      "source": "community/agents/research-agent/.claude/skills/ecosystem-monitoring"
+    },
+    {
+      "destination": "email-triage",
+      "exact_name": true,
+      "name": "email-triage",
+      "runtime_name": "email-triage",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/email-triage"
+    },
+    {
+      "destination": "env-management",
+      "exact_name": true,
+      "name": "env-management",
+      "runtime_name": "env-management",
+      "source": "community/agents/research-agent/.claude/skills/env-management"
+    },
+    {
+      "destination": "evening-review",
+      "exact_name": true,
+      "name": "evening-review",
+      "runtime_name": "evening-review",
+      "source": "community/skills/evening-review"
+    },
+    {
+      "destination": "event-logging",
+      "exact_name": true,
+      "name": "event-logging",
+      "runtime_name": "event-logging",
+      "source": "community/skills/event-logging"
+    },
+    {
+      "destination": "framework-upstream-auto-update",
+      "exact_name": true,
+      "name": "framework-upstream-auto-update",
+      "runtime_name": "framework-upstream-auto-update",
+      "source": "community/skills/framework-upstream-auto-update"
+    },
+    {
+      "destination": "goal-management",
+      "exact_name": true,
+      "name": "goal-management",
+      "runtime_name": "goal-management",
+      "source": "community/skills/goal-management"
+    },
+    {
+      "destination": "guardrails-reference",
+      "exact_name": true,
+      "name": "guardrails-reference",
+      "runtime_name": "guardrails-reference",
+      "source": "community/agents/research-agent/.claude/skills/guardrails-reference"
+    },
+    {
+      "destination": "heartbeat",
+      "exact_name": true,
+      "name": "heartbeat",
+      "runtime_name": "heartbeat",
+      "source": "community/skills/heartbeat"
+    },
+    {
+      "destination": "human-tasks",
+      "exact_name": true,
+      "name": "human-tasks",
+      "runtime_name": "human-tasks",
+      "source": "community/skills/human-tasks"
+    },
+    {
+      "destination": "idea-grooming",
+      "exact_name": true,
+      "name": "idea-grooming",
+      "runtime_name": "idea-grooming",
+      "source": "skills/idea-grooming"
+    },
+    {
+      "destination": "knowledge-base",
+      "exact_name": true,
+      "name": "knowledge-base",
+      "runtime_name": "knowledge-base",
+      "source": "community/skills/knowledge-base"
+    },
+    {
+      "destination": "local-ultrareview",
+      "exact_name": true,
+      "name": "local-ultrareview",
+      "runtime_name": "local-ultrareview",
+      "source": "community/skills/local-ultrareview"
+    },
+    {
+      "destination": "local-version-control",
+      "exact_name": true,
+      "name": "local-version-control",
+      "runtime_name": "local-version-control",
+      "source": "community/skills/local-version-control"
+    },
+    {
+      "destination": "m2c1-worker",
+      "exact_name": true,
+      "name": "m2c1-worker",
+      "runtime_name": "m2c1-worker",
+      "source": "community/skills/m2c1-worker"
+    },
+    {
+      "destination": "mcp-integration",
+      "exact_name": true,
+      "name": "mcp-integration",
+      "runtime_name": "mcp-integration",
+      "source": "skills/mcp-integration"
+    },
+    {
+      "destination": "meeting-prep",
+      "exact_name": true,
+      "name": "meeting-prep",
+      "runtime_name": "meeting-prep",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/meeting-prep"
+    },
+    {
+      "destination": "memory",
+      "exact_name": true,
+      "name": "memory",
+      "runtime_name": "memory",
+      "source": "community/skills/memory"
+    },
+    {
+      "destination": "morning-review",
+      "exact_name": true,
+      "name": "morning-review",
+      "runtime_name": "morning-review",
+      "source": "community/skills/morning-review"
+    },
+    {
+      "destination": "multi-perspective-grilling",
+      "exact_name": true,
+      "name": "multi-perspective-grilling",
+      "runtime_name": "multi-perspective-grilling",
+      "source": "skills/multi-perspective-grilling"
+    },
+    {
+      "destination": "nighttime-mode",
+      "exact_name": true,
+      "name": "nighttime-mode",
+      "runtime_name": "nighttime-mode",
+      "source": "community/skills/nighttime-mode"
+    },
+    {
+      "destination": "obsidian-log",
+      "exact_name": true,
+      "name": "obsidian-log",
+      "runtime_name": "obsidian-log",
+      "source": "community/skills/obsidian-log"
+    },
+    {
+      "destination": "officecli",
+      "exact_name": true,
+      "name": "officecli",
+      "runtime_name": "officecli",
+      "source": "community/skills/officecli"
+    },
+    {
+      "destination": "onboarding",
+      "exact_name": true,
+      "name": "onboarding",
+      "runtime_name": "onboarding",
+      "source": "community/skills/onboarding"
+    },
+    {
+      "destination": "opencli",
+      "exact_name": true,
+      "name": "opencli",
+      "runtime_name": "opencli",
+      "source": "community/skills/opencli"
+    },
+    {
+      "destination": "pending-items-summary",
+      "exact_name": true,
+      "name": "pending-items-summary",
+      "runtime_name": "pending-items-summary",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/pending-items-summary"
+    },
+    {
+      "destination": "prompt-engineering",
+      "exact_name": true,
+      "name": "prompt-engineering",
+      "runtime_name": "prompt-engineering",
+      "source": "skills/prompt-engineering"
+    },
+    {
+      "destination": "rate-limit-management",
+      "exact_name": true,
+      "name": "rate-limit-management",
+      "runtime_name": "rate-limit-management",
+      "source": "community/skills/rate-limit-management"
+    },
+    {
+      "destination": "relationship-review",
+      "exact_name": true,
+      "name": "relationship-review",
+      "runtime_name": "relationship-review",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/relationship-review"
+    },
+    {
+      "destination": "research-agent-setup",
+      "exact_name": true,
+      "name": "research-agent-setup",
+      "runtime_name": "research-agent-setup",
+      "source": "community/agents/research-agent/.claude/skills/research-agent-setup"
+    },
+    {
+      "destination": "research-quality-review",
+      "exact_name": true,
+      "name": "research-quality-review",
+      "runtime_name": "research-quality-review",
+      "source": "community/agents/research-agent/.claude/skills/research-quality-review"
+    },
+    {
+      "destination": "signal-scoring",
+      "exact_name": true,
+      "name": "signal-scoring",
+      "runtime_name": "signal-scoring",
+      "source": "community/agents/research-agent/.claude/skills/signal-scoring"
+    },
+    {
+      "destination": "soul-philosophy",
+      "exact_name": true,
+      "name": "soul-philosophy",
+      "runtime_name": "soul-philosophy",
+      "source": "community/agents/research-agent/.claude/skills/soul-philosophy"
+    },
+    {
+      "destination": "source-collection",
+      "exact_name": true,
+      "name": "source-collection",
+      "runtime_name": "source-collection",
+      "source": "community/agents/research-agent/.claude/skills/source-collection"
+    },
+    {
+      "destination": "system-diagnostics",
+      "exact_name": true,
+      "name": "system-diagnostics",
+      "runtime_name": "system-diagnostics",
+      "source": "community/skills/system-diagnostics"
+    },
+    {
+      "destination": "Task System",
+      "exact_name": true,
+      "name": "Task System",
+      "runtime_name": "Task System",
+      "source": "skills/tasks"
+    },
+    {
+      "destination": "tasks",
+      "exact_name": true,
+      "name": "tasks",
+      "runtime_name": "tasks",
+      "source": "community/skills/tasks"
+    },
+    {
+      "destination": "cortextos-theta-wave",
+      "exact_name": false,
+      "name": "theta-wave",
+      "runtime_name": "cortextos-theta-wave",
+      "source": "community/skills/theta-wave"
+    },
+    {
+      "destination": "tool-discovery",
+      "exact_name": true,
+      "name": "tool-discovery",
+      "runtime_name": "tool-discovery",
+      "source": "community/agents/agentic-crm-assistant/.claude/skills/tool-discovery"
+    },
+    {
+      "destination": "tool-registration",
+      "exact_name": true,
+      "name": "tool-registration",
+      "runtime_name": "tool-registration",
+      "source": "community/agents/research-agent/.claude/skills/tool-registration"
+    },
+    {
+      "destination": "tool-use-patterns",
+      "exact_name": true,
+      "name": "tool-use-patterns",
+      "runtime_name": "tool-use-patterns",
+      "source": "skills/tool-use-patterns"
+    },
+    {
+      "destination": "topic-briefing",
+      "exact_name": true,
+      "name": "topic-briefing",
+      "runtime_name": "topic-briefing",
+      "source": "community/agents/research-agent/.claude/skills/topic-briefing"
+    },
+    {
+      "destination": "upstream-sync",
+      "exact_name": true,
+      "name": "upstream-sync",
+      "runtime_name": "upstream-sync",
+      "source": "community/skills/upstream-sync"
+    },
+    {
+      "destination": "voice-agent-factory",
+      "exact_name": true,
+      "name": "voice-agent-factory",
+      "runtime_name": "voice-agent-factory",
+      "source": "community/skills/voice-agent-factory"
+    },
+    {
+      "destination": "web-research",
+      "exact_name": true,
+      "name": "web-research",
+      "runtime_name": "web-research",
+      "source": "skills/web-research"
+    },
+    {
+      "destination": "weekly-review",
+      "exact_name": true,
+      "name": "weekly-review",
+      "runtime_name": "weekly-review",
+      "source": "community/skills/weekly-review"
+    },
+    {
+      "destination": "worker-agents",
+      "exact_name": true,
+      "name": "worker-agents",
+      "runtime_name": "worker-agents",
+      "source": "community/skills/worker-agents"
+    },
+    {
+      "destination": "oauth-rotation",
+      "name": "oauth-rotation",
+      "runtime_name": "oauth-rotation",
+      "source": "<compatibility-wrapper>"
+    }
+  ],
+  "imported_count": 69,
+  "managed_by": "import_cortextos_skills.py",
+  "source": "/private/tmp/cortextos-github",
+  "source_git_head": "cdd8fc618347a4020a9546d8d207d829cb3a99d3"
+}

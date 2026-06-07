@@ -187,6 +187,45 @@ class TestResolveDeliveryTarget:
             "thread_id": "topic-7",
         }
 
+    def test_selected_agent_telegram_delivery_uses_agent_lane(self, monkeypatch):
+        monkeypatch.setenv(
+            "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+            "123456:ABCDEFGHIJKLMNOPQRST",
+        )
+        monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "-7001:9")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-9000")
+
+        assert _resolve_delivery_target({"deliver": "telegram", "agent": "admin"}) == {
+            "platform": "telegram",
+            "chat_id": "-7001",
+            "thread_id": "9",
+            "agent_id": "admin",
+        }
+
+    def test_selected_agent_telegram_delivery_falls_back_to_executive(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", "")
+        monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "-7001:9")
+        monkeypatch.setenv("ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL", "")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-9000")
+
+        assert _resolve_delivery_target({"deliver": "telegram", "agent": "admin"}) == {
+            "platform": "telegram",
+            "chat_id": "-9000",
+            "thread_id": None,
+            "agent_id": "executive-assistant",
+        }
+
+    def test_orchestrator_agent_alias_uses_executive_telegram_lane(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL", "")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-9000")
+
+        assert _resolve_delivery_target({"deliver": "telegram", "agent": "orchestrator"}) == {
+            "platform": "telegram",
+            "chat_id": "-9000",
+            "thread_id": None,
+            "agent_id": "executive-assistant",
+        }
+
     def test_explicit_telegram_topic_target_overrides_cron_thread_id(self, monkeypatch):
         """Explicit ``telegram:chat:thread`` targets bypass TELEGRAM_CRON_THREAD_ID."""
         monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "999")
@@ -820,6 +859,39 @@ class TestDeliverResultWrapping:
 
         send_mock.assert_called_once()
         assert send_mock.call_args.kwargs["thread_id"] == "17585"
+
+    def test_agent_scoped_telegram_delivery_forwards_agent_id(self, monkeypatch):
+        """Agent-owned heartbeat deliveries should use the selected Telegram bot lane."""
+        from gateway.config import Platform
+
+        monkeypatch.setenv(
+            "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+            "123456:ABCDEFGHIJKLMNOPQRST",
+        )
+        monkeypatch.setenv("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL", "-7001:9")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-9000")
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        job = {
+            "id": "admin-heartbeat",
+            "name": "Admin heartbeat",
+            "deliver": "telegram",
+            "agent": "admin",
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            _deliver_result(job, "hello")
+
+        send_mock.assert_called_once()
+        assert send_mock.call_args.args[2] == "-7001"
+        assert send_mock.call_args.kwargs["thread_id"] == "9"
+        assert send_mock.call_args.kwargs["agent_id"] == "admin"
 
 
 class TestDeliverResultErrorReturns:
@@ -1764,6 +1836,34 @@ class TestRunJobSkillBacked:
         assert "Instructions for maps." in prompt_arg
         assert "Combine the results." in prompt_arg
 
+    def test_build_job_prompt_inherits_agent_and_job_skills(self):
+        calls: list[str] = []
+
+        def _skill_view(name: str) -> str:
+            calls.append(name)
+            return json.dumps({"success": True, "content": f"# {name}\nInstructions for {name}."})
+
+        with patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
+             patch("tools.skill_usage.bump_use"):
+            result = _build_job_prompt(
+                {
+                    "id": "admin-heartbeat",
+                    "name": "Admin heartbeat",
+                    "agent": "admin",
+                    "skills": ["heartbeat-specific"],
+                    "prompt": "Check the admin lane.",
+                }
+            )
+
+        assert "AGENT HUB CONTEXT" in result
+        assert "You are running as agent: Admin (admin)." in result
+        assert "outside this agent's specialization" in result
+        assert "Instructions for tasks." in result
+        assert "Instructions for nano-pdf." in result
+        assert "Instructions for admin-agent." in result
+        assert "Instructions for heartbeat-specific." in result
+        assert calls.index("tasks") < calls.index("admin-agent") < calls.index("heartbeat-specific")
+
 
 class TestSilentDelivery:
     """Verify that [SILENT] responses suppress delivery while still saving output."""
@@ -1901,6 +2001,26 @@ class TestBuildJobPromptSilentHint:
         system_pos = result.index("do NOT use send_message")
         prompt_pos = result.index("My custom prompt")
         assert system_pos < prompt_pos
+
+    def test_heartbeat_quiet_mode_injects_change_only_guidance(self):
+        job = {
+            "prompt": "Check agent health",
+            "origin": {"type": "heartbeat"},
+            "metadata": {"heartbeat_report_mode": "quiet"},
+        }
+        result = _build_job_prompt(job)
+        assert "HEARTBEAT REPORT MODE: Only important changes" in result
+        assert "respond with exactly [SILENT]" in result
+
+    def test_heartbeat_notify_mode_injects_every_run_guidance(self):
+        job = {
+            "prompt": "Check agent health",
+            "origin": {"type": "heartbeat"},
+            "metadata": {"heartbeat_report_mode": "notify"},
+        }
+        result = _build_job_prompt(job)
+        assert "HEARTBEAT REPORT MODE: Every run" in result
+        assert "do not use [SILENT]" in result
 
 
 class TestParseWakeGate:
@@ -2140,6 +2260,46 @@ class TestBuildJobPromptMissingSkill:
             result = _build_job_prompt({"skills": ["ghost-skill", "real-skill"], "prompt": "go"})
         assert "Real skill content." in result
         assert "go" in result
+
+    def test_cortext_native_loop_skills_resolve_without_missing_notice(self, caplog):
+        """Cortext-native heartbeat loop concepts map to Elevate-native guidance."""
+
+        with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+            with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view), \
+                 patch("tools.skill_usage.bump_use") as mock_bump:
+                result = _build_job_prompt({
+                    "name": "Executive Assistant morning review",
+                    "skills": ["morning-review", "goal-management", "event-logging"],
+                    "prompt": "Review the fleet.",
+                })
+
+        assert "# Morning Review" in result
+        assert "# Goal Management" in result
+        assert "# Event Logging" in result
+        assert "Review the fleet." in result
+        assert "Skill(s) not found" not in result
+        assert "could not be found" not in result
+        assert not any("skill not found" in record.message for record in caplog.records)
+        mock_bump.assert_not_called()
+
+    def test_cortext_skill_alias_loads_canonical_skill_when_short_name_missing(self):
+        calls: list[str] = []
+
+        def _skill_view(name: str) -> str:
+            calls.append(name)
+            if name == "real-estate/theta-wave":
+                return json.dumps({"success": True, "content": "Canonical theta instructions."})
+            return json.dumps({"success": False, "error": f"Skill '{name}' not found."})
+
+        with patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
+             patch("tools.skill_usage.bump_use") as mock_bump:
+            result = _build_job_prompt({"skills": ["theta-wave"], "prompt": "Run the challenge."})
+
+        assert calls == ["theta-wave", "real-estate/theta-wave"]
+        assert "Canonical theta instructions." in result
+        assert "Run the challenge." in result
+        assert "Skill(s) not found" not in result
+        mock_bump.assert_called_once_with("real-estate/theta-wave")
 
 
 class TestBuildJobPromptBumpUse:

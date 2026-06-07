@@ -151,6 +151,65 @@ def test_agent_bus_experiment_create_run_evaluate_and_context():
     assert "Useful enough to keep." in context["context"]["learnings"]
 
 
+def test_agent_bus_cycle_management_is_native():
+    created = _call(
+        {
+            "action": "create_cycle",
+            "agent_id": "theta-wave",
+            "surface": "admin",
+            "name": "Admin stale blocker reduction",
+            "metric": "stale_blockers",
+            "metric_type": "quantitative",
+            "direction": "lower",
+            "window": "24h",
+            "every_n_runs": 2,
+            "measurement": "Count unresolved blockers after the heartbeat.",
+            "approval_required": True,
+        }
+    )
+    assert created["success"] is True
+    assert created["surface"] == "admin"
+    cycle = created["cycles"][0]
+    assert cycle["name"] == "Admin stale blocker reduction"
+    assert cycle["metric"] == "stale_blockers"
+    assert cycle["approval_required"] is True
+
+    modified = _call(
+        {
+            "action": "modify_cycle",
+            "agent_id": "theta-wave",
+            "surface": "admin",
+            "name": "Admin stale blocker reduction",
+            "enabled": False,
+            "every_n_runs": 5,
+        }
+    )
+    assert modified["success"] is True
+    assert modified["cycles"][0]["enabled"] is False
+    assert modified["cycles"][0]["every_n_runs"] == 5
+
+    listed = _call(
+        {
+            "action": "list_cycles",
+            "agent_id": "theta-wave",
+            "surface": "admin",
+        }
+    )
+    assert listed["success"] is True
+    assert listed["cycles"][0]["name"] == "Admin stale blocker reduction"
+
+    removed = _call(
+        {
+            "action": "remove_cycle",
+            "agent_id": "theta-wave",
+            "surface": "admin",
+            "name": "Admin stale blocker reduction",
+        }
+    )
+    assert removed["success"] is True
+    assert removed["cycles"] == []
+
+
 def test_agent_bus_memory_write_and_list_are_native():
     agent_id = "memory-bus-agent"
     written = _call(

@@ -4756,11 +4756,24 @@ def _session_identity_payload(identity: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_cron_session_row(session: Dict[str, Any] | None, session_id: str = "") -> bool:
+    sid = str((session or {}).get("id") or session_id or "")
+    source = str((session or {}).get("source") or "")
+    return source == "cron" or sid.startswith("cron_")
+
+
 def _resolve_active_session_or_404(db: Any, session_id: str) -> tuple[str, str, Dict[str, Any]]:
     sid = db.resolve_session_id(session_id)
     if not sid:
         raise HTTPException(status_code=404, detail="Session not found")
     identity = db.resolve_canonical_session_identity(sid)
+    requested_session = db.get_session(sid)
+    if _is_cron_session_row(requested_session, sid):
+        identity["active_session_id"] = sid
+        identity["lineage_root_id"] = identity.get("lineage_root_id") or sid
+        identity["session_kind"] = "cron"
+        identity["is_compression_tip"] = True
+        return sid, sid, identity
     active_id = str(identity.get("active_session_id") or sid)
     if not db.get_session(active_id):
         active_id = sid
@@ -6770,6 +6783,7 @@ def get_heartbeat_surfaces():
         # paused/resumed toggle updates the job first. Map surface -> job.enabled
         # so a card reflects whether the heartbeat will actually fire, even if a
         # stale config.json copy disagrees.
+        job_by_surface: Dict[str, Dict[str, Any]] = {}
         job_enabled_by_surface: Dict[str, bool] = {}
         # Surface automations are the per-surface "kit" cron jobs that pair with
         # each heartbeat (origin.type=="surface-automation"). Group them by
@@ -6785,6 +6799,7 @@ def get_heartbeat_surfaces():
                 if not (isinstance(_surf, str) and _surf):
                     continue
                 if _otype == "surface-heartbeat":
+                    job_by_surface[_surf] = _job
                     job_enabled_by_surface[_surf] = bool(_job.get("enabled", True))
                 elif _otype == "surface-automation":
                     _sched_obj = _job.get("schedule") or {}
@@ -6831,6 +6846,32 @@ def get_heartbeat_surfaces():
                 if not isinstance(config, dict):
                     config = {}
                 config["enabled"] = job_enabled_by_surface[surface_name]
+            job = job_by_surface.get(surface_name)
+            if job:
+                if not isinstance(config, dict):
+                    config = {}
+                if job.get("agent"):
+                    config["agent"] = job.get("agent")
+                if job.get("deliver"):
+                    config["deliver"] = job.get("deliver")
+                if job.get("model"):
+                    config["model"] = job.get("model")
+                if not config.get("cadence"):
+                    schedule = job.get("schedule") or {}
+                    config["cadence"] = (
+                        job.get("schedule_display")
+                        or (schedule.get("display") if isinstance(schedule, dict) else None)
+                        or (schedule.get("expr") if isinstance(schedule, dict) else None)
+                    )
+            if isinstance(config, dict) and not str(config.get("agent") or "").strip():
+                try:
+                    from cron.jobs import resolve_surface_agent
+
+                    inferred_agent = resolve_surface_agent(surface_name, {"config": config})
+                    if inferred_agent:
+                        config["agent"] = inferred_agent
+                except Exception:
+                    pass
 
             # Work-run history (history/*.json), newest first.
             history_files: List[Path] = []
@@ -7047,6 +7088,20 @@ def get_heartbeat_experiments():
                 continue
             surface_name = surface_dir.name
             config = _read_json(surface_dir / "config.json")
+            try:
+                from cron.jobs import resolve_surface_agent
+
+                agent_name = resolve_surface_agent(
+                    surface_name,
+                    {"config": config if isinstance(config, dict) else {}},
+                )
+            except Exception:
+                agent_name = (
+                    str(config.get("agent") or "").strip()
+                    if isinstance(config, dict)
+                    else ""
+                )
+            agent_name = agent_name or surface_name
             exp_cfg = config.get("experiment") if isinstance(config, dict) else None
             exp_cfg = exp_cfg if isinstance(exp_cfg, dict) else {}
 
@@ -7057,6 +7112,11 @@ def get_heartbeat_experiments():
                 cycles: List[Dict[str, Any]] = _list_cycles(surface_name)
             except Exception:
                 cycles = []
+            cycles = [
+                {**c, "agent": c.get("agent") or agent_name}
+                for c in cycles
+                if isinstance(c, dict)
+            ]
 
             # Metric/direction/window context for normalizing experiments below.
             cycle_by_metric = {
@@ -7086,6 +7146,7 @@ def get_heartbeat_experiments():
                 return {
                     "id": r.get("id") or r.get("ts"),
                     "surface": surface_name,
+                    "agent": agent_name,
                     "status": status,
                     "decision": r.get("decision"),
                     "hypothesis": r.get("hypothesis"),
@@ -7172,6 +7233,7 @@ def get_heartbeat_experiments():
 
             out_surfaces.append({
                 "surface": surface_name,
+                "agent": agent_name,
                 "cycles": cycles,
                 "experiments": experiments,
                 "learnings": learnings,
@@ -7366,15 +7428,12 @@ def _surface_heartbeat_job(surface_key: str) -> Optional[Dict[str, Any]]:
     """The account-scoped heartbeat cron job for a surface (enabled or not)."""
     from cron.jobs import list_jobs
 
-    return next(
-        (
-            j
-            for j in list_jobs(include_disabled=True)
-            if (j.get("origin") or {}).get("type") == "surface-heartbeat"
-            and (j.get("origin") or {}).get("surface") == surface_key
-        ),
-        None,
-    )
+    match: Optional[Dict[str, Any]] = None
+    for job in list_jobs(include_disabled=True):
+        origin = job.get("origin") or {}
+        if origin.get("type") == "surface-heartbeat" and origin.get("surface") == surface_key:
+            match = job
+    return match
 
 
 def _delivery_routes() -> List[Dict[str, str]]:
@@ -7470,6 +7529,38 @@ def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
         raise HTTPException(status_code=500, detail=f"Set route failed: {exc}")
 
 
+def _activity_text(value: Any) -> Optional[str]:
+    """Convert activity payload fragments into compact display text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_activity_text(item) for item in value]
+        text = "; ".join(part for part in parts if part)
+        return text or None
+    if isinstance(value, dict):
+        for key in (
+            "summary",
+            "attention_summary",
+            "message",
+            "title",
+            "event",
+            "category",
+            "status",
+        ):
+            text = _activity_text(value.get(key))
+            if text:
+                return text
+        try:
+            return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+        except Exception:
+            return None
+    return str(value)
+
+
 @app.get("/api/activity")
 def get_activity(limit: int = 100, agent: Optional[str] = None):
     """Fleet activity feed — what every agent did, newest first. Aggregates surface
@@ -7496,9 +7587,9 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
                     items.append({
                         "kind": "heartbeat",
                         "agent": surface,
-                        "ts": rec.get("ran_at") or f.stem,
-                        "title": rec.get("summary") or rec.get("did") or "ran",
-                        "detail": rec.get("found") or rec.get("checked"),
+                        "ts": _activity_text(rec.get("ran_at") or f.stem) or f.stem,
+                        "title": _activity_text(rec.get("summary") or rec.get("did")) or "ran",
+                        "detail": _activity_text(rec.get("found") or rec.get("checked")),
                         "status": "ok",
                     })
         try:
@@ -7511,11 +7602,11 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
                 o = j.get("origin") or {}
                 items.append({
                     "kind": "cron",
-                    "agent": o.get("surface") or "system",
-                    "ts": lr,
-                    "title": j.get("name") or "job",
-                    "detail": j.get("last_summary"),
-                    "status": j.get("last_status") or "ok",
+                    "agent": _activity_text(o.get("surface") or j.get("agent")) or "system",
+                    "ts": _activity_text(lr) or "",
+                    "title": _activity_text(j.get("name")) or "job",
+                    "detail": _activity_text(j.get("last_summary")),
+                    "status": _activity_text(j.get("last_status")) or "ok",
                 })
         except Exception:
             _log.warning("activity: cron last-runs unavailable", exc_info=True)
@@ -7533,12 +7624,13 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
                     if not isinstance(rec, dict):
                         continue
                     items.append({
-                        "kind": rec.get("kind") or "agent_activity",
-                        "agent": rec.get("agent") or "system",
-                        "ts": rec.get("ts"),
-                        "title": rec.get("event") or rec.get("category") or "Agent activity",
-                        "detail": rec.get("message") or rec.get("metadata"),
-                        "status": rec.get("severity") or "info",
+                        "kind": _activity_text(rec.get("kind")) or "agent_activity",
+                        "agent": _activity_text(rec.get("agent")) or "system",
+                        "ts": _activity_text(rec.get("ts")),
+                        "title": _activity_text(rec.get("event") or rec.get("category"))
+                        or "Agent activity",
+                        "detail": _activity_text(rec.get("message") or rec.get("metadata")),
+                        "status": _activity_text(rec.get("severity")) or "info",
                     })
 
             pressure_log = data_root() / "agent_context_pressure.jsonl"
@@ -7552,12 +7644,12 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
                     if not isinstance(rec, dict):
                         continue
                     items.append({
-                        "kind": rec.get("kind") or "context",
-                        "agent": rec.get("agent") or "system",
-                        "ts": rec.get("ts"),
-                        "title": rec.get("title") or "Context pressure",
-                        "detail": rec.get("detail"),
-                        "status": rec.get("status") or "warning",
+                        "kind": _activity_text(rec.get("kind")) or "context",
+                        "agent": _activity_text(rec.get("agent")) or "system",
+                        "ts": _activity_text(rec.get("ts")),
+                        "title": _activity_text(rec.get("title")) or "Context pressure",
+                        "detail": _activity_text(rec.get("detail")),
+                        "status": _activity_text(rec.get("status")) or "warning",
                     })
         except Exception:
             _log.warning("activity: context pressure log unavailable", exc_info=True)
@@ -7767,10 +7859,13 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
 
 
 _HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
-# Allowlist of per-surface settings the dashboard may edit (cortextOS settings-tab
-# parity). goal/cadence/experiment/cycles/playbook are NOT here — they're owned by
-# the seeder + the autoresearch loop, never the settings panel.
+# Allowlist of per-surface heartbeat settings the dashboard may edit. The
+# backend still stores these under ``surface`` workspaces, but the UI presents
+# them as ordinary heartbeats.
 _SURFACE_CONFIG_EDITABLE = {
+    "goal",
+    "cadence",
+    "agent",
     "model",
     "timezone",
     "day_mode_start",
@@ -7778,7 +7873,20 @@ _SURFACE_CONFIG_EDITABLE = {
     "communication_style",
     "approval_rules",
     "max_session_seconds",
+    "heartbeat_report_mode",
 }
+
+
+def _normalize_heartbeat_report_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"notify", "notifying", "always", "always-notify", "every-run", "report"}:
+        return "notify"
+    if raw in {"quiet", "silent", "changes", "change-only", "important", "important-only"}:
+        return "quiet"
+    raise HTTPException(
+        status_code=400,
+        detail="heartbeat_report_mode must be quiet or notify",
+    )
 
 
 @app.get("/api/heartbeats/surfaces/{surface}/config")
@@ -7795,6 +7903,15 @@ def get_heartbeat_surface_config(surface: str):
             loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 cfg = loaded
+        if not str(cfg.get("agent") or "").strip():
+            try:
+                from cron.jobs import resolve_surface_agent
+
+                inferred_agent = resolve_surface_agent(surface_key, {"config": cfg})
+                if inferred_agent:
+                    cfg["agent"] = inferred_agent
+            except Exception:
+                pass
         return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
     except HTTPException:
         raise
@@ -7804,6 +7921,9 @@ def get_heartbeat_surface_config(surface: str):
 
 
 class _HeartbeatConfigPatchBody(BaseModel):
+    goal: Optional[str] = None
+    cadence: Optional[str] = None
+    agent: Optional[str] = None
     model: Optional[str] = None
     timezone: Optional[str] = None
     day_mode_start: Optional[str] = None
@@ -7811,18 +7931,44 @@ class _HeartbeatConfigPatchBody(BaseModel):
     communication_style: Optional[str] = None
     approval_rules: Optional[Dict[str, Any]] = None
     max_session_seconds: Optional[int] = None
+    heartbeat_report_mode: Optional[str] = None
+    report_mode: Optional[str] = None
+    notification_mode: Optional[str] = None
 
 
 @app.patch("/api/heartbeats/surfaces/{surface}/config")
 def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody):
-    """Allowlist-merge editable settings into a surface's config.json. Preserves
-    goal/cadence/experiment/cycles/playbook. Validates HH:MM + approval shape."""
+    """Allowlist-merge editable settings into a heartbeat config.json.
+
+    Mirrors job-owned fields (cadence, agent, model) onto the surface heartbeat
+    cron job so the settings are functional, not just prompt-visible.
+    """
     try:
         surface_key = _validate_heartbeat_surface(surface)
         from elevate_constants import get_account_data_dir
         from cron.jobs import day_night_mode
 
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        mode_value = None
+        for alias in ("heartbeat_report_mode", "report_mode", "notification_mode"):
+            if alias in patch:
+                mode_value = patch.pop(alias)
+                break
+        if mode_value is not None:
+            patch["heartbeat_report_mode"] = _normalize_heartbeat_report_mode(mode_value)
+        if "goal" in patch and not str(patch["goal"]).strip():
+            raise HTTPException(status_code=400, detail="goal is required")
+        if "cadence" in patch:
+            cadence = str(patch["cadence"]).strip()
+            if not cadence:
+                raise HTTPException(status_code=400, detail="cadence is required")
+            try:
+                from cron.jobs import parse_schedule
+
+                parse_schedule(cadence)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"invalid cadence: {exc}")
+            patch["cadence"] = cadence
         # Validate time windows.
         for k in ("day_mode_start", "day_mode_end"):
             if k in patch and not _HHMM_RE.match(str(patch[k])):
@@ -7850,15 +7996,26 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
         tmp = cfg_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         tmp.replace(cfg_path)
-        # The runner honors the cron job's ``model`` (scheduler reads job.model), so a
-        # model change must reach the JOB, not just config.json — otherwise it's
-        # cosmetic. Mirror it onto the surface's heartbeat job (empty = default).
+        job_updates: Dict[str, Any] = {}
         if "model" in patch:
+            job_updates["model"] = patch.get("model") or None
+        if "agent" in patch:
+            job_updates["agent"] = patch.get("agent") or None
+        if "cadence" in patch:
+            job_updates["schedule"] = patch["cadence"]
+        if "heartbeat_report_mode" in patch:
+            job = _surface_heartbeat_job(surface_key)
+            metadata = job.get("metadata") if isinstance((job or {}).get("metadata"), dict) else {}
+            job_updates["metadata"] = {
+                **metadata,
+                "heartbeat_report_mode": patch["heartbeat_report_mode"],
+            }
+        if job_updates:
             from cron.jobs import update_job
 
             job = _surface_heartbeat_job(surface_key)
             if job:
-                update_job(job["id"], {"model": patch.get("model") or None})
+                update_job(job["id"], job_updates)
         return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
     except HTTPException:
         raise

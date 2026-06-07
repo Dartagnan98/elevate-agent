@@ -35,11 +35,11 @@ import { ListSkeleton, PageSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
-/*  Experiments = the autoresearch view of surface heartbeats.         */
-/*  Each surface runs a research cycle every Nth heartbeat: it proposes */
-/*  an experiment, runs it for a window, then decides keep/discard and  */
-/*  compounds the learning into its own playbook. This page is a        */
-/*  read-only window onto that loop (mirrors CTRL Flow /ai/experiments).*/
+/*  Experiments = the autoresearch view of agent-owned heartbeats.      */
+/*  Elevate keeps the heartbeat workspace key internally, but this page */
+/*  presents the CortextOS model: agents own cycles, history, and       */
+/*  learnings; theta-wave/orchestrator behavior happens through native  */
+/*  heartbeats rather than daemon sessions.                             */
 /* ------------------------------------------------------------------ */
 
 /* ----------------------------- helpers ---------------------------- */
@@ -63,6 +63,24 @@ export function timeAgo(iso?: string | null): string {
 
 export function titleCase(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+function humanizeId(s?: string | null): string {
+  const clean = (s || "").trim();
+  if (!clean) return "Agent";
+  return clean
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function groupAgentId(group: HeartbeatExperimentSurface): string {
+  return (group.agent || group.surface || "").trim();
+}
+
+function groupAgentName(group: HeartbeatExperimentSurface): string {
+  return humanizeId(groupAgentId(group));
 }
 
 type StatusVariant = "default" | "secondary" | "outline" | "success" | "warning";
@@ -385,7 +403,7 @@ export function Field({ label, children }: { label: string; children: React.Reac
   );
 }
 
-/* --------------------- new surface / new cycle -------------------- */
+/* --------------------- new heartbeat / new cycle ------------------ */
 
 export function NewSurfaceForm({
   onClose,
@@ -740,7 +758,7 @@ export function SurfaceSettingsForm({
           value={commStyle}
           onChange={(e) => setCommStyle(e.target.value)}
           rows={2}
-          placeholder="How this surface should sound in its summaries."
+          placeholder="How this agent should sound in its summaries."
           className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
         />
       </Field>
@@ -948,22 +966,27 @@ export function SurfaceGoalsForm({
   );
 }
 
-/* ------------------------- surface card --------------------------- */
+/* ---------------------- agent experiment card --------------------- */
 
-function SurfaceCard({
-  surface,
+function AgentExperimentCard({
+  group,
+  defaultOpen = false,
   onChanged,
 }: {
-  surface: HeartbeatExperimentSurface;
+  group: HeartbeatExperimentSurface;
+  defaultOpen?: boolean;
   onChanged: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [showNewCycle, setShowNewCycle] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showGoals, setShowGoals] = useState(false);
-  const stats = surface.stats;
+  const stats = group.stats;
   const decided = stats.kept + stats.discarded;
   const tone = keepRateTone(stats.keepRate, decided);
+  const agentId = groupAgentId(group);
+  const agentName = groupAgentName(group);
+  const workspaceLabel = group.surface && group.surface !== agentId ? `${group.surface} heartbeat` : null;
 
   return (
     <Card>
@@ -980,7 +1003,7 @@ function SurfaceCard({
               ) : (
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
               )}
-              <CardTitle>{titleCase(surface.surface)}</CardTitle>
+              <CardTitle>{agentName}</CardTitle>
               {stats.running > 0 && (
                 <Badge variant="secondary" className="shrink-0">
                   {stats.running} running
@@ -988,14 +1011,15 @@ function SurfaceCard({
               )}
             </div>
             <div className="mt-1.5 ml-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-              <span>{stats.total} total</span>
+              <span>{stats.total} experiments</span>
               <span className={TONE_TEXT[tone]}>
                 {decided > 0 ? `${stats.keepRate}% kept` : "no decisions"}
               </span>
               <span className="inline-flex items-center gap-1">
                 <FlaskConical className="h-3 w-3" />
-                {surface.cycles.length} {surface.cycles.length === 1 ? "cycle" : "cycles"}
+                {group.cycles.length} {group.cycles.length === 1 ? "cycle" : "cycles"}
               </span>
+              {workspaceLabel && <span>{workspaceLabel}</span>}
             </div>
           </div>
         </button>
@@ -1034,13 +1058,13 @@ function SurfaceCard({
                 </Button>
               </div>
             </div>
-            {surface.cycles.length > 0 ? (
+            {group.cycles.length > 0 ? (
               <ul className="space-y-1.5">
-                {surface.cycles.map((c, i) => (
+                {group.cycles.map((c, i) => (
                   <CycleRow
                     key={c.name || i}
                     cycle={c}
-                    surface={surface.surface}
+                    surface={group.surface}
                     onChanged={onChanged}
                   />
                 ))}
@@ -1054,11 +1078,11 @@ function SurfaceCard({
 
           {showNewCycle && (
             <Modal
-              title={`New cycle · ${titleCase(surface.surface)}`}
+              title={`New cycle · ${agentName}`}
               onClose={() => setShowNewCycle(false)}
             >
               <NewCycleForm
-                surface={surface.surface}
+                surface={group.surface}
                 onClose={() => setShowNewCycle(false)}
                 onCreated={onChanged}
               />
@@ -1067,11 +1091,11 @@ function SurfaceCard({
 
           {showSettings && (
             <Modal
-              title={`Settings · ${titleCase(surface.surface)}`}
+              title={`Settings · ${agentName}`}
               onClose={() => setShowSettings(false)}
             >
               <SurfaceSettingsForm
-                surface={surface.surface}
+                surface={group.surface}
                 onClose={() => setShowSettings(false)}
               />
             </Modal>
@@ -1079,30 +1103,30 @@ function SurfaceCard({
 
           {showGoals && (
             <Modal
-              title={`Goals · ${titleCase(surface.surface)}`}
+              title={`Goals · ${agentName}`}
               onClose={() => setShowGoals(false)}
             >
               <SurfaceGoalsForm
-                surface={surface.surface}
+                surface={group.surface}
                 onClose={() => setShowGoals(false)}
               />
             </Modal>
           )}
 
-          {surface.experiments.length > 0 ? (
+          {group.experiments.length > 0 ? (
             <div className="space-y-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
                 Experiments
               </span>
               <ul className="space-y-1.5">
-                {surface.experiments.map((e, i) => (
+                {group.experiments.map((e, i) => (
                   <ExperimentRow key={e.id || i} exp={e} />
                 ))}
               </ul>
             </div>
           ) : (
             <p className="text-xs italic text-muted-foreground/70">
-              No experiments yet on this surface.
+              No experiments yet for this agent.
             </p>
           )}
         </CardContent>
@@ -1130,7 +1154,9 @@ function TimelineRow({ exp }: { exp: HeartbeatExperiment }) {
       <div className="mt-0.5 shrink-0">{glyph}</div>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-medium text-foreground">{titleCase(exp.surface)}</span>
+          <span className="text-xs font-medium text-foreground">
+            {humanizeId(exp.agent || exp.surface)}
+          </span>
           {exp.metric && (
             <span className="text-[11px] text-muted-foreground">· {exp.metric}</span>
           )}
@@ -1154,10 +1180,10 @@ function TimelineRow({ exp }: { exp: HeartbeatExperiment }) {
 
 /* ----------------------------- page ------------------------------- */
 
-type Tab = "surfaces" | "timeline" | "learnings";
+type Tab = "agents" | "timeline" | "learnings";
 
 const TABS: { key: Tab; label: string }[] = [
-  { key: "surfaces", label: "By Surface" },
+  { key: "agents", label: "By Agent" },
   { key: "timeline", label: "Timeline" },
   { key: "learnings", label: "Learnings" },
 ];
@@ -1167,8 +1193,7 @@ export default function ExperimentsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("surfaces");
-  const [showNewSurface, setShowNewSurface] = useState(false);
+  const [tab, setTab] = useState<Tab>("agents");
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) setRefreshing(true);
@@ -1191,24 +1216,24 @@ export default function ExperimentsPage() {
   }, [load]);
   useRefreshOnAgentTurn(() => void load(true));
 
-  const surfaces = data?.surfaces || [];
+  const agentGroups = data?.surfaces || [];
   const summary = data?.summary;
 
-  // Flatten every experiment across surfaces for the timeline, newest first.
+  // Flatten every experiment across agents for the timeline, newest first.
   const timeline = useMemo(() => {
-    const all = surfaces.flatMap((s) => s.experiments);
+    const all = agentGroups.flatMap((s) => s.experiments);
     return [...all].sort((a, b) => {
       const ta = new Date(a.completed_at || a.created_at || 0).getTime();
       const tb = new Date(b.completed_at || b.created_at || 0).getTime();
       return tb - ta;
     });
-  }, [surfaces]);
+  }, [agentGroups]);
 
   const keepTone = summary
     ? keepRateTone(summary.keepRate, summary.kept + summary.discarded)
     : "muted";
 
-  const empty = surfaces.length === 0;
+  const empty = agentGroups.length === 0;
 
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 pb-16">
@@ -1219,7 +1244,7 @@ export default function ExperimentsPage() {
             <h1 className="text-lg font-semibold text-foreground">Experiments</h1>
           </div>
           <p className="text-sm text-muted-foreground">
-            Autoresearch — each surface improves its own playbook.
+            Autoresearch cycles across your agent fleet.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1231,20 +1256,8 @@ export default function ExperimentsPage() {
             )}
             Refresh
           </Button>
-          <Button onClick={() => setShowNewSurface(true)}>
-            <Plus className="h-4 w-4" /> New surface
-          </Button>
         </div>
       </header>
-
-      {showNewSurface && (
-        <Modal title="New surface" onClose={() => setShowNewSurface(false)}>
-          <NewSurfaceForm
-            onClose={() => setShowNewSurface(false)}
-            onCreated={() => load(true)}
-          />
-        </Modal>
-      )}
 
       {loading ? (
         <ListSkeleton rows={5} />
@@ -1257,7 +1270,7 @@ export default function ExperimentsPage() {
           {/* Stat tiles */}
           {summary && (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-              <StatTile label="Cycles" value={summary.cycles} />
+              <StatTile label="Active Cycles" value={summary.cycles} />
               <StatTile label="Running" value={summary.running} dot={summary.running > 0} />
               <StatTile label="Completed" value={summary.completed} />
               <StatTile
@@ -1266,7 +1279,7 @@ export default function ExperimentsPage() {
                 valueClass={TONE_TEXT[keepTone]}
                 subtitle={`${summary.kept} kept · ${summary.discarded} discarded`}
               />
-              <StatTile label="Total Runs" value={summary.total} />
+              <StatTile label="Total" value={summary.total} />
             </div>
           )}
 
@@ -1293,14 +1306,23 @@ export default function ExperimentsPage() {
           </div>
 
           {empty ? (
-            <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-              No experiments yet — each surface runs its improvement loop every Nth
-              heartbeat.
+            <div className="rounded-lg border border-dashed border-border px-6 py-12 text-center">
+              <FlaskConical className="mx-auto h-8 w-8 text-muted-foreground/50" />
+              <h3 className="mt-4 text-base font-medium text-foreground">No experiments yet</h3>
+              <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
+                Experiments are autonomous research cycles where agents test hypotheses,
+                measure results, and compound learnings through their theta-wave heartbeats.
+              </p>
             </div>
-          ) : tab === "surfaces" ? (
-            <div className="grid gap-3 lg:grid-cols-2">
-              {surfaces.map((s) => (
-                <SurfaceCard key={s.surface} surface={s} onChanged={() => load(true)} />
+          ) : tab === "agents" ? (
+            <div className="space-y-3">
+              {agentGroups.map((group, index) => (
+                <AgentExperimentCard
+                  key={group.surface}
+                  group={group}
+                  defaultOpen={index === 0}
+                  onChanged={() => load(true)}
+                />
               ))}
             </div>
           ) : tab === "timeline" ? (
@@ -1312,18 +1334,17 @@ export default function ExperimentsPage() {
               </ul>
             ) : (
               <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-                No experiments yet — each surface runs its improvement loop every Nth
-                heartbeat.
+                No experiments yet.
               </div>
             )
           ) : (
             <div className="space-y-3">
-              {surfaces.map((s) => {
+              {agentGroups.map((s) => {
                 const learnings = (s.learnings || "").trim();
                 return (
                   <Card key={s.surface}>
                     <CardHeader>
-                      <CardTitle>{titleCase(s.surface)}</CardTitle>
+                      <CardTitle>{groupAgentName(s)}</CardTitle>
                     </CardHeader>
                     <CardContent>
                       {learnings ? (

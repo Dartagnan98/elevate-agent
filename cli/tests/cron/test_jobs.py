@@ -24,6 +24,8 @@ from cron.jobs import (
     advance_next_run,
     get_due_jobs,
     save_job_output,
+    ensure_theta_wave,
+    THETA_WAVE_SKILL,
 )
 
 
@@ -227,6 +229,53 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
     monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
     return tmp_path
+
+
+class TestThetaWaveSeed:
+    def test_ensure_theta_wave_creates_active_agent_job(self, tmp_cron_dir):
+        from elevate_constants import get_account_data_dir
+
+        job = ensure_theta_wave()
+
+        assert job["name"] == "Theta Wave"
+        assert job["enabled"] is True
+        assert job["state"] == "scheduled"
+        assert job["agent"] == "theta-wave"
+        assert job["skill"] == THETA_WAVE_SKILL
+        assert job["workdir"] == str(get_account_data_dir() / "system-review")
+
+        config = json.loads((get_account_data_dir() / "system-review" / "config.json").read_text())
+        assert config["enabled"] is True
+        assert config["auto_create_agent_cycles"] is True
+        assert config["auto_modify_agent_cycles"] is True
+        assert config["approval_required"] is False
+
+    def test_ensure_theta_wave_repairs_existing_paused_seed(self, tmp_cron_dir):
+        from elevate_constants import get_account_data_dir
+
+        old = create_job(
+            prompt="old theta prompt",
+            schedule="0 2 * * *",
+            name="Theta Wave",
+            skill=THETA_WAVE_SKILL,
+            deliver="local",
+        )
+        paused = pause_job(old["id"], reason="old opt-in seed")
+        assert paused["enabled"] is False
+
+        job = ensure_theta_wave()
+
+        assert job["id"] == old["id"]
+        assert job["enabled"] is True
+        assert job["state"] == "scheduled"
+        assert job["agent"] == "theta-wave"
+        assert job["workdir"] == str(get_account_data_dir() / "system-review")
+        assert job["paused_reason"] is None
+
+        config = json.loads((get_account_data_dir() / "system-review" / "config.json").read_text())
+        assert config["enabled"] is True
+        assert config["auto_create_agent_cycles"] is True
+        assert config["auto_modify_agent_cycles"] is True
 
 
 class TestJobCRUD:

@@ -277,6 +277,28 @@ def _float_arg(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _int_arg(value: Any, default: int | None = None) -> int | None:
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_arg(value: Any, default: bool | None = None) -> bool | None:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
+
+
 def _cycle_defaults(surface: str, metric: str) -> dict[str, Any]:
     try:
         from cron.cycles import find_cycle_defaults
@@ -419,6 +441,60 @@ def _list_experiments(surface: str) -> dict[str, Any]:
         "history": history,
         "count": len(history) + len(active_by_cycle),
     }
+
+
+def _cycle_opts(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "name": str(args.get("name") or args.get("cycle") or args.get("cycle_name") or args.get("title") or "").strip(),
+        "metric": str(args.get("metric") or "").strip(),
+        "created_by": _actor_agent(args, parent_agent),
+    }
+    aliases = {
+        "metric_type": args.get("metric_type") or args.get("metricType"),
+        "direction": args.get("direction"),
+        "window": args.get("window"),
+        "measurement": args.get("measurement"),
+        "loop_interval": args.get("loop_interval") or args.get("loopInterval"),
+        "surface": args.get("target_surface") or args.get("targetSurface") or args.get("experiment_surface"),
+    }
+    opts.update({key: value for key, value in aliases.items() if value not in (None, "")})
+    every_n = _int_arg(args.get("every_n_runs") if args.get("every_n_runs") is not None else args.get("everyNRuns"))
+    if every_n is not None:
+        opts["every_n_runs"] = every_n
+    approval_required = _bool_arg(
+        args.get("approval_required") if args.get("approval_required") is not None else args.get("approvalRequired")
+    )
+    if approval_required is not None:
+        opts["approval_required"] = approval_required
+    enabled = _bool_arg(args.get("enabled"))
+    if enabled is not None:
+        opts["enabled"] = enabled
+    return opts
+
+
+def _list_cycles(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    surface = _surface_for_experiment(args, parent_agent)
+    from cron.cycles import list_cycles
+
+    return {"surface": surface, "cycles": list_cycles(surface)}
+
+
+def _manage_cycle(action: str, args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    surface = _surface_for_experiment(args, parent_agent)
+    from cron.cycles import manage_cycle
+
+    result = manage_cycle(surface, action, **_cycle_opts(args, parent_agent))
+    if not result.get("ok"):
+        raise ValueError(str(result.get("error") or f"cycle {action} failed"))
+    actor = _actor_agent(args, parent_agent)
+    _append_activity(
+        agent_id=actor,
+        category="experiment",
+        event=f"cycle_{action}d" if action != "modify" else "cycle_modified",
+        message=str(args.get("name") or args.get("cycle") or args.get("cycle_name") or "cycle"),
+        metadata={"surface": surface, "action": action},
+    )
+    return {"surface": surface, "action": action, "cycles": result.get("cycles") or []}
 
 
 def _create_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
@@ -952,6 +1028,18 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
         if action in {"gather_experiment_context", "experiment_context", "context_experiments"}:
             return tool_result(success=True, context=_gather_experiment_context(args, parent_agent))
 
+        if action in {"list_cycles", "cycles", "cycle_list"}:
+            return tool_result(success=True, **_list_cycles(args, parent_agent))
+
+        if action in {"create_cycle", "cycle_create"}:
+            return tool_result(success=True, **_manage_cycle("create", args, parent_agent))
+
+        if action in {"modify_cycle", "update_cycle", "cycle_modify", "cycle_update"}:
+            return tool_result(success=True, **_manage_cycle("modify", args, parent_agent))
+
+        if action in {"remove_cycle", "delete_cycle", "cycle_remove", "cycle_delete"}:
+            return tool_result(success=True, **_manage_cycle("remove", args, parent_agent))
+
         if action in {"browse_catalog", "catalog"}:
             items = _browse_catalog(args)
             return tool_result(success=True, items=items, count=len(items))
@@ -1007,6 +1095,10 @@ AGENT_BUS_SCHEMA = {
                         "list_experiments",
                         "evaluate_experiment",
                         "gather_experiment_context",
+                        "list_cycles",
+                        "create_cycle",
+                        "modify_cycle",
+                        "remove_cycle",
                         "browse_catalog",
                         "list_skills",
                     ],
@@ -1015,12 +1107,16 @@ AGENT_BUS_SCHEMA = {
                 "target_agent_id": {"type": "string"},
                 "to_agent_id": {"type": "string"},
                 "surface": {"type": "string"},
+                "target_surface": {"type": "string"},
+                "targetSurface": {"type": "string"},
                 "task_id": {"type": "string"},
+                "name": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "desc": {"type": "string"},
                 "type": {"type": "string"},
                 "status": {"type": "string"},
+                "enabled": {"type": "boolean"},
                 "priority": {"type": "string", "enum": ["urgent", "high", "normal", "low"]},
                 "assignee": {"type": "string"},
                 "assigned_to": {"type": "string"},
@@ -1081,6 +1177,12 @@ AGENT_BUS_SCHEMA = {
                 "direction": {"type": "string", "enum": ["higher", "lower"]},
                 "window": {"type": "string"},
                 "measurement": {"type": "string"},
+                "every_n_runs": {"type": "integer", "minimum": 1},
+                "everyNRuns": {"type": "integer", "minimum": 1},
+                "loop_interval": {"type": "string"},
+                "loopInterval": {"type": "string"},
+                "approval_required": {"type": "boolean"},
+                "approvalRequired": {"type": "boolean"},
                 "baseline_value": {"type": "number"},
                 "measured_value": {"type": "number"},
                 "result_value": {"type": "number"},

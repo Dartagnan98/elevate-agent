@@ -314,6 +314,7 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "leads": {
         "name": "Leads Heartbeat",
         "schedule": "0 8,15 * * *",
+        "config": {"agent": "outreach"},
         "goal": (
             "Each run: check new/changed leads since the last run; surface the hot ones "
             "with a one-line why; list overdue follow-ups and today's showings; draft "
@@ -330,6 +331,7 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "admin": {
         "name": "Admin Heartbeat",
         "schedule": "30 7 * * *",
+        "config": {"agent": "admin"},
         "goal": (
             "Each run: scan the calendar and tasks; flag deadlines, conflicts, and anything "
             "needing the realtor's decision; reconcile today's agenda. End with one tight "
@@ -343,6 +345,48 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+
+HEARTBEAT_AGENT_ALIASES: Dict[str, List[str]] = {
+    "admin": ["admin"],
+    "analyst": ["analyst"],
+    "theta-wave": ["theta-wave"],
+    "executive-assistant": ["executive-assistant"],
+    "leads": ["leads", "outreach"],
+}
+
+
+def _agent_exists(agent_id: str) -> bool:
+    try:
+        from elevate_cli.agent_hub import get_agent_def
+
+        return get_agent_def(agent_id) is not None
+    except Exception:
+        return False
+
+
+def resolve_surface_agent(surface: str, spec: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Resolve the Agent Hub owner for a heartbeat storage key.
+
+    ``surface`` remains the on-disk compatibility key, but heartbeat runs should
+    be owned by a real Agent Hub agent whenever one can be resolved.
+    """
+    spec = spec if isinstance(spec, dict) else {}
+    config = spec.get("config") if isinstance(spec.get("config"), dict) else {}
+    explicit = str(config.get("agent") or spec.get("agent") or "").strip()
+    if explicit and _agent_exists(explicit):
+        return explicit
+    key = (surface or "").strip().lower()
+    candidates = [key, *HEARTBEAT_AGENT_ALIASES.get(key, [])]
+    seen: set[str] = set()
+    for candidate in candidates:
+        clean = str(candidate or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        if _agent_exists(clean):
+            return clean
+    return explicit or None
 
 
 def _seed_surface_heartbeat_workspace(
@@ -382,6 +426,9 @@ def _seed_surface_heartbeat_workspace(
             "created_at": _hermes_now().isoformat(),
         }
         extra_config = spec.get("config") if isinstance(spec.get("config"), dict) else {}
+        resolved_agent = str(extra_config.get("agent") or resolve_surface_agent(surface, spec) or "").strip()
+        if resolved_agent and not extra_config.get("agent"):
+            extra_config = {**extra_config, "agent": resolved_agent}
         cfg.write_text(json.dumps({
             "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
             "enabled": bool(enabled), "experiment": spec["experiment"],
@@ -501,6 +548,11 @@ def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False)
         _seed_surface_heartbeat_workspace(
             surface, spec, enabled=bool(existing.get("enabled", False))
         )
+        if not str(existing.get("agent") or "").strip():
+            resolved_agent = resolve_surface_agent(surface, spec)
+            if resolved_agent:
+                repaired = update_job(existing["id"], {"agent": resolved_agent})
+                return repaired or existing
         return existing
     ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=enabled)
     prompt = (
@@ -515,6 +567,7 @@ def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False)
         skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
         origin={"type": "surface-heartbeat", "surface": surface, "source": source},
         workdir=str(ws),
+        agent=resolve_surface_agent(surface, spec),
     )
     if not enabled:
         # create_job() returns an enabled+scheduled job; flip it off through the
@@ -839,28 +892,38 @@ THETA_WAVE_NAME = "Theta Wave"
 THETA_WAVE_SCHEDULE = "0 2 * * *"
 
 
-def _seed_theta_wave_workspace(*, enabled: bool = False) -> Path:
+def _seed_theta_wave_workspace(*, enabled: bool = True) -> Path:
     """Scaffold accounts/<key>/system-review/{config.json, learnings.md, history/,
-    experiments/history/, reviews/}. Never rewrites an existing config.json."""
+    experiments/history/, reviews/}. Repairs the config so the native fleet loop
+    can author heartbeat experiment cycles without a daemon or dashboard session."""
     from elevate_constants import get_account_data_dir
     ws = get_account_data_dir() / "system-review"
     (ws / "history").mkdir(parents=True, exist_ok=True)
     (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
     (ws / "reviews").mkdir(parents=True, exist_ok=True)
     cfg = ws / "config.json"
-    if not cfg.exists():
-        cfg.write_text(json.dumps({
-            "metric": "system_effectiveness",
-            "metric_type": "qualitative_compound",
-            "direction": "higher",
-            "schedule": THETA_WAVE_SCHEDULE,
-            "enabled": bool(enabled),
-            "auto_create_agent_cycles": False,
-            "auto_modify_agent_cycles": False,
-            "approval_required": True,
-            "created_by": "system",
-            "created_at": _hermes_now().date().isoformat(),
-        }, indent=2))
+    existing: Dict[str, Any] = {}
+    if cfg.exists():
+        try:
+            parsed = json.loads(cfg.read_text(encoding="utf-8"))
+            existing = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            existing = {}
+    created_at = existing.get("created_at") or _hermes_now().date().isoformat()
+    config = {
+        "metric": "system_effectiveness",
+        "metric_type": "qualitative_compound",
+        "direction": "higher",
+        "schedule": THETA_WAVE_SCHEDULE,
+        "created_by": "system",
+        "created_at": created_at,
+        **existing,
+        "enabled": bool(enabled),
+        "auto_create_agent_cycles": True,
+        "auto_modify_agent_cycles": True,
+        "approval_required": False,
+    }
+    cfg.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
     learn = ws / "learnings.md"
     if not learn.exists():
         learn.write_text(
@@ -872,32 +935,48 @@ def _seed_theta_wave_workspace(*, enabled: bool = False) -> Path:
 
 def ensure_theta_wave() -> Dict[str, Any]:
     """Idempotently seed the Theta Wave system-review cron (workspace + job) for the
-    active account — OFF by default (opt-in), like the surfaces it reviews. An existing
-    job (matched by name) is left exactly as-is."""
+    active account. Existing older paused seeds are repaired into an active native
+    theta-wave agent job."""
     existing = next(
         (j for j in load_jobs() if (j.get("name") or "").strip().lower() == THETA_WAVE_NAME.lower()),
         None,
     )
     if existing:
-        _seed_theta_wave_workspace(enabled=bool(existing.get("enabled", False)))
-        return existing
-    ws = _seed_theta_wave_workspace(enabled=False)
+        ws = _seed_theta_wave_workspace(enabled=True)
+        updates: Dict[str, Any] = {}
+        if (existing.get("agent") or "") != "theta-wave":
+            updates["agent"] = "theta-wave"
+        if existing.get("workdir") != str(ws):
+            updates["workdir"] = str(ws)
+        if (existing.get("skill") or "") != THETA_WAVE_SKILL:
+            updates["skill"] = THETA_WAVE_SKILL
+            updates["skills"] = [THETA_WAVE_SKILL]
+        if existing.get("deliver") != "local":
+            updates["deliver"] = "local"
+        if existing.get("origin") != {"type": "system-review", "source": "system"}:
+            updates["origin"] = {"type": "system-review", "source": "system"}
+        job = update_job(existing["id"], updates) if updates else existing
+        if not job:
+            job = existing
+        if not job.get("enabled", True) or job.get("state") == "paused":
+            job = resume_job(job["id"]) or job
+        return job
+    ws = _seed_theta_wave_workspace(enabled=True)
     prompt = (
         f"You are Theta Wave, the fleet self-improvement reviewer. Workspace: {ws}. The surface "
         f"fleet is in the sibling dir ../heartbeats/. Run your loop per the theta-wave skill: scan "
         f"every surface, classify each (Stale/Converged/Successful/Underperforming), and create/"
-        f"modify/remove cycles via the cycle endpoints — gated by auto_create_agent_cycles / "
-        f"auto_modify_agent_cycles (else propose for dashboard approval). You are the only actor "
+        f"modify/remove cycles through the native agent_bus cycle actions — gated by "
+        f"auto_create_agent_cycles / auto_modify_agent_cycles. You are the only actor "
         f"that authors cycles. Change cycles, never realtor data."
     )
-    job = create_job(
+    return create_job(
         prompt=prompt, schedule=THETA_WAVE_SCHEDULE, name=THETA_WAVE_NAME,
         skill=THETA_WAVE_SKILL, deliver="local",
         origin={"type": "system-review", "source": "system"},
         workdir=str(ws),
+        agent="theta-wave",
     )
-    paused = pause_job(job["id"], reason="theta-wave is opt-in (seeded off)")
-    return paused or job
 
 
 def ensure_system_jobs() -> List[Dict[str, Any]]:
@@ -1313,6 +1392,7 @@ def create_job(
     expected_readiness_version: Optional[str] = None,
     backfill_pending: bool = False,
     max_session_seconds: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1397,6 +1477,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+    normalized_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     try:
         normalized_max_session_seconds = int(max_session_seconds) if max_session_seconds not in (None, "") else None
     except (TypeError, ValueError):
@@ -1502,6 +1583,7 @@ def create_job(
         "workdir": normalized_workdir,
         "max_session_seconds": normalized_max_session_seconds,
         "profile": normalized_profile,
+        "metadata": normalized_metadata,
         # /leads cron metadata
         "agent": normalized_agent,
         "tier": normalized_tier,

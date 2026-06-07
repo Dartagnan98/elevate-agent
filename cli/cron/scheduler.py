@@ -202,6 +202,148 @@ from cron.jobs import advance_next_run, ensure_system_jobs, get_due_jobs, mark_j
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
 
+_CORTEXT_CRON_SKILL_ALIASES: dict[str, tuple[str, ...]] = {
+    "surface-heartbeat": ("real-estate/surface-heartbeat",),
+    "theta-wave": ("real-estate/theta-wave",),
+}
+
+_CORTEXT_NATIVE_CRON_SKILLS: dict[str, str] = {
+    "approvals": """
+# Approvals
+Use Elevate's native approval system as the source of truth. Check pending
+surface approvals, waiting-human handoffs, and approval blockers before taking
+action. Draft or summarize freely, but external sends, deletion, deployments,
+credential changes, financial/legal actions, and agent safety exceptions must
+stay gated until the dashboard approval or human reply exists.
+""".strip(),
+    "human-tasks": """
+# Human Tasks
+Treat assigned work as Elevate-native Tasks and agent_handoffs. Surface the
+highest-risk waiting-human items first, keep titles and blockers concise, and
+route follow-up work through Tasks, Comms, or handoffs instead of creating a
+separate inbox or file queue.
+""".strip(),
+    "event-logging": """
+# Event Logging
+Use Elevate's existing run output, Activity, Comms, Tasks, handoff records, and
+agent memory as the durable log. Report concrete outcomes, blockers, and next
+actions in the final response so the scheduler can save the run summary and
+status marker. Do not create a duplicate log store.
+""".strip(),
+    "morning-review": """
+# Morning Review
+Run a start-of-day operator review. Check active Tasks, Comms, Approvals,
+handoffs, heartbeats, cron failures, and stale blockers for the selected agent.
+Produce a concise priority list for today's work, call out anything requiring
+human decision, and suppress delivery when there is truly nothing new.
+""".strip(),
+    "evening-review": """
+# Evening Review
+Run an end-of-day closeout. Summarize completed work, unresolved blockers,
+waiting-human items, failed or stale automations, and what should be ready for
+the next morning. Prefer drafts and handoffs over external delivery unless an
+approval already exists.
+""".strip(),
+    "weekly-review": """
+# Weekly Review
+Run a weekly fleet review. Compare recent Tasks, Activity, Comms, Approvals,
+handoffs, heartbeat reports, and cron outcomes. Identify durable patterns,
+stale goals, repeated failures, and one or two concrete improvements for the
+next week.
+""".strip(),
+    "goal-management": """
+# Goal Management
+Use Agent Hub goals, heartbeat goals, Tasks, and handoffs as the native goal
+system. Review progress, stale goals, blockers, and owner routing. Create or
+recommend updates only through Elevate's existing task, handoff, memory, or
+heartbeat surfaces.
+""".strip(),
+    "nighttime-mode": """
+# Nighttime Mode
+Operate in quiet mode. Favor safe local analysis, summaries, drafts, memory
+updates, and handoff preparation. Avoid noisy outreach and any externally
+visible action unless the agent's policy and an existing approval allow it.
+""".strip(),
+    "autoresearch": """
+# Autoresearch
+Use Elevate's heartbeat experiments as the research loop: inspect recent runs,
+state the hypothesis, measure against the configured metric, decide keep or
+discard, and write only the durable learning. Proposed experiment or cycle
+changes must respect dashboard approval gates.
+""".strip(),
+    "system-diagnostics": """
+# System Diagnostics
+Inspect Elevate-native health signals: cron and heartbeat status, recent
+Activity, Tasks, Approvals, Comms, handoffs, memory activity, stale recovery,
+and agent configuration. Explain anomalies with evidence and propose practical
+fixes instead of restarting daemon sessions.
+""".strip(),
+    "catalog-browse": """
+# Catalog Browse
+Review the local/bundled skill and agent catalog for useful updates, gaps, and
+safe install candidates. Summarize what is relevant to the selected agent and
+route any install or publish decision through the normal approval path.
+""".strip(),
+    "upstream-sync": """
+# Upstream Sync
+Compare local agent or skill behavior with the configured upstream/source when
+that context is available. Report drift, compatibility risks, and recommended
+updates. Do not pull, deploy, publish, or overwrite anything unless explicitly
+approved through Elevate.
+""".strip(),
+}
+
+
+def _cortext_cron_skill_key(skill_name: str) -> str:
+    return str(skill_name or "").strip().lower().replace("_", "-")
+
+
+def _cortext_native_cron_skill(skill_name: str) -> dict | None:
+    content = _CORTEXT_NATIVE_CRON_SKILLS.get(_cortext_cron_skill_key(skill_name))
+    if not content:
+        return None
+    return {
+        "success": True,
+        "name": skill_name,
+        "content": content,
+        "description": "Elevate-native compatibility instructions for a CortextOS loop concept.",
+        "_elevate_native": True,
+    }
+
+
+def _load_cron_skill(skill_view, skill_name: str) -> tuple[dict | None, str | None, str | None]:
+    """Load a skill for cron prompt assembly.
+
+    Returns ``(payload, usage_name, error)``. Known CortextOS loop concepts are
+    translated directly into short Elevate-native compatibility instructions.
+    """
+    native = _cortext_native_cron_skill(skill_name)
+    if native:
+        logger.debug(
+            "Cron job skill '%s' resolved through Elevate-native Cortext compatibility",
+            skill_name,
+        )
+        return native, None, None
+
+    try:
+        loaded = json.loads(skill_view(skill_name))
+    except (json.JSONDecodeError, TypeError):
+        return None, None, "invalid_json"
+    if loaded.get("success"):
+        return loaded, skill_name, None
+
+    original_error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
+    key = _cortext_cron_skill_key(skill_name)
+    for alias in _CORTEXT_CRON_SKILL_ALIASES.get(key, ()):
+        try:
+            alias_loaded = json.loads(skill_view(alias))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if alias_loaded.get("success"):
+            return alias_loaded, alias, None
+
+    return loaded, None, str(original_error)
+
 # Hidden machine status marker the cron agent appends (see _build_job_prompt) so
 # the scheduler can pace re-runs even though the delivered message is now
 # human-friendly prose (no JSON / status codes). It is read for backoff, then
@@ -467,6 +609,145 @@ def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
     return value or None
 
 
+def _job_agent_id(job: dict) -> str:
+    """Return the agent id attached to a cron/heartbeat job, if any."""
+
+    for key in ("agent", "agentId", "agent_id"):
+        value = str(job.get(key) or "").strip()
+        if value:
+            return value
+    metadata = job.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("agent", "agentId", "agent_id"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+_HEARTBEAT_ORIGIN_TYPES = {"heartbeat", "surface-heartbeat", "cortext-native-loop"}
+
+
+def _job_mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _normalize_heartbeat_report_mode(value: object) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"notify", "notifying", "always", "always-notify", "every-run", "report"}:
+        return "notify"
+    if raw in {"quiet", "silent", "changes", "change-only", "important", "important-only"}:
+        return "quiet"
+    return ""
+
+
+def _is_heartbeat_job(job: dict) -> bool:
+    origin = _job_mapping(job.get("origin"))
+    if str(origin.get("type") or "").strip() in _HEARTBEAT_ORIGIN_TYPES:
+        return True
+    metadata = _job_mapping(job.get("metadata"))
+    return any(
+        key in metadata
+        for key in ("heartbeat_report_mode", "report_mode", "notification_mode", "heartbeat_notification_mode")
+    )
+
+
+def _heartbeat_report_mode(job: dict) -> str:
+    for source in (_job_mapping(job.get("metadata")), _job_mapping(job.get("origin")), job):
+        for key in ("heartbeat_report_mode", "report_mode", "notification_mode", "heartbeat_notification_mode"):
+            mode = _normalize_heartbeat_report_mode(source.get(key))
+            if mode:
+                return mode
+    return "quiet" if _is_heartbeat_job(job) else ""
+
+
+def _heartbeat_report_mode_hint(job: dict) -> str:
+    if not _is_heartbeat_job(job):
+        return ""
+    mode = _heartbeat_report_mode(job)
+    if mode == "notify":
+        return (
+            "HEARTBEAT REPORT MODE: Every run. This is a CortextOS-style heartbeat: "
+            "run the configured checks, update useful state, and always produce a concise "
+            "human-visible final report, even if the report is only that everything is quiet. "
+            "This overrides the general SILENT fallback above; for this heartbeat, do not use "
+            "[SILENT] on a successful run.\n\n"
+        )
+    return (
+        "HEARTBEAT REPORT MODE: Only important changes. This is a CortextOS-style heartbeat: "
+        "run the configured checks, update useful state, and notify only when there are new "
+        "blockers, approvals, stale agents, tasks, failures, or meaningful changes. If nothing "
+        "needs attention, respond with exactly [SILENT] so the run is saved without sending a "
+        "notification.\n\n"
+    )
+
+
+def _canonical_agent_id(agent_id: str) -> str:
+    try:
+        from gateway.agent_lanes import normalize_agent_id
+
+        normalized = normalize_agent_id(agent_id)
+    except Exception:
+        normalized = str(agent_id or "").strip().lower().replace("_", "-")
+    if normalized in {"orchestrator", "executive", "executive-assistant"}:
+        return "executive-assistant"
+    return normalized
+
+
+def _resolve_agent_telegram_target(agent_id: str, *, allow_shared_bot: bool = False) -> Optional[dict]:
+    """Resolve an agent-owned Telegram target.
+
+    Non-executive agents only count as ready when they have their own bot token
+    and target. The executive-assistant is the orchestrator fallback and may use
+    the shared Telegram bot/home channel.
+    """
+
+    normalized_agent_id = _canonical_agent_id(agent_id)
+    if not normalized_agent_id:
+        return None
+    try:
+        from gateway.agent_lanes import (
+            agent_telegram_bot_token,
+            agent_telegram_delivery_target,
+            agent_telegram_uses_shared_bot,
+            parse_telegram_target,
+        )
+    except Exception:
+        return None
+
+    target_ref = agent_telegram_delivery_target(normalized_agent_id, default="")
+    chat_id, thread_id = parse_telegram_target(target_ref)
+    if not chat_id:
+        return None
+
+    if normalized_agent_id != "executive-assistant":
+        token = agent_telegram_bot_token(normalized_agent_id)
+        if not token:
+            return None
+        if agent_telegram_uses_shared_bot(normalized_agent_id) and not allow_shared_bot:
+            return None
+
+    return {
+        "platform": "telegram",
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "agent_id": normalized_agent_id,
+    }
+
+
+def _resolve_agent_scoped_telegram_target(job: dict) -> Optional[dict]:
+    selected_agent_id = _job_agent_id(job)
+    if not selected_agent_id:
+        return None
+
+    target = _resolve_agent_telegram_target(selected_agent_id)
+    if target:
+        return target
+
+    # Orchestrator and executive-assistant are the same bot/lane in Elevate.
+    return _resolve_agent_telegram_target("executive-assistant", allow_shared_bot=True)
+
+
 def _iter_home_target_platforms():
     """Iterate built-in + plugin platform names that expose a home channel.
 
@@ -560,6 +841,10 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
     if not _is_known_delivery_platform(platform_name):
         return None
+    if platform_name.lower() == "telegram":
+        target = _resolve_agent_scoped_telegram_target(job)
+        if target:
+            return target
     chat_id = _get_home_target_chat_id(platform_name)
     if not chat_id:
         return None
@@ -777,6 +1062,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         platform_name = target["platform"]
         chat_id = target["chat_id"]
         thread_id = target.get("thread_id")
+        target_agent_id = target.get("agent_id")
 
         # Diagnostic: log thread_id for topic-aware delivery debugging
         origin = _resolve_origin(job) or {}
@@ -815,7 +1101,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+            send_metadata = {}
+            if thread_id:
+                send_metadata["thread_id"] = thread_id
+            if target_agent_id:
+                send_metadata["agent_id"] = target_agent_id
+            send_metadata = send_metadata or None
             try:
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
@@ -878,7 +1169,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
         if not delivered:
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
-            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+            send_kwargs = {
+                "thread_id": thread_id,
+                "media_files": media_files,
+            }
+            if target_agent_id:
+                send_kwargs["agent_id"] = target_agent_id
+            coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, **send_kwargs)
             try:
                 result = asyncio.run(coro)
             except RuntimeError:
@@ -888,7 +1185,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # fresh thread that has no running loop.
                 coro.close()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                    future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, **send_kwargs))
                     result = future.result(timeout=30)
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
@@ -1216,7 +1513,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
-    prompt = cron_hint + prompt
+    prompt = cron_hint + _heartbeat_report_mode_hint(job) + prompt
     if skills is None:
         legacy = job.get("skill")
         skills = [legacy] if legacy else []
@@ -1224,6 +1521,24 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         skills = [skills]
 
     skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    agent_id = _job_agent_id(job)
+    if agent_id:
+        try:
+            from elevate_cli.agent_hub import agent_effective_skills, agent_run_context
+
+            skill_names = agent_effective_skills(agent_id, skill_names)
+            agent_context = agent_run_context(agent_id)
+        except Exception:
+            logger.debug(
+                "Cron job '%s': failed to resolve Agent Hub skills for %s",
+                job.get("name", job.get("id")),
+                agent_id,
+                exc_info=True,
+            )
+            agent_context = ""
+        if agent_context:
+            prompt = f"{agent_context}\n\n{prompt}"
+
     if not skill_names:
         return _scan_assembled_cron_prompt(prompt, job)
 
@@ -1233,23 +1548,23 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     parts = []
     skipped: list[str] = []
     for skill_name in skill_names:
-        try:
-            loaded = json.loads(skill_view(skill_name))
-        except (json.JSONDecodeError, TypeError):
+        loaded, usage_name, load_error = _load_cron_skill(skill_view, skill_name)
+        if load_error == "invalid_json":
             logger.warning("Cron job '%s': skill '%s' returned invalid JSON, skipping", job.get("name", job.get("id")), skill_name)
             skipped.append(skill_name)
             continue
-        if not loaded.get("success"):
-            error = loaded.get("error") or f"Failed to load skill '{skill_name}'"
+        if not loaded or not loaded.get("success"):
+            error = load_error or f"Failed to load skill '{skill_name}'"
             logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
             skipped.append(skill_name)
             continue
 
         # Bump usage so the curator sees this skill as actively used.
-        try:
-            bump_use(skill_name)
-        except Exception:
-            logger.debug("Cron job: failed to bump skill usage for '%s'", skill_name, exc_info=True)
+        if usage_name:
+            try:
+                bump_use(usage_name)
+            except Exception:
+                logger.debug("Cron job: failed to bump skill usage for '%s'", usage_name, exc_info=True)
 
         content = str(loaded.get("content") or "").strip()
         if parts:

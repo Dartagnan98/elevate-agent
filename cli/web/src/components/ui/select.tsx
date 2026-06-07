@@ -161,15 +161,31 @@ export function SelectOption(_props: SelectOptionProps) {
   return null;
 }
 
+function optionLabel(children: React.ReactNode, fallback: string): string {
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+  if (Array.isArray(children)) {
+    const text = children.map((child) => optionLabel(child, "")).join("").trim();
+    return text || fallback;
+  }
+  return fallback;
+}
+
 function flattenChildren(children: React.ReactNode, out: SelectOptionData[]) {
   const arr = Array.isArray(children) ? children : [children];
   for (const child of arr) {
+    if (Array.isArray(child)) {
+      flattenChildren(child, out);
+      continue;
+    }
     if (!child || typeof child !== "object" || !("props" in child)) continue;
     const props = child.props as Record<string, unknown>;
     if (props.value !== undefined) {
+      const value = String(props.value);
       out.push({
-        value: String(props.value),
-        label: typeof props.children === "string" ? props.children : String(props.value),
+        value,
+        label: typeof props.label === "string" ? props.label : optionLabel(props.children as React.ReactNode, value),
       });
     } else if (props.children) {
       flattenChildren(props.children as React.ReactNode, out);
@@ -189,6 +205,7 @@ interface SelectProps {
 
 interface SelectOptionProps {
   value: string;
+  label?: string;
   children: React.ReactNode;
 }
 

@@ -22,6 +22,56 @@ type Item = {
   status?: string;
 };
 
+type RawItem = Omit<Item, "kind" | "agent" | "ts" | "title" | "detail" | "status"> & {
+  kind?: unknown;
+  agent?: unknown;
+  ts?: unknown;
+  title?: unknown;
+  detail?: unknown;
+  status?: unknown;
+};
+
+function displayText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => displayText(entry))
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const preferred =
+      record.summary ||
+      record.attention_summary ||
+      record.message ||
+      record.title ||
+      record.status ||
+      record.event ||
+      record.category;
+    if (preferred) return displayText(preferred);
+    try {
+      return JSON.stringify(record);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function normalizeItem(item: RawItem): Item {
+  return {
+    kind: displayText(item.kind) || "activity",
+    agent: displayText(item.agent) || "system",
+    ts: displayText(item.ts),
+    title: displayText(item.title) || "Agent activity",
+    detail: displayText(item.detail) || null,
+    status: displayText(item.status) || undefined,
+  };
+}
+
 function timeAgo(iso?: string | null): string {
   if (!iso) return "";
   const then = new Date(iso).getTime();
@@ -55,7 +105,7 @@ export default function ActivityPage() {
     if (refresh) setRefreshing(true);
     try {
       const resp = await api.getActivity({ limit: 150 });
-      setItems(resp.items || []);
+      setItems(((resp.items || []) as RawItem[]).map(normalizeItem));
       setError(null);
     } catch (e) {
       setError(String(e));

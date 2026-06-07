@@ -6163,6 +6163,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 list_profiles,
                 get_active_profile_name,
                 seed_profile_skills,
+                seed_profile_agent_hub,
             )
 
             active = get_active_profile_name()
@@ -6173,6 +6174,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 for p in other_profiles:
                     try:
                         r = seed_profile_skills(p.path, quiet=True)
+                        hub_r = seed_profile_agent_hub(p.path, quiet=True)
                         if r:
                             copied = len(r.get("copied", []))
                             updated = len(r.get("updated", []))
@@ -6187,6 +6189,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             status = ", ".join(parts) if parts else "up to date"
                         else:
                             status = "sync failed"
+                        if hub_r:
+                            created = len(hub_r.get("created") or [])
+                            repaired = len(hub_r.get("updated") or [])
+                            if created or repaired:
+                                status += f"; Agent Hub +{created}/repair {repaired}"
                         print(f"  {p.name}: {status}")
                     except Exception as pe:
                         print(f"  {p.name}: error ({pe})")
@@ -7020,6 +7027,13 @@ def cmd_dashboard(args):
         sync_skills(quiet=True)
     except Exception as exc:  # never block dashboard startup on a seed hiccup
         logger.debug("bundled skill seed (dashboard) failed: %s", exc)
+
+    try:
+        from elevate_cli.agent_hub import reconcile_agent_hub_defaults
+
+        reconcile_agent_hub_defaults()
+    except Exception as exc:  # never block dashboard startup on a seed hiccup
+        logger.debug("Agent Hub default seed (dashboard) failed: %s", exc)
 
     from elevate_cli.web_server import start_server
 

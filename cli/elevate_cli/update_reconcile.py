@@ -50,6 +50,33 @@ def _check_required_imports(report: dict[str, Any]) -> None:
     report["imports"] = imports
 
 
+def _sync_bundled_skills(report: dict[str, Any]) -> None:
+    from tools.skills_sync import sync_skills
+
+    result = sync_skills(quiet=True)
+    report["bundledSkills"] = {
+        "copied": len(result.get("copied") or []),
+        "updated": len(result.get("updated") or []),
+        "skipped": int(result.get("skipped") or 0),
+        "userModified": len(result.get("user_modified") or []),
+        "cleaned": len(result.get("cleaned") or []),
+        "totalBundled": int(result.get("total_bundled") or 0),
+    }
+
+
+def _seed_agent_hub_defaults(report: dict[str, Any]) -> None:
+    from elevate_cli.agent_hub import reconcile_agent_hub_defaults
+
+    result = reconcile_agent_hub_defaults()
+    report["agentHub"] = {
+        "changed": bool(result.get("changed")),
+        "created": list(result.get("created") or []),
+        "updated": len(result.get("updated") or []),
+        "count": int(result.get("count") or 0),
+        "defaultAgent": result.get("defaultAgent") or "executive-assistant",
+    }
+
+
 def _seed_operational_defaults(report: dict[str, Any]) -> None:
     from elevate_cli.data import connect
     from elevate_cli.data.dispatch import ensure_default_admin_actions
@@ -134,12 +161,24 @@ def reconcile() -> dict[str, Any]:
         "ok": True,
         "python": sys.executable,
         "imports": {},
+        "bundledSkills": None,
+        "agentHub": None,
         "adminActions": None,
         "systemJobs": None,
         "errors": [],
     }
 
     _check_required_imports(report)
+
+    try:
+        _sync_bundled_skills(report)
+    except Exception as exc:  # pragma: no cover - update guardrail
+        _record_error(report, "bundled skills", exc)
+
+    try:
+        _seed_agent_hub_defaults(report)
+    except Exception as exc:  # pragma: no cover - update guardrail
+        _record_error(report, "agent hub defaults", exc)
 
     try:
         _seed_operational_defaults(report)
@@ -163,6 +202,28 @@ def _print_human(report: dict[str, Any]) -> None:
         print(f"  ! Missing runtime imports: {', '.join(missing)}")
     else:
         print("  OK Runtime imports available")
+
+    skills = report.get("bundledSkills")
+    if isinstance(skills, dict):
+        print(
+            "  OK Bundled skills: "
+            f"{skills.get('totalBundled', 0)} bundled "
+            f"(+{skills.get('copied', 0)}, "
+            f"updated {skills.get('updated', 0)}, "
+            f"{skills.get('userModified', 0)} user-modified kept)"
+        )
+
+    hub = report.get("agentHub")
+    if isinstance(hub, dict):
+        created = hub.get("created") or []
+        created_text = f", created {', '.join(created)}" if created else ""
+        print(
+            "  OK Agent Hub: "
+            f"{hub.get('count', 0)} agents, "
+            f"{hub.get('updated', 0)} repaired, "
+            f"default {hub.get('defaultAgent') or 'executive-assistant'}"
+            f"{created_text}"
+        )
 
     actions = report.get("adminActions")
     if isinstance(actions, dict):

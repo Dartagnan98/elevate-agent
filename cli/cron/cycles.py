@@ -200,7 +200,7 @@ def manage_cycle(surface: str, action: str, **opts: Any) -> Dict[str, Any]:
             "every_n_runs": every_n,
             "loop_interval": loop_interval,
             "approval_required": bool(opts.get("approval_required", False)),
-            "enabled": True,
+            "enabled": bool(opts.get("enabled", True)),
             "created_by": opts.get("created_by") or "agent",
             "created_at": _now_iso(),
         }

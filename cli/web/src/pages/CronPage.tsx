@@ -73,6 +73,86 @@ const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive"> = {
   completed: "destructive",
 };
 
+type JobKindFilter = "all" | "automations" | "heartbeats";
+type CreateJobKind = "automation" | "heartbeat";
+type ReportMode = "quiet" | "notify";
+
+const HEARTBEAT_ORIGIN_TYPES = new Set([
+  "heartbeat",
+  "surface-heartbeat",
+  "cortext-native-loop",
+]);
+
+const JOB_KIND_OPTIONS: Array<{ label: string; value: JobKindFilter }> = [
+  { label: "All", value: "all" },
+  { label: "Automations", value: "automations" },
+  { label: "Heartbeats", value: "heartbeats" },
+];
+
+const CREATE_KIND_OPTIONS: Array<{ label: string; value: CreateJobKind }> = [
+  { label: "Automation", value: "automation" },
+  { label: "Heartbeat", value: "heartbeat" },
+];
+
+const REPORT_MODE_OPTIONS: Array<{ label: string; value: ReportMode }> = [
+  { label: "Only important changes", value: "quiet" },
+  { label: "Every run", value: "notify" },
+];
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function cronOriginType(job: CronJob): string {
+  return String(job.origin?.type || "");
+}
+
+function isHeartbeatJob(job: CronJob): boolean {
+  return HEARTBEAT_ORIGIN_TYPES.has(cronOriginType(job));
+}
+
+function normalizeJobKindFilter(value: unknown): JobKindFilter {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "heartbeat" || raw === "heartbeats") return "heartbeats";
+  if (raw === "automation" || raw === "automations") return "automations";
+  return "all";
+}
+
+function normalizeReportMode(value: unknown): ReportMode {
+  const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  if (["notify", "notifying", "always", "always-notify", "every-run", "report"].includes(raw)) {
+    return "notify";
+  }
+  return "quiet";
+}
+
+function heartbeatReportMode(job: CronJob): ReportMode {
+  const metadata = asRecord(job.metadata);
+  const origin = asRecord(job.origin);
+  return normalizeReportMode(
+    metadata.heartbeat_report_mode ||
+      metadata.report_mode ||
+      metadata.notification_mode ||
+      origin.heartbeat_report_mode ||
+      origin.report_mode ||
+      origin.notification_mode ||
+      "quiet",
+  );
+}
+
+function withHeartbeatReportMode(
+  metadata: Record<string, unknown> | undefined,
+  mode: ReportMode,
+): Record<string, unknown> {
+  return { ...(metadata || {}), heartbeat_report_mode: mode };
+}
+
+function jobKindLabel(job: CronJob): string {
+  return isHeartbeatJob(job) ? "Heartbeat" : "Automation";
+}
+
 function notifyCronSidebarChanged(): void {
   if (typeof window === "undefined") return;
   const emit = () => window.dispatchEvent(new CustomEvent("elevate:cron-jobs-changed"));
@@ -408,6 +488,8 @@ function EditJobForm({
   const [prompt, setPrompt] = useState(job.prompt ?? "");
   const [deliver, setDeliver] = useState(job.deliver ?? "local");
   const [agent, setAgent] = useState(job.agent ?? "");
+  const isHeartbeat = isHeartbeatJob(job);
+  const [reportMode, setReportMode] = useState<ReportMode>(heartbeatReportMode(job));
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>(initial.mode);
   const [time, setTime] = useState(initial.time);
   const [dayOfWeek, setDayOfWeek] = useState(initial.dayOfWeek);
@@ -433,13 +515,17 @@ function EditJobForm({
     }
     setSaving(true);
     try {
-      await api.updateCronJob(job.id, {
+      const updates: Record<string, unknown> = {
         name: name.trim(),
         prompt: prompt.trim(),
         schedule: schedule.expression.trim(),
         deliver,
         agent: agent || null,
-      });
+      };
+      if (isHeartbeat) {
+        updates.metadata = withHeartbeatReportMode(asRecord(job.metadata), reportMode);
+      }
+      await api.updateCronJob(job.id, updates);
       showToast(`Saved "${name.trim() || prompt.trim().slice(0, 30)}"`, "success");
       onSaved();
     } catch (e) {
@@ -451,6 +537,23 @@ function EditJobForm({
 
   return (
     <div className="grid gap-4">
+      {isHeartbeat && (
+        <div className="grid gap-2">
+          <Label htmlFor={`edit-${job.id}-report-mode`}>Report mode</Label>
+          <Select
+            id={`edit-${job.id}-report-mode`}
+            value={reportMode}
+            onValueChange={(v) => setReportMode(normalizeReportMode(v))}
+          >
+            {REPORT_MODE_OPTIONS.map((option) => (
+              <SelectOption key={option.value} value={option.value}>
+                {option.label}
+              </SelectOption>
+            ))}
+          </Select>
+        </div>
+      )}
+
       <div className="grid gap-2">
         <Label htmlFor={`edit-${job.id}-name`}>{t.cron.nameOptional}</Label>
         <Input
@@ -541,10 +644,12 @@ function EditJobForm({
 
 function NewJobForm({
   agents,
+  defaultKind,
   onCancel,
   onCreated,
 }: {
   agents: AgentHubAgent[];
+  defaultKind: CreateJobKind;
   onCancel: () => void;
   onCreated: () => void;
 }) {
@@ -559,7 +664,13 @@ function NewJobForm({
   const [name, setName] = useState("");
   const [deliver, setDeliver] = useState("local");
   const [agent, setAgent] = useState("");
+  const [kind, setKind] = useState<CreateJobKind>(defaultKind);
+  const [reportMode, setReportMode] = useState<ReportMode>("quiet");
   const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    setKind(defaultKind);
+  }, [defaultKind]);
 
   const schedule = useMemo(
     () =>
@@ -586,6 +697,14 @@ function NewJobForm({
         name: name.trim() || undefined,
         deliver,
         agent: agent || undefined,
+        metadata:
+          kind === "heartbeat"
+            ? withHeartbeatReportMode(undefined, reportMode)
+            : undefined,
+        origin:
+          kind === "heartbeat"
+            ? { type: "heartbeat", source: "automations-page" }
+            : undefined,
       });
       showToast(t.common.create + " ✓", "success");
       onCreated();
@@ -598,6 +717,39 @@ function NewJobForm({
 
   return (
     <div className="grid gap-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="grid gap-2">
+          <Label htmlFor="cron-kind">Type</Label>
+          <Select
+            id="cron-kind"
+            value={kind}
+            onValueChange={(v) => setKind(v === "heartbeat" ? "heartbeat" : "automation")}
+          >
+            {CREATE_KIND_OPTIONS.map((option) => (
+              <SelectOption key={option.value} value={option.value}>
+                {option.label}
+              </SelectOption>
+            ))}
+          </Select>
+        </div>
+        {kind === "heartbeat" && (
+          <div className="grid gap-2">
+            <Label htmlFor="cron-report-mode">Report mode</Label>
+            <Select
+              id="cron-report-mode"
+              value={reportMode}
+              onValueChange={(v) => setReportMode(normalizeReportMode(v))}
+            >
+              {REPORT_MODE_OPTIONS.map((option) => (
+                <SelectOption key={option.value} value={option.value}>
+                  {option.label}
+                </SelectOption>
+              ))}
+            </Select>
+          </div>
+        )}
+      </div>
+
       <div className="grid gap-2">
         <Label htmlFor="cron-name">{t.cron.nameOptional}</Label>
         <Input
@@ -736,6 +888,9 @@ function JobRailRow({
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/80">
             <Clock className="h-2.5 w-2.5" />
             <span className="truncate">{job.schedule_display}</span>
+            <span className="shrink-0 rounded border border-border px-1 text-[9px] uppercase tracking-wide">
+              {jobKindLabel(job)}
+            </span>
           </div>
         </div>
         {isError && (
@@ -773,6 +928,8 @@ function JobDetail({
 }) {
   const { t } = useI18n();
   const isPaused = job.state === "paused";
+  const isHeartbeat = isHeartbeatJob(job);
+  const reportMode = heartbeatReportMode(job);
 
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">
@@ -788,6 +945,12 @@ function JobDetail({
               <Badge variant={STATUS_VARIANT[job.state] ?? "secondary"}>
                 {job.state}
               </Badge>
+              <Badge variant="outline">{jobKindLabel(job)}</Badge>
+              {isHeartbeat && (
+                <Badge variant="secondary">
+                  {reportMode === "notify" ? "Every run" : "Important changes"}
+                </Badge>
+              )}
               {job.deliver && job.deliver !== "local" && (
                 <Badge variant="outline">{job.deliver}</Badge>
               )}
@@ -874,6 +1037,18 @@ function JobDetail({
                 value={formatTime(job.next_run_at)}
                 hint={
                   job.next_run_at ? formatRelative(job.next_run_at) : undefined
+                }
+              />
+              <MetaCell
+                icon={<Send className="h-3 w-3" />}
+                label="Type"
+                value={jobKindLabel(job)}
+                hint={
+                  isHeartbeat
+                    ? reportMode === "notify"
+                      ? "reports every run"
+                      : "quiet unless useful"
+                    : undefined
                 }
               />
               <MetaCell
@@ -965,6 +1140,7 @@ export default function CronPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const editParam = searchParams.get("edit");
   const agentParam = searchParams.get("agent") ?? "";
+  const kindFilter = normalizeJobKindFilter(searchParams.get("kind"));
   const [selectedId, setSelectedId] = useState<string | null>(editParam);
   const [editingId, setEditingId] = useState<string | null>(editParam);
   const [showCreate, setShowCreate] = useState(false);
@@ -1054,6 +1230,8 @@ export default function CronPage() {
   const filteredJobs = useMemo(() => {
     const cleanAgent = agentFilter.trim();
     return jobs.filter((job) => {
+      if (kindFilter === "heartbeats" && !isHeartbeatJob(job)) return false;
+      if (kindFilter === "automations" && isHeartbeatJob(job)) return false;
       if (cleanAgent && (job.agent ?? "") !== cleanAgent) return false;
       if (!lowerSearch) return true;
       return (
@@ -1063,7 +1241,7 @@ export default function CronPage() {
         job.schedule_display.toLowerCase().includes(lowerSearch)
       );
     });
-  }, [agentFilter, jobs, lowerSearch]);
+  }, [agentFilter, jobs, kindFilter, lowerSearch]);
 
   useEffect(() => {
     if (filteredJobs.length === 0) {
@@ -1091,7 +1269,15 @@ export default function CronPage() {
   );
 
   /* ---- Page header (count + search + new) ---- */
-  const enabledCount = jobs.filter((j) => j.state !== "paused").length;
+  const enabledCount = filteredJobs.filter((j) => j.state !== "paused").length;
+  const heartbeatCount = jobs.filter(isHeartbeatJob).length;
+  const automationCount = jobs.length - heartbeatCount;
+  const emptyJobsMessage =
+    kindFilter === "heartbeats"
+      ? "No heartbeats yet. Create one here, or switch to All."
+      : kindFilter === "automations"
+        ? "No automations yet. Create one here, or switch to All."
+        : t.cron.noJobs;
   const updateAgentFilter = useCallback(
     (nextAgent: string) => {
       setAgentFilter(nextAgent);
@@ -1100,6 +1286,20 @@ export default function CronPage() {
           const next = new URLSearchParams(prev);
           if (nextAgent) next.set("agent", nextAgent);
           else next.delete("agent");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const updateKindFilter = useCallback(
+    (nextKind: JobKindFilter) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (nextKind === "all") next.delete("kind");
+          else next.set("kind", nextKind);
           return next;
         },
         { replace: true },
@@ -1116,11 +1316,12 @@ export default function CronPage() {
     }
     setAfterTitle(
       <span className="whitespace-nowrap text-xs text-muted-foreground">
-        {enabledCount}/{jobs.length} active
+        {enabledCount}/{filteredJobs.length} active · {automationCount} automations ·{" "}
+        {heartbeatCount} heartbeats
       </span>,
     );
     setEnd(
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <Select value={agentFilter} onValueChange={updateAgentFilter}>
           <SelectOption value="">All agents</SelectOption>
           {agents.map((agent) => (
@@ -1178,8 +1379,10 @@ export default function CronPage() {
   }, [
     agentFilter,
     agents,
+    automationCount,
     enabledCount,
-    jobs.length,
+    filteredJobs.length,
+    heartbeatCount,
     loading,
     search,
     setAfterTitle,
@@ -1280,6 +1483,23 @@ export default function CronPage() {
         loading={jobDelete.isDeleting}
       />
 
+      <div className="flex flex-col gap-2 rounded-md border border-border bg-card/50 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 text-[11px] text-muted-foreground">
+          <span className="font-medium text-foreground">Scheduled runs</span>
+          <span className="mx-2 text-muted-foreground/50">·</span>
+          <span>{automationCount} automations</span>
+          <span className="mx-2 text-muted-foreground/50">·</span>
+          <span>{heartbeatCount} heartbeats</span>
+        </div>
+        <Segmented
+          className="w-fit rounded-md bg-card p-1"
+          onChange={(value) => updateKindFilter(normalizeJobKindFilter(value))}
+          options={JOB_KIND_OPTIONS}
+          size="sm"
+          value={kindFilter}
+        />
+      </div>
+
       {attention && attention.total > 0 && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-4 py-3 text-xs">
           <div className="mb-2 flex items-center gap-2 font-medium text-amber-700 dark:text-amber-300">
@@ -1338,7 +1558,7 @@ export default function CronPage() {
             <div className="flex items-center gap-2 text-[11px] font-medium tracking-normal text-muted-foreground">
               <Clock className="h-3 w-3" />
               <span>{t.cron.scheduledJobs}</span>
-              <span className="text-muted-foreground/60">({jobs.length})</span>
+              <span className="text-muted-foreground/60">({filteredJobs.length})</span>
             </div>
           </div>
 
@@ -1383,7 +1603,7 @@ export default function CronPage() {
 
             {filteredJobs.length === 0 && (
               <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
-                {lowerSearch ? "No jobs match your search." : t.cron.noJobs}
+                {lowerSearch ? "No jobs match your search." : emptyJobsMessage}
               </p>
             )}
           </div>
@@ -1417,6 +1637,7 @@ export default function CronPage() {
               <div className="px-5 py-5">
                 <NewJobForm
                   agents={agents}
+                  defaultKind={kindFilter === "heartbeats" ? "heartbeat" : "automation"}
                   onCancel={() => setShowCreate(false)}
                   onCreated={() => {
                     setShowCreate(false);
@@ -1451,8 +1672,8 @@ export default function CronPage() {
           ) : (
             <div className="flex flex-1 items-center justify-center px-6 py-12">
               <p className="text-xs text-muted-foreground">
-                {jobs.length === 0
-                  ? "No cron jobs yet. Use + New cron job to create one."
+                {filteredJobs.length === 0
+                  ? emptyJobsMessage
                   : "Select a job from the rail to view its details."}
               </p>
             </div>

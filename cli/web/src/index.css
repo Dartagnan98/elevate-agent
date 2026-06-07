@@ -772,6 +772,14 @@ html .font-courier {
   flex-shrink: 0;
 }
 
+.nav-row-more {
+  width: calc(100% - 12px);
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
 .nav-row > span:not(.nav-badge) {
   flex: 1;
   min-width: 0;

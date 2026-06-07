@@ -25,8 +25,8 @@ Your prompt gives you:
 You are itself an autoresearch cycle. Your `config.json`:
 ```json
 {"metric":"system_effectiveness","metric_type":"qualitative_compound","direction":"higher",
- "schedule":"0 2 * * *","auto_create_agent_cycles":false,"auto_modify_agent_cycles":false,
- "approval_required":true}
+ "schedule":"0 2 * * *","auto_create_agent_cycles":true,"auto_modify_agent_cycles":true,
+ "approval_required":false}
 ```
 `auto_create_agent_cycles` / `auto_modify_agent_cycles` gate whether you APPLY cycle changes
 directly or only PROPOSE them for dashboard approval. Approvals are dashboard-only.
@@ -34,21 +34,24 @@ directly or only PROPOSE them for dashboard approval. Approvals are dashboard-on
 **You change cycles, never realtor data.** Drafts/recommendations only, same as every surface.
 
 ## How to read + write the fleet
-- **Read** the fleet in one shot from the local dashboard:
-  `GET ${ELEVATE_DASHBOARD_URL:-http://127.0.0.1:9120}/api/heartbeats/experiments`
-  → `{surfaces:[{surface, cycles, experiments, learnings, stats}], summary}`. If the dashboard
-  isn't reachable, read the files directly under `../heartbeats/<surface>/`
-  (`config.json` cycles, `experiments/history/*.json`, `learnings.md`).
-- **Write** cycle changes through the cycle endpoints (they validate + persist):
-  - create: `POST …/api/heartbeats/surfaces/<surface>/cycles` `{name, metric, metric_type, direction, window, every_n_runs, measurement}`
-  - modify: `PATCH …/api/heartbeats/surfaces/<surface>/cycles/<name>` `{enabled:false, …}` (set `enabled:false` to PAUSE a cycle)
-  - remove: `DELETE …/api/heartbeats/surfaces/<surface>/cycles/<name>`
+- **Read** each surface through the native `agent_bus` actions. Use `list_cycles` for the
+  configured cycles and `gather_experiment_context` or `list_experiments` for recent runs,
+  decisions, learnings, and keep/discard history. If the bus is unavailable, read files directly
+  under `../heartbeats/<surface>/` (`config.json` cycles, `experiments/history/*.json`,
+  `learnings.md`).
+- **Write** cycle changes through the native `agent_bus` cycle actions. They validate and persist
+  into the same heartbeat `config.json` that the dashboard edits:
+  - create: `create_cycle` with `{surface, name, metric, metric_type, direction, window, every_n_runs, measurement, approval_required}`
+  - modify: `modify_cycle` with `{surface, name, enabled:false, ...}` (set `enabled:false` to PAUSE a cycle)
+  - remove: `remove_cycle` with `{surface, name}`
+- Dashboard HTTP endpoints are for the UI. Do not depend on a dashboard session token during your
+  cron run.
 
 ## The loop — 8 phases
 
 ### 1. Scan every surface
-From `/api/heartbeats/experiments` (or the files): for each surface collect its cycles, its
-recent experiment history (decisions in order), its keep rate, and its learnings.
+For each heartbeat surface, collect its cycles, recent experiment history (decisions in order),
+keep rate, and learnings through `agent_bus`.
 
 ### 2. Gather context per surface
 For each surface, build the picture: how long since its last experiment ran? what were the last
@@ -74,7 +77,7 @@ touch. Examples:
 ### 5. Apply or propose (gated)
 For each intended change:
 - If the matching gate is ON (`auto_create_agent_cycles` for creates, `auto_modify_agent_cycles`
-  for modifies/removes): APPLY it via the cycle endpoint above.
+  for modifies/removes): APPLY it via the native `agent_bus` cycle action above.
 - If the gate is OFF: do NOT apply. Write a proposal to `reviews/<UTC-ISO>-proposals.json`
   (`[{surface, action, cycle, rationale}]`) for the realtor to approve on the dashboard.
 
