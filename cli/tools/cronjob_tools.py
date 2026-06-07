@@ -40,15 +40,29 @@ from cron.jobs import (
 # run in fresh sessions with full tool access.
 # ---------------------------------------------------------------------------
 
-_CRON_THREAT_PATTERNS = [
+# Prompt-injection / social-engineering TEXT. These are never legitimate in any
+# content — a prompt, a bundled skill, or injected context — so they are scanned
+# on the FULL assembled prompt (incl. loaded skill content) at runtime. This is
+# what actually plugs the #3968 "malicious skill carries an injection payload"
+# gap.
+_CRON_INJECTION_PATTERNS = [
     (r'ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions', "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
-    # Match a READ of a secret file, not a heredoc WRITE. `cat > foo.env << EOF`
-    # (scaffolding an .env — common in agent-setup skills) is not exfiltration;
-    # the negative lookahead `(?!>)` between `cat` and the filename excludes any
-    # `>`/`>>` redirect target, so only `cat <secret>` style reads still trip.
+]
+
+# Shell-command / exfil payloads. Legitimate FIRST-PARTY skills routinely contain
+# these — authenticated API curls (`curl -H "Authorization: token $GITHUB_TOKEN"`),
+# `.env` scaffolding (`cat > .env << EOF`), cleanup `rm`s — and are
+# indistinguishable from real exfil by regex. So these scan ONLY the
+# user-authored cron prompt (scope="full" at create/update), NOT bundled skill
+# content, where they false-block every API skill. Skill safety is enforced at
+# tool-approval + skill vetting, not by regex-scanning skill docs.
+#
+# `read_secrets`: the negative lookahead `(?!>)` excludes `cat > foo.env`
+# (a heredoc WRITE) so only `cat <secret>` style reads trip.
+_CRON_COMMAND_PATTERNS = [
     (r'cat\s+(?:(?!>)[^\n])*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
@@ -118,8 +132,34 @@ def _strip_legitimate_emoji_zwj(prompt: str) -> str:
     return ''.join(cleaned)
 
 
-def _scan_cron_prompt(prompt: str) -> str:
-    """Scan a cron prompt for critical threats. Returns error string if blocked, else empty."""
+def _scan_cron_prompt(prompt: str, *, scope: str = "full") -> str:
+    """Scan a cron prompt for critical threats. Returns error string if blocked, else empty.
+
+    ``scope="full"`` (default — the user-authored cron prompt at create/update):
+    scan invisible-unicode + prompt-injection text + shell-command/exfil payloads.
+
+    ``scope="assembled"`` (the fully-assembled runtime prompt = user prompt +
+    loaded skill content): scan ONLY invisible-unicode + prompt-injection text.
+    Bundled skills legitimately contain authenticated API curls, ``.env``
+    scaffolding and cleanup ``rm``s that are indistinguishable from exfil by
+    regex, so applying the command/exfil patterns here false-blocks every API
+    skill. Those payloads are already gated on the user prompt at create/update
+    (``scope="full"``), and runtime skill safety is enforced at tool-approval +
+    skill vetting — not by regex-scanning skill docs.
+    """
+    # Invisible-unicode + injection text are never legitimate anywhere → both scopes.
+    prompt_for_invisible_scan = _strip_legitimate_emoji_zwj(prompt)
+    for char in _CRON_INVISIBLE_CHARS:
+        if char in prompt_for_invisible_scan:
+            return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
+    for pattern, pid in _CRON_INJECTION_PATTERNS:
+        if re.search(pattern, prompt, re.IGNORECASE):
+            return f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection or exfiltration payloads."
+
+    if scope != "full":
+        return ""
+
+    # Shell-command / exfil payloads — user-authored prompt only.
     github_auth_header = re.search(
         rf'curl\s+[^\n]*(?:-H|--header)\s+["\']Authorization:\s*token\s+{_CRON_SECRET_VAR_RE}["\']'
         r'\s+["\']?https://api\.github\.com(?:/|\b)',
@@ -131,11 +171,7 @@ def _scan_cron_prompt(prompt: str) -> str:
         # Allow the bundled GitHub skill fallback shape without opening a
         # blanket exemption for arbitrary Authorization-header exfiltration.
         prompt_to_scan = prompt.replace(github_auth_header.group(0), "curl https://api.github.com/user")
-    prompt_for_invisible_scan = _strip_legitimate_emoji_zwj(prompt_to_scan)
-    for char in _CRON_INVISIBLE_CHARS:
-        if char in prompt_for_invisible_scan:
-            return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
-    for pattern, pid in _CRON_THREAT_PATTERNS:
+    for pattern, pid in _CRON_COMMAND_PATTERNS:
         if re.search(pattern, prompt_to_scan, re.IGNORECASE):
             return f"Blocked: prompt matches threat pattern '{pid}'. Cron prompts must not contain injection or exfiltration payloads."
     for pattern, pid in _CRON_EXFIL_COMMAND_PATTERNS:

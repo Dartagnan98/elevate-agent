@@ -1604,7 +1604,11 @@ def _scan_assembled_cron_prompt(assembled: str, job: dict) -> str:
     """
     from tools.cronjob_tools import _scan_cron_prompt
 
-    scan_error = _scan_cron_prompt(assembled)
+    # scope="assembled": the assembled prompt includes loaded skill content,
+    # which legitimately contains shell/API commands. Scan it for prompt-
+    # injection text + invisible unicode only — the command/exfil payloads are
+    # already gated on the user-authored prompt at create/update.
+    scan_error = _scan_cron_prompt(assembled, scope="assembled")
     if scan_error:
         job_label = job.get("name") or job.get("id") or "<unknown>"
         logger.warning(
