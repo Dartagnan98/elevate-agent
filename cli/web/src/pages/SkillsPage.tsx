@@ -31,6 +31,8 @@ import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { RouteSkeleton } from "@/components/route-skeletons";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Markdown } from "@/components/Markdown";
 import { useI18n } from "@/i18n";
@@ -587,11 +589,7 @@ export default function SkillsPage() {
 
   /* ---- Loading ---- */
   if (loading) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">
-        Loading skills…
-      </p>
-    );
+    return <RouteSkeleton path="/skills" />;
   }
 
   return (
@@ -790,8 +788,9 @@ function TreeSection(props: TreeSectionProps) {
                 {isExpanded && (
                   <div className="ml-6 mt-0.5 mb-1 border-l border-border/60 pl-2">
                     {isLoadingTree && !tree && (
-                      <div className="py-1 text-[10px] text-muted-foreground">
-                        Loading…
+                      <div className="space-y-1 py-1">
+                        <Skeleton className="h-3 w-32" />
+                        <Skeleton className="h-3 w-24" />
                       </div>
                     )}
                     {tree && tree.length === 0 && (
@@ -1091,7 +1090,12 @@ function SkillDetail({
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-5 py-4">
         {fileLoading ? (
-          <p className="text-xs text-muted-foreground">Loading…</p>
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-5/6" />
+            <Skeleton className="h-4 w-3/4" />
+          </div>
         ) : viewMode === "render" ? (
           <div className="rounded-md border border-border bg-card/40 p-4">
             <Markdown content={stripFrontmatter(fileContent)} />

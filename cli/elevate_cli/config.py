@@ -695,6 +695,22 @@ DEFAULT_CONFIG = {
         "cache_ttl": "5m",
     },
 
+    # Gateway/desktop pre-turn guardrails. These run before an expensive model
+    # turn starts and fail open if the local ledger is unavailable.
+    "guardrails": {
+        "enabled": True,
+        "rate_limit": {
+            "enabled": True,
+            "max_messages": 20,
+            "window_seconds": 60,
+        },
+        "usage": {
+            "enabled": True,
+            "daily_token_cap": 2_000_000,
+            "window_seconds": 24 * 60 * 60,
+        },
+    },
+
     # AWS Bedrock provider configuration.
     # Only used when model.provider is "bedrock".
     "bedrock": {

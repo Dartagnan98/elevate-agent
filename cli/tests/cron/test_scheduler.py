@@ -853,6 +853,29 @@ class TestDeliverResultErrorReturns:
 
 
 class TestRunJobSessionPersistence:
+    def test_run_job_skips_disabled_agent_before_session_start(self, tmp_path):
+        job = {
+            "id": "disabled-agent-job",
+            "name": "Disabled Agent Job",
+            "prompt": "hello",
+            "agent": "admin",
+            "schedule_display": "Every hour",
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._agent_run_allowed", return_value=(False, "Agent admin is disabled")), \
+             patch("elevate_state.SessionDB") as session_db_cls, \
+             patch("run_agent.AIAgent") as agent_cls:
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == SILENT_MARKER
+        assert "**Status:** skipped" in output
+        assert "Agent admin is disabled" in output
+        session_db_cls.assert_not_called()
+        agent_cls.assert_not_called()
+
     def test_run_job_passes_session_db_and_cron_platform(self, tmp_path):
         job = {
             "id": "test-job",

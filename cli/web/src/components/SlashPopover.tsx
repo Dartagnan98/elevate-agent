@@ -479,7 +479,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     const slashCommandsCacheRef = useRef<{ items: CompletionItem[]; replaceFrom: number } | null>(null);
 
     useEffect(() => {
-      if (!trigger || catalogLoadedRef.current) return;
+      if (!trigger || trigger.mode !== "mention" || catalogLoadedRef.current) return;
       catalogLoadedRef.current = true;
       void Promise.allSettled([
         api.getSkills(),
@@ -533,12 +533,17 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       // the background.
       if (trigger.mode === "slash") {
         const query = slashCommandQuery(trigger.text);
+        if (query === null) {
+          setItems([]);
+          setSelected(0);
+          return;
+        }
         const renderSlash = (rawItems: CompletionItem[], replaceFrom: number) => {
           setSlashReplaceFrom(replaceFrom);
           const skillsByCommand = skillCommandMap(catalog);
           const commandItems = (rawItems ?? [])
             .map((item) => normalizeSlashItem(item, skillsByCommand))
-            .filter((item) => query === null || matchesSlash(item, query));
+            .filter((item) => matchesSlash(item, query));
           const skillItems = slashSkillItems(catalog, query);
           const hasSkillMatches =
             skillItems.length > 0 || commandItems.some((item) => item.kind === "skill");
@@ -620,17 +625,35 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       return () => window.clearTimeout(timer);
     }, [agents, catalog, gw, trigger]);
 
-    const visible = Boolean(trigger && items.length > 0);
+    const visibleItems = useMemo(() => {
+      if (!trigger) return [];
+      if (trigger.mode !== "slash") return items;
+      const query = slashCommandQuery(trigger.text);
+      if (query === null) return [];
+      return items.filter((item) => matchesSlash(item, query));
+    }, [items, trigger]);
+    const visible = Boolean(trigger && visibleItems.length > 0);
+
+    useEffect(() => {
+      if (visibleItems.length > 0 && selected >= visibleItems.length) {
+        setSelected(visibleItems.length - 1);
+      }
+    }, [selected, visibleItems.length]);
 
     const inputForItem = useCallback(
-      (item: PickerItem): { nextCaret: number; nextInput: string } | null => {
-        if (!trigger) return null;
+      (
+        item: PickerItem,
+        context?: { sourceInput?: string; sourceTrigger?: Trigger },
+      ): { nextCaret: number; nextInput: string } | null => {
+        const activeInput = context?.sourceInput ?? input;
+        const activeTrigger = context?.sourceTrigger ?? trigger;
+        if (!activeTrigger) return null;
 
-        let replaceStart = trigger.start;
+        let replaceStart = activeTrigger.start;
         let replacement = item.insertText ?? item.text;
 
-        if (trigger.mode === "slash") {
-          replaceStart = trigger.start + slashReplaceFrom;
+        if (activeTrigger.mode === "slash") {
+          replaceStart = activeTrigger.start + slashReplaceFrom;
           replacement = replacement.replace(/^\//, "");
         }
 
@@ -638,7 +661,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           replacement = replacement.endsWith(" ") ? replacement : `${replacement} `;
         }
 
-        const nextInput = `${input.slice(0, replaceStart)}${replacement}${input.slice(trigger.end)}`;
+        const nextInput = `${activeInput.slice(0, replaceStart)}${replacement}${activeInput.slice(activeTrigger.end)}`;
         return {
           nextCaret: replaceStart + replacement.length,
           nextInput,
@@ -665,33 +688,55 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
       ref,
       () => ({
         handleKey: (event) => {
-          if (!visible) return false;
+          const liveInput = event.currentTarget.value;
+          const liveCaret = event.currentTarget.selectionStart ?? liveInput.length;
+          const liveTrigger = detectTrigger(liveInput, liveCaret);
+          const activeTrigger = liveTrigger ?? trigger;
+          const activeVisibleItems =
+            activeTrigger?.mode === "slash"
+              ? (() => {
+                  const query = slashCommandQuery(activeTrigger.text);
+                  return query === null ? [] : items.filter((item) => matchesSlash(item, query));
+                })()
+              : visibleItems;
+
+          if (!activeTrigger || activeVisibleItems.length === 0) return false;
 
           switch (event.key) {
             case "ArrowDown":
               event.preventDefault();
-              setSelected((value) => (value + 1) % items.length);
+              setSelected((value) => (value + 1) % activeVisibleItems.length);
               return true;
             case "ArrowUp":
               event.preventDefault();
-              setSelected((value) => (value - 1 + items.length) % items.length);
+              setSelected((value) => (value - 1 + activeVisibleItems.length) % activeVisibleItems.length);
               return true;
             case "Enter":
             case "Tab": {
               event.preventDefault();
-              const item = items[selected];
+              const item = activeVisibleItems[selected] ?? activeVisibleItems[0];
               if (item) {
-                const next = inputForItem(item);
+                const next = inputForItem(item, {
+                  sourceInput: liveInput,
+                  sourceTrigger: activeTrigger,
+                });
                 // Only fire on Enter when the typed text already IS the full
                 // command (user typed it out, no list-pick). Picking a skill
                 // from the list loads it (with a space for args) instead of
                 // firing it bare — matching the click behavior.
                 const shouldSubmit =
                   event.key === "Enter" &&
-                  trigger?.mode === "slash" &&
+                  activeTrigger.mode === "slash" &&
                   Boolean(onSubmit) &&
-                  next?.nextInput.trim() === input.trim();
-                apply(item, { submit: shouldSubmit });
+                  next?.nextInput.trim() === liveInput.trim();
+                if (next) {
+                  setItems([]);
+                  if (shouldSubmit && onSubmit) {
+                    onSubmit(next.nextInput);
+                  } else {
+                    onApply(next.nextInput, next.nextCaret);
+                  }
+                }
               }
               return true;
             }
@@ -704,7 +749,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
           }
         },
       }),
-      [apply, input, inputForItem, items, onSubmit, selected, trigger?.mode, visible],
+      [inputForItem, items, onApply, onSubmit, selected, trigger, visibleItems],
     );
 
     // Keep the keyboard-selected row inside the scrollable popover viewport.
@@ -719,7 +764,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     let lastGroup = "";
 
     const listboxId = "slash-popover-listbox";
-    const activeItemId = items[selected] ? `slash-item-${selected}` : undefined;
+    const activeItemId = visibleItems[selected] ? `slash-item-${selected}` : undefined;
 
     return (
       <div
@@ -728,7 +773,7 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
         id={listboxId}
         role="listbox"
       >
-        {items.map((item, index) => {
+        {visibleItems.map((item, index) => {
           const active = index === selected;
           const Icon = item.icon;
           const showGroup = item.group !== lastGroup;

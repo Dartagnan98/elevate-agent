@@ -34,5 +34,15 @@ export function Button({
   size,
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>) {
-  return <button className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+  const inferredTitle =
+    size === "icon" && !props.title && typeof props["aria-label"] === "string"
+      ? props["aria-label"]
+      : props.title;
+  return (
+    <button
+      className={cn(buttonVariants({ variant, size }), className)}
+      {...props}
+      title={inferredTitle}
+    />
+  );
 }

@@ -846,6 +846,7 @@ class AIAgent:
         chat_type: str = None,
         thread_id: str = None,
         gateway_session_key: str = None,
+        agent_id: str = None,
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
@@ -923,6 +924,27 @@ class AIAgent:
         self._chat_type = chat_type
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._agent_id = str(agent_id or "").strip()
+        if not self._agent_id:
+            try:
+                from gateway.session_context import get_session_env
+                self._agent_id = str(get_session_env("ELEVATE_SESSION_AGENT_ID", "") or "").strip()
+            except Exception:
+                self._agent_id = ""
+        if self._agent_id:
+            try:
+                from elevate_cli.agent_hub import get_agent_def
+
+                _hub_agent_def = get_agent_def(self._agent_id)
+                if isinstance(_hub_agent_def, dict) and _hub_agent_def.get("enabled") is False:
+                    raise RuntimeError(f"Agent {self._agent_id} is disabled")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+        self._agent_memory_policy: Dict[str, Any] = {}
+        self._agent_memory_recall_allowed = True
+        self._agent_memory_write_allowed = True
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1555,6 +1577,32 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+        try:
+            from agent.memory_manager import (
+                memory_policy_allows_recall,
+                memory_policy_allows_write,
+                normalize_agent_memory_policy,
+            )
+            _hub_memory_policy: Dict[str, Any] = {}
+            if self._agent_id:
+                try:
+                    from elevate_cli.agent_hub import get_agent_def
+                    _hub_agent = get_agent_def(self._agent_id)
+                    _hub_memory = _hub_agent.get("memory") if isinstance(_hub_agent, dict) else {}
+                    if isinstance(_hub_memory, dict):
+                        _hub_memory_policy = _hub_memory
+                except Exception:
+                    _hub_memory_policy = {}
+            self._agent_memory_policy = normalize_agent_memory_policy(
+                self._agent_id,
+                _hub_memory_policy,
+            )
+            self._agent_memory_recall_allowed = memory_policy_allows_recall(self._agent_memory_policy)
+            self._agent_memory_write_allowed = memory_policy_allows_write(self._agent_memory_policy)
+        except Exception:
+            self._agent_memory_policy = {"agentId": self._agent_id} if self._agent_id else {}
+            self._agent_memory_recall_allowed = True
+            self._agent_memory_write_allowed = True
         # Cache only the derived auxiliary compression context override that is
         # needed later by the startup feasibility check.  Avoid exposing a
         # broad pseudo-public config object on the agent instance.
@@ -1598,6 +1646,7 @@ class AIAgent:
                     from agent.memory_manager import MemoryManager as _MemoryManager
                     from plugins.memory import load_memory_provider as _load_mem
                     self._memory_manager = _MemoryManager()
+                    self._memory_manager.set_agent_policy(self._agent_id, self._agent_memory_policy)
                     _mp = _load_mem(_mem_provider_name)
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
@@ -1608,6 +1657,10 @@ class AIAgent:
                             "elevate_home": str(get_elevate_home()),
                             "agent_context": "primary",
                         }
+                        if self._agent_id:
+                            _init_kwargs["agent_id"] = self._agent_id
+                        if self._agent_memory_policy:
+                            _init_kwargs["agent_memory_policy"] = dict(self._agent_memory_policy)
                         # Thread session title for memory provider scoping
                         # (e.g. honcho uses this to derive chat-scoped session keys)
                         if self._session_db:
@@ -1759,6 +1812,9 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        compression_abort_on_summary_failure = str(
+            _compression_cfg.get("abort_on_summary_failure", True)
+        ).lower() in ("true", "1", "yes", "on")
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -1915,6 +1971,7 @@ class AIAgent:
                 config_context_length=_config_context_length,
                 provider=self.provider,
                 api_mode=self.api_mode,
+                abort_on_summary_failure=compression_abort_on_summary_failure,
             )
         self.compression_enabled = compression_enabled
 
@@ -4616,26 +4673,38 @@ class AIAgent:
         Safe to call multiple times (idempotent).  Each cleanup step is
         independently guarded so a failure in one does not prevent the rest.
         """
-        task_id = getattr(self, "session_id", None) or ""
+        task_ids = {
+            str(v)
+            for v in (
+                getattr(self, "session_id", None),
+                getattr(self, "_current_task_id", None),
+            )
+            if v
+        }
+        if not task_ids:
+            task_ids = {""}
 
         # 1. Kill background processes for this task
         try:
             from tools.process_registry import process_registry
-            process_registry.kill_all(task_id=task_id)
+            for task_id in task_ids:
+                process_registry.kill_all(task_id=task_id)
         except Exception:
             pass
 
         # 2. Clean terminal sandbox environments
-        try:
-            cleanup_vm(task_id)
-        except Exception:
-            pass
+        for task_id in task_ids:
+            try:
+                cleanup_vm(task_id)
+            except Exception:
+                pass
 
         # 3. Clean browser daemon sessions
-        try:
-            cleanup_browser(task_id)
-        except Exception:
-            pass
+        for task_id in task_ids:
+            try:
+                cleanup_browser(task_id)
+            except Exception:
+                pass
 
         # 4. Close active child agents
         try:
@@ -4669,10 +4738,24 @@ class AIAgent:
         """
         # Walk history backwards to find the most recent todo tool response
         last_todo_response = None
+        last_todo_injection = None
+        try:
+            from tools.todo_tool import parse_todo_injection
+        except Exception:
+            parse_todo_injection = None
         for msg in reversed(history):
+            content = msg.get("content", "")
+
+            if last_todo_injection is None and parse_todo_injection:
+                try:
+                    parsed = parse_todo_injection(content)
+                    if parsed:
+                        last_todo_injection = parsed
+                except Exception:
+                    pass
+
             if msg.get("role") != "tool":
                 continue
-            content = msg.get("content", "")
             # Quick check: todo responses contain "todos" key
             if '"todos"' not in content:
                 continue
@@ -4684,6 +4767,9 @@ class AIAgent:
             except (json.JSONDecodeError, TypeError):
                 continue
         
+        if not last_todo_response and last_todo_injection:
+            last_todo_response = last_todo_injection
+
         if last_todo_response:
             # Replay the items into the store (replace mode)
             self._todo_store.write(last_todo_response, merge=False)
@@ -4835,7 +4921,7 @@ class AIAgent:
         if system_message is not None:
             prompt_parts.append(system_message)
 
-        if self._memory_store:
+        if self._memory_store and self._agent_memory_recall_allowed:
             if self._memory_enabled:
                 mem_block = self._memory_store.format_for_system_prompt("memory")
                 if mem_block:
@@ -4845,6 +4931,27 @@ class AIAgent:
                 user_block = self._memory_store.format_for_system_prompt("user")
                 if user_block:
                     prompt_parts.append(user_block)
+
+        if self._agent_memory_recall_allowed and self._agent_id:
+            try:
+                from elevate_cli.agent_hub import agent_memory_facts
+
+                facts = agent_memory_facts(self._agent_id, limit=30)
+                fact_lines = [str(item.get("fact") or "").strip() for item in facts]
+                fact_lines = [line for line in fact_lines if line]
+                if fact_lines:
+                    prompt_parts.append(
+                        "\n".join(
+                            [
+                                "==============================================",
+                                f"AGENT MEMORY ({self._agent_id})",
+                                "==============================================",
+                                *[f"- {line}" for line in fact_lines],
+                            ]
+                        )
+                    )
+            except Exception:
+                pass
 
         admin_onboarding_block = _load_admin_onboarding_memory_block()
         if admin_onboarding_block:
@@ -8366,7 +8473,7 @@ class AIAgent:
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
+    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
         Args:
@@ -8377,6 +8484,21 @@ class AIAgent:
         Returns:
             (compressed_messages, new_system_prompt) tuple
         """
+        try:
+            from agent.conversation_compression import compress_context as _shared_compress_context
+        except ImportError:
+            pass
+        else:
+            return _shared_compress_context(
+                self,
+                messages,
+                system_message,
+                approx_tokens=approx_tokens,
+                task_id=task_id,
+                focus_topic=focus_topic,
+                force=force,
+            )
+
         _pre_msg_count = len(messages)
         logger.info(
             "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
@@ -8453,9 +8575,21 @@ class AIAgent:
             _compact_hb_stop.set()
             _compact_hb.join(timeout=1.0)
 
+        plan_snapshot = None
+        try:
+            from tools.present_plan_tool import format_latest_plan_for_injection
+            plan_snapshot = format_latest_plan_for_injection(messages)
+        except Exception as e:
+            logger.debug("Plan snapshot preservation skipped: %s", e)
         todo_snapshot = self._todo_store.format_for_injection()
-        if todo_snapshot:
-            compressed.append({"role": "user", "content": todo_snapshot})
+        try:
+            from agent.conversation_compression import insert_preserved_context
+            compressed = insert_preserved_context(compressed, [plan_snapshot, todo_snapshot])
+        except Exception as e:
+            logger.debug("Preserved context insertion skipped: %s", e)
+            for snapshot in (plan_snapshot, todo_snapshot):
+                if snapshot:
+                    compressed.append({"role": "user", "content": snapshot})
 
         self._invalidate_system_prompt()
         new_system_prompt = self._build_system_prompt(system_message)
@@ -8582,6 +8716,16 @@ class AIAgent:
             parent_agent=self,
         )
 
+    def _memory_policy_block(self, action: Any) -> Optional[str]:
+        action_text = str(action or "").strip().lower()
+        if action_text in {"add", "replace", "append", "update", "write", "delete"}:
+            if not self._agent_memory_write_allowed:
+                return "Agent memory write policy blocks this operation."
+            return None
+        if not self._agent_memory_recall_allowed:
+            return "Agent memory recall policy blocks this operation."
+        return None
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
         """Invoke a single tool and return the result string. No display logic.
@@ -8635,6 +8779,9 @@ class AIAgent:
             )
         elif function_name == "memory":
             target = function_args.get("target", "memory")
+            block_message = self._memory_policy_block(function_args.get("action"))
+            if block_message:
+                return json.dumps({"success": False, "error": block_message}, ensure_ascii=False)
             from tools.memory_tool import memory_tool as _memory_tool
             result = _memory_tool(
                 action=function_args.get("action"),
@@ -8650,6 +8797,7 @@ class AIAgent:
                         function_args.get("action", ""),
                         target,
                         function_args.get("content", ""),
+                        metadata={"session_id": self.session_id, "agent_id": self._agent_id},
                     )
                 except Exception:
                     pass
@@ -9192,24 +9340,29 @@ class AIAgent:
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
                 target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
-                )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                        )
-                    except Exception:
-                        pass
+                block_message = self._memory_policy_block(function_args.get("action"))
+                if block_message:
+                    function_result = json.dumps({"success": False, "error": block_message}, ensure_ascii=False)
+                else:
+                    from tools.memory_tool import memory_tool as _memory_tool
+                    function_result = _memory_tool(
+                        action=function_args.get("action"),
+                        target=target,
+                        content=function_args.get("content"),
+                        old_text=function_args.get("old_text"),
+                        store=self._memory_store,
+                    )
+                    # Bridge: notify external memory provider of built-in memory writes
+                    if self._memory_manager and function_args.get("action") in ("add", "replace"):
+                        try:
+                            self._memory_manager.on_memory_write(
+                                function_args.get("action", ""),
+                                target,
+                                function_args.get("content", ""),
+                                metadata={"session_id": self.session_id, "agent_id": self._agent_id},
+                            )
+                        except Exception:
+                            pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -13272,6 +13425,7 @@ class AIAgent:
             "final_response": final_response,
             "last_reasoning": last_reasoning,
             "messages": messages,
+            "session_id": self.session_id,
             "api_calls": api_call_count,
             "completed": completed,
             "partial": False,  # True only when stopped due to invalid tool calls

@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { OAuthLoginModal } from "@/components/OAuthLoginModal";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 
 interface Props {
@@ -110,9 +111,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
       </CardHeader>
       <CardContent>
         {loading && providers === null && (
-          <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          </div>
+          <ListSkeleton rows={3} />
         )}
         {providers && providers.length === 0 && (
           <p className="px-1 py-1 text-xs text-muted-foreground/80">

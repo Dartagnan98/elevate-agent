@@ -1536,6 +1536,36 @@ class TestCompressionChainProjection:
         db.create_session("solo", "cli")
         assert db.get_compression_tip("solo") == "solo"
 
+    def test_resolve_canonical_session_identity_returns_root_and_active_tip(self, db):
+        import time as _time
+        self._build_compression_chain(db, _time.time() - 3600)
+
+        root_identity = db.resolve_canonical_session_identity("root1")
+        assert root_identity["requested_session_id"] == "root1"
+        assert root_identity["lineage_root_id"] == "root1"
+        assert root_identity["active_session_id"] == "tip1"
+        assert root_identity["session_kind"] == "compression"
+        assert root_identity["is_compression_tip"] is False
+
+        tip_identity = db.resolve_canonical_session_identity("tip1")
+        assert tip_identity["requested_session_id"] == "tip1"
+        assert tip_identity["lineage_root_id"] == "root1"
+        assert tip_identity["active_session_id"] == "tip1"
+        assert tip_identity["is_compression_tip"] is True
+
+    def test_list_child_sessions_returns_physical_descendants(self, db):
+        import time as _time
+        self._build_compression_chain(db, _time.time() - 3600)
+
+        children = db.list_child_sessions("root1")
+        by_id = {child["id"]: child for child in children}
+        assert {"delegate1", "mid1", "tip1"}.issubset(by_id)
+        assert by_id["delegate1"]["session_kind"] == "subagent"
+        assert by_id["tip1"]["session_kind"] == "compression"
+        assert by_id["tip1"]["lineage_root_id"] == "root1"
+        assert by_id["tip1"]["active_session_id"] == "tip1"
+        assert by_id["tip1"]["is_active_session"] is True
+
     def test_get_compression_tip_skips_delegate_children(self, db):
         """Delegate subagents have parent_session_id set but were created
         BEFORE the parent ended. They must not be followed as compression
@@ -1920,4 +1950,3 @@ class TestAutoMaintenance:
         assert marker is not None
         # Should parse as a float timestamp close to now.
         assert abs(float(marker) - time.time()) < 60
-

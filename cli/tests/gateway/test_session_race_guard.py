@@ -425,39 +425,30 @@ def test_telegram_auto_mode_preference_notes_stay_lightweight():
     assert {"memory", "messaging", "session_search", "todo"}.issubset(
         set(decision["selected_toolsets"])
     )
-    # ...but the core local toolsets are a floor that is never stripped, so the
-    # agent never reports it "doesn't have" file/terminal/Gmail/deploy tools on
-    # a phrasing the classifier read as lightweight (the original bug).
-    assert {"skills", "terminal", "file"}.issubset(set(decision["selected_toolsets"]))
-    # "Lightweight" now means the HEAVY specialized toolsets stay intent-gated —
-    # that is where the real token savings are.
-    for heavy in ("browser", "vision", "image_gen", "computer", "code_execution"):
+    # Local code/file/skill tools are no longer part of the default follow-up
+    # floor; they load when the profile router sees a matching intent.
+    for heavy in ("skills", "terminal", "file", "browser", "vision", "image_gen", "computer", "code_execution"):
         assert heavy not in decision["selected_toolsets"]
 
 
-def test_telegram_auto_mode_never_strips_core_local_tools():
-    """Regression for the gateway-tool-profile bug: conversational phrasings the
-    keyword classifier does not recognize must still load the core local floor,
-    so the agent never reports it lacks file/terminal/skills (Gmail/Calendar/
-    deploy/Mailjet all run through terminal + skills)."""
+def test_telegram_auto_mode_keeps_followups_lean_and_escalates_file_intent():
+    """Light follow-ups should stay lean; file/code intent should still load local tools."""
     runner = _make_runner()
     cfg = {
         "agent": {"gateway_tool_profile": "auto"},
         "platform_toolsets": {"telegram": ["elevate-telegram"]},
     }
-    for msg in (
-        "can you show me the pdf now",
-        "where are we at with the pdf of solds now ?",
-        "Why is the local Gmail/file/calendar/deploy tool not active?",
-        "is the report ready",
-        "ok do that",
-    ):
-        decision = runner._gateway_tool_profile_decision(cfg, "telegram", msg)
-        ts = set(decision["selected_toolsets"])
-        assert {"skills", "terminal", "file"}.issubset(ts), f"core stripped for {msg!r}: {sorted(ts)}"
-    # The floor is unioned via ``configured_set & _GATEWAY_CORE_TOOLSETS`` (the
-    # same pattern the profile intersection already uses), so it can only ever
-    # surface tools the platform is already configured for.
+    followup = runner._gateway_tool_profile_decision(cfg, "telegram", "ok do that")
+    assert followup["selected_profile"] == "gateway-followup"
+    assert set(followup["selected_toolsets"]) == {"memory", "messaging", "session_search", "todo"}
+
+    file_intent = runner._gateway_tool_profile_decision(
+        cfg,
+        "telegram",
+        "Please read the local file and patch the repo",
+    )
+    assert file_intent["selected_profile"] == "coding-edit"
+    assert {"terminal", "file", "todo"}.issubset(set(file_intent["selected_toolsets"]))
 
 
 def test_telegram_auto_mode_survives_saved_configurable_allowlist():

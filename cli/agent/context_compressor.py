@@ -81,6 +81,76 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+_PREVIOUS_SUMMARY_MAX_CHARS = 32_000
+_AUTO_SKILL_PAYLOAD_COMPACT_THRESHOLD_CHARS = 20_000
+
+
+def _auto_loaded_skill_names(content: Any) -> list[str]:
+    """Return auto-loaded skill names embedded in a persisted skill payload."""
+    if not isinstance(content, str) or "skill is auto-loaded" not in content[:2000]:
+        return []
+    names = re.findall(
+        r'\[SYSTEM: The "([^"]+)" skill is auto-loaded\. Follow its instructions for this session\.\]',
+        content,
+    )
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        cleaned = name.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def _compact_historical_auto_skill_payloads(
+    messages: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], int]:
+    """Replace old full auto-skill payload messages with a compact marker.
+
+    Gateway agent lanes can bind many skills. Older transcripts persisted those
+    full SKILL.md payloads as normal user messages, and the compressor protects
+    the first exchange as head context. One 800KB auto-skill bootstrap message
+    can therefore survive every compaction and make recovery impossible.
+
+    Do not rewrite the latest user message because it may contain the current
+    user ask appended after the skill payload. The gateway now avoids producing
+    that shape for large payloads; this helper is for already-persisted history.
+    """
+    last_user_idx = -1
+    for idx, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user_idx = idx
+
+    changed = 0
+    result: list[dict[str, Any]] = []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            result.append(msg)
+            continue
+        content = msg.get("content")
+        names = _auto_loaded_skill_names(content)
+        if (
+            idx != last_user_idx
+            and names
+            and isinstance(content, str)
+            and len(content) > _AUTO_SKILL_PAYLOAD_COMPACT_THRESHOLD_CHARS
+        ):
+            preview = ", ".join(names[:40])
+            if len(names) > 40:
+                preview += f", ... +{len(names) - 40} more"
+            compacted = (
+                "[Historical auto-loaded skill payload omitted during context "
+                f"compression: {len(names)} skill(s): {preview}. "
+                "This was session bootstrap context, not a user request. "
+                "Load exact skill instructions with skill_view(name=\"...\") if "
+                "a later task needs one of these workflows.]"
+            )
+            result.append({**msg, "content": compacted})
+            changed += 1
+        else:
+            result.append(msg)
+    return result, changed
 
 
 def _content_length_for_budget(raw_content: Any) -> int:
@@ -601,6 +671,18 @@ class ContextCompressor(ContextEngine):
         self._last_aux_model_failure_error: Optional[str] = None
         self._last_aux_model_failure_model: Optional[str] = None
 
+    @staticmethod
+    def _clip_summary_for_rollup(summary: Optional[str]) -> Optional[str]:
+        if not summary or len(summary) <= _PREVIOUS_SUMMARY_MAX_CHARS:
+            return summary
+        head_chars = int(_PREVIOUS_SUMMARY_MAX_CHARS * 0.65)
+        tail_chars = _PREVIOUS_SUMMARY_MAX_CHARS - head_chars
+        return (
+            summary[:head_chars].rstrip()
+            + "\n\n...[older compacted summary clipped to keep rolling summary bounded]...\n\n"
+            + summary[-tail_chars:].lstrip()
+        )
+
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
@@ -1090,14 +1172,15 @@ Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command out
 
 Write only the summary body. Do not include any preamble or prefix."""
 
-        if self._previous_summary:
+        previous_summary = self._clip_summary_for_rollup(self._previous_summary)
+        if previous_summary:
             # Iterative update: preserve existing info, add new progress
             prompt = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
-{self._previous_summary}
+{previous_summary}
 
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
@@ -1151,7 +1234,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
             # Store for iterative updates on next compaction
-            self._previous_summary = summary
+            self._previous_summary = self._clip_summary_for_rollup(summary)
             self._summary_failure_cooldown_until = 0.0
             self._summary_model_fallen_back = False
             self._last_summary_error = None
@@ -1607,6 +1690,12 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # recent native vision tool result can keep re-shipping a huge base64
         # image payload until the provider rejects it.
         messages = _strip_historical_media(messages)
+        messages, auto_skill_compacted = _compact_historical_auto_skill_payloads(messages)
+        if auto_skill_compacted and not self.quiet_mode:
+            logger.info(
+                "Pre-compression: compacted %d historical auto-skill payload message(s)",
+                auto_skill_compacted,
+            )
 
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
@@ -1655,7 +1744,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         )
         if summary_idx is not None:
             if summary_body and not self._previous_summary:
-                self._previous_summary = summary_body
+                self._previous_summary = self._clip_summary_for_rollup(summary_body)
             turns_to_summarize = messages[max(compress_start, summary_idx + 1):compress_end]
 
         if not self.quiet_mode:

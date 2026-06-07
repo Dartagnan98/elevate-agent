@@ -61,6 +61,22 @@ def _iso_after(seconds: float) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=max(0.0, seconds))).isoformat()
 
 
+def _clean_agent_id(agent_id: str | None) -> str | None:
+    cleaned = str(agent_id or "").strip()
+    return cleaned or None
+
+
+def _agent_enabled(agent_id: str | None, *, config: dict[str, Any] | None = None) -> bool:
+    if not agent_id:
+        return True
+    try:
+        from elevate_cli.agent_hub import agent_is_enabled
+
+        return agent_is_enabled(agent_id, config=config)
+    except Exception:
+        return False
+
+
 def _int_setting(value: Any, default: int, *, minimum: int = 0) -> int:
     try:
         parsed = int(value if value not in (None, "") else default)
@@ -243,6 +259,7 @@ def _merge_runtime_status(
         "pending": _loop_running() and _WAKE_EVENT.is_set(),
         "lastWakeAt": _LAST_WAKE_AT or stored_wake.get("lastWakeAt"),
         "lastReason": _LAST_WAKE_REASON or stored_wake.get("lastReason") or "",
+        "agentId": stored_wake.get("agentId"),
         "count": max(_WAKE_COUNT, stored_wake_count),
     }
     status["loop"] = {
@@ -256,8 +273,10 @@ def tick(
     actor: str = "agent-worker",
     config: dict[str, Any] | None = None,
     reason: str = "manual",
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     worker = _config(config)
+    scoped_agent_id = _clean_agent_id(agent_id)
     now = now_iso()
     last_beat_at = now if reason == "heartbeat" else None
     next_beat_at = (
@@ -268,6 +287,25 @@ def tick(
     if not worker["enabled"]:
         status = _base_snapshot("disabled", config=config)
         status["lastTickAt"] = now
+        status["agentId"] = scoped_agent_id
+        _merge_runtime_status(
+            status,
+            config=config,
+            reason=reason,
+            last_beat_at=last_beat_at,
+            next_beat_at=next_beat_at,
+        )
+        _write_status(status)
+        return status
+
+    if scoped_agent_id and not _agent_enabled(scoped_agent_id, config=config):
+        status = _base_snapshot("disabled", config=config)
+        status["lastTickAt"] = now
+        status["lastReason"] = reason
+        status["lastError"] = f"Agent {scoped_agent_id} is disabled"
+        status["agentId"] = scoped_agent_id
+        status["drained"] = {"handoffs": 0, "adminRuns": 0}
+        status["recovered"] = {"staleHandoffs": 0, "staleAdminRuns": 0}
         _merge_runtime_status(
             status,
             config=config,
@@ -283,6 +321,7 @@ def tick(
         status["state"] = "locked"
         status["lastTickAt"] = now
         status["lastReason"] = reason
+        status["agentId"] = scoped_agent_id
         return status
 
     lock_fd = None
@@ -297,6 +336,7 @@ def tick(
                 status["state"] = "locked"
                 status["lastTickAt"] = now_iso()
                 status["lastReason"] = reason
+                status["agentId"] = scoped_agent_id
                 return status
 
         from elevate_cli.data import (
@@ -314,21 +354,24 @@ def tick(
         with connect() as conn:
             stale_handoffs = mark_stale_agent_handoffs(
                 conn,
+                to_agent_id=scoped_agent_id,
                 max_running_minutes=worker["stale_running_minutes"],
                 actor=actor,
             )
-            stale_admin_runs = mark_stale_action_runs(
-                conn,
-                max_running_minutes=worker["stale_running_minutes"],
-                actor=actor,
-            )
+            if scoped_agent_id is None:
+                stale_admin_runs = mark_stale_action_runs(
+                    conn,
+                    max_running_minutes=worker["stale_running_minutes"],
+                    actor=actor,
+                )
             if worker["max_handoffs_per_tick"]:
                 handoffs = drain_queued_agent_handoffs(
                     conn,
+                    to_agent_id=scoped_agent_id,
                     limit=worker["max_handoffs_per_tick"],
                     actor=actor,
                 )
-            if worker["max_admin_runs_per_tick"]:
+            if scoped_agent_id is None and worker["max_admin_runs_per_tick"]:
                 admin_runs = drain_queued_action_runs(
                     conn,
                     limit=worker["max_admin_runs_per_tick"],
@@ -342,6 +385,7 @@ def tick(
                 "lastTickAt": now,
                 "lastSuccessAt": now,
                 "lastError": "",
+                "agentId": scoped_agent_id,
                 "drained": {
                     "handoffs": len(handoffs),
                     "adminRuns": len(admin_runs),
@@ -365,6 +409,7 @@ def tick(
         status = _base_snapshot("error", config=config)
         status["lastTickAt"] = now_iso()
         status["lastError"] = str(exc)
+        status["agentId"] = scoped_agent_id
         _merge_runtime_status(
             status,
             config=config,
@@ -389,19 +434,39 @@ def request_wake(
     reason: str = "manual",
     actor: str = "system",
     delay_seconds: float = 0.0,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist a cross-process worker wake request and nudge this process too."""
     global _LAST_WAKE_AT, _LAST_WAKE_REASON, _WAKE_COUNT
 
     now = _utc_iso()
     clean_reason = str(reason or "manual").strip()[:160] or "manual"
+    scoped_agent_id = _clean_agent_id(agent_id)
+    if scoped_agent_id and not _agent_enabled(scoped_agent_id):
+        status = snapshot()
+        status["state"] = "disabled"
+        status["lastError"] = f"Agent {scoped_agent_id} is disabled"
+        status["agentId"] = scoped_agent_id
+        status["wake"] = {
+            **(status.get("wake") if isinstance(status.get("wake"), dict) else {}),
+            "enabled": status.get("enabled", True),
+            "pending": False,
+            "lastWakeAt": now,
+            "lastReason": clean_reason,
+            "agentId": scoped_agent_id,
+            "count": _WAKE_COUNT,
+        }
+        _write_status(status)
+        return status
+    stored_reason = f"{clean_reason}:{scoped_agent_id}" if scoped_agent_id else clean_reason
     _WAKE_COUNT += 1
     _LAST_WAKE_AT = now
-    _LAST_WAKE_REASON = clean_reason
+    _LAST_WAKE_REASON = stored_reason
     payload = {
         "requestedAt": now,
         "notBefore": _iso_after(delay_seconds),
-        "reason": clean_reason,
+        "reason": stored_reason,
+        "agentId": scoped_agent_id,
         "actor": str(actor or "system"),
         "count": _WAKE_COUNT,
         "token": f"{time.time_ns()}:{os.getpid()}:{_WAKE_COUNT}",
@@ -419,7 +484,8 @@ def request_wake(
         "enabled": status.get("enabled", True),
         "pending": True,
         "lastWakeAt": now,
-        "lastReason": clean_reason,
+        "lastReason": stored_reason,
+        "agentId": scoped_agent_id,
         "count": _WAKE_COUNT,
     }
     _write_status(status)

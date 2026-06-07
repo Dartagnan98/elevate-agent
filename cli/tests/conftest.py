@@ -364,6 +364,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_elevate_home / "memories").mkdir()
     (fake_elevate_home / "skills").mkdir()
     monkeypatch.setenv("ELEVATE_HOME", str(fake_elevate_home))
+    # Unit tests use per-test SQLite state.db files unless a test explicitly
+    # opts into the PG cutover. Production keeps the module defaults.
+    monkeypatch.setenv("ELEVATE_SESSIONDB_READ_FROM_PG", "0")
+    monkeypatch.setenv("ELEVATE_DISABLE_SQLITE_WRITE", "0")
 
     # Scoped gateway locks intentionally default to a machine-global state dir
     # in production so multiple profiles cannot claim the same external token

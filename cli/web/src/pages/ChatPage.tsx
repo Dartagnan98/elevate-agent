@@ -17,10 +17,12 @@ import {
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   api,
   type AgentHubAgent,
   type AnalyticsResponse,
+  type SessionArtifactItem,
   type SessionMessage as StoredSessionMessage,
   type WorkspaceGitStatus,
 } from "@/lib/api";
@@ -87,7 +89,7 @@ import type {
   ReactNode,
   UIEvent as ReactUIEvent,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
 interface SessionInfo {
@@ -115,7 +117,9 @@ interface GatewayTranscriptMessage {
 
 interface SessionCreateResponse {
   agent_ready?: boolean;
+  active_session_id?: string;
   info?: SessionInfo;
+  lineage_root_id?: string;
   persisted_session_id?: string;
   resumed?: string;
   session_id: string;
@@ -2325,6 +2329,17 @@ function nowLabel(ts: number): string {
   });
 }
 
+function afterNextPaint(): Promise<void> {
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => resolve());
+    });
+  });
+}
+
 function deriveChatTitle(
   messages: ChatMessage[],
   resumeId: string | null,
@@ -2477,6 +2492,20 @@ function artifactsFromMessages(messages: ChatMessage[]): ArtifactEntry[] {
     if (!message.content.trim()) return [];
     return artifactsFromText(message.content, `${message.role} history`, message.id);
   });
+}
+
+function artifactsFromServer(items: SessionArtifactItem[]): ArtifactEntry[] {
+  return items
+    .filter((item) => item.path)
+    .map((item) =>
+      makeArtifact({
+        detail: item.path,
+        kind: "file",
+        path: item.path,
+        source: "session artifacts",
+        title: item.name || fileName(item.path),
+      }),
+    );
 }
 
 function previewPriority(artifact: ArtifactEntry): number {
@@ -3733,6 +3762,22 @@ export default function ChatPage() {
       } else void api.getSessionMessages(resumeId)
         .then((response) => {
           if (cancelled) return;
+          const canonicalSessionId =
+            response.active_session_id || response.session_id || resumeId;
+          if (canonicalSessionId) {
+            persistedSessionIdRef.current = canonicalSessionId;
+            const canonicalArtifacts = readSessionArtifacts(canonicalSessionId);
+            if (canonicalArtifacts.length) addArtifacts(canonicalArtifacts);
+            void api.getSessionArtifacts(canonicalSessionId)
+              .then((artifactResponse) => {
+                if (cancelled) return;
+                addArtifacts(artifactsFromServer(artifactResponse.artifacts));
+              })
+              .catch(() => {
+                // Artifact hydration is additive; transcript hydration already
+                // carries the user-visible failure state for this resume.
+              });
+          }
           const hydrated = normalizeStoredTranscript(response.messages);
           const latestActiveSnapshot = readActiveTurnSnapshot(resumeId);
           historyHydratedRef.current = true;
@@ -3745,7 +3790,10 @@ export default function ChatPage() {
               mergeServerWithCache(hydrated, base),
               latestActiveSnapshot,
             );
-            rememberTranscript(response.session_id || resumeId, merged);
+            rememberTranscript(canonicalSessionId, merged);
+            if (response.lineage_root_id) {
+              rememberTranscript(response.lineage_root_id, merged);
+            }
             rememberTranscript(resumeId, merged);
             hydrateArtifactsFromMessages(merged);
             // Cold-load path (no warm cache): the IF-branch above only set
@@ -3756,7 +3804,7 @@ export default function ChatPage() {
             // -> a transient-null re-run would wipe it. Stamp the key here too.
             if (merged.length) {
               renderedChatKeyRef.current =
-                resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+                canonicalSessionId ?? resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
             }
             if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
               // Cache heuristic flagged this as pending (last msg = user
@@ -4419,7 +4467,11 @@ export default function ChatPage() {
         if (cancelled) return;
         activeSessionRef.current = created.session_id;
         persistedSessionIdRef.current =
-          created.persisted_session_id ?? created.resumed ?? resumeId ?? null;
+          created.active_session_id ??
+          created.persisted_session_id ??
+          created.resumed ??
+          resumeId ??
+          null;
         // Pin a freshly-created (?new=) chat to its persisted id by
         // rewriting the URL to ?resume=<id>. Re-entering the route later
         // (browser back, tab switch, sidebar) then reattaches to the live
@@ -4946,20 +4998,20 @@ export default function ChatPage() {
     );
   }, [resumeId, setSearchParams]);
 
-  const createSessionForSend = useCallback(async (): Promise<string | null> => {
+  const createSessionForSend = useCallback(async (options?: { prewarm?: boolean }): Promise<string | null> => {
     if (sessionId && state === "open") return sessionId;
     if (createSessionPromiseRef.current) return createSessionPromiseRef.current;
 
     const promise = (async () => {
       try {
-        setStatusText("Starting chat...");
+        setStatusText(options?.prewarm ? "Preparing chat..." : "Starting chat...");
         await gw.connect();
         const created = await gw.request<SessionCreateResponse>("session.create", {
           cols: 100,
         });
         activeSessionRef.current = created.session_id;
         persistedSessionIdRef.current =
-          created.persisted_session_id ?? null;
+          created.active_session_id ?? created.persisted_session_id ?? null;
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
         if (created.info?.credential_warning || created.info?.config_warning) {
@@ -4982,6 +5034,28 @@ export default function ChatPage() {
     createSessionPromiseRef.current = promise;
     return promise;
   }, [gw, sessionId, state]);
+
+  useEffect(() => {
+    if (!autoResumeDecided || !draftChat || sessionId || state === "error") return;
+    void createSessionForSend({ prewarm: true });
+  }, [autoResumeDecided, createSessionForSend, draftChat, sessionId, state]);
+
+  const prewarmDraftSession = useCallback(
+    (nextInput?: string) => {
+      if (
+        !draftChat ||
+        sessionId ||
+        activeSessionRef.current ||
+        state === "error" ||
+        createSessionPromiseRef.current
+      ) {
+        return;
+      }
+      if (typeof nextInput === "string" && !nextInput.trim()) return;
+      void createSessionForSend({ prewarm: true });
+    },
+    [createSessionForSend, draftChat, sessionId, state],
+  );
 
   const submitGatewayPrompt = useCallback(
     async (
@@ -5311,26 +5385,65 @@ export default function ChatPage() {
       // An attachment-only message (image with no caption) is a valid send.
       if (!trimmed && !hasReadyAttachment) return;
 
+      const resetComposerForSend = () => {
+        setInput("");
+        composerScrollTopRef.current = 0;
+        if (richLayerRef.current) richLayerRef.current.style.transform = "translateY(0px)";
+        setBanner(null);
+        setAgentMenuOpen(false);
+        // Sending a message (refine or execute) retires the current plan-ready
+        // bar until the agent presents a fresh plan.
+        setPlanReadyForApproval(false);
+      };
+
+      const isSlashCommand = trimmed.startsWith("/");
+      const previewIntent = !!trimmed && isOpenPreviewIntent(trimmed);
+      const stillUploading = attachments.some((item) => item.status === "uploading");
+      if (!isSlashCommand && stillUploading) {
+        setBanner("Wait for attachments to finish uploading before sending.");
+        setStatusText("Attachment still uploading");
+        return;
+      }
+      const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
+      const messageAttachments: ChatMessageAttachment[] = readyAttachments.map(
+        (att) => ({
+          name: att.name,
+          size: att.size,
+          mediaType: att.mediaType,
+          previewUrl: att.previewUrl,
+        }),
+      );
+      const showedUserMessage = !isSlashCommand && !previewIntent && !busy && !!trimmed;
+
+      if (showedUserMessage) {
+        flushSync(() => {
+          resetComposerForSend();
+          appendMessage(
+            "user",
+            trimmed,
+            messageAttachments.length ? { attachments: messageAttachments } : {},
+          );
+          ensureAssistant();
+          setBusy(true);
+          setStatusText("Thinking...");
+        });
+        await afterNextPaint();
+      } else {
+        resetComposerForSend();
+      }
+
       // Tell the sidebar this chat just became active so it floats to the top
       // immediately, without waiting for the next poll. (Pairs with the
-      // agent-turn-complete event fired on message.complete.)
+      // agent-turn-complete event fired on message.complete.) Keep it after
+      // the first chat paint so sidebar work cannot block the user's bubble.
       window.dispatchEvent(
         new CustomEvent("elevate:agent-turn-start", { detail: { sessionId } }),
       );
 
-      setInput("");
-      composerScrollTopRef.current = 0;
-      if (richLayerRef.current) richLayerRef.current.style.transform = "translateY(0px)";
-      setBanner(null);
-      setAgentMenuOpen(false);
-      // Sending a message (refine or execute) retires the current plan-ready
-      // bar until the agent presents a fresh plan.
-      setPlanReadyForApproval(false);
-
-      const historyArtifacts = artifacts.length ? [] : artifactsFromMessages(messages);
+      const historyArtifacts = previewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
       const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
-      const previewTarget = bestSidePreviewArtifact(availableArtifacts);
-      if (previewTarget && isOpenPreviewIntent(trimmed)) {
+      const previewTarget = previewIntent ? bestSidePreviewArtifact(availableArtifacts) : null;
+      if (previewTarget) {
         if (historyArtifacts.length) {
           addArtifacts(historyArtifacts);
         }
@@ -5345,7 +5458,7 @@ export default function ChatPage() {
         return;
       }
 
-      if (trimmed.startsWith("/")) {
+      if (isSlashCommand) {
         let targetSessionId = sessionId;
         if (!targetSessionId && draftChat) {
           targetSessionId = await createSessionForSend();
@@ -5373,25 +5486,17 @@ export default function ChatPage() {
       const routedText = routePromptForAgent(trimmed);
       let targetSessionId = sessionId;
 
-      // New-chat cold start: creating the session takes a few seconds. Show the
-      // user bubble + thinking animation INSTANTLY (before awaiting the session)
-      // instead of leaving a dead, empty screen until the agent spins up. Only
-      // for the no-attachment case so the attachment chips still render via the
-      // normal append path.
+      // New-chat cold start: creating the session takes a few seconds, so the
+      // user bubble + thinking animation were already flushed and painted above
+      // before any awaited session/backend work begins.
       const needsSession = !targetSessionId && draftChat;
-      const optimistic = needsSession && !hasReadyAttachment && !!trimmed;
-      if (optimistic) {
-        appendMessage("user", trimmed);
-        setBusy(true);
-        setStatusText("Thinking...");
-      }
 
       if (needsSession) {
         targetSessionId = await createSessionForSend();
       }
 
       if (!targetSessionId || (state !== "open" && !draftChat)) {
-        if (optimistic) setBusy(false);
+        if (showedUserMessage) setBusy(false);
         const queued: QueuedInput = {
           agentId: selectedAgent.id,
           createdAt: Date.now(),
@@ -5443,11 +5548,11 @@ export default function ChatPage() {
         selectedAgent.id,
         "Sending...",
         targetSessionId,
-        optimistic,
+        showedUserMessage,
       );
       pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, busy, createSessionForSend, draftChat, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, attachments, busy, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
@@ -5488,7 +5593,7 @@ export default function ChatPage() {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    void submitPrompt(input);
+    void submitPrompt(inputRef.current?.value ?? input);
   };
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -5498,7 +5603,7 @@ export default function ChatPage() {
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void submitPrompt(input);
+      void submitPrompt(event.currentTarget.value);
     }
   };
 
@@ -5651,6 +5756,7 @@ export default function ChatPage() {
           .join(" ");
         setInput(nextInput);
         setCaretIndex(nextInput.length);
+        prewarmDraftSession(nextInput);
         setStatusText("Voice captured");
         window.requestAnimationFrame(() => {
           const target = inputRef.current;
@@ -5670,7 +5776,7 @@ export default function ChatPage() {
         if (!stale()) setVoiceTranscribing(false);
       }
     },
-    [gw],
+    [gw, prewarmDraftSession],
   );
 
   const toggleVoiceInput = useCallback(async () => {
@@ -6499,7 +6605,9 @@ export default function ChatPage() {
                     )}
                     disabled={state === "error"}
                     onChange={(event) => {
-                      setInput(event.target.value);
+                      const nextInput = event.target.value;
+                      setInput(nextInput);
+                      prewarmDraftSession(nextInput);
                       setCaretIndex(event.currentTarget.selectionStart ?? event.target.value.length);
                       setAgentMenuOpen(false);
                       const el = event.currentTarget;
@@ -6509,6 +6617,7 @@ export default function ChatPage() {
                     onClick={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
                     }
+                    onFocus={() => prewarmDraftSession()}
                     onKeyDown={onComposerKeyDown}
                     onKeyUp={(event) =>
                       setCaretIndex(event.currentTarget.selectionStart ?? input.length)
@@ -6776,7 +6885,7 @@ function EmptyState({
               {metrics.map((metric) => (
                 <div className="chat-start-metric" key={metric.label}>
                   <span>{metric.label}</span>
-                  <strong>{loading ? "..." : metric.value}</strong>
+                  {loading ? <Skeleton className="h-5 w-12" /> : <strong>{metric.value}</strong>}
                 </div>
               ))}
             </div>
@@ -6792,11 +6901,13 @@ function EmptyState({
                 />
               ))}
             </div>
-            <p className="chat-start-note">
-              {loading
-                ? "Loading activity"
-                : `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`}
-            </p>
+            <div className="chat-start-note">
+              {loading ? (
+                <Skeleton className="h-4 w-48" />
+              ) : (
+                `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`
+              )}
+            </div>
           </>
         ) : (
           <div className="chat-start-models">
@@ -6813,7 +6924,7 @@ function EmptyState({
               })
             ) : (
               <div className="chat-start-empty-models">
-                {loading ? "Loading models" : "No model activity yet"}
+                {loading ? <Skeleton className="h-5 w-40" /> : "No model activity yet"}
               </div>
             )}
           </div>

@@ -36,8 +36,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Segmented } from "@/components/ui/segmented";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import type { AgentHubAgent } from "@/lib/api-types";
 
 /* ------------------------------------------------------------------ */
 /*  Schedule helpers (unchanged from previous version)                 */
@@ -383,10 +385,12 @@ function ScheduleFields({
 /* ------------------------------------------------------------------ */
 
 function EditJobForm({
+  agents,
   job,
   onCancel,
   onSaved,
 }: {
+  agents: AgentHubAgent[];
   job: CronJob;
   onCancel: () => void;
   onSaved: () => void;
@@ -403,6 +407,7 @@ function EditJobForm({
   const [name, setName] = useState(job.name ?? "");
   const [prompt, setPrompt] = useState(job.prompt ?? "");
   const [deliver, setDeliver] = useState(job.deliver ?? "local");
+  const [agent, setAgent] = useState(job.agent ?? "");
   const [scheduleMode, setScheduleMode] = useState<ScheduleMode>(initial.mode);
   const [time, setTime] = useState(initial.time);
   const [dayOfWeek, setDayOfWeek] = useState(initial.dayOfWeek);
@@ -433,6 +438,7 @@ function EditJobForm({
         prompt: prompt.trim(),
         schedule: schedule.expression.trim(),
         deliver,
+        agent: agent || null,
       });
       showToast(`Saved "${name.trim() || prompt.trim().slice(0, 30)}"`, "success");
       onSaved();
@@ -476,7 +482,7 @@ function EditJobForm({
         setTime={setTime}
         time={time}
       />
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="grid gap-2">
           <Label htmlFor={`edit-${job.id}-deliver`}>{t.cron.deliverTo}</Label>
           <Select
@@ -495,6 +501,25 @@ function EditJobForm({
             <SelectOption value="email">{t.cron.delivery.email}</SelectOption>
           </Select>
         </div>
+        <div className="grid gap-2">
+          <Label htmlFor={`edit-${job.id}-agent`}>Run as agent</Label>
+          <Select
+            id={`edit-${job.id}-agent`}
+            value={agent}
+            onValueChange={(v) => setAgent(v)}
+          >
+            <SelectOption value="">Default agent</SelectOption>
+            {agents
+              .filter((a) => a.enabled)
+              .map((a) => (
+                <SelectOption key={a.id} value={a.id}>
+                  {a.name}
+                </SelectOption>
+              ))}
+          </Select>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
         <div className="flex items-end gap-2">
           <Button variant="ghost" onClick={onCancel} disabled={saving}>
             <X className="h-3.5 w-3.5" />
@@ -515,9 +540,11 @@ function EditJobForm({
 /* ------------------------------------------------------------------ */
 
 function NewJobForm({
+  agents,
   onCancel,
   onCreated,
 }: {
+  agents: AgentHubAgent[];
   onCancel: () => void;
   onCreated: () => void;
 }) {
@@ -531,6 +558,7 @@ function NewJobForm({
   const [customSchedule, setCustomSchedule] = useState("0 9 * * *");
   const [name, setName] = useState("");
   const [deliver, setDeliver] = useState("local");
+  const [agent, setAgent] = useState("");
   const [creating, setCreating] = useState(false);
 
   const schedule = useMemo(
@@ -557,6 +585,7 @@ function NewJobForm({
         schedule: schedule.expression.trim(),
         name: name.trim() || undefined,
         deliver,
+        agent: agent || undefined,
       });
       showToast(t.common.create + " ✓", "success");
       onCreated();
@@ -604,7 +633,7 @@ function NewJobForm({
         time={time}
       />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="grid gap-2">
           <Label htmlFor="cron-deliver">{t.cron.deliverTo}</Label>
           <Select
@@ -623,6 +652,25 @@ function NewJobForm({
             <SelectOption value="email">{t.cron.delivery.email}</SelectOption>
           </Select>
         </div>
+        <div className="grid gap-2">
+          <Label htmlFor="cron-agent">Run as agent</Label>
+          <Select
+            id="cron-agent"
+            value={agent}
+            onValueChange={(v) => setAgent(v)}
+          >
+            <SelectOption value="">Default agent</SelectOption>
+            {agents
+              .filter((a) => a.enabled)
+              .map((a) => (
+                <SelectOption key={a.id} value={a.id}>
+                  {a.name}
+                </SelectOption>
+              ))}
+          </Select>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2">
         <div className="flex items-end gap-2">
           <Button variant="ghost" onClick={onCancel} disabled={creating}>
             <X className="h-3.5 w-3.5" />
@@ -703,6 +751,7 @@ function JobRailRow({
 /* ------------------------------------------------------------------ */
 
 function JobDetail({
+  agents,
   job,
   isEditing,
   onEditToggle,
@@ -712,6 +761,7 @@ function JobDetail({
   onSaved,
   onCancelEdit,
 }: {
+  agents: AgentHubAgent[];
   job: CronJob;
   isEditing: boolean;
   onEditToggle: () => void;
@@ -801,6 +851,7 @@ function JobDetail({
       <div className="flex-1 px-5 py-5">
         {isEditing ? (
           <EditJobForm
+            agents={agents}
             job={job}
             onCancel={onCancelEdit}
             onSaved={onSaved}
@@ -908,14 +959,17 @@ function MetaCell({
 
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
+  const [agents, setAgents] = useState<AgentHubAgent[]>([]);
   const [attention, setAttention] = useState<import("../lib/api-types").CronAttention | null>(null);
   const [loading, setLoading] = useState(true);
   const [searchParams, setSearchParams] = useSearchParams();
   const editParam = searchParams.get("edit");
+  const agentParam = searchParams.get("agent") ?? "";
   const [selectedId, setSelectedId] = useState<string | null>(editParam);
   const [editingId, setEditingId] = useState<string | null>(editParam);
   const [showCreate, setShowCreate] = useState(false);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(agentParam);
+  const [agentFilter, setAgentFilter] = useState(agentParam);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
@@ -927,6 +981,17 @@ export default function CronPage() {
       setEditingId(editParam);
     }
   }, [editParam]);
+
+  useEffect(() => {
+    setAgentFilter(agentParam);
+  }, [agentParam]);
+
+  useEffect(() => {
+    api
+      .getAgentHub({ lite: true })
+      .then((snap) => setAgents(snap.agents || []))
+      .catch(() => setAgents([]));
+  }, []);
 
   const closeEditor = useCallback(() => {
     setEditingId(null);
@@ -987,14 +1052,28 @@ export default function CronPage() {
   /* ---- Filter ---- */
   const lowerSearch = search.trim().toLowerCase();
   const filteredJobs = useMemo(() => {
-    if (!lowerSearch) return jobs;
-    return jobs.filter(
-      (job) =>
+    const cleanAgent = agentFilter.trim();
+    return jobs.filter((job) => {
+      if (cleanAgent && (job.agent ?? "") !== cleanAgent) return false;
+      if (!lowerSearch) return true;
+      return (
         (job.name ?? "").toLowerCase().includes(lowerSearch) ||
+        (job.agent ?? "").toLowerCase().includes(lowerSearch) ||
         job.prompt.toLowerCase().includes(lowerSearch) ||
-        job.schedule_display.toLowerCase().includes(lowerSearch),
-    );
-  }, [jobs, lowerSearch]);
+        job.schedule_display.toLowerCase().includes(lowerSearch)
+      );
+    });
+  }, [agentFilter, jobs, lowerSearch]);
+
+  useEffect(() => {
+    if (filteredJobs.length === 0) {
+      if (selectedId) setSelectedId(null);
+      return;
+    }
+    if (!selectedId || !filteredJobs.some((job) => job.id === selectedId)) {
+      setSelectedId(filteredJobs[0].id);
+    }
+  }, [filteredJobs, selectedId]);
 
   /* ---- Group jobs by status for rail sections ---- */
   const activeJobs = useMemo(
@@ -1013,6 +1092,21 @@ export default function CronPage() {
 
   /* ---- Page header (count + search + new) ---- */
   const enabledCount = jobs.filter((j) => j.state !== "paused").length;
+  const updateAgentFilter = useCallback(
+    (nextAgent: string) => {
+      setAgentFilter(nextAgent);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (nextAgent) next.set("agent", nextAgent);
+          else next.delete("agent");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   useLayoutEffect(() => {
     if (loading) {
@@ -1027,6 +1121,14 @@ export default function CronPage() {
     );
     setEnd(
       <div className="flex items-center gap-2">
+        <Select value={agentFilter} onValueChange={updateAgentFilter}>
+          <SelectOption value="">All agents</SelectOption>
+          {agents.map((agent) => (
+            <SelectOption key={agent.id} value={agent.id}>
+              {agent.name}
+            </SelectOption>
+          ))}
+        </Select>
         <div className="relative w-full min-w-0 sm:max-w-xs">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
@@ -1074,6 +1176,8 @@ export default function CronPage() {
       setEnd(null);
     };
   }, [
+    agentFilter,
+    agents,
     enabledCount,
     jobs.length,
     loading,
@@ -1082,6 +1186,7 @@ export default function CronPage() {
     setEnd,
     showCreate,
     t,
+    updateAgentFilter,
   ]);
 
   /* ---- Actions ---- */
@@ -1151,11 +1256,7 @@ export default function CronPage() {
 
   /* ---- Loading ---- */
   if (loading) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">
-        {t.common.loading}
-      </p>
-    );
+    return <RouteSkeleton path="/cron" />;
   }
 
   const pendingJob = jobDelete.pendingId
@@ -1315,6 +1416,7 @@ export default function CronPage() {
               </div>
               <div className="px-5 py-5">
                 <NewJobForm
+                  agents={agents}
                   onCancel={() => setShowCreate(false)}
                   onCreated={() => {
                     setShowCreate(false);
@@ -1326,6 +1428,7 @@ export default function CronPage() {
             </div>
           ) : selectedJob ? (
             <JobDetail
+              agents={agents}
               job={selectedJob}
               isEditing={editingId === selectedJob.id}
               onEditToggle={() => {

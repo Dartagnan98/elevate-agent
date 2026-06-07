@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { useI18n } from "@/i18n";
 
 /* ------------------------------------------------------------------ */
@@ -494,7 +495,7 @@ export default function EnvPage() {
 
   if (!vars) {
     return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">{t.common.loading}</p>
+      <RouteSkeleton path="/env" />
     );
   }
 

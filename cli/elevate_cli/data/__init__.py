@@ -178,12 +178,17 @@ from elevate_cli.data.dispatch import (
 from elevate_cli.data.agent_handoffs import (
     agent_handoff_summary,
     approve_agent_handoff,
+    create_agent_comms_message,
     create_agent_handoff,
     dispatch_agent_handoff_to_cron,
     drain_queued_agent_handoffs,
+    get_agent_comms_channel,
     get_agent_handoff,
+    list_agent_comms_channels,
+    list_agent_comms_messages,
     list_agent_handoffs,
     mark_stale_agent_handoffs,
+    record_agent_handoff_cron_delivery,
     record_agent_handoff_message,
     record_agent_handoff_result,
 )
@@ -331,6 +336,8 @@ __all__ = [
     "dispatch_agent_handoff_to_cron", "drain_queued_agent_handoffs",
     "get_agent_handoff", "list_agent_handoffs", "mark_stale_agent_handoffs",
     "record_agent_handoff_message", "record_agent_handoff_result",
+    "create_agent_comms_message", "get_agent_comms_channel",
+    "list_agent_comms_channels", "list_agent_comms_messages",
     # workflow bootstrap import
     "import_listing_workflow_csv", "parse_listing_workflow_csv",
     # province guide reference store

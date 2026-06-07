@@ -29,8 +29,10 @@ these paths see no behavioural change.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +41,187 @@ from typing import Any, List, Optional, Tuple
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
+def _is_preserved_context_message(msg: Any) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    text = _content_text(msg.get("content")).strip()
+    if not text:
+        return False
+    try:
+        from tools.present_plan_tool import PLAN_INJECTION_HEADER
+    except Exception:
+        PLAN_INJECTION_HEADER = (
+            "[Your latest Plan panel plan was preserved across context compression "
+            "- reference only, not a new request]"
+        )
+    try:
+        from tools.todo_tool import TODO_INJECTION_HEADER
+    except Exception:
+        TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
+    return text.startswith(PLAN_INJECTION_HEADER) or text.startswith(TODO_INJECTION_HEADER)
+
+
+def insert_preserved_context(
+    compressed: list,
+    snapshots: List[Optional[str]],
+) -> list:
+    """Insert preserved plan/todo context without hiding the latest user ask."""
+    to_insert = [s.strip() for s in snapshots if isinstance(s, str) and s.strip()]
+    if not to_insert:
+        return compressed
+
+    existing = {_content_text(m.get("content")).strip() for m in compressed if isinstance(m, dict)}
+    to_insert = [s for s in to_insert if s not in existing]
+    if not to_insert:
+        return compressed
+
+    snapshot = "\n\n".join(to_insert)
+    insert_at = None
+    for i in range(len(compressed) - 1, -1, -1):
+        msg = compressed[i]
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and not _is_preserved_context_message(msg)
+        ):
+            insert_at = i
+            break
+
+    next_messages = list(compressed)
+    preserved_msg = {"role": "user", "content": snapshot}
+    if insert_at is None:
+        next_messages.append(preserved_msg)
+    else:
+        next_messages.insert(insert_at, preserved_msg)
+    return next_messages
+
+
+def _collect_checkpoint_files(messages: list) -> List[str]:
+    file_keys = {
+        "path", "file_path", "target_file", "filename", "file", "notebook_path",
+        "files", "paths", "files_read", "files_written", "output_path",
+        "output_file", "artifact_path",
+    }
+    seen: set[str] = set()
+    out: List[str] = []
+
+    def add_value(value: Any) -> None:
+        if len(out) >= 500:
+            return
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.startswith("/") and raw not in seen:
+                seen.add(raw)
+                out.append(raw)
+            return
+        if isinstance(value, list):
+            for item in value:
+                add_value(item)
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in file_keys:
+                    add_value(item)
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        for call in msg.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            args = fn.get("arguments", call.get("arguments"))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (TypeError, ValueError):
+                    args = None
+            if isinstance(args, dict):
+                add_value(args)
+        content = msg.get("content")
+        if isinstance(content, str) and "{" in content:
+            try:
+                parsed = json.loads(content)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                add_value(parsed)
+    return out
+
+
+def _store_compression_checkpoint(
+    agent: Any,
+    *,
+    session_id: str,
+    old_session_id: Optional[str],
+    source_messages: list,
+    compressed_messages: list,
+) -> None:
+    db = getattr(agent, "_session_db", None)
+    if db is None or not session_id:
+        return
+    lineage_root_id = old_session_id or session_id
+    try:
+        identity = db.resolve_canonical_session_identity(old_session_id or session_id)
+        lineage_root_id = identity.get("lineage_root_id") or lineage_root_id
+    except Exception:
+        pass
+    checkpoint: dict[str, Any] = {
+        "version": 1,
+        "session_id": session_id,
+        "lineage_root_id": lineage_root_id,
+        "active_session_id": session_id,
+        "updated_at": time.time(),
+        "message_count": len(compressed_messages),
+    }
+    try:
+        from tools.present_plan_tool import extract_latest_plan_from_messages
+
+        latest_plan = extract_latest_plan_from_messages(source_messages)
+        if latest_plan:
+            plan, title = latest_plan
+            checkpoint["plan"] = plan
+            checkpoint["plan_title"] = title or ""
+    except Exception:
+        pass
+    try:
+        todos = getattr(agent, "_todo_store", None)
+        if todos is not None:
+            checkpoint["todos"] = todos.read()
+    except Exception:
+        pass
+    files = _collect_checkpoint_files(source_messages) or _collect_checkpoint_files(compressed_messages)
+    if files:
+        checkpoint["files"] = files
+        checkpoint["artifacts"] = [{"path": path} for path in files]
+    try:
+        checkpoint["children"] = db.list_child_sessions(session_id)
+    except Exception:
+        pass
+    try:
+        db.set_meta(f"session_checkpoint:{session_id}", json.dumps(checkpoint))
+        if old_session_id and old_session_id != session_id:
+            db.set_meta(f"session_checkpoint:{old_session_id}", json.dumps(checkpoint))
+    except Exception as exc:
+        logger.debug("compression checkpoint write failed for %s: %s", session_id, exc)
 
 
 def check_compression_model_feasibility(agent: Any) -> None:
@@ -84,14 +267,14 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 msg = (
                     "⚠ Configured auxiliary compression provider "
                     f"'{_aux_cfg_provider}' is unavailable — context "
-                    "compression will drop middle turns without a summary. "
+                    "compression will abort rather than drop context. "
                     "Check auxiliary.compression in config.yaml and "
                     "reauthenticate that provider."
                 )
             else:
                 msg = (
                     "⚠ No auxiliary LLM provider configured — context "
-                    "compression will drop middle turns without a summary. "
+                    "compression will abort rather than drop context. "
                     "Run `elevate setup` or set OPENROUTER_API_KEY."
                 )
             agent._compression_warning = msg
@@ -150,12 +333,15 @@ def check_compression_model_feasibility(agent: Any) -> None:
             # above guarantees aux_context >= MINIMUM_CONTEXT_LENGTH,
             # so the new threshold is always >= 64K.
             #
-            # The compression summariser sends a single user-role
-            # prompt (no system prompt, no tools) to the aux model, so
-            # new_threshold == aux_context is safe: the request is
-            # the raw messages plus a small summarisation instruction.
             old_threshold = threshold
-            new_threshold = aux_context
+            # Keep real room for the summarizer template, previous rolling
+            # summary, and output budget.  Using the aux model's whole window
+            # as the trigger point made the warning technically correct while
+            # still letting the summarizer request overflow.
+            new_threshold = min(
+                aux_context,
+                max(MINIMUM_CONTEXT_LENGTH, int(aux_context * 0.72)),
+            )
             agent.context_compressor.threshold_tokens = new_threshold
             # Keep threshold_percent in sync so future main-model
             # context_length changes (update_model) re-derive from a
@@ -165,7 +351,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 agent.context_compressor.threshold_percent = (
                     new_threshold / main_ctx
                 )
-            safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
+            safe_pct = int((new_threshold / main_ctx) * 100) if main_ctx else 50
             # Build human-readable "model (provider)" labels for both
             # the main model and the compression model so users can
             # tell at a glance which provider each side is actually
@@ -364,9 +550,14 @@ def compress_context(
                     "check auxiliary.compression.model in config.yaml."
                 )
 
+    plan_snapshot = None
+    try:
+        from tools.present_plan_tool import format_latest_plan_for_injection
+        plan_snapshot = format_latest_plan_for_injection(messages)
+    except Exception as e:
+        logger.debug("Plan snapshot preservation skipped: %s", e)
     todo_snapshot = agent._todo_store.format_for_injection()
-    if todo_snapshot:
-        compressed.append({"role": "user", "content": todo_snapshot})
+    compressed = insert_preserved_context(compressed, [plan_snapshot, todo_snapshot])
 
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)
@@ -421,6 +612,17 @@ def compress_context(
             agent._last_flushed_db_idx = 0
         except Exception as e:
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+
+    try:
+        _store_compression_checkpoint(
+            agent,
+            session_id=agent.session_id or "",
+            old_session_id=locals().get("old_session_id"),
+            source_messages=messages,
+            compressed_messages=compressed,
+        )
+    except Exception as _checkpoint_err:
+        logger.debug("compression checkpoint skipped: %s", _checkpoint_err)
 
     # Notify the context engine that the session_id rotated because of
     # compression (not a fresh /new). Plugin engines (e.g. elevate-lcm) use
@@ -477,6 +679,40 @@ def compress_context(
     )
     agent.context_compressor.last_prompt_tokens = _compressed_est
     agent.context_compressor.last_completion_tokens = 0
+
+    try:
+        from gateway.session_context import get_session_env
+
+        _pressure_agent_id = (
+            get_session_env("ELEVATE_SESSION_AGENT_ID", "")
+            or str(getattr(agent, "_agent_id", "") or "")
+            or os.environ.get("ELEVATE_AGENT_ID", "")
+        ).strip()
+        _context_limit = int(getattr(agent.context_compressor, "context_length", 0) or 0)
+        if _pressure_agent_id and _context_limit:
+            from elevate_cli.agent_policy import record_agent_context_pressure
+            from elevate_cli.data import connect
+
+            _summary_bits = []
+            for _msg in compressed[:4]:
+                if isinstance(_msg, dict):
+                    _text = _content_text(_msg.get("content")).strip()
+                    if _text:
+                        _summary_bits.append(_text)
+                if len("\n\n".join(_summary_bits)) > 2400:
+                    break
+            with connect() as _conn:
+                record_agent_context_pressure(
+                    _pressure_agent_id,
+                    session_id=str(getattr(agent, "session_id", "") or ""),
+                    current_tokens=int(approx_tokens or 0),
+                    context_limit=_context_limit,
+                    summary="\n\n".join(_summary_bits)[:4000],
+                    conn=_conn,
+                    actor=_pressure_agent_id,
+                )
+    except Exception as _pressure_exc:
+        logger.debug("agent context-pressure record skipped: %s", _pressure_exc)
 
     # Clear the file-read dedup cache.  After compression the original
     # read content is summarised away — if the model re-reads the same
@@ -612,5 +848,6 @@ __all__ = [
     "check_compression_model_feasibility",
     "replay_compression_warning",
     "compress_context",
+    "insert_preserved_context",
     "try_shrink_image_parts_in_messages",
 ]

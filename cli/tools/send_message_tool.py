@@ -140,6 +140,10 @@ SEND_MESSAGE_SCHEMA = {
             "message": {
                 "type": "string",
                 "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/hermes/cache/img_xxx.jpg') in the message — the platform will deliver it as a native media attachment."
+            },
+            "agent_id": {
+                "type": "string",
+                "description": "Optional Agent Hub id for policy enforcement when an agent-owned run sends externally."
             }
         },
         "required": []
@@ -164,6 +168,58 @@ def _handle_list():
         return json.dumps({"targets": format_directory_for_display()})
     except Exception as e:
         return json.dumps(_error(f"Failed to load channel directory: {e}"))
+
+
+def _agent_send_policy_block(args, *, platform_name: str, target: str, chat_id: str | None) -> str | None:
+    agent_id = str(args.get("agent_id") or args.get("agentId") or "").strip()
+    if not agent_id:
+        try:
+            from gateway.session_context import get_session_env
+
+            agent_id = get_session_env("ELEVATE_SESSION_AGENT_ID", "").strip()
+        except Exception:
+            agent_id = ""
+    if not agent_id:
+        return None
+    try:
+        from elevate_cli.agent_policy import evaluate_agent_policy
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            decision = evaluate_agent_policy(
+                agent_id,
+                action="send_message",
+                category="external_send",
+                conn=conn,
+                create_approval=True,
+                surface=platform_name,
+                description=(
+                    f"Agent {agent_id} wants to send a message to "
+                    f"{target or chat_id or platform_name}."
+                ),
+                actor=agent_id,
+                resource=target or chat_id or platform_name,
+            )
+    except Exception as exc:
+        logger.warning("send_message agent policy check failed: %s", _sanitize_error_text(exc))
+        return None
+    if decision.get("decision") == "allow":
+        return None
+    if decision.get("decision") == "deny":
+        return json.dumps(
+            {
+                "error": f"Agent policy denied send_message for {agent_id}: {decision.get('reason')}",
+                "policy": decision,
+            }
+        )
+    return json.dumps(
+        {
+            "approvalRequired": True,
+            "error": "Agent policy requires dashboard approval before this external send.",
+            "policy": decision,
+            "approval": decision.get("approval"),
+        }
+    )
 
 
 def _handle_send(args):
@@ -274,6 +330,15 @@ def _handle_send(args):
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
     if duplicate_skip:
         return json.dumps(duplicate_skip)
+
+    policy_block = _agent_send_policy_block(
+        args,
+        platform_name=platform_name,
+        target=target,
+        chat_id=chat_id,
+    )
+    if policy_block:
+        return policy_block
 
     # Slack: resolve user IDs (U...) to DM channel IDs via conversations.open
     if platform_name == "slack" and chat_id and chat_id.startswith("U"):

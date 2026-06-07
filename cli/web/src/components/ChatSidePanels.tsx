@@ -23,6 +23,7 @@ import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type { SessionFileItem, TodoItem, TodoStatus } from "@/lib/api-types";
 import { Markdown } from "@/components/Markdown";
@@ -399,7 +400,7 @@ export function PlanPanel({
       {loading && todos === null && !hasPlan ? (
         <div className="flex flex-col gap-3 p-4">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="h-4 w-full animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+            <Skeleton key={i} className="h-4 w-full rounded-[6px] bg-[var(--chat-border)]" />
           ))}
         </div>
       ) : error && isEmpty ? (
@@ -818,7 +819,7 @@ export function FilesPanel({
       {loading && files === null ? (
         <div className="flex flex-col gap-2 p-3">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-4 w-full animate-pulse rounded-[6px] bg-[var(--chat-border)]" />
+            <Skeleton key={i} className="h-4 w-full rounded-[6px] bg-[var(--chat-border)]" />
           ))}
         </div>
       ) : error ? (

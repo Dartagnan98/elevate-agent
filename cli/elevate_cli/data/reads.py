@@ -906,7 +906,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
             placeholders = ",".join("?" for _ in profile_ids)
             for row in conn.execute(
                 f"""
-                SELECT profile_id, contact_id, favorite, favorited_at
+                SELECT profile_id, contact_id, favorite, favorited_at, favorited_by
                 FROM lead_profile_flags
                 WHERE profile_id IN ({placeholders})
                 """,
@@ -931,6 +931,7 @@ def db_source_inbox_response(*, limit: int = 16) -> dict[str, Any]:
         is_favorite = bool(flag and flag["favorite"])
         profile["favorite"] = is_favorite
         profile["favoritedAt"] = flag["favorited_at"] if flag else None
+        profile["favoritedBy"] = flag["favorited_by"] if flag else None
         if is_favorite:
             profile["leadSectionIds"] = sorted({
                 *[str(x) for x in profile.get("leadSectionIds", []) if x],

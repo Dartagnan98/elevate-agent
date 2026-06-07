@@ -40,6 +40,11 @@ def _safe(fn, *args, **kwargs) -> None:
     try:
         fn(*args, **kwargs)
     except Exception as exc:
+        if os.environ.get("ELEVATE_DISABLE_SQLITE_WRITE", "1").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            logger.error("pg-primary write failed: %s: %s", fn.__name__, exc)
+            raise
         logger.debug("pg-shadow: %s failed: %s", fn.__name__, exc)
 
 

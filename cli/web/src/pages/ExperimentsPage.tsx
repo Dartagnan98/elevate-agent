@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
+import { ListSkeleton, PageSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -696,11 +697,7 @@ export function SurfaceSettingsForm({
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
-      </div>
-    );
+    return <PageSkeleton rows={5} variant="form" />;
   }
 
   return (
@@ -870,11 +867,7 @@ export function SurfaceGoalsForm({
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading goals…
-      </div>
-    );
+    return <PageSkeleton rows={4} variant="form" />;
   }
 
   return (
@@ -1254,9 +1247,7 @@ export default function ExperimentsPage() {
       )}
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-        </div>
+        <ListSkeleton rows={5} />
       ) : error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load experiments: {error}

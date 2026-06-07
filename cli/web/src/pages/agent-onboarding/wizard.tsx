@@ -25,6 +25,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
 import {
   AgentConfigEditor,
@@ -1390,7 +1391,7 @@ function ConnectedAgentsRail({
             Agent Hub agents
           </h4>
           {hubLoading ? (
-            <p className="mt-2 text-[12px] text-muted-foreground/80">Loading…</p>
+            <ListSkeleton rows={3} className="mt-2" />
           ) : hubError ? (
             <p className="mt-2 text-[12px] text-muted-foreground/80">
               {hubError}
@@ -1628,12 +1629,7 @@ function AgentHubRoster() {
   };
 
   if (loading && !agents) {
-    return (
-      <div className="flex items-center justify-center gap-2 rounded-md border border-border/60 bg-card/30 px-3 py-4 text-[12px] text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>Loading Agent Hub roster…</span>
-      </div>
-    );
+    return <ListSkeleton rows={3} />;
   }
 
   if (loadError) {
@@ -2045,7 +2041,7 @@ function ApiKeysPanel({
   return (
     <div className="space-y-2.5">
       {loading && Object.keys(envMap).length === 0 ? (
-        <p className="text-[12px] text-muted-foreground/80">Loading…</p>
+        <ListSkeleton rows={4} />
       ) : (
         API_KEY_FIELDS.map((field) => {
           const state = envMap[field.envKey];
@@ -2225,10 +2221,7 @@ function SkillsBrowser() {
 
   if (loading && !skills) {
     return (
-      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Loading installed skills…
-      </div>
+      <ListSkeleton rows={3} />
     );
   }
   if (loadError) {
@@ -2366,10 +2359,7 @@ function ToolsetsBrowser() {
 
   if (loading && !toolsets) {
     return (
-      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Loading toolsets…
-      </div>
+      <ListSkeleton rows={3} />
     );
   }
   if (loadError) {
@@ -2813,9 +2803,7 @@ function AgentSettingsBrowser() {
 
   if (!loaded) {
     return (
-      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading agent settings…
-      </div>
+      <PageSkeleton rows={4} variant="form" />
     );
   }
 
@@ -5269,9 +5257,7 @@ function WhatsAppLocalPanel() {
 
   if (!statusLoaded) {
     return (
-      <p className="text-[11.5px] text-muted-foreground">
-        <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" /> Loading WhatsApp status…
-      </p>
+      <Skeleton className="h-4 w-44" />
     );
   }
   if (!status?.bridgePresent) {

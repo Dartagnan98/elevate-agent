@@ -459,6 +459,29 @@ session_reset:
 # explicitly want one shared "room brain" per group/channel.
 group_sessions_per_user: true
 
+# =============================================================================
+# Gateway Guardrails
+# =============================================================================
+# These protect both the local desktop/TUI chat and messaging gateways before an
+# expensive agent turn starts. The defaults are intentionally generous; lower
+# them for public/shared bots or raise them for trusted high-volume sessions.
+#
+# Environment overrides:
+#   ELEVATE_RATE_LIMIT_MESSAGES
+#   ELEVATE_RATE_LIMIT_WINDOW_SECONDS
+#   ELEVATE_DAILY_TOKEN_CAP
+#   ELEVATE_TOKEN_CAP_WINDOW_SECONDS
+guardrails:
+  enabled: true
+  rate_limit:
+    enabled: true
+    max_messages: 20
+    window_seconds: 60
+  usage:
+    enabled: true
+    daily_token_cap: 2000000
+    window_seconds: 86400
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Gateway Streaming
 # ─────────────────────────────────────────────────────────────────────────────

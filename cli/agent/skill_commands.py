@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -16,6 +17,7 @@ from elevate_constants import display_elevate_home
 logger = logging.getLogger(__name__)
 
 _skill_commands: Dict[str, Dict[str, Any]] = {}
+_skill_commands_lock = threading.RLock()
 # Patterns for sanitizing skill names into clean hyphen-separated slugs.
 _SKILL_INVALID_CHARS = re.compile(r"[^a-z0-9-]")
 _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
@@ -337,77 +339,98 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         Dict mapping "/skill-name" to {name, description, skill_md_path, skill_dir}.
     """
     global _skill_commands
-    _skill_commands = {}
-    try:
-        from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
-        from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
-        disabled = _get_disabled_skill_names()
-        seen_names: set = set()
+    with _skill_commands_lock:
+        commands: Dict[str, Dict[str, Any]] = {}
+        try:
+            from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, _get_disabled_skill_names
+            from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+            disabled = _get_disabled_skill_names()
+            seen_names: set = set()
+            access_config = None
+            required_entitlements_from_frontmatter = None
+            is_entitlement_active = None
+            try:
+                from elevate_cli.access import (
+                    is_entitlement_active as _is_entitlement_active,
+                    load_access_config,
+                    required_entitlements_from_frontmatter as _required_entitlements_from_frontmatter,
+                )
 
-        # Scan local dir first, then external dirs
-        dirs_to_scan = []
-        if SKILLS_DIR.exists():
-            dirs_to_scan.append(SKILLS_DIR)
-        dirs_to_scan.extend(get_external_skills_dirs())
+                access_config = load_access_config()
+                required_entitlements_from_frontmatter = _required_entitlements_from_frontmatter
+                is_entitlement_active = _is_entitlement_active
+            except Exception:
+                pass
 
-        for scan_dir in dirs_to_scan:
-            for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
-                if any(part in ('.git', '.github', '.hub') for part in skill_md.parts):
-                    continue
-                try:
-                    content = skill_md.read_text(encoding='utf-8')
-                    frontmatter, body = _parse_frontmatter(content)
-                    # Skip skills incompatible with the current OS platform
-                    if not skill_matches_platform(frontmatter):
-                        continue
-                    name = frontmatter.get('name', skill_md.parent.name)
-                    if name in seen_names:
-                        continue
-                    # Respect user's disabled skills config
-                    if name in disabled:
+            # Scan local dir first, then external dirs
+            dirs_to_scan = []
+            if SKILLS_DIR.exists():
+                dirs_to_scan.append(SKILLS_DIR)
+            dirs_to_scan.extend(get_external_skills_dirs())
+
+            for scan_dir in dirs_to_scan:
+                for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
+                    if any(part in ('.git', '.github', '.hub') for part in skill_md.parts):
                         continue
                     try:
-                        from elevate_cli.access import evaluate_skill_access
-
-                        access_decision = evaluate_skill_access(frontmatter)
-                        if not access_decision.allowed:
+                        content = skill_md.read_text(encoding='utf-8')
+                        frontmatter, body = _parse_frontmatter(content)
+                        # Skip skills incompatible with the current OS platform
+                        if not skill_matches_platform(frontmatter):
                             continue
+                        name = frontmatter.get('name', skill_md.parent.name)
+                        if name in seen_names:
+                            continue
+                        # Respect user's disabled skills config
+                        if name in disabled:
+                            continue
+                        if (
+                            access_config is not None
+                            and required_entitlements_from_frontmatter is not None
+                            and is_entitlement_active is not None
+                        ):
+                            required = required_entitlements_from_frontmatter(frontmatter)
+                            if any(
+                                not is_entitlement_active(entitlement, access_config)
+                                for entitlement in required
+                            ):
+                                continue
+                        description = frontmatter.get('description', '')
+                        if not description:
+                            for line in body.strip().split('\n'):
+                                line = line.strip()
+                                if line and not line.startswith('#'):
+                                    description = line[:80]
+                                    break
+                        seen_names.add(name)
+                        # Normalize to hyphen-separated slug, stripping
+                        # non-alnum chars (e.g. +, /) to avoid invalid
+                        # Telegram command names downstream.
+                        cmd_name = name.lower().replace(' ', '-').replace('_', '-')
+                        cmd_name = _SKILL_INVALID_CHARS.sub('', cmd_name)
+                        cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
+                        if not cmd_name:
+                            continue
+                        commands[f"/{cmd_name}"] = {
+                            "name": name,
+                            "description": description or f"Invoke the {name} skill",
+                            "skill_md_path": str(skill_md),
+                            "skill_dir": str(skill_md.parent),
+                        }
                     except Exception:
-                        pass
-                    description = frontmatter.get('description', '')
-                    if not description:
-                        for line in body.strip().split('\n'):
-                            line = line.strip()
-                            if line and not line.startswith('#'):
-                                description = line[:80]
-                                break
-                    seen_names.add(name)
-                    # Normalize to hyphen-separated slug, stripping
-                    # non-alnum chars (e.g. +, /) to avoid invalid
-                    # Telegram command names downstream.
-                    cmd_name = name.lower().replace(' ', '-').replace('_', '-')
-                    cmd_name = _SKILL_INVALID_CHARS.sub('', cmd_name)
-                    cmd_name = _SKILL_MULTI_HYPHEN.sub('-', cmd_name).strip('-')
-                    if not cmd_name:
                         continue
-                    _skill_commands[f"/{cmd_name}"] = {
-                        "name": name,
-                        "description": description or f"Invoke the {name} skill",
-                        "skill_md_path": str(skill_md),
-                        "skill_dir": str(skill_md.parent),
-                    }
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return _skill_commands
+        except Exception:
+            pass
+        _skill_commands = commands
+        return _skill_commands
 
 
 def get_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Return the current skill commands mapping (scan first if empty)."""
-    if not _skill_commands:
-        scan_skill_commands()
-    return _skill_commands
+    with _skill_commands_lock:
+        if not _skill_commands:
+            scan_skill_commands()
+        return _skill_commands
 
 
 def resolve_skill_command_key(command: str) -> Optional[str]:

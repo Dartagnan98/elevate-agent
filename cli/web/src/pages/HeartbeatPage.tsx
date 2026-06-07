@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import {
   Activity,
@@ -24,6 +25,7 @@ import { Select, SelectOption } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import { Markdown } from "@/components/Markdown";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -628,6 +630,9 @@ export default function HeartbeatPage() {
   const { toast, showToast } = useToast();
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const agentParam = searchParams.get("agent") ?? "";
+  const [agentFilter, setAgentFilter] = useState(agentParam);
   const [surfaces, setSurfaces] = useState<HeartbeatSurface[]>([]);
   const [surfacesLoaded, setSurfacesLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -659,6 +664,10 @@ export default function HeartbeatPage() {
     return () => window.clearInterval(id);
   }, [refresh]);
   useRefreshOnAgentTurn(() => void refresh());
+
+  useEffect(() => {
+    setAgentFilter(agentParam);
+  }, [agentParam]);
 
   // Agent Hub agents power the "Run as agent" picker. Telegram delivery routes
   // to the chosen agent's own bot (per-agent ELEVATE_AGENT_<id>_TELEGRAM_*).
@@ -880,10 +889,31 @@ export default function HeartbeatPage() {
       return next;
     });
 
+  const updateAgentFilter = useCallback(
+    (nextAgent: string) => {
+      setAgentFilter(nextAgent);
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (nextAgent) next.set("agent", nextAgent);
+          else next.delete("agent");
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const filteredJobs = useMemo(
+    () => jobs.filter((job) => !agentFilter || (job.agent ?? "") === agentFilter),
+    [agentFilter, jobs],
+  );
+
   const sorted = useMemo(
     () =>
-      [...jobs].sort((a, b) => (a.name || a.prompt).localeCompare(b.name || b.prompt)),
-    [jobs],
+      [...filteredJobs].sort((a, b) => (a.name || a.prompt).localeCompare(b.name || b.prompt)),
+    [filteredJobs],
   );
 
   return (
@@ -945,12 +975,18 @@ export default function HeartbeatPage() {
           <h2 className="text-sm font-semibold text-foreground">
             Active heartbeats{sorted.length ? ` (${sorted.length})` : ""}
           </h2>
+          <Select value={agentFilter} onValueChange={updateAgentFilter}>
+            <SelectOption value="">All agents</SelectOption>
+            {agents.map((agent) => (
+              <SelectOption key={agent.id} value={agent.id}>
+                {agent.name}
+              </SelectOption>
+            ))}
+          </Select>
         </div>
 
         {loading ? (
-          <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-          </div>
+          <ListSkeleton rows={5} />
         ) : sorted.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
             No heartbeats yet. Create one above.

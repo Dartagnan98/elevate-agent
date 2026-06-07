@@ -36,6 +36,74 @@ from tools.registry import tool_error
 logger = logging.getLogger(__name__)
 
 
+_DISABLED_POLICY_VALUES = {"", "none", "disabled", "off", "never"}
+_NO_RECALL_VALUES = _DISABLED_POLICY_VALUES | {"no_recall", "read_disabled"}
+_NO_WRITE_VALUES = _DISABLED_POLICY_VALUES | {"no_write", "read_only", "readonly", "write_disabled"}
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def normalize_agent_memory_policy(agent_id: str = "", policy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    raw = policy if isinstance(policy, dict) else {}
+    return {
+        "agentId": str(agent_id or raw.get("agentId") or raw.get("agent_id") or "").strip(),
+        "mode": str(raw.get("mode") or "shared_scoped").strip() or "shared_scoped",
+        "scopes": _as_list(raw.get("scopes")),
+        "sources": _as_list(raw.get("sources")),
+        "recall_policy": str(raw.get("recall_policy") or raw.get("recallPolicy") or "agent_scoped_recent").strip() or "agent_scoped_recent",
+        "write_policy": str(raw.get("write_policy") or raw.get("writePolicy") or "append_events").strip() or "append_events",
+        "handoff_policy": str(raw.get("handoff_policy") or raw.get("handoffPolicy") or "summary_only").strip() or "summary_only",
+    }
+
+
+def memory_policy_allows_recall(policy: Optional[Dict[str, Any]]) -> bool:
+    normalized = normalize_agent_memory_policy(policy=policy)
+    mode = normalized["mode"].lower()
+    recall = normalized["recall_policy"].lower()
+    return mode not in _DISABLED_POLICY_VALUES and recall not in _NO_RECALL_VALUES
+
+
+def memory_policy_allows_write(policy: Optional[Dict[str, Any]]) -> bool:
+    normalized = normalize_agent_memory_policy(policy=policy)
+    mode = normalized["mode"].lower()
+    write = normalized["write_policy"].lower()
+    return mode not in _DISABLED_POLICY_VALUES and write not in _NO_WRITE_VALUES
+
+
+def memory_policy_metadata(policy: Optional[Dict[str, Any]], *, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized = normalize_agent_memory_policy(policy=policy)
+    meta = {
+        "agent_id": normalized["agentId"],
+        "agentId": normalized["agentId"],
+        "memory_scopes": normalized["scopes"],
+        "memory_sources": normalized["sources"],
+        "memory_recall_policy": normalized["recall_policy"],
+        "memory_write_policy": normalized["write_policy"],
+        "memory_handoff_policy": normalized["handoff_policy"],
+    }
+    if extra:
+        meta.update(extra)
+    return meta
+
+
 # ---------------------------------------------------------------------------
 # Context fencing helpers
 # ---------------------------------------------------------------------------
@@ -252,6 +320,36 @@ class MemoryManager:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        self._agent_memory_policy: Dict[str, Any] = normalize_agent_memory_policy()
+
+    def set_agent_policy(self, agent_id: str = "", policy: Optional[Dict[str, Any]] = None) -> None:
+        """Apply the active Agent Hub memory policy to this manager instance."""
+        self._agent_memory_policy = normalize_agent_memory_policy(agent_id, policy)
+
+    @staticmethod
+    def _accepted_kwargs(method: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Return only keyword args accepted by ``method``.
+
+        Memory providers are plugin-shaped and older ones only accept the
+        original narrow signature. Filtering keeps policy threading additive.
+        """
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return dict(kwargs)
+        params = signature.parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return dict(kwargs)
+        return {key: value for key, value in kwargs.items() if key in params}
+
+    def _policy_kwargs(self, **extra: Any) -> Dict[str, Any]:
+        metadata = memory_policy_metadata(self._agent_memory_policy, extra=extra or None)
+        return {
+            "agent_id": self._agent_memory_policy.get("agentId", ""),
+            "agent_memory_policy": dict(self._agent_memory_policy),
+            "memory_policy": dict(self._agent_memory_policy),
+            "memory_metadata": metadata,
+        }
 
     # -- Registration --------------------------------------------------------
 
@@ -342,10 +440,14 @@ class MemoryManager:
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
         """
+        if not memory_policy_allows_recall(self._agent_memory_policy):
+            return ""
         parts = []
+        policy_kwargs = self._policy_kwargs(session_id=session_id)
         for provider in self._providers:
             try:
-                result = provider.prefetch(query, session_id=session_id)
+                kwargs = {"session_id": session_id, **policy_kwargs}
+                result = provider.prefetch(query, **self._accepted_kwargs(provider.prefetch, kwargs))
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
@@ -357,9 +459,13 @@ class MemoryManager:
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
+        if not memory_policy_allows_recall(self._agent_memory_policy):
+            return
+        policy_kwargs = self._policy_kwargs(session_id=session_id)
         for provider in self._providers:
             try:
-                provider.queue_prefetch(query, session_id=session_id)
+                kwargs = {"session_id": session_id, **policy_kwargs}
+                provider.queue_prefetch(query, **self._accepted_kwargs(provider.queue_prefetch, kwargs))
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
@@ -370,9 +476,17 @@ class MemoryManager:
 
     def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Sync a completed turn to all providers."""
+        if not memory_policy_allows_write(self._agent_memory_policy):
+            return
+        policy_kwargs = self._policy_kwargs(session_id=session_id)
         for provider in self._providers:
             try:
-                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+                kwargs = {"session_id": session_id, **policy_kwargs}
+                provider.sync_turn(
+                    user_content,
+                    assistant_content,
+                    **self._accepted_kwargs(provider.sync_turn, kwargs),
+                )
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' sync_turn failed: %s",
@@ -419,7 +533,26 @@ class MemoryManager:
         if provider is None:
             return tool_error(f"No memory provider handles tool '{tool_name}'")
         try:
-            return provider.handle_tool_call(tool_name, args, **kwargs)
+            action_text = str(args.get("action") or args.get("operation") or "").lower()
+            if action_text in {"add", "append", "replace", "update", "write", "delete"}:
+                if not memory_policy_allows_write(self._agent_memory_policy):
+                    return tool_error("Agent memory write policy blocks this operation.")
+            elif not memory_policy_allows_recall(self._agent_memory_policy):
+                return tool_error("Agent memory recall policy blocks this operation.")
+            scoped_args = dict(args or {})
+            if (
+                self._agent_memory_policy.get("agentId")
+                or self._agent_memory_policy.get("scopes")
+                or self._agent_memory_policy.get("sources")
+            ):
+                metadata = scoped_args.get("metadata")
+                scoped_args["metadata"] = memory_policy_metadata(
+                    self._agent_memory_policy,
+                    extra=metadata if isinstance(metadata, dict) else None,
+                )
+            kwargs = {**kwargs, **self._policy_kwargs()}
+            kwargs = self._accepted_kwargs(provider.handle_tool_call, kwargs)
+            return provider.handle_tool_call(tool_name, scoped_args, **kwargs)
         except Exception as e:
             logger.error(
                 "Memory provider '%s' handle_tool_call(%s) failed: %s",
@@ -545,6 +678,9 @@ class MemoryManager:
 
         Skips the builtin provider itself (it's the source of the write).
         """
+        if not memory_policy_allows_write(self._agent_memory_policy):
+            return
+        write_metadata = memory_policy_metadata(self._agent_memory_policy, extra=dict(metadata or {}))
         for provider in self._providers:
             if provider.name == "builtin":
                 continue
@@ -552,10 +688,10 @@ class MemoryManager:
                 metadata_mode = self._provider_memory_write_metadata_mode(provider)
                 if metadata_mode == "keyword":
                     provider.on_memory_write(
-                        action, target, content, metadata=dict(metadata or {})
+                        action, target, content, metadata=dict(write_metadata)
                     )
                 elif metadata_mode == "positional":
-                    provider.on_memory_write(action, target, content, dict(metadata or {}))
+                    provider.on_memory_write(action, target, content, dict(write_metadata))
                 else:
                     provider.on_memory_write(action, target, content)
             except Exception as e:
@@ -599,9 +735,11 @@ class MemoryManager:
         if "elevate_home" not in kwargs:
             from elevate_constants import get_elevate_home
             kwargs["elevate_home"] = str(get_elevate_home())
+        kwargs.update(self._policy_kwargs())
         for provider in self._providers:
             try:
-                provider.initialize(session_id=session_id, **kwargs)
+                init_kwargs = {"session_id": session_id, **kwargs}
+                provider.initialize(**self._accepted_kwargs(provider.initialize, init_kwargs))
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' initialize failed: %s",

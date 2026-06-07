@@ -118,15 +118,35 @@ def _handoff_tool(args: dict[str, Any], **kw: Any) -> str:
                     return tool_error("handoff not found")
                 if current_agent_id and current_agent_id != handoff.get("toAgentId"):
                     return tool_error("only the receiving agent can complete this handoff")
+                result = args.get("result")
+                summary = str(args.get("summary") or args.get("message") or args.get("content") or "").strip()
+                status = str(args.get("status") or "completed").strip().lower()
+                if status == "skipped":
+                    status = "completed"
+                    if isinstance(result, dict):
+                        result = {**result, "outcome": result.get("outcome") or "skipped"}
+                    else:
+                        result = {"outcome": "skipped"}
+                if summary:
+                    if isinstance(result, dict):
+                        result = {**result}
+                        result.setdefault("summary", summary)
+                    elif result is None:
+                        result = {"summary": summary}
+                    else:
+                        result = {"summary": summary, "result": result}
                 handoff = record_agent_handoff_result(
                     conn,
                     handoff_id,
-                    status=str(args.get("status") or "completed"),
-                    result=args.get("result"),
+                    status=status,
+                    result=result,
                     error_message=args.get("error_message") or args.get("errorMessage"),
                     human_prompt=args.get("human_prompt") or args.get("humanPrompt"),
                     idempotency_key=args.get("idempotency_key") or args.get("idempotencyKey"),
-                    actor=current_agent_id or str(args.get("actor") or "").strip() or "executive-assistant",
+                    actor=current_agent_id
+                    or str(args.get("actor") or "").strip()
+                    or str(handoff.get("toAgentId") or "").strip()
+                    or "executive-assistant",
                 )
                 return tool_result(success=True, handoff=handoff)
 
@@ -196,7 +216,7 @@ AGENT_HANDOFF_SCHEMA = {
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["running", "waiting_human", "completed", "failed", "cancelled"],
+                    "enum": ["running", "waiting_human", "completed", "failed", "cancelled", "skipped"],
                     "description": "Result status for action=complete, or filter for action=list.",
                 },
                 "deal_id": {"type": "string"},
@@ -207,6 +227,7 @@ AGENT_HANDOFF_SCHEMA = {
                 "parent_handoff_id": {"type": "string"},
                 "payload": {"type": "object"},
                 "result": {"type": "object"},
+                "summary": {"type": "string"},
                 "human_prompt": {"type": "object"},
                 "error_message": {"type": "string"},
                 "idempotency_key": {"type": "string"},

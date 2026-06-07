@@ -14,6 +14,7 @@ import { api } from "@/lib/api";
 import type { AdminActionRun, AdminDealTask } from "@/lib/api";
 import type { HubData } from "./_shared/types";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 type AdminTaskTarget =
@@ -101,7 +102,7 @@ function AdminTaskDialog({
               {target.kind === "deal-task" ? "Deal task" : "Action run"}
             </div>
             <div className="mt-1 truncate text-[1.02rem] font-semibold leading-tight text-foreground">
-              {task?.title || run?.registryName || run?.skill || "Loading..."}
+              {task?.title || run?.registryName || run?.skill || <Skeleton className="h-5 w-48" />}
             </div>
           </div>
           <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">

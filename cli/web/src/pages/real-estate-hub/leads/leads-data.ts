@@ -104,6 +104,9 @@ export interface LeadsProfile {
   lastTouch: string;
   sourceId?: string;
   threadId?: string;
+  contactIds?: string[];
+  favorite?: boolean;
+  favoritedAt?: string | null;
 }
 
 export interface LeadsTemplateItem {

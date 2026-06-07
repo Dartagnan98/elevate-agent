@@ -444,6 +444,21 @@ class TestSessionStoreRewriteTranscript:
         reloaded = store.load_transcript(session_id)
         assert reloaded == []
 
+    def test_rewrite_uses_db_replace_messages(self, store):
+        fake_db = MagicMock()
+        store._db = fake_db
+        session_id = "test_session_3"
+        messages = [
+            {"role": "user", "content": "kept"},
+            {"role": "assistant", "content": "also kept"},
+        ]
+
+        store.rewrite_transcript(session_id, messages)
+
+        fake_db.replace_messages.assert_called_once_with(session_id, messages)
+        assert not fake_db.clear_messages.called
+        assert not fake_db.append_message.called
+
 
 class TestLoadTranscriptCorruptLines:
     """Regression: corrupt JSONL lines (e.g. from mid-write crash) must be

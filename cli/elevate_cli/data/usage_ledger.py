@@ -122,4 +122,31 @@ def recent_turns(limit: int = 20) -> List[Dict[str, Any]]:
         return []
 
 
-__all__ = ["record_turn", "recent_turns"]
+def sum_recent_tokens(
+    *,
+    since: float,
+    source: str | None = None,
+    session_key: str | None = None,
+) -> int:
+    """Sum total tokens for recent ledger rows."""
+    where = ["timestamp >= ?"]
+    params: list[Any] = [float(since)]
+    if source:
+        where.append("source = ?")
+        params.append(str(source))
+    if session_key:
+        where.append("session_key = ?")
+        params.append(str(session_key))
+    sql = f"SELECT COALESCE(SUM(total_tokens), 0) AS total FROM turn_usage WHERE {' AND '.join(where)}"
+    try:
+        with connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return 0
+        return int(row["total"] if isinstance(row, dict) else row[0] or 0)
+    except Exception as exc:
+        logger.debug("Failed to sum usage ledger tokens: %s", exc)
+        return 0
+
+
+__all__ = ["record_turn", "recent_turns", "sum_recent_tokens"]

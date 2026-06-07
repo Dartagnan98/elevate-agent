@@ -4,6 +4,7 @@ import { Activity, Clock, FlaskConical, Loader2, RefreshCw } from "lucide-react"
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -100,9 +101,7 @@ export default function ActivityPage() {
       </header>
 
       {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-        </div>
+        <ListSkeleton rows={6} />
       ) : error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load activity: {error}

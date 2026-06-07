@@ -60,6 +60,7 @@ import type {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageSkeleton } from "@/components/ui/skeleton";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import {
   playOnboardingChime,
@@ -5577,9 +5578,8 @@ function RealEstateAdminPageLegacy() {
         ]}
       />
       {adminSetup.loading && (
-        <div className="rounded-md border border-border bg-card px-4 py-5 text-[0.86rem] text-muted-foreground">
-          <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
-          Loading Admin setup
+        <div className="rounded-md border border-border bg-card p-4">
+          <PageSkeleton rows={5} variant="form" />
         </div>
       )}
       {adminSetup.error && (

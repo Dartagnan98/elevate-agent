@@ -347,6 +347,26 @@ def _db_unavailable_error(rid, *, code: int):
     return _err(rid, code, f"state.db unavailable: {detail}")
 
 
+def _session_identity_for(db, session_id: str) -> dict:
+    try:
+        identity = db.resolve_canonical_session_identity(session_id)
+    except Exception:
+        identity = {
+            "requested_session_id": session_id,
+            "lineage_root_id": session_id,
+            "active_session_id": session_id,
+            "session_kind": "chat",
+            "is_compression_tip": True,
+        }
+    return {
+        "requested_session_id": identity.get("requested_session_id") or session_id,
+        "lineage_root_id": identity.get("lineage_root_id") or session_id,
+        "active_session_id": identity.get("active_session_id") or session_id,
+        "session_kind": identity.get("session_kind") or "chat",
+        "is_compression_tip": identity.get("is_compression_tip"),
+    }
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
@@ -721,7 +741,16 @@ def _load_tool_progress_mode() -> str:
     return mode if mode in {"off", "new", "all", "verbose"} else "all"
 
 
-def _load_enabled_toolsets() -> list[str] | None:
+_TUI_TOOL_PROFILES = {
+    "gateway-followup": ("memory", "session_search", "todo", "messaging"),
+    "skill-runner": ("skills", "terminal", "file", "todo", "memory", "session_search"),
+    "coding-edit": ("terminal", "file", "todo", "delegation", "code_execution", "web", "memory", "session_search"),
+    "research-browser": ("web", "browser", "file", "todo", "memory", "session_search"),
+    "creative-vision": ("vision", "image_gen", "file", "todo", "memory"),
+}
+
+
+def _load_configured_toolsets() -> list[str] | None:
     try:
         from elevate_cli.config import load_config
         from elevate_cli.tools_config import _get_platform_tools
@@ -738,6 +767,109 @@ def _load_enabled_toolsets() -> list[str] | None:
         return enabled or None
     except Exception:
         return None
+
+
+def _load_tui_tool_profile_mode() -> str:
+    cfg = _load_cfg()
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    display_cfg = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
+    raw = (
+        agent_cfg.get("tui_tool_profile")
+        or display_cfg.get("tui_tool_profile")
+        or agent_cfg.get("gateway_tool_profile")
+        or "auto"
+    )
+    mode = str(raw or "auto").strip().lower()
+    if mode in {"off", "full", "legacy", "all", "false", "0"}:
+        return "full"
+    return "auto"
+
+
+def _load_enabled_toolsets(profile: str | None = None) -> list[str] | None:
+    configured = _load_configured_toolsets()
+    if _load_tui_tool_profile_mode() == "full":
+        return configured
+
+    requested = _TUI_TOOL_PROFILES.get(profile or "gateway-followup")
+    if not requested:
+        return configured
+    if not configured:
+        return sorted(set(requested))
+    allowed = set(configured)
+    selected = sorted({toolset for toolset in requested if toolset in allowed})
+    return selected or None
+
+
+def _select_tui_tool_profile(prompt: object) -> str | None:
+    if _load_tui_tool_profile_mode() == "full" or not isinstance(prompt, str):
+        return None
+    head = prompt[:5000]
+    lower = head.lower()
+    if "[system: the user has invoked" in lower and " skill" in lower:
+        return "skill-runner"
+    if any(
+        word in lower
+        for word in (
+            "skill",
+            "cma",
+            "comparative market",
+            "matrix",
+            "mls",
+            "listing",
+            "lead",
+            "leads",
+            "buyer",
+            "seller",
+            "transaction",
+        )
+    ):
+        return "skill-runner"
+    if any(
+        word in lower
+        for word in (
+            "code",
+            "repo",
+            "git",
+            "patch",
+            "edit",
+            "fix",
+            "debug",
+            "pytest",
+            "npm",
+            "python",
+            "terminal",
+            "shell",
+            "script",
+            "subagent",
+            "delegate",
+        )
+    ):
+        return "coding-edit"
+    if any(word in lower for word in ("browser", "website", "web page", "research", "search the web")):
+        return "research-browser"
+    if any(word in lower for word in ("image", "photo", "screenshot", "vision", "generate a picture")):
+        return "creative-vision"
+    return None
+
+
+def _ensure_tui_tool_profile(sid: str, session: dict, profile: str | None) -> None:
+    if not profile:
+        return
+    desired = _load_enabled_toolsets(profile=profile)
+    agent = session.get("agent")
+    current = getattr(agent, "enabled_toolsets", None) if agent else None
+    if current is not None and set(current or []) == set(desired or []):
+        return
+    new_agent = _make_agent(
+        sid,
+        session["session_key"],
+        session_id=session.get("session_key"),
+        tool_profile=profile,
+    )
+    session["agent"] = new_agent
+    session.pop("agent_base_ephemeral", None)
+    session.pop("agent_lane_id", None)
+    _emit("session.info", sid, _session_info(new_agent))
 
 
 def _session_tool_progress_mode(sid: str) -> str:
@@ -1509,7 +1641,12 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     return info
 
 
-def _make_agent(sid: str, key: str, session_id: str | None = None):
+def _make_agent(
+    sid: str,
+    key: str,
+    session_id: str | None = None,
+    tool_profile: str | None = None,
+):
     from run_agent import AIAgent
     from elevate_cli.runtime_provider import resolve_runtime_provider
 
@@ -1531,7 +1668,7 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
         verbose_logging=_load_tool_progress_mode() == "verbose",
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
-        enabled_toolsets=_load_enabled_toolsets(),
+        enabled_toolsets=_load_enabled_toolsets(profile=tool_profile),
         platform="tui",
         session_id=session_id or key,
         session_db=_get_db(),
@@ -1565,13 +1702,6 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
         "transport": current_transport() or _stdio_transport,
     }
-    try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
-        )
-    except Exception:
-        # Defer hard-failure to slash.exec; chat still works without slash worker.
-        _sessions[sid]["slash_worker"] = None
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
@@ -2107,12 +2237,6 @@ def _(rid, params: dict) -> dict:
             session["agent"] = agent
 
             try:
-                worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
-                session["slash_worker"] = worker
-            except Exception:
-                pass
-
-            try:
                 from tools.approval import (
                     register_gateway_notify,
                     load_permanent_allowlist,
@@ -2163,11 +2287,20 @@ def _(rid, params: dict) -> dict:
 
     threading.Thread(target=_build, daemon=True).start()
 
+    identity_payload = _session_identity_for(_get_db(), key) if _get_db() is not None else {
+        "requested_session_id": key,
+        "lineage_root_id": key,
+        "active_session_id": key,
+        "session_kind": "chat",
+        "is_compression_tip": True,
+    }
+
     return _ok(
         rid,
         {
             "session_id": sid,
             "persisted_session_id": key,
+            **identity_payload,
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -2273,10 +2406,13 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    identity_payload = _session_identity_for(db, target)
+    active_target = str(identity_payload.get("active_session_id") or target)
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     for existing_sid, existing_session in list(_sessions.items()):
-        if existing_session.get("session_key") != target:
+        existing_key = existing_session.get("session_key")
+        if existing_key not in {target, active_target}:
             continue
         # Snapshot the event ring AND bind the new transport under the
         # same lock that write_json takes. This is the no-duplicate
@@ -2306,10 +2442,13 @@ def _(rid, params: dict) -> dict:
         with existing_session.get("history_lock", threading.Lock()):
             history = list(existing_session.get("history", []))
         messages = _history_to_messages(history) if include_messages else None
+        persisted_key = str(existing_key or active_target or target)
+        existing_identity = _session_identity_for(db, persisted_key)
         result = {
             "session_id": existing_sid,
-            "resumed": target,
-            "persisted_session_id": target,
+            "resumed": persisted_key,
+            "persisted_session_id": persisted_key,
+            **existing_identity,
             "message_count": len(messages) if messages is not None else len(history),
             "agent_ready": bool(existing_session.get("agent")),
             "info": _light_session_info(existing_session.get("agent")),
@@ -2341,6 +2480,7 @@ def _(rid, params: dict) -> dict:
         if _tip and _tip != target:
             logger.info("resume: following compression chain %s -> %s", target, _tip)
             target = _tip
+        identity_payload = _session_identity_for(db, target)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
         messages = _history_to_messages(history) if include_messages else None
@@ -2439,6 +2579,7 @@ def _(rid, params: dict) -> dict:
         "session_id": sid,
         "resumed": target,
         "persisted_session_id": target,
+        **identity_payload,
         "message_count": len(messages) if messages is not None else len(history),
         "agent_ready": False,
         "info": _light_session_info(),
@@ -2450,7 +2591,7 @@ def _(rid, params: dict) -> dict:
 
 @method("session.title")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session, err = _sess_nowait(params, rid)
     if err:
         return err
     db = _get_db()
@@ -3084,30 +3225,67 @@ def _(rid, params: dict) -> dict:
     if not _license_signed_in():
         _emit_sign_in_nag(sid)
         return _ok(rid, {"status": "sign_in_required"})
-    if agent_id:
-        try:
-            _apply_agent_lane(session, agent_id)
-        except Exception:
-            logger.exception("failed to apply agent lane %s", agent_id)
+    try:
+        from gateway.guardrails import check_gateway_guardrails, record_guardrail_block
+
+        guard_session_key = str(session.get("session_key") or sid or "")
+        decision = check_gateway_guardrails(
+            config=_load_cfg(),
+            identity_key=f"tui:{guard_session_key or 'unknown'}",
+            source="tui",
+            session_key=guard_session_key,
+        )
+        if not decision.allowed:
+            record_guardrail_block(
+                decision=decision,
+                session_id=guard_session_key,
+                session_key=guard_session_key,
+                message_id=str(rid),
+                source="tui",
+                model=_resolve_model(),
+            )
+            return _err(rid, 4290, decision.message)
+    except Exception as exc:
+        logger.debug("prompt guardrails skipped: %s", exc)
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
         session["running"] = True
-        history = list(session["history"])
-        history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
         session["attached_images"] = []
         videos = list(session.get("attached_videos", []))
         session["attached_videos"] = []
         files = list(session.get("attached_files", []))
         session["attached_files"] = []
-    agent = session["agent"]
     _emit("message.start", sid)
 
     def run():
         approval_token = None
         session_tokens = []
         try:
+            wait_err = _wait_agent(session, rid)
+            if wait_err:
+                error = wait_err.get("error") if isinstance(wait_err, dict) else None
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else "agent initialization failed"
+                )
+                _emit("error", sid, {"message": message})
+                return
+            try:
+                _ensure_tui_tool_profile(sid, session, _select_tui_tool_profile(text))
+            except Exception:
+                logger.exception("failed to apply tui tool profile")
+            if agent_id:
+                try:
+                    _apply_agent_lane(session, agent_id)
+                except Exception:
+                    logger.exception("failed to apply agent lane %s", agent_id)
+            with session["history_lock"]:
+                history = list(session["history"])
+                history_version = int(session.get("history_version", 0))
+            agent = session["agent"]
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,
@@ -3189,6 +3367,23 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
+                agent_session_id = getattr(agent, "session_id", None)
+                if isinstance(agent_session_id, str) and agent_session_id:
+                    old_session_key = str(session.get("session_key") or "")
+                    if agent_session_id != old_session_key:
+                        logger.info(
+                            "prompt.submit: agent session rotated %s -> %s",
+                            old_session_key,
+                            agent_session_id,
+                        )
+                        session["session_key"] = agent_session_id
+                        db = _get_db()
+                        if db is not None:
+                            _emit(
+                                "session.identity",
+                                sid,
+                                _session_identity_for(db, agent_session_id),
+                            )
 
                 last_reasoning = None
                 status_note = None
@@ -4260,9 +4455,9 @@ def _(rid, params: dict) -> dict:
 
         skill_count = 0
         try:
-            from agent.skill_commands import scan_skill_commands
+            from agent.skill_commands import get_skill_commands
 
-            for k, info in sorted(scan_skill_commands().items()):
+            for k, info in sorted(get_skill_commands().items()):
                 d = str(info.get("description", "Skill"))
                 all_pairs.append([k, d[:120] + ("…" if len(d) > 120 else "")])
                 skill_count += 1
@@ -4408,11 +4603,11 @@ def _(rid, params: dict) -> dict:
 
     try:
         from agent.skill_commands import (
-            scan_skill_commands,
+            get_skill_commands,
             build_skill_invocation_message,
         )
 
-        cmds = scan_skill_commands()
+        cmds = get_skill_commands()
         key = f"/{name}"
         if key in cmds:
             msg = build_skill_invocation_message(
@@ -5026,9 +5221,66 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     return ""
 
 
+def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str:
+    """Handle /compress in-process instead of paying the slash-worker tax."""
+    agent = session.get("agent")
+    if session.get("running"):
+        return "session busy — /interrupt the current turn before running /compress"
+    if not agent:
+        return "(._.) No active agent -- send a message first."
+    if not getattr(agent, "compression_enabled", True):
+        return "(._.) Compression is disabled in config."
+
+    with session["history_lock"]:
+        original_history = list(session.get("history", []))
+        if len(original_history) < 4:
+            return "(._.) Not enough conversation to compress (need at least 4 messages)."
+
+        from agent.manual_compression_feedback import summarize_manual_compression
+        from agent.model_metadata import estimate_messages_tokens_rough
+
+        approx_tokens = estimate_messages_tokens_rough(original_history)
+        compressed, _ = agent._compress_context(
+            original_history,
+            getattr(agent, "_cached_system_prompt", "") or "",
+            approx_tokens=approx_tokens,
+            focus_topic=focus_topic or None,
+        )
+        session["history"] = compressed
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+        if (
+            getattr(agent, "session_id", None)
+            and agent.session_id != session.get("session_key")
+        ):
+            session["session_key"] = agent.session_id
+            db = _get_db()
+            if db is not None:
+                _emit("session.identity", sid, _session_identity_for(db, agent.session_id))
+            _restart_slash_worker(session)
+
+        new_tokens = estimate_messages_tokens_rough(compressed)
+        summary = summarize_manual_compression(
+            original_history,
+            compressed,
+            approx_tokens,
+            new_tokens,
+        )
+
+    _emit("session.info", sid, _session_info(agent))
+    icon = "🗜️" if summary["noop"] else "✅"
+    lines = [
+        f"  {icon} {summary['headline']}",
+        f"     {summary['token_line']}",
+    ]
+    if summary["note"]:
+        lines.append(f"     {summary['note']}")
+    return "\n".join(lines)
+
+
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
+    session, err = _sess_nowait(params, rid)
     if err:
         return err
 
@@ -5049,6 +5301,26 @@ def _(rid, params: dict) -> dict:
         return _err(
             rid, 4018, f"pending-input command: use command.dispatch for /{_cmd_base}"
         )
+
+    if _cmd_base == "compress":
+        _focus = " ".join(_cmd_parts[1:]).strip() if len(_cmd_parts) > 1 else ""
+        with session["history_lock"]:
+            if len(session.get("history", [])) < 4:
+                return _ok(
+                    rid,
+                    {
+                        "output": "(._.) Not enough conversation to compress (need at least 4 messages)."
+                    },
+                )
+        if wait_err := _wait_agent(session, rid):
+            return wait_err
+        return _ok(
+            rid,
+            {"output": _run_direct_compress_slash(params.get("session_id", ""), session, _focus)},
+        )
+
+    if wait_err := _wait_agent(session, rid):
+        return wait_err
 
     try:
         from agent.skill_commands import get_skill_commands

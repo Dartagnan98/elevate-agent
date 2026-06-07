@@ -1004,17 +1004,14 @@ _GATEWAY_TOOL_PROFILES = {
     "cron-automation": ("cronjob", "skills", "terminal", "file", "todo", "memory", "session_search"),
 }
 
-# Capability floor for auto mode: these core local toolsets are NEVER stripped
-# by intent profiling — only the heavy specialized toolsets (browser, vision,
-# image_gen, computer, code_execution, cronjob, delegation, web) stay intent-
-# gated. Without this floor, a phrasing the keyword classifier doesn't match
-# falls to the lean follow-up profile and the agent reports it "doesn't have"
-# file / terminal / Gmail (gws) / Calendar / deploy / Mailjet tools even though
-# the platform is configured for them — those all run through terminal + skills.
-# Intersected with the platform's configured toolsets, so a user who disabled a
-# capability stays disabled.
+# Capability floor for auto mode: cheap continuity tools stay always-on while
+# code/file/skill surfaces load through the intent profile router. This keeps
+# ordinary follow-ups lean enough that compaction fires less often.
 _GATEWAY_CORE_TOOLSETS = (
-    "memory", "session_search", "todo", "messaging", "skills", "terminal", "file",
+    "memory", "session_search", "todo", "messaging",
+)
+_GATEWAY_LOCAL_CORE_TOOLSETS = (
+    "skills", "terminal", "file",
 )
 
 _GATEWAY_PROFILE_KEYWORDS = {
@@ -2638,6 +2635,9 @@ class GatewayRunner:
             user_config,
             platform_key,
         )
+        if mode == "auto":
+            configured_set |= set(_GATEWAY_CORE_TOOLSETS)
+            configured = sorted(configured_set)
         explicit_platform_config = GatewayRunner._has_explicit_platform_tool_config(
             user_config,
             platform_key,
@@ -2688,6 +2688,11 @@ class GatewayRunner:
             selected_toolsets = sorted(
                 set(selected_toolsets) | (configured_set & set(_GATEWAY_CORE_TOOLSETS))
             )
+            if explicit_platform_config and explicit_profile_mode:
+                selected_toolsets = sorted(
+                    set(selected_toolsets)
+                    | (configured_set & set(_GATEWAY_LOCAL_CORE_TOOLSETS))
+                )
 
         available_profiles: dict[str, dict[str, Any]] = {}
         for profile, requested in _GATEWAY_TOOL_PROFILES.items():
@@ -5636,6 +5641,29 @@ class GatewayRunner:
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+
+        try:
+            from gateway.guardrails import check_gateway_guardrails, record_guardrail_block
+
+            _guard_config = _load_gateway_config()
+            _guard_decision = check_gateway_guardrails(
+                config=_guard_config,
+                identity_key=f"{_platform_name}:{source.user_id or source.chat_id or session_key}",
+                source=_platform_name,
+                session_key=session_key,
+            )
+            if not _guard_decision.allowed:
+                record_guardrail_block(
+                    decision=_guard_decision,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    message_id=event.message_id,
+                    source=_platform_name,
+                    model=_resolve_gateway_model(_guard_config),
+                )
+                return _guard_decision.message
+        except Exception as exc:
+            logger.debug("Gateway guardrails skipped: %s", exc)
         
         # Emit session:start for new or auto-reset sessions
         _is_new_session = (
@@ -5676,7 +5704,48 @@ class GatewayRunner:
             if _turn_agent:
                 event.agent_id = str(_turn_agent.get("id") or _turn_agent.get("agent_id") or "").strip()
                 event.agent_name = str(_turn_agent.get("name") or _turn_agent.get("display_name") or "").strip()
-                event.auto_skill = merge_agent_skills(getattr(event, "auto_skill", None), _turn_agent)
+                _existing_auto_skill = getattr(event, "auto_skill", None)
+                _agent_skills_raw = _turn_agent.get("skills")
+                if isinstance(_agent_skills_raw, str):
+                    _agent_skill_names = [_agent_skills_raw.strip()] if _agent_skills_raw.strip() else []
+                elif isinstance(_agent_skills_raw, (list, tuple, set)):
+                    _agent_skill_names = [
+                        str(_s).strip()
+                        for _s in _agent_skills_raw
+                        if str(_s or "").strip()
+                    ]
+                else:
+                    _agent_skill_names = []
+                _hub_cfg = _lane_config.get("agent_hub") if isinstance(_lane_config.get("agent_hub"), dict) else {}
+                _limit_raw = os.getenv("ELEVATE_AGENT_AUTO_SKILL_LIMIT") or _hub_cfg.get("auto_load_skill_limit", 5)
+                try:
+                    _agent_auto_skill_limit = max(0, int(_limit_raw))
+                except (TypeError, ValueError):
+                    _agent_auto_skill_limit = 5
+                if _agent_skill_names and len(_agent_skill_names) > _agent_auto_skill_limit:
+                    event.auto_skill = _existing_auto_skill
+                    _preview_names = ", ".join(_agent_skill_names[:40])
+                    if len(_agent_skill_names) > 40:
+                        _preview_names += f", ... +{len(_agent_skill_names) - 40} more"
+                    _skills_note = (
+                        f"[Agent configured skills: {_preview_names}. "
+                        "These are available capability names, not preloaded full instructions. "
+                        "When the user asks for a named workflow, load the exact skill with "
+                        "skill_view(name=\"...\") before acting.]"
+                    )
+                    event.channel_prompt = "\n\n".join(
+                        part
+                        for part in (_skills_note, getattr(event, "channel_prompt", None))
+                        if str(part or "").strip()
+                    )
+                    logger.info(
+                        "Agent lane %s has %d configured skills; not auto-loading full payloads (limit=%d)",
+                        event.agent_id or "?",
+                        len(_agent_skill_names),
+                        _agent_auto_skill_limit,
+                    )
+                else:
+                    event.auto_skill = merge_agent_skills(_existing_auto_skill, _turn_agent)
                 _agent_prompt = agent_lane_prompt(_turn_agent)
                 if _agent_prompt:
                     event.channel_prompt = "\n\n".join(
@@ -5784,8 +5853,15 @@ class GatewayRunner:
             _skill_names = [_auto] if isinstance(_auto, str) else list(_auto)
             try:
                 from agent.skill_commands import _load_skill_payload, _build_skill_message
+                try:
+                    _auto_payload_limit = int(os.getenv("ELEVATE_AUTO_SKILL_PAYLOAD_MAX_CHARS", "120000"))
+                except (TypeError, ValueError):
+                    _auto_payload_limit = 120000
+                _auto_payload_limit = max(0, _auto_payload_limit)
+                _original_event_text = event.text or ""
                 _combined_parts: list[str] = []
                 _loaded_names: list[str] = []
+                _deferred_names: list[str] = []
                 for _sname in _skill_names:
                     _loaded = _load_skill_payload(_sname, task_id=_quick_key)
                     if _loaded:
@@ -5796,17 +5872,43 @@ class GatewayRunner:
                         )
                         _part = _build_skill_message(_loaded_skill, _skill_dir, _note)
                         if _part:
-                            _combined_parts.append(_part)
-                            _loaded_names.append(_sname)
+                            _candidate_size = sum(len(p) + 2 for p in _combined_parts) + len(_part)
+                            if _candidate_size <= _auto_payload_limit:
+                                _combined_parts.append(_part)
+                                _loaded_names.append(_sname)
+                            else:
+                                _deferred_names.append(_sname)
                     else:
                         logger.warning("[Gateway] Auto-skill '%s' not found", _sname)
                 if _combined_parts:
                     # Append the user's original text after all skill payloads
-                    _combined_parts.append(event.text)
+                    _combined_parts.append(_original_event_text)
                     event.text = "\n\n".join(_combined_parts)
+                    if not getattr(event, "_persist_user_message", None):
+                        event._persist_user_message = _original_event_text
                     logger.info(
                         "[Gateway] Auto-loaded skill(s) %s for session %s",
                         _loaded_names, session_key,
+                    )
+                if _deferred_names:
+                    _deferred_preview = ", ".join(str(_s) for _s in _deferred_names[:40])
+                    if len(_deferred_names) > 40:
+                        _deferred_preview += f", ... +{len(_deferred_names) - 40} more"
+                    _deferred_note = (
+                        f"[Auto-skill payload cap: {_deferred_preview} were not fully "
+                        "preloaded because the combined skill instructions would exceed "
+                        f"{_auto_payload_limit:,} chars. Load a deferred skill explicitly "
+                        "with skill_view(name=\"...\") before using that workflow.]"
+                    )
+                    event.channel_prompt = "\n\n".join(
+                        part
+                        for part in (_deferred_note, getattr(event, "channel_prompt", None))
+                        if str(part or "").strip()
+                    )
+                    logger.info(
+                        "[Gateway] Deferred auto-skill payload(s) %s for session %s due to payload cap",
+                        _deferred_names,
+                        session_key,
                     )
             except Exception as e:
                 logger.warning("[Gateway] Failed to auto-load skill(s) %s: %s", _skill_names, e)
@@ -5994,10 +6096,14 @@ class GatewayRunner:
                         )
                         if _hyg_runtime.get("api_key"):
                             _hyg_msgs = [
-                                {"role": m.get("role"), "content": m.get("content")}
+                                dict(m)
                                 for m in history
-                                if m.get("role") in ("user", "assistant")
-                                and m.get("content")
+                                if m.get("role") in ("system", "user", "assistant", "tool")
+                                and (
+                                    m.get("content") is not None
+                                    or m.get("tool_calls")
+                                    or m.get("tool_call_id")
+                                )
                             ]
 
                             if len(_hyg_msgs) >= 4:
@@ -8363,6 +8469,7 @@ class GatewayRunner:
 
         source = event.source
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"
+        self._record_background_task(task_id, "queued", prompt, source)
 
         # Fire-and-forget the background task
         _task = asyncio.create_task(
@@ -8374,6 +8481,50 @@ class GatewayRunner:
         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
         return f'🔄 Background task started: "{preview}"\nTask ID: {task_id}\nYou can keep chatting — results will appear when done.'
 
+    def _record_background_task(
+        self,
+        task_id: str,
+        status: str,
+        prompt: str,
+        source: "SessionSource",
+        *,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        db = getattr(self, "_session_db", None)
+        if db is None or not task_id:
+            return
+        now = time.time()
+        existing: dict = {}
+        try:
+            raw = db.get_meta(f"background_task:{task_id}")
+            if raw:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    existing = parsed
+        except Exception:
+            existing = {}
+        payload = {
+            **existing,
+            "task_id": task_id,
+            "status": status,
+            "prompt": prompt,
+            "platform": getattr(source.platform, "value", str(source.platform)),
+            "chat_id": source.chat_id,
+            "user_id": source.user_id,
+            "thread_id": source.thread_id,
+            "updated_at": now,
+        }
+        payload.setdefault("created_at", now)
+        if result is not None:
+            payload["result_preview"] = result[:2000]
+        if error is not None:
+            payload["error"] = error[:2000]
+        try:
+            db.set_meta(f"background_task:{task_id}", json.dumps(payload))
+        except Exception as exc:
+            logger.debug("background task checkpoint failed for %s: %s", task_id, exc)
+
     async def _run_background_task(
         self, prompt: str, source: "SessionSource", task_id: str
     ) -> None:
@@ -8383,9 +8534,11 @@ class GatewayRunner:
         adapter = self.adapters.get(source.platform)
         if not adapter:
             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
+            self._record_background_task(task_id, "failed", prompt, source, error="adapter unavailable")
             return
 
         _thread_metadata = self._source_delivery_metadata(source)
+        self._record_background_task(task_id, "running", prompt, source)
 
         try:
             user_config = _load_gateway_config()
@@ -8394,6 +8547,13 @@ class GatewayRunner:
                 user_config=user_config,
             )
             if not runtime_kwargs.get("api_key"):
+                self._record_background_task(
+                    task_id,
+                    "failed",
+                    prompt,
+                    source,
+                    error="no provider credentials configured",
+                )
                 await adapter.send(
                     source.chat_id,
                     f"❌ Background task {task_id} failed: no provider credentials configured.",
@@ -8441,6 +8601,7 @@ class GatewayRunner:
                     chat_name=source.chat_name,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
+                    agent_id=str(getattr(source, "agent_id", "") or ""),
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -8457,6 +8618,13 @@ class GatewayRunner:
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
                 response = f"Error: {result['error']}"
+            self._record_background_task(
+                task_id,
+                "completed",
+                prompt,
+                source,
+                result=response,
+            )
 
             # Extract media files from the response
             if response:
@@ -8509,6 +8677,7 @@ class GatewayRunner:
 
         except Exception as e:
             logger.exception("Background task %s failed", task_id)
+            self._record_background_task(task_id, "failed", prompt, source, error=str(e))
             try:
                 await adapter.send(
                     chat_id=source.chat_id,
@@ -8975,9 +9144,14 @@ class GatewayRunner:
                 return "No provider configured -- cannot compress."
 
             msgs = [
-                {"role": m.get("role"), "content": m.get("content")}
+                dict(m)
                 for m in history
-                if m.get("role") in ("user", "assistant") and m.get("content")
+                if m.get("role") in ("system", "user", "assistant", "tool")
+                and (
+                    m.get("content") is not None
+                    or m.get("tool_calls")
+                    or m.get("tool_call_id")
+                )
             ]
             original_count = len(msgs)
             approx_tokens = estimate_messages_tokens_rough(msgs)
@@ -9001,7 +9175,13 @@ class GatewayRunner:
                 loop = asyncio.get_running_loop()
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(msgs, "", approx_tokens=approx_tokens, focus_topic=focus_topic)
+                    lambda: tmp_agent._compress_context(
+                        msgs,
+                        "",
+                        approx_tokens=approx_tokens,
+                        focus_topic=focus_topic,
+                        force=True,
+                    )
                 )
 
                 # _compress_context already calls end_session() on the old session
@@ -12079,6 +12259,7 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
+                    agent_id=str(getattr(source, "agent_id", "") or ""),
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )

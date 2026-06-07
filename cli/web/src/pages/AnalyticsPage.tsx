@@ -14,6 +14,7 @@ import { timeAgo } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 
@@ -356,9 +357,7 @@ export default function AnalyticsPage() {
   return (
     <div className="flex flex-col gap-6">
       {loading && !data && (
-        <p className="px-1 py-1 text-xs text-muted-foreground/80">
-          {t.common.loading}
-        </p>
+        <RouteSkeleton path="/analytics" />
       )}
 
       {error && (

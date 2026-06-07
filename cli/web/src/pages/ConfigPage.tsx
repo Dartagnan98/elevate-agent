@@ -63,6 +63,8 @@ import { AutoField } from "@/components/AutoField";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { RouteSkeleton } from "@/components/route-skeletons";
+import { ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -1161,7 +1163,7 @@ function SourceConnectorSettingsPanel() {
         });
       })()}
       {loading && !connectors.length && (
-        <div className="py-6 text-sm text-muted-foreground">Loading connector blueprints...</div>
+        <ListSkeleton rows={4} />
       )}
     </section>
   );
@@ -1289,7 +1291,7 @@ function CrmIntegrationSettingsPanel() {
       </header>
       <div className="space-y-4">
         {loading || !form ? (
-          <div className="py-6 text-sm text-muted-foreground">Loading CRM settings...</div>
+          <PageSkeleton rows={5} variant="form" />
         ) : (
           <>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
@@ -1900,7 +1902,7 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
   }, [config]);
 
   if (!draft) {
-    return <p className="text-sm text-muted-foreground">Loading…</p>;
+    return <PageSkeleton rows={4} variant="form" />;
   }
 
   const get = (path: string): unknown => getNestedValue(draft, path);
@@ -2132,9 +2134,11 @@ function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant="outline">
-            {discovered ? `${discovered.length} discovered` : "Loading..."}
-          </Badge>
+          {discovered ? (
+            <Badge variant="outline">{`${discovered.length} discovered`}</Badge>
+          ) : (
+            <Skeleton className="h-6 w-24" />
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -2155,7 +2159,7 @@ function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
       )}
 
       {discovered === null ? (
-        <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading plugins…</p>
+        <ListSkeleton rows={4} />
       ) : discovered.length === 0 ? (
         <p className="px-1 py-1 text-xs text-muted-foreground/80">
           No plugins discovered. Drop a plugin directory under <code className="bg-transparent p-0 font-mono text-xs">~/.elevate/plugins/</code> and click Rescan.
@@ -2460,9 +2464,7 @@ export default function ConfigPage() {
 
   /* ---- Loading ---- */
   if (!config || !schema) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading config…</p>
-    );
+    return <RouteSkeleton path="/config" />;
   }
 
   /* ---- Render field list (shared between search & normal) ---- */
@@ -2810,7 +2812,12 @@ export default function ConfigPage() {
                   </div>
                   <div className="mt-4 rounded-md border border-border overflow-hidden">
                     {yamlLoading ? (
-                      <p className="px-3 py-3 text-xs text-muted-foreground/80">Loading YAML…</p>
+                      <div className="min-h-[600px] space-y-2 px-4 py-3">
+                        <Skeleton className="h-4 w-56" />
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-4 w-5/6" />
+                        <Skeleton className="h-4 w-2/3" />
+                      </div>
                     ) : (
                       <textarea
                         className="flex min-h-[600px] w-full bg-transparent px-4 py-3 text-sm font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none"

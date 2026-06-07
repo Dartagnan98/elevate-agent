@@ -142,6 +142,68 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["agents"] == []
 
+    def test_get_heartbeat_experiments_reads_proposed_and_running_records(self):
+        from elevate_constants import get_account_data_dir
+
+        surface_dir = get_account_data_dir() / "heartbeats" / "theta-wave-test"
+        active_dir = surface_dir / "experiments" / "active"
+        history_dir = surface_dir / "experiments" / "history"
+        active_dir.mkdir(parents=True)
+        history_dir.mkdir(parents=True)
+        (surface_dir / "config.json").write_text(
+            json.dumps(
+                {
+                    "experiment": {
+                        "metric": "stale_handoffs",
+                        "direction": "lower",
+                        "window": "7d",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (history_dir / "proposed.json").write_text(
+            json.dumps(
+                {
+                    "id": "exp-proposed",
+                    "status": "proposed",
+                    "hypothesis": "A clearer handoff card reduces stale work.",
+                    "metric": "stale_handoffs",
+                    "baseline_value": 7,
+                    "created_at": "2026-06-06T10:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (active_dir / "stale_handoffs.json").write_text(
+            json.dumps(
+                {
+                    "id": "exp-running",
+                    "status": "running",
+                    "hypothesis": "Native loops improve recovery.",
+                    "metric": "stale_handoffs",
+                    "baseline_value": 7,
+                    "started_at": "2026-06-06T11:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        resp = self.client.get("/api/heartbeats/experiments")
+
+        assert resp.status_code == 200
+        payload = resp.json()
+        surface = payload["surfaces"][0]
+        assert surface["surface"] == "theta-wave-test"
+        assert payload["summary"]["running"] == 1
+        assert surface["stats"]["total"] == 2
+        by_id = {item["id"]: item for item in surface["experiments"]}
+        assert by_id["exp-running"]["status"] == "running"
+        assert by_id["exp-running"]["result"] is None
+        assert by_id["exp-running"]["baseline"] == 7
+        assert by_id["exp-proposed"]["status"] == "proposed"
+        assert by_id["exp-proposed"]["direction"] == "lower"
+
     def test_update_session_title(self):
         from elevate_state import SessionDB
 

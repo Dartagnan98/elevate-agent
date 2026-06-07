@@ -6,7 +6,7 @@ import type {
   OutreachTemplate,
   SourceInboxSentItem,
 } from "@/lib/api-types";
-import type { LeadsDraft, LeadsDraftAction } from "./leads-data";
+import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "./leads-data";
 import {
   computeLeadsKpis,
   mapLeadsDrafts,
@@ -151,6 +151,21 @@ export function LeadsDesignShell() {
     [setSourceInbox],
   );
 
+  const handleProfileFavoriteChange = useCallback(
+    async (profile: LeadsProfile, favorite: boolean) => {
+      try {
+        const res = await api.updateSourceInboxProfileFavorite(profile.id, favorite, {
+          contactId: profile.contactIds?.[0] ?? null,
+        });
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("favorite toggle failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
   const rootAttrs = {
     "data-accent": "graphite" as const,
     "data-density": "compact" as const,
@@ -181,6 +196,7 @@ export function LeadsDesignShell() {
           templates={templates && templates.length > 0 ? templates : undefined}
           sent={sent && sent.length > 0 ? sent : undefined}
           onDraftAction={handleDraftAction}
+          onProfileFavoriteChange={handleProfileFavoriteChange}
           onReRunOnboarding={() => setForceOnboarding(true)}
           onRefresh={() => void data.refresh({ force: true })}
           templateMutations={templateMutations}

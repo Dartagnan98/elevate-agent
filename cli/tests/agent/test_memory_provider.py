@@ -345,6 +345,66 @@ class TestMemoryManager:
         assert p1._init_kwargs["session_id"] == "test-123"
         assert p1._init_kwargs["platform"] == "cli"
 
+    def test_agent_memory_policy_disables_recall_and_queue(self):
+        mgr = MemoryManager()
+        mgr.set_agent_policy("research", {"recall_policy": "none"})
+        p = FakeMemoryProvider("external")
+        p._prefetch_result = "should not leak"
+        mgr.add_provider(p)
+
+        assert mgr.prefetch_all("what do you know?", session_id="s1") == ""
+        mgr.queue_prefetch_all("next turn", session_id="s1")
+        assert p.prefetch_queries == []
+        assert p.queued_prefetches == []
+
+    def test_agent_memory_policy_disables_sync_and_write(self):
+        mgr = MemoryManager()
+        mgr.set_agent_policy("research", {"write_policy": "read_only"})
+        p = FakeMemoryProvider("external")
+        mgr.add_provider(p)
+
+        mgr.sync_all("user", "assistant", session_id="s1")
+        mgr.on_memory_write("add", "memory", "secret")
+        assert p.synced_turns == []
+        assert p.memory_writes == []
+
+    def test_agent_memory_policy_stamps_tool_metadata(self):
+        mgr = MemoryManager()
+        mgr.set_agent_policy(
+            "research",
+            {
+                "scopes": ["research", "handoffs"],
+                "sources": ["comms"],
+                "recall_policy": "agent_scoped_recent",
+                "write_policy": "append_events",
+            },
+        )
+        p = FakeMemoryProvider(
+            "external",
+            tools=[{"name": "memory_recall", "description": "Recall", "parameters": {}}],
+        )
+        mgr.add_provider(p)
+
+        result = json.loads(mgr.handle_tool_call("memory_recall", {"query": "x"}))
+        metadata = result["args"]["metadata"]
+        assert metadata["agent_id"] == "research"
+        assert metadata["memory_scopes"] == ["research", "handoffs"]
+        assert metadata["memory_sources"] == ["comms"]
+        assert metadata["memory_recall_policy"] == "agent_scoped_recent"
+        assert metadata["memory_write_policy"] == "append_events"
+
+    def test_initialize_all_threads_agent_memory_policy(self):
+        mgr = MemoryManager()
+        mgr.set_agent_policy("research", {"scopes": ["research"]})
+        p = FakeMemoryProvider("external")
+        mgr.add_provider(p)
+
+        mgr.initialize_all(session_id="test-123", platform="cli")
+        assert p._init_kwargs["agent_id"] == "research"
+        assert p._init_kwargs["agent_memory_policy"]["agentId"] == "research"
+        assert p._init_kwargs["memory_policy"]["scopes"] == ["research"]
+        assert p._init_kwargs["memory_metadata"]["memory_scopes"] == ["research"]
+
     # -- Error resilience ---------------------------------------------------
 
     def test_prefetch_failure_doesnt_block(self):

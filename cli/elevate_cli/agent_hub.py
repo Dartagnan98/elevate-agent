@@ -9,7 +9,9 @@ holographic memory store. It never returns raw secrets.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import re
 import sqlite3
 import time
 from datetime import datetime
@@ -162,6 +164,7 @@ def _model_summary(config: dict[str, Any]) -> dict[str, Any]:
 
 
 _AGENT_EDITABLE_FIELDS: tuple[str, ...] = (
+    "name",
     "enabled",
     "role",
     "description",
@@ -170,7 +173,571 @@ _AGENT_EDITABLE_FIELDS: tuple[str, ...] = (
     "toolsets",
     "platforms",
     "session_sources",
+    "runtime",
+    "routing",
+    "safety",
+    "identity",
+    "soul",
+    "lifecycle",
+    "ecosystem",
+    "memory",
+    "metadata",
 )
+
+
+_AGENT_RUNTIME_FIELDS: tuple[str, ...] = (
+    "model",
+    "provider",
+    "base_url",
+    "workdir",
+    "timezone",
+    "context_warning_threshold",
+    "context_handoff_threshold",
+    "runtime_type",
+    "codex_context_cap",
+)
+
+_AGENT_ROUTING_FIELDS: tuple[str, ...] = (
+    "owns",
+    "handoff_targets",
+    "escalation_target",
+    "default_priority",
+)
+
+_AGENT_SAFETY_FIELDS: tuple[str, ...] = (
+    "approval_mode",
+    "always_ask",
+    "never_ask",
+    "dangerously_skip_permissions",
+)
+
+_AGENT_IDENTITY_FIELDS: tuple[str, ...] = (
+    "emoji",
+    "vibe",
+    "work_style",
+)
+
+_AGENT_SOUL_FIELDS: tuple[str, ...] = (
+    "autonomy_rules",
+    "communication_style",
+    "day_mode",
+    "night_mode",
+    "day_mode_start",
+    "day_mode_end",
+    "core_truths",
+)
+
+_AGENT_LIFECYCLE_FIELDS: tuple[str, ...] = (
+    "startup_delay",
+    "max_session_seconds",
+    "max_crashes_per_day",
+    "crash_window_seconds",
+    "crash_window_max",
+    "telegram_polling",
+)
+
+_AGENT_ECOSYSTEM_FIELDS: tuple[str, ...] = (
+    "local_version_control",
+    "upstream_sync",
+    "catalog_browse",
+    "community_publish",
+)
+
+_AGENT_MEMORY_FIELDS: tuple[str, ...] = (
+    "mode",
+    "scopes",
+    "sources",
+    "recall_policy",
+    "write_policy",
+    "handoff_policy",
+)
+
+_DEFAULT_AGENT_RUNTIME: dict[str, Any] = {
+    "model": "",
+    "provider": "",
+    "base_url": "",
+    "workdir": "",
+    "timezone": "",
+    "context_warning_threshold": None,
+    "context_handoff_threshold": None,
+    "runtime_type": "",
+    "codex_context_cap": None,
+}
+
+_DEFAULT_AGENT_ROUTING: dict[str, Any] = {
+    "owns": [],
+    "handoff_targets": [],
+    "escalation_target": "",
+    "default_priority": "normal",
+}
+
+_DEFAULT_AGENT_SAFETY: dict[str, Any] = {
+    "approval_mode": "confirm_external_send",
+    "always_ask": [],
+    "never_ask": [],
+    "dangerously_skip_permissions": False,
+}
+
+_DEFAULT_AGENT_IDENTITY: dict[str, Any] = {
+    "emoji": "",
+    "vibe": "",
+    "work_style": "",
+}
+
+_DEFAULT_AGENT_SOUL: dict[str, Any] = {
+    "autonomy_rules": "",
+    "communication_style": "",
+    "day_mode": "",
+    "night_mode": "",
+    "day_mode_start": "",
+    "day_mode_end": "",
+    "core_truths": "",
+}
+
+_DEFAULT_AGENT_LIFECYCLE: dict[str, Any] = {
+    "startup_delay": 0,
+    "max_session_seconds": None,
+    "max_crashes_per_day": None,
+    "crash_window_seconds": None,
+    "crash_window_max": None,
+    "telegram_polling": None,
+}
+
+_DEFAULT_AGENT_ECOSYSTEM: dict[str, Any] = {
+    "local_version_control": False,
+    "upstream_sync": False,
+    "catalog_browse": False,
+    "community_publish": False,
+}
+
+_DEFAULT_AGENT_MEMORY: dict[str, Any] = {
+    "mode": "shared_scoped",
+    "scopes": [],
+    "sources": [],
+    "recall_policy": "agent_scoped_recent",
+    "write_policy": "append_events",
+    "handoff_policy": "summary_only",
+}
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, "", False):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _normalize_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def _strict_int(value: Any, path: str, *, allow_zero: bool = False) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{path} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{path} must be an integer") from exc
+    if parsed < 0 or (parsed == 0 and not allow_zero):
+        label = "non-negative" if allow_zero else "positive"
+        raise ValueError(f"{path} must be a {label} integer")
+    return parsed
+
+
+def _copy_dict(value: Any) -> dict[str, Any]:
+    return copy.deepcopy(value) if isinstance(value, dict) else {}
+
+
+_AGENT_METADATA_BLOCKED_KEYS = {
+    "daemon",
+    "ipc",
+    "pm2",
+    "pty",
+    "file_inbox",
+    "fileinbox",
+    "fast_checker",
+    "fast-checker",
+    "fastchecker",
+    "process",
+    "processes",
+}
+
+
+def _is_secret_metadata_key(key: str) -> bool:
+    lower = key.lower().replace("-", "_")
+    if lower.endswith("_env") or lower.endswith("_env_var") or lower.endswith("_env_name"):
+        return False
+    return bool(re.search(r"(api[_-]?key|apikey|secret|password|token)", lower))
+
+
+def _sanitize_agent_metadata(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Preserve non-secret import metadata while dropping daemon/process state."""
+    merged: dict[str, Any] = copy.deepcopy(base) if isinstance(base, dict) else {}
+    if not isinstance(value, dict):
+        return merged
+
+    def clean(item: Any) -> Any:
+        if isinstance(item, dict):
+            out: dict[str, Any] = {}
+            for raw_key, raw_value in item.items():
+                key = str(raw_key)
+                lower = key.lower().replace("-", "_")
+                if lower in _AGENT_METADATA_BLOCKED_KEYS or lower.startswith(("daemon_", "pm2_", "ipc_", "pty_")):
+                    continue
+                if _is_secret_metadata_key(key):
+                    continue
+                cleaned = clean(raw_value)
+                if cleaned is not None:
+                    out[key] = cleaned
+            return out
+        if isinstance(item, (list, tuple, set)):
+            cleaned_items = []
+            for child in item:
+                cleaned = clean(child)
+                if cleaned is not None:
+                    cleaned_items.append(cleaned)
+            return cleaned_items
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            return item
+        return str(item)
+
+    merged.update(clean(value) or {})
+    return merged
+
+
+def _coerce_agent_payload_aliases(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fold Cortext-shaped keys into Elevate's canonical config sections.
+
+    The raw daemon/PM2/IPC settings are intentionally not represented here.
+    These aliases only describe agent identity, policy, runtime defaults, and
+    lifecycle semantics that Elevate can enforce natively.
+    """
+    result = copy.deepcopy(payload)
+
+    runtime = _copy_dict(result.get("runtime"))
+    raw_runtime = result.get("runtime")
+    if isinstance(raw_runtime, str):
+        runtime["runtime_type"] = raw_runtime
+    for source, target in (
+        ("runtime_type", "runtime_type"),
+        ("model", "model"),
+        ("provider", "provider"),
+        ("base_url", "base_url"),
+        ("working_directory", "workdir"),
+        ("workdir", "workdir"),
+        ("timezone", "timezone"),
+        ("ctx_warning_threshold", "context_warning_threshold"),
+        ("ctx_handoff_threshold", "context_handoff_threshold"),
+        ("codex_context_cap", "codex_context_cap"),
+    ):
+        if source in result:
+            runtime[target] = result[source]
+    if runtime:
+        result["runtime"] = runtime
+
+    safety = _copy_dict(result.get("safety"))
+    approval_rules = result.get("approval_rules")
+    if isinstance(approval_rules, dict):
+        if "always_ask" in approval_rules:
+            safety["always_ask"] = approval_rules.get("always_ask")
+        if "never_ask" in approval_rules:
+            safety["never_ask"] = approval_rules.get("never_ask")
+        if "approval_mode" in approval_rules and "approval_mode" not in safety:
+            safety["approval_mode"] = approval_rules.get("approval_mode")
+    if "dangerously_skip_permissions" in result:
+        safety["dangerously_skip_permissions"] = result.get("dangerously_skip_permissions")
+    if safety:
+        result["safety"] = safety
+
+    soul = _copy_dict(result.get("soul"))
+    for source, target in (
+        ("communication_style", "communication_style"),
+        ("day_mode_start", "day_mode_start"),
+        ("day_mode_end", "day_mode_end"),
+    ):
+        if source in result:
+            soul[target] = result[source]
+    if soul:
+        result["soul"] = soul
+
+    lifecycle = _copy_dict(result.get("lifecycle"))
+    for source in (
+        "startup_delay",
+        "max_session_seconds",
+        "max_crashes_per_day",
+        "telegram_polling",
+    ):
+        if source in result:
+            lifecycle[source] = result[source]
+    crash_window = result.get("crash_window")
+    if isinstance(crash_window, dict):
+        seconds = (
+            crash_window.get("seconds")
+            or crash_window.get("duration_seconds")
+            or crash_window.get("window_seconds")
+        )
+        max_crashes = (
+            crash_window.get("max_crashes")
+            or crash_window.get("max")
+            or crash_window.get("count")
+        )
+        if seconds is not None:
+            lifecycle["crash_window_seconds"] = seconds
+        if max_crashes is not None:
+            lifecycle["crash_window_max"] = max_crashes
+    if lifecycle:
+        result["lifecycle"] = lifecycle
+
+    return result
+
+
+def _validate_agent_patch(payload: dict[str, Any]) -> None:
+    runtime = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
+    warning = None
+    handoff = None
+    if "context_warning_threshold" in runtime:
+        warning = _strict_int(runtime.get("context_warning_threshold"), "runtime.context_warning_threshold")
+        if warning is not None and not 1 <= warning <= 100:
+            raise ValueError("runtime.context_warning_threshold must be between 1 and 100")
+    if "context_handoff_threshold" in runtime:
+        handoff = _strict_int(runtime.get("context_handoff_threshold"), "runtime.context_handoff_threshold")
+        if handoff is not None and not 1 <= handoff <= 100:
+            raise ValueError("runtime.context_handoff_threshold must be between 1 and 100")
+    if "codex_context_cap" in runtime:
+        _strict_int(runtime.get("codex_context_cap"), "runtime.codex_context_cap")
+    if warning is not None and handoff is not None and warning >= handoff:
+        raise ValueError("runtime.context_warning_threshold must be lower than context_handoff_threshold")
+
+    soul = payload.get("soul") if isinstance(payload.get("soul"), dict) else {}
+    for key in ("day_mode_start", "day_mode_end"):
+        value = str(soul.get(key) or "").strip()
+        if value and not _HHMM_RE.match(value):
+            raise ValueError(f"soul.{key} must use HH:MM 24-hour time")
+
+    lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+    for key in (
+        "startup_delay",
+        "max_session_seconds",
+        "max_crashes_per_day",
+        "crash_window_seconds",
+        "crash_window_max",
+    ):
+        if key in lifecycle:
+            _strict_int(lifecycle.get(key), f"lifecycle.{key}", allow_zero=(key == "startup_delay"))
+
+    safety = payload.get("safety") if isinstance(payload.get("safety"), dict) else {}
+    for key in ("always_ask", "never_ask"):
+        if key in safety and not isinstance(safety.get(key), (str, list, tuple, set)):
+            raise ValueError(f"safety.{key} must be a list of policy rule names")
+
+
+def _validate_agent_config(agent: dict[str, Any]) -> None:
+    runtime = _normalize_runtime(agent.get("runtime"))
+    warning = runtime.get("context_warning_threshold")
+    handoff = runtime.get("context_handoff_threshold")
+    if warning is not None and handoff is not None and int(warning) >= int(handoff):
+        raise ValueError("runtime.context_warning_threshold must be lower than context_handoff_threshold")
+    soul = _normalize_soul(agent.get("soul"))
+    for key in ("day_mode_start", "day_mode_end"):
+        value = str(soul.get(key) or "").strip()
+        if value and not _HHMM_RE.match(value):
+            raise ValueError(f"soul.{key} must use HH:MM 24-hour time")
+
+
+def _normalize_runtime(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {"runtime_type": value} if isinstance(value, str) else {}
+    merged = {**_DEFAULT_AGENT_RUNTIME}
+    if isinstance(base, dict):
+        merged.update({key: base.get(key) for key in _AGENT_RUNTIME_FIELDS if key in base})
+    if "working_directory" in raw and "workdir" not in raw:
+        raw["workdir"] = raw.get("working_directory")
+    if "ctx_warning_threshold" in raw and "context_warning_threshold" not in raw:
+        raw["context_warning_threshold"] = raw.get("ctx_warning_threshold")
+    if "ctx_handoff_threshold" in raw and "context_handoff_threshold" not in raw:
+        raw["context_handoff_threshold"] = raw.get("ctx_handoff_threshold")
+    for key in ("model", "provider", "base_url", "workdir", "timezone", "runtime_type"):
+        if key in raw:
+            merged[key] = str(raw.get(key) or "").strip()
+    for key in ("context_warning_threshold", "context_handoff_threshold", "codex_context_cap"):
+        if key in raw:
+            merged[key] = _optional_int(raw.get(key))
+    return {key: merged.get(key) for key in _AGENT_RUNTIME_FIELDS}
+
+
+def _normalize_routing(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_ROUTING)
+    if isinstance(base, dict):
+        for key in _AGENT_ROUTING_FIELDS:
+            if key in base:
+                merged[key] = copy.deepcopy(base.get(key))
+    for key in ("owns", "handoff_targets"):
+        if key in raw:
+            merged[key] = _as_list(raw.get(key))
+    for key in ("escalation_target", "default_priority"):
+        if key in raw:
+            merged[key] = str(raw.get(key) or "").strip()
+    if not merged.get("default_priority"):
+        merged["default_priority"] = "normal"
+    return {key: merged.get(key) for key in _AGENT_ROUTING_FIELDS}
+
+
+def _normalize_safety(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_SAFETY)
+    if isinstance(base, dict):
+        for key in _AGENT_SAFETY_FIELDS:
+            if key in base:
+                merged[key] = copy.deepcopy(base.get(key))
+    if "approval_mode" in raw:
+        merged["approval_mode"] = str(raw.get("approval_mode") or "").strip()
+    for key in ("always_ask", "never_ask"):
+        if key in raw:
+            merged[key] = _as_list(raw.get(key))
+    approval_rules = raw.get("approval_rules") if isinstance(raw.get("approval_rules"), dict) else {}
+    for key in ("always_ask", "never_ask"):
+        if key in approval_rules and key not in raw:
+            merged[key] = _as_list(approval_rules.get(key))
+    if "dangerously_skip_permissions" in raw:
+        merged["dangerously_skip_permissions"] = _normalize_bool(raw.get("dangerously_skip_permissions"))
+    if not merged.get("approval_mode"):
+        merged["approval_mode"] = "confirm_external_send"
+    return {key: merged.get(key) for key in _AGENT_SAFETY_FIELDS}
+
+
+def _normalize_identity(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_IDENTITY)
+    if isinstance(base, dict):
+        for key in _AGENT_IDENTITY_FIELDS:
+            if key in base:
+                merged[key] = str(base.get(key) or "").strip()
+    for key in _AGENT_IDENTITY_FIELDS:
+        if key in raw:
+            merged[key] = str(raw.get(key) or "").strip()
+    return {key: merged.get(key) for key in _AGENT_IDENTITY_FIELDS}
+
+
+def _normalize_soul(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_SOUL)
+    if isinstance(base, dict):
+        for key in _AGENT_SOUL_FIELDS:
+            if key in base:
+                merged[key] = str(base.get(key) or "").strip()
+    for key in _AGENT_SOUL_FIELDS:
+        if key in raw:
+            merged[key] = str(raw.get(key) or "").strip()
+    return {key: merged.get(key) for key in _AGENT_SOUL_FIELDS}
+
+
+def _normalize_lifecycle(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    crash_window = raw.get("crash_window") if isinstance(raw.get("crash_window"), dict) else {}
+    if crash_window:
+        raw = dict(raw)
+        if "crash_window_seconds" not in raw:
+            raw["crash_window_seconds"] = (
+                crash_window.get("seconds")
+                or crash_window.get("duration_seconds")
+                or crash_window.get("window_seconds")
+            )
+        if "crash_window_max" not in raw:
+            raw["crash_window_max"] = (
+                crash_window.get("max_crashes")
+                or crash_window.get("max")
+                or crash_window.get("count")
+            )
+    merged = copy.deepcopy(_DEFAULT_AGENT_LIFECYCLE)
+    if isinstance(base, dict):
+        for key in _AGENT_LIFECYCLE_FIELDS:
+            if key in base:
+                merged[key] = copy.deepcopy(base.get(key))
+    for key in (
+        "startup_delay",
+        "max_session_seconds",
+        "max_crashes_per_day",
+        "crash_window_seconds",
+        "crash_window_max",
+    ):
+        if key in raw:
+            merged[key] = _optional_int(raw.get(key)) or (0 if key == "startup_delay" else None)
+    if "telegram_polling" in raw:
+        raw_polling = raw.get("telegram_polling")
+        merged["telegram_polling"] = None if raw_polling is None else bool(raw_polling)
+    return {key: merged.get(key) for key in _AGENT_LIFECYCLE_FIELDS}
+
+
+def _normalize_ecosystem(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_ECOSYSTEM)
+    if isinstance(base, dict):
+        for key in _AGENT_ECOSYSTEM_FIELDS:
+            if key in base:
+                merged[key] = bool(base.get(key))
+    for key in _AGENT_ECOSYSTEM_FIELDS:
+        if key in raw:
+            item = raw.get(key)
+            merged[key] = bool(item.get("enabled")) if isinstance(item, dict) else bool(item)
+    return {key: merged.get(key) for key in _AGENT_ECOSYSTEM_FIELDS}
+
+
+def _normalize_memory(value: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = copy.deepcopy(_DEFAULT_AGENT_MEMORY)
+    if isinstance(base, dict):
+        for key in _AGENT_MEMORY_FIELDS:
+            if key in base:
+                merged[key] = copy.deepcopy(base.get(key))
+    for key in ("mode", "recall_policy", "write_policy", "handoff_policy"):
+        if key in raw:
+            merged[key] = str(raw.get(key) or "").strip()
+    for key in ("scopes", "sources"):
+        if key in raw:
+            merged[key] = _as_list(raw.get(key))
+    if not merged.get("mode"):
+        merged["mode"] = _DEFAULT_AGENT_MEMORY["mode"]
+    if not merged.get("recall_policy"):
+        merged["recall_policy"] = _DEFAULT_AGENT_MEMORY["recall_policy"]
+    if not merged.get("write_policy"):
+        merged["write_policy"] = _DEFAULT_AGENT_MEMORY["write_policy"]
+    if not merged.get("handoff_policy"):
+        merged["handoff_policy"] = _DEFAULT_AGENT_MEMORY["handoff_policy"]
+    return {key: merged.get(key) for key in _AGENT_MEMORY_FIELDS}
+
+
+def _builtin_agent_ids() -> set[str]:
+    return {_slug(str(agent.get("id") or "")) for agent in DEFAULT_AGENT_DEFS}
+
+
+def _is_builtin_agent_id(agent_id: str) -> bool:
+    return _slug(agent_id) in _builtin_agent_ids()
+
+
+def _agent_config_id(raw: dict[str, Any]) -> str:
+    return _slug(str(raw.get("id") or raw.get("slug") or raw.get("name") or ""))
+
+
+def _persisted_agents(config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    hub_cfg = config.get("agent_hub")
+    if not isinstance(hub_cfg, dict):
+        hub_cfg = {}
+        config["agent_hub"] = hub_cfg
+    raw_agents = hub_cfg.get("agents")
+    if not isinstance(raw_agents, list):
+        raw_agents = []
+    hub_cfg["agents"] = raw_agents
+    return hub_cfg, raw_agents
 
 
 def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -184,19 +751,14 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     target_id = _slug(str(agent_id or ""))
     if not target_id:
         raise ValueError("agent id is required")
+    patch = _coerce_agent_payload_aliases(patch)
+    _validate_agent_patch(patch)
 
     config = load_config()
-    hub_cfg = config.get("agent_hub")
-    if not isinstance(hub_cfg, dict):
-        hub_cfg = {}
-        config["agent_hub"] = hub_cfg
-
-    raw_agents = hub_cfg.get("agents")
-    if not isinstance(raw_agents, list):
-        raw_agents = []
+    hub_cfg, raw_agents = _persisted_agents(config)
 
     existing_ids = {
-        _slug(str(item.get("id") or item.get("slug") or item.get("name") or ""))
+        _agent_config_id(item)
         for item in raw_agents
         if isinstance(item, dict)
     }
@@ -217,7 +779,7 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     for index, raw in enumerate(raw_agents):
         if not isinstance(raw, dict):
             continue
-        raw_id = _slug(str(raw.get("id") or raw.get("slug") or raw.get("name") or ""))
+        raw_id = _agent_config_id(raw)
         if raw_id != target_id:
             continue
         raw.setdefault("id", target_id)
@@ -227,8 +789,26 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
             value = patch[field]
             if field == "enabled":
                 raw[field] = bool(value)
-            elif field in {"role", "description", "prompt"}:
+            elif field in {"name", "role", "description", "prompt"}:
                 raw[field] = str(value or "").strip()
+            elif field == "runtime":
+                raw[field] = _normalize_runtime(value, base=raw.get("runtime") if isinstance(raw.get("runtime"), dict) else None)
+            elif field == "routing":
+                raw[field] = _normalize_routing(value, base=raw.get("routing") if isinstance(raw.get("routing"), dict) else None)
+            elif field == "safety":
+                raw[field] = _normalize_safety(value, base=raw.get("safety") if isinstance(raw.get("safety"), dict) else None)
+            elif field == "identity":
+                raw[field] = _normalize_identity(value, base=raw.get("identity") if isinstance(raw.get("identity"), dict) else None)
+            elif field == "soul":
+                raw[field] = _normalize_soul(value, base=raw.get("soul") if isinstance(raw.get("soul"), dict) else None)
+            elif field == "lifecycle":
+                raw[field] = _normalize_lifecycle(value, base=raw.get("lifecycle") if isinstance(raw.get("lifecycle"), dict) else None)
+            elif field == "ecosystem":
+                raw[field] = _normalize_ecosystem(value, base=raw.get("ecosystem") if isinstance(raw.get("ecosystem"), dict) else None)
+            elif field == "memory":
+                raw[field] = _normalize_memory(value, base=raw.get("memory") if isinstance(raw.get("memory"), dict) else None)
+            elif field == "metadata":
+                raw[field] = _sanitize_agent_metadata(value, base=raw.get("metadata") if isinstance(raw.get("metadata"), dict) else None)
             else:
                 raw[field] = sorted(
                     {str(item).strip() for item in _as_list(value) if str(item).strip()}
@@ -237,10 +817,384 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         updated = raw
         break
 
+    if updated is not None:
+        _validate_agent_config(updated)
     hub_cfg["agents"] = raw_agents
     config["agent_hub"] = hub_cfg
     save_config(config)
-    return updated or {}
+    return get_agent_def(target_id, config=config) or updated or {}
+
+
+def create_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a custom Agent Hub config entry."""
+    from elevate_cli.config import save_config
+
+    payload = _coerce_agent_payload_aliases(payload)
+    _validate_agent_patch(payload)
+    name = str(payload.get("name") or payload.get("label") or "").strip()
+    requested_id = str(payload.get("id") or payload.get("slug") or "").strip()
+    target_id = _slug(requested_id or name)
+    if not target_id:
+        raise ValueError("agent name or id is required")
+    if _is_builtin_agent_id(target_id):
+        raise ValueError("built-in agents cannot be recreated")
+
+    config = load_config()
+    hub_cfg, raw_agents = _persisted_agents(config)
+    existing_ids = {
+        _agent_config_id(item)
+        for item in raw_agents
+        if isinstance(item, dict)
+    } | _builtin_agent_ids()
+    if target_id in existing_ids:
+        raise ValueError(f"agent '{target_id}' already exists")
+
+    raw = {
+        "id": target_id,
+        "name": name or target_id.replace("-", " ").title(),
+        "role": str(payload.get("role") or "support").strip().lower(),
+        "description": str(payload.get("description") or "").strip(),
+        "enabled": bool(payload.get("enabled", True)),
+        "platforms": _as_list(payload.get("platforms")) or ["local"],
+        "session_sources": _as_list(payload.get("session_sources")) or ["cli", "cron"],
+        "skills": _as_list(payload.get("skills")),
+        "toolsets": _as_list(payload.get("toolsets")),
+        "prompt": str(payload.get("prompt") or "").strip(),
+        "runtime": _normalize_runtime(payload.get("runtime")),
+        "routing": _normalize_routing(payload.get("routing")),
+        "safety": _normalize_safety(payload.get("safety")),
+        "identity": _normalize_identity(payload.get("identity")),
+        "soul": _normalize_soul(payload.get("soul")),
+        "lifecycle": _normalize_lifecycle(payload.get("lifecycle")),
+        "ecosystem": _normalize_ecosystem(payload.get("ecosystem")),
+        "memory": _normalize_memory(payload.get("memory")),
+        "metadata": _sanitize_agent_metadata(payload.get("metadata")),
+    }
+    _validate_agent_config(raw)
+    raw_agents.append(raw)
+    hub_cfg["agents"] = raw_agents
+    config["agent_hub"] = hub_cfg
+    save_config(config)
+    return get_agent_def(target_id, config=config) or raw
+
+
+def delete_agent_config(agent_id: str) -> dict[str, Any]:
+    """Delete a custom Agent Hub agent. Built-ins can only be disabled."""
+    from elevate_cli.config import save_config
+
+    target_id = _slug(str(agent_id or ""))
+    if not target_id:
+        raise ValueError("agent id is required")
+    if _is_builtin_agent_id(target_id):
+        raise ValueError("built-in agents cannot be deleted; disable the agent instead")
+
+    config = load_config()
+    hub_cfg, raw_agents = _persisted_agents(config)
+    next_agents = [
+        raw for raw in raw_agents
+        if not (isinstance(raw, dict) and _agent_config_id(raw) == target_id)
+    ]
+    if len(next_agents) == len(raw_agents):
+        raise LookupError(f"Agent '{agent_id}' not found")
+    hub_cfg["agents"] = next_agents
+    config["agent_hub"] = hub_cfg
+    save_config(config)
+    return {"ok": True, "id": target_id}
+
+
+def agent_runtime_defaults(agent_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return sanitized runtime defaults for future agent-owned runs."""
+    agent = get_agent_def(agent_id, config=config)
+    runtime = agent.get("runtime") if isinstance(agent, dict) else None
+    return _normalize_runtime(runtime)
+
+
+def agent_lifecycle_defaults(agent_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return sanitized lifecycle policy for future agent-owned runs."""
+    agent = get_agent_def(agent_id, config=config)
+    lifecycle = agent.get("lifecycle") if isinstance(agent, dict) else None
+    return _normalize_lifecycle(lifecycle)
+
+
+def _utc_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _agent_memory_events_path() -> Path:
+    from elevate_cli.data.paths import data_root
+
+    return data_root() / "agent_memory_events.jsonl"
+
+
+def _redact_memory_fact(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    clean = re.sub(
+        r"(?i)\b(api[_-]?key|token|secret|password|private[_-]?key|auth[_-]?token)\b\s*[:=]\s*([^\s,;]+)",
+        lambda match: f"{match.group(1)}=[redacted]",
+        clean,
+    )
+    clean = re.sub(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}", "Bearer [redacted]", clean)
+    clean = re.sub(r"\bsk-[a-zA-Z0-9_-]{12,}\b", "[redacted]", clean)
+    return clean
+
+
+def _memory_fact_items(content: Any, *, limit: int = 200) -> list[str]:
+    if isinstance(content, (list, tuple, set)):
+        raw_text = "\n\n".join(str(item or "") for item in content)
+    else:
+        raw_text = str(content or "")
+    if not raw_text.strip():
+        return []
+
+    facts: list[str] = []
+    seen: set[str] = set()
+    block: list[str] = []
+    in_code = False
+
+    def flush_block() -> None:
+        if not block:
+            return
+        text = " ".join(part.strip() for part in block if part.strip())
+        block.clear()
+        text = re.sub(r"\s+", " ", text).strip()
+        text = _redact_memory_fact(text)
+        if not text or len(text) < 3:
+            return
+        if len(text) > 1200:
+            text = text[:1197].rstrip() + "..."
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        facts.append(text)
+
+    for raw_line in raw_text.replace("\r\n", "\n").split("\n"):
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            flush_block()
+            continue
+        if in_code:
+            continue
+        if not line:
+            flush_block()
+            continue
+        if re.match(r"^#{1,6}\s+", line):
+            flush_block()
+            continue
+        line = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line)
+        line = re.sub(r"^\[[ xX]\]\s*", "", line)
+        block.append(line)
+        if len(" ".join(block)) >= 900:
+            flush_block()
+        if len(facts) >= limit:
+            break
+    flush_block()
+    return facts[:limit]
+
+
+def agent_memory_facts(agent_id: str, *, limit: int = 40) -> list[dict[str, Any]]:
+    """Return recent native memory facts for an agent."""
+    if not str(agent_id or "").strip():
+        return []
+    clean_agent = _slug(str(agent_id or ""))
+    if not clean_agent:
+        return []
+    path = _agent_memory_events_path()
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-5000:]
+    except Exception:
+        return []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        if _slug(str(rec.get("agent") or "")) != clean_agent:
+            continue
+        fact = _redact_memory_fact(str(rec.get("fact") or ""))
+        if not fact:
+            continue
+        fact_id = str(rec.get("factId") or rec.get("id") or "").strip()
+        key = fact_id or fact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            {
+                "id": fact_id,
+                "agent": clean_agent,
+                "fact": fact,
+                "source": str(rec.get("source") or "agent-hub"),
+                "actor": str(rec.get("actor") or ""),
+                "ts": str(rec.get("ts") or ""),
+                "scopes": _as_list(rec.get("scopes")),
+            }
+        )
+    items.sort(key=lambda item: str(item.get("ts") or ""))
+    return items[-max(1, min(int(limit or 40), 500)):]
+
+
+def seed_agent_memory(
+    agent_id: str,
+    content: Any,
+    *,
+    source: str = "agent-hub",
+    actor: str = "human:web",
+    scopes: Any = None,
+) -> dict[str, Any]:
+    """Seed native per-agent memory facts from imported content."""
+    if not str(agent_id or "").strip():
+        raise ValueError("agent id is required")
+    clean_agent = _slug(str(agent_id or ""))
+    if not clean_agent:
+        raise ValueError("agent id is required")
+    facts = _memory_fact_items(content)
+    if not facts:
+        return {"agent": clean_agent, "seeded": 0, "duplicates": 0, "source": str(source or "agent-hub")}
+
+    existing = {
+        item.get("id") or hashlib.sha256(f"{clean_agent}\0{item.get('fact')}".encode("utf-8")).hexdigest()[:16]
+        for item in agent_memory_facts(clean_agent, limit=500)
+    }
+    path = _agent_memory_events_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = _utc_iso()
+    written = 0
+    duplicates = 0
+    with path.open("a", encoding="utf-8") as fh:
+        for fact in facts:
+            fact_id = hashlib.sha256(f"{clean_agent}\0{fact}".encode("utf-8")).hexdigest()[:16]
+            if fact_id in existing:
+                duplicates += 1
+                continue
+            existing.add(fact_id)
+            rec = {
+                "kind": "agent_memory_fact",
+                "agent": clean_agent,
+                "factId": fact_id,
+                "fact": fact,
+                "source": str(source or "agent-hub"),
+                "actor": str(actor or ""),
+                "scopes": _as_list(scopes),
+                "ts": now,
+            }
+            fh.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n")
+            written += 1
+    return {
+        "agent": clean_agent,
+        "seeded": written,
+        "duplicates": duplicates,
+        "source": str(source or "agent-hub"),
+    }
+
+
+def delete_agent_memory_seed(
+    agent_id: str,
+    *,
+    source: str | None = "cortext-import",
+) -> dict[str, Any]:
+    """Delete imported native memory facts for one agent.
+
+    This is intentionally scoped for installer cleanup. By default it removes
+    only facts whose source is ``cortext-import`` so hand-written/user-learned
+    memory survives uninstalling a preset.
+    """
+    if not str(agent_id or "").strip():
+        raise ValueError("agent id is required")
+    clean_agent = _slug(str(agent_id or ""))
+    if not clean_agent:
+        raise ValueError("agent id is required")
+    path = _agent_memory_events_path()
+    if not path.exists():
+        return {"agent": clean_agent, "removed": 0, "source": source}
+
+    wanted_source = str(source or "").strip()
+    kept: list[str] = []
+    removed = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:
+            kept.append(line)
+            continue
+        if not isinstance(rec, dict):
+            kept.append(line)
+            continue
+        rec_agent = _slug(str(rec.get("agent") or ""))
+        rec_source = str(rec.get("source") or "").strip()
+        matches_source = (
+            not wanted_source
+            or rec_source == wanted_source
+            or (
+                wanted_source == "cortext-import"
+                and rec_source.startswith("cortext-preset:")
+            )
+        )
+        if (
+            rec.get("kind") == "agent_memory_fact"
+            and rec_agent == clean_agent
+            and matches_source
+        ):
+            removed += 1
+            continue
+        kept.append(line)
+
+    if removed:
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        tmp.replace(path)
+    return {"agent": clean_agent, "removed": removed, "source": source}
+
+
+def _agent_compat(agent: dict[str, Any]) -> dict[str, Any]:
+    runtime = _normalize_runtime(agent.get("runtime"))
+    safety = _normalize_safety(agent.get("safety"))
+    soul = _normalize_soul(agent.get("soul"))
+    lifecycle = _normalize_lifecycle(agent.get("lifecycle"))
+    crash_window = {
+        "seconds": lifecycle.get("crash_window_seconds"),
+        "max_crashes": lifecycle.get("crash_window_max"),
+    }
+    return {
+        "cortext": {
+            "runtime": runtime.get("runtime_type") or "",
+            "runtime_type": runtime.get("runtime_type") or "",
+            "model": runtime.get("model") or "",
+            "provider": runtime.get("provider") or "",
+            "base_url": runtime.get("base_url") or "",
+            "working_directory": runtime.get("workdir") or "",
+            "timezone": runtime.get("timezone") or "",
+            "ctx_warning_threshold": runtime.get("context_warning_threshold"),
+            "ctx_handoff_threshold": runtime.get("context_handoff_threshold"),
+            "codex_context_cap": runtime.get("codex_context_cap"),
+            "dangerously_skip_permissions": bool(safety.get("dangerously_skip_permissions")),
+            "approval_rules": {
+                "always_ask": _as_list(safety.get("always_ask")),
+                "never_ask": _as_list(safety.get("never_ask")),
+            },
+            "communication_style": soul.get("communication_style") or "",
+            "day_mode_start": soul.get("day_mode_start") or "",
+            "day_mode_end": soul.get("day_mode_end") or "",
+            "startup_delay": lifecycle.get("startup_delay") or 0,
+            "max_session_seconds": lifecycle.get("max_session_seconds"),
+            "max_crashes_per_day": lifecycle.get("max_crashes_per_day"),
+            "crash_window": crash_window,
+            "telegram_polling": lifecycle.get("telegram_polling"),
+        },
+        "notes": [
+            "Cortext daemon, IPC, PM2, PTY injection, and file inbox settings are not imported.",
+            "dangerously_skip_permissions is preserved for compatibility but does not bypass Elevate safety gates.",
+        ],
+    }
 
 
 def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -275,6 +1229,7 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     for index, raw in enumerate(raw_agents):
         if not isinstance(raw, dict):
             continue
+        raw = _coerce_agent_payload_aliases(raw)
         name = str(raw.get("name") or raw.get("label") or "").strip()
         agent_id = str(raw.get("id") or raw.get("slug") or _slug(name)).strip()
         if not agent_id:
@@ -290,25 +1245,50 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
         default = defaults_by_id.get(agent_id, {})
         metadata = default.get("metadata") if isinstance(default.get("metadata"), dict) else {}
         raw_metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+        default_runtime = default.get("runtime") if isinstance(default.get("runtime"), dict) else {}
+        raw_runtime = raw.get("runtime") if isinstance(raw.get("runtime"), dict) else {}
+        default_routing = default.get("routing") if isinstance(default.get("routing"), dict) else {}
+        raw_routing = raw.get("routing") if isinstance(raw.get("routing"), dict) else {}
+        default_safety = default.get("safety") if isinstance(default.get("safety"), dict) else {}
+        raw_safety = raw.get("safety") if isinstance(raw.get("safety"), dict) else {}
+        default_identity = default.get("identity") if isinstance(default.get("identity"), dict) else {}
+        raw_identity = raw.get("identity") if isinstance(raw.get("identity"), dict) else {}
+        default_soul = default.get("soul") if isinstance(default.get("soul"), dict) else {}
+        raw_soul = raw.get("soul") if isinstance(raw.get("soul"), dict) else {}
+        default_lifecycle = default.get("lifecycle") if isinstance(default.get("lifecycle"), dict) else {}
+        raw_lifecycle = raw.get("lifecycle") if isinstance(raw.get("lifecycle"), dict) else {}
+        default_ecosystem = default.get("ecosystem") if isinstance(default.get("ecosystem"), dict) else {}
+        raw_ecosystem = raw.get("ecosystem") if isinstance(raw.get("ecosystem"), dict) else {}
+        default_memory = default.get("memory") if isinstance(default.get("memory"), dict) else {}
+        raw_memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else {}
         if not name:
             name = str(default.get("name") or agent_id.replace("-", " ").title()).strip()
-        agents.append(
-            {
-                "id": agent_id,
-                "name": name,
-                "role": str(raw.get("role") or default.get("role") or "support").strip().lower(),
-                "description": str(raw.get("description") or default.get("description") or "").strip(),
-                "enabled": bool(raw.get("enabled", True)),
-                "platforms": _merge_unique(default.get("platforms"), raw.get("platforms")),
-                "session_sources": _merge_unique(default.get("session_sources"), raw.get("session_sources")),
-                "skills": _merge_unique(default.get("skills"), raw.get("skills")),
-                "toolsets": _merge_unique(default.get("toolsets"), raw.get("toolsets")),
-                "prompt": str(
-                    raw.get("prompt") or raw.get("system_prompt") or default.get("prompt") or ""
-                ).strip(),
-                "metadata": {**dict(metadata), **dict(raw_metadata)},
-            }
-        )
+        agent = {
+            "id": agent_id,
+            "name": name,
+            "role": str(raw.get("role") or default.get("role") or "support").strip().lower(),
+            "description": str(raw.get("description") or default.get("description") or "").strip(),
+            "enabled": bool(raw.get("enabled", True)),
+            "platforms": _merge_unique(default.get("platforms"), raw.get("platforms")),
+            "session_sources": _merge_unique(default.get("session_sources"), raw.get("session_sources")),
+            "skills": _merge_unique(default.get("skills"), raw.get("skills")),
+            "toolsets": _merge_unique(default.get("toolsets"), raw.get("toolsets")),
+            "prompt": str(
+                raw.get("prompt") or raw.get("system_prompt") or default.get("prompt") or ""
+            ).strip(),
+            "runtime": _normalize_runtime(raw_runtime, base=default_runtime),
+            "routing": _normalize_routing(raw_routing, base=default_routing),
+            "safety": _normalize_safety(raw_safety, base=default_safety),
+            "identity": _normalize_identity(raw_identity, base=default_identity),
+            "soul": _normalize_soul(raw_soul, base=default_soul),
+            "lifecycle": _normalize_lifecycle(raw_lifecycle, base=default_lifecycle),
+            "ecosystem": _normalize_ecosystem(raw_ecosystem, base=default_ecosystem),
+            "memory": _normalize_memory(raw_memory, base=default_memory),
+            "canDelete": not _is_builtin_agent_id(agent_id),
+            "metadata": {**dict(metadata), **dict(raw_metadata)},
+        }
+        agent["compat"] = _agent_compat(agent)
+        agents.append(agent)
     return agents
 
 
@@ -333,6 +1313,19 @@ def get_agent_def(
         if _slug(str(agent.get("id") or "")) == wanted:
             return agent
     return None
+
+
+def agent_is_enabled(agent_id: str, config: dict[str, Any] | None = None) -> bool:
+    """Return whether an Agent Hub agent may start new work.
+
+    Unknown agents are treated as disabled for agent-scoped execution gates.
+    This keeps "Run as agent" / scoped worker paths from silently falling back
+    to a default persona when the operator expected a named agent.
+    """
+    agent = get_agent_def(agent_id, config=config)
+    if not agent:
+        return False
+    return bool(agent.get("enabled", True))
 
 
 def _session_summary(limit: int = 100, *, include_total: bool = True) -> dict[str, Any]:
@@ -1138,20 +2131,244 @@ def _memory_graph(conn: sqlite3.Connection) -> dict[str, Any]:
     return {"nodes": nodes[:90], "edges": edges[:180]}
 
 
+def _agent_queue_summaries(
+    handoffs: dict[str, Any],
+    agent_worker: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    worker = agent_worker if isinstance(agent_worker, dict) else {}
+    recovered = worker.get("recovered") if isinstance(worker.get("recovered"), dict) else {}
+    last_worker_agent = str(worker.get("agentId") or "").strip()
+    last_worker_tick = worker.get("lastTickAt")
+    by_agent = handoffs.get("byAgent") if isinstance(handoffs.get("byAgent"), list) else []
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in by_agent:
+        if not isinstance(row, dict):
+            continue
+        agent_id = _slug(str(row.get("agentId") or ""))
+        if not agent_id:
+            continue
+        summaries[agent_id] = {
+            "total": int(row.get("total") or 0),
+            "queued": int(row.get("queued") or 0),
+            "running": int(row.get("running") or 0),
+            "waitingHuman": int(row.get("waitingHuman") or 0),
+            "completed": int(row.get("completed") or 0),
+            "failed": int(row.get("failed") or 0),
+            "staleRecovered": int(recovered.get("staleHandoffs") or 0) if last_worker_agent == agent_id else 0,
+            "lastWorkerTickAt": last_worker_tick,
+        }
+    return summaries
+
+
+def _job_agent_id(job: dict[str, Any]) -> str:
+    agent_id = str(job.get("agent") or "").strip()
+    if agent_id:
+        return _slug(agent_id)
+    origin = job.get("origin") if isinstance(job.get("origin"), dict) else {}
+    for key in ("agent", "agentId", "to_agent_id", "toAgentId"):
+        agent_id = str(origin.get(key) or "").strip()
+        if agent_id:
+            return _slug(agent_id)
+    return ""
+
+
+def _agent_automation_summaries() -> dict[str, dict[str, Any]]:
+    try:
+        from cron.jobs import list_jobs
+
+        jobs = list_jobs(include_disabled=True)
+    except Exception:
+        return {}
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        agent_id = _job_agent_id(job)
+        if not agent_id:
+            continue
+        summary = summaries.setdefault(
+            agent_id,
+            {
+                "total": 0,
+                "enabled": 0,
+                "paused": 0,
+                "failures": 0,
+                "nextRunAt": None,
+                "lastRunAt": None,
+            },
+        )
+        summary["total"] += 1
+        if bool(job.get("enabled", True)):
+            summary["enabled"] += 1
+        else:
+            summary["paused"] += 1
+        if job.get("last_error") or str(job.get("last_status") or "").lower() == "failed":
+            summary["failures"] += 1
+        next_run_at = str(job.get("next_run_at") or "").strip()
+        if next_run_at and (not summary["nextRunAt"] or next_run_at < str(summary["nextRunAt"])):
+            summary["nextRunAt"] = next_run_at
+        last_run_at = str(job.get("last_run_at") or "").strip()
+        if last_run_at and (not summary["lastRunAt"] or last_run_at > str(summary["lastRunAt"])):
+            summary["lastRunAt"] = last_run_at
+    return summaries
+
+
+def _context_pressure_summaries() -> dict[str, dict[str, Any]]:
+    try:
+        from elevate_cli.data.paths import data_root
+
+        path = data_root() / "agent_context_pressure.jsonl"
+        if not path.exists():
+            return {}
+        lines = path.read_text(encoding="utf-8").splitlines()[-200:]
+    except Exception:
+        return {}
+    summaries: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        agent_id = _slug(str(rec.get("agent") or ""))
+        if not agent_id:
+            continue
+        current = summaries.get(agent_id)
+        ts = str(rec.get("ts") or "")
+        if current and ts <= str(current.get("lastEventAt") or ""):
+            continue
+        summaries[agent_id] = {
+            "lastEventAt": ts or None,
+            "kind": rec.get("kind") or "",
+            "percent": rec.get("percent"),
+            "tokens": rec.get("tokens"),
+            "contextLimit": rec.get("contextLimit"),
+            "status": rec.get("status") or "",
+            "detail": rec.get("detail") or "",
+            "thresholds": rec.get("thresholds") if isinstance(rec.get("thresholds"), dict) else {},
+        }
+    return summaries
+
+
+def _approval_blocker_summaries() -> dict[str, int]:
+    try:
+        from elevate_cli.data import connect, surface_tasks
+
+        with connect() as conn:
+            approvals = surface_tasks.list_approvals(conn, status="pending")
+    except Exception:
+        return {}
+    counts: dict[str, int] = {}
+    for approval in approvals:
+        if not isinstance(approval, dict):
+            continue
+        agent_id = _slug(str(approval.get("surface") or ""))
+        if not agent_id:
+            continue
+        counts[agent_id] = counts.get(agent_id, 0) + 1
+    return counts
+
+
+def _lifecycle_status_summaries(agent_ids: list[str]) -> dict[str, dict[str, Any]]:
+    try:
+        from elevate_cli.agent_policy import agent_lifecycle_status
+        from elevate_cli.data import connect
+
+        with connect() as conn:
+            return {
+                agent_id: agent_lifecycle_status(agent_id, conn=conn)
+                for agent_id in agent_ids
+            }
+    except Exception:
+        return {}
+
+
+def _agent_memory_summary(agent: dict[str, Any], queue_summary: dict[str, Any]) -> dict[str, Any]:
+    memory = _normalize_memory(agent.get("memory"))
+    agent_id = _slug(str(agent.get("id") or ""))
+    facts = agent_memory_facts(agent_id, limit=500) if agent_id else []
+    recent_facts = facts[-3:]
+    return {
+        "mode": memory.get("mode"),
+        "scopes": memory.get("scopes") or [],
+        "sources": memory.get("sources") or [],
+        "recallPolicy": memory.get("recall_policy"),
+        "writePolicy": memory.get("write_policy"),
+        "handoffPolicy": memory.get("handoff_policy"),
+        "nativeFacts": len(facts),
+        "nativeFactsCapped": len(facts) >= 500,
+        "lastMemoryAt": (facts[-1].get("ts") if facts else None),
+        "recentFacts": [
+            {
+                "id": item.get("id"),
+                "fact": item.get("fact"),
+                "source": item.get("source"),
+                "ts": item.get("ts"),
+            }
+            for item in recent_facts
+        ],
+        "handoffResults": int(queue_summary.get("completed") or 0),
+        "handoffFailures": int(queue_summary.get("failed") or 0),
+    }
+
+
+_EMPTY_QUEUE_SUMMARY: dict[str, Any] = {
+    "total": 0,
+    "queued": 0,
+    "running": 0,
+    "waitingHuman": 0,
+    "completed": 0,
+    "failed": 0,
+    "staleRecovered": 0,
+    "lastWorkerTickAt": None,
+}
+
+_EMPTY_AUTOMATION_SUMMARY: dict[str, Any] = {
+    "total": 0,
+    "enabled": 0,
+    "paused": 0,
+    "failures": 0,
+    "nextRunAt": None,
+    "lastRunAt": None,
+}
+
+_EMPTY_CONTEXT_PRESSURE: dict[str, Any] = {
+    "lastEventAt": None,
+    "kind": "",
+    "percent": None,
+    "tokens": None,
+    "contextLimit": None,
+    "status": "",
+    "detail": "",
+    "thresholds": {},
+}
+
+
 def _agent_summaries(
     config: dict[str, Any],
     *,
     gateway_running: bool,
     sessions: dict[str, Any],
     model: dict[str, Any],
+    handoffs: dict[str, Any],
+    agent_worker: dict[str, Any],
 ) -> list[dict[str, Any]]:
     agents = _load_agent_defs(config)
     by_source = sessions.get("by_source") if isinstance(sessions.get("by_source"), dict) else {}
     recent_sessions = sessions.get("recent") if isinstance(sessions.get("recent"), list) else []
     global_toolsets = _as_list(config.get("toolsets"))
+    queue_by_agent = _agent_queue_summaries(handoffs, agent_worker)
+    automations_by_agent = _agent_automation_summaries()
+    agent_ids = [_slug(str(agent.get("id") or "")) for agent in agents]
+    lifecycle_by_agent = _lifecycle_status_summaries([agent_id for agent_id in agent_ids if agent_id])
+    context_by_agent = _context_pressure_summaries()
+    approval_blockers = _approval_blocker_summaries()
 
     result: list[dict[str, Any]] = []
     for agent in agents:
+        agent_id = _slug(str(agent.get("id") or ""))
         sources = agent["session_sources"] or agent["platforms"] or ["cli"]
         source_set = set(sources)
         telegram_lane = _agent_telegram_lane(agent) if "telegram" in agent["platforms"] else None
@@ -1173,6 +2390,19 @@ def _agent_summaries(
             status = "ready"
         else:
             status = "offline"
+        queue_summary = {
+            **_EMPTY_QUEUE_SUMMARY,
+            **queue_by_agent.get(agent_id, {}),
+        }
+        automation_summary = {
+            **_EMPTY_AUTOMATION_SUMMARY,
+            **automations_by_agent.get(agent_id, {}),
+        }
+        lifecycle_status = lifecycle_by_agent.get(agent_id, {})
+        context_pressure = {
+            **_EMPTY_CONTEXT_PRESSURE,
+            **context_by_agent.get(agent_id, {}),
+        }
         result.append(
             {
                 **agent,
@@ -1182,6 +2412,24 @@ def _agent_summaries(
                 "toolsets": agent["toolsets"] or global_toolsets,
                 "has_prompt": bool(agent.get("prompt")),
                 "telegramLane": telegram_lane,
+                "queueSummary": queue_summary,
+                "automationSummary": automation_summary,
+                "lifecycleSummary": lifecycle_status,
+                "contextPressure": context_pressure,
+                "memorySummary": _agent_memory_summary(agent, queue_summary),
+                "observability": {
+                    "lastWakeAt": (agent_worker.get("wake") or {}).get("lastWakeAt")
+                    if isinstance(agent_worker.get("wake"), dict)
+                    and (agent_worker.get("wake") or {}).get("agentId") == agent_id
+                    else None,
+                    "lastScopedTickAt": agent_worker.get("lastTickAt")
+                    if agent_worker.get("agentId") == agent_id
+                    else None,
+                    "lastCronResultAt": automation_summary.get("lastRunAt"),
+                    "retryOrCrashCount": int(lifecycle_status.get("dailyFailures") or 0),
+                    "approvalBlockers": int(approval_blockers.get(agent_id, 0)),
+                    "staleRecovered": int(queue_summary.get("staleRecovered") or 0),
+                },
             }
         )
     return result
@@ -1364,6 +2612,8 @@ def build_agent_hub_snapshot(
             gateway_running=gateway_running,
             sessions=sessions,
             model=model,
+            handoffs=handoffs,
+            agent_worker=agent_worker,
         ),
         "orchestration": orchestration,
         "handoffs": handoffs,

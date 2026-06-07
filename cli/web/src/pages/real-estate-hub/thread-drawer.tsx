@@ -17,6 +17,7 @@ import type { SourceInboxDraft } from "@/lib/api-types";
 import type { HubData } from "../RealEstateHubPages";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { LeadStatusControl } from "./_shared/lead-status-control";
 
@@ -332,7 +333,7 @@ function ThreadDrawer({
                 </div>
               )}
               {loading && (
-                <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading thread…</p>
+                <ListSkeleton rows={4} />
               )}
               {error && (
                 <div className="rounded-md border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
@@ -409,8 +410,9 @@ function ThreadContextSidebar({
 }) {
   if (loading || !context) {
     return (
-      <div className="font-mono-ui text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-muted-foreground/80">
-        Loading context...
+      <div className="space-y-3">
+        <Skeleton className="h-3 w-28" />
+        <ListSkeleton rows={3} />
       </div>
     );
   }

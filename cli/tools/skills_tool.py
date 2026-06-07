@@ -81,6 +81,50 @@ from elevate_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
 
+_SKILL_VIEW_CONTENT_MAX_CHARS = 24_000
+
+
+def _clip_skill_view_content(
+    content: str,
+    *,
+    full: bool = False,
+    max_chars: int | None = None,
+) -> tuple[str, Dict[str, Any]]:
+    if full:
+        return content, {
+            "content_truncated": False,
+            "content_chars": len(content),
+            "content_limit": None,
+        }
+    try:
+        limit = int(max_chars) if max_chars is not None else _SKILL_VIEW_CONTENT_MAX_CHARS
+    except (TypeError, ValueError):
+        limit = _SKILL_VIEW_CONTENT_MAX_CHARS
+    limit = max(4_000, min(limit, 80_000))
+    if len(content) <= limit:
+        return content, {
+            "content_truncated": False,
+            "content_chars": len(content),
+            "content_limit": limit,
+        }
+    head_chars = int(limit * 0.70)
+    tail_chars = limit - head_chars
+    clipped = (
+        content[:head_chars].rstrip()
+        + "\n\n...[skill content truncated; call skill_view with full=true, max_chars, or a targeted file_path for more]...\n\n"
+        + content[-tail_chars:].lstrip()
+    )
+    return clipped, {
+        "content_truncated": True,
+        "content_chars": len(content),
+        "content_limit": limit,
+        "usage_hint": (
+            "Content was capped for context efficiency. Call skill_view with "
+            "full=true for the whole file, max_chars for a larger slice, or "
+            "file_path for a linked reference/template/script."
+        ),
+    }
+
 logger = logging.getLogger(__name__)
 
 
@@ -816,6 +860,8 @@ def _serve_plugin_skill(
     *,
     preprocess: bool = True,
     session_id: str | None = None,
+    full: bool = False,
+    max_chars: int | None = None,
 ) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from elevate_cli.plugins import _get_disabled_plugins, get_plugin_manager
@@ -900,14 +946,21 @@ def _serve_plugin_skill(
                 "Could not preprocess plugin skill %s:%s", namespace, bare, exc_info=True
             )
 
+    rendered_with_banner = f"{banner}{rendered_content}" if banner else rendered_content
+    clipped_content, clip_meta = _clip_skill_view_content(
+        rendered_with_banner,
+        full=full,
+        max_chars=max_chars,
+    )
     return json.dumps(
         {
             "success": True,
             "name": f"{namespace}:{bare}",
-            "content": f"{banner}{rendered_content}" if banner else rendered_content,
+            "content": clipped_content,
             "description": description,
             "linked_files": None,
             "readiness_status": SkillReadinessStatus.AVAILABLE.value,
+            **clip_meta,
         },
         ensure_ascii=False,
     )
@@ -918,6 +971,8 @@ def skill_view(
     file_path: str = None,
     task_id: str = None,
     preprocess: bool = True,
+    full: bool = False,
+    max_chars: int | None = None,
 ) -> str:
     """
     View the content of a skill or a specific file within a skill directory.
@@ -930,6 +985,8 @@ def skill_view(
         preprocess: Apply configured SKILL.md template and inline shell rendering
             to main skill content. Internal slash/preload callers disable this
             because they render the skill message themselves.
+        full: Return full content instead of the default capped outline.
+        max_chars: Optional cap override for the default outline/capped read.
 
     Returns:
         JSON string with skill content or error message
@@ -1009,6 +1066,8 @@ def skill_view(
                     bare,
                     preprocess=preprocess,
                     session_id=task_id,
+                    full=full,
+                    max_chars=max_chars,
                 )
 
             # Plugin exists but this specific skill is missing?
@@ -1110,29 +1169,55 @@ def skill_view(
                     _record(None, found_md)
 
         if len(candidates) > 1:
-            paths = [str(smd) for _, smd in candidates]
-            logging.getLogger(__name__).warning(
-                "Skill name collision for '%s': %d candidates — %s",
-                original_name, len(candidates), "; ".join(paths),
-            )
-            return json.dumps(
-                {
-                    "success": False,
-                    "error": (
-                        f"Ambiguous skill name '{original_name}': {len(candidates)} skills "
-                        "match across your local skills dir and external_dirs. "
-                        "Refusing to guess — load one explicitly by its categorized path."
-                    ),
-                    "matches": paths,
-                    "hint": (
-                        "Pass the full relative path instead of the bare name "
-                        "(e.g., 'category/skill-name'), use a source-qualified "
-                        "name like 'local/skill-name' or 'cloud/skill-name', "
-                        "or rename one of the colliding skills."
-                    ),
-                },
-                ensure_ascii=False,
-            )
+            def _is_under(path: Path, root: Path) -> bool:
+                try:
+                    path.resolve().relative_to(root.resolve())
+                    return True
+                except Exception:
+                    return False
+
+            def _is_cloud_skill(path: Path) -> bool:
+                return any(part == "cloud-skills" for part in path.parts)
+
+            local_candidates = [
+                (sd, smd) for sd, smd in candidates if _is_under(smd, SKILLS_DIR)
+            ]
+            cloud_candidates = [
+                (sd, smd) for sd, smd in candidates if _is_cloud_skill(smd)
+            ]
+            if len(local_candidates) == 1 and len(candidates) == len(cloud_candidates) + 1:
+                chosen = local_candidates[0]
+                logging.getLogger(__name__).warning(
+                    "Skill name collision for '%s': using local skill %s over %d cloud duplicate(s)",
+                    original_name,
+                    chosen[1],
+                    len(cloud_candidates),
+                )
+                candidates = [chosen]
+            else:
+                paths = [str(smd) for _, smd in candidates]
+                logging.getLogger(__name__).warning(
+                    "Skill name collision for '%s': %d candidates — %s",
+                    original_name, len(candidates), "; ".join(paths),
+                )
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Ambiguous skill name '{original_name}': {len(candidates)} skills "
+                            "match across your local skills dir and external_dirs. "
+                            "Refusing to guess — load one explicitly by its categorized path."
+                        ),
+                        "matches": paths,
+                        "hint": (
+                            "Pass the full relative path instead of the bare name "
+                            "(e.g., 'category/skill-name'), use a source-qualified "
+                            "name like 'local/skill-name' or 'cloud/skill-name', "
+                            "or rename one of the colliding skills."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
 
         if candidates:
             skill_dir, skill_md = candidates[0]
@@ -1332,13 +1417,19 @@ def skill_view(
                     ensure_ascii=False,
                 )
 
+            clipped_content, clip_meta = _clip_skill_view_content(
+                content,
+                full=full,
+                max_chars=max_chars,
+            )
             return json.dumps(
                 {
                     "success": True,
                     "name": name,
                     "file": file_path,
-                    "content": content,
+                    "content": clipped_content,
                     "file_type": target_file.suffix,
+                    **clip_meta,
                 },
                 ensure_ascii=False,
             )
@@ -1503,13 +1594,19 @@ def skill_view(
                     "Could not preprocess skill content for %s", skill_name, exc_info=True
                 )
 
+        clipped_content, clip_meta = _clip_skill_view_content(
+            rendered_content,
+            full=full,
+            max_chars=max_chars,
+        )
+
         result = {
             "success": True,
             "name": skill_name,
             "description": frontmatter.get("description", ""),
             "tags": tags,
             "related_skills": related_skills,
-            "content": rendered_content,
+            "content": clipped_content,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -1526,6 +1623,7 @@ def skill_view(
             "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value
             if setup_needed
             else SkillReadinessStatus.AVAILABLE.value,
+            **clip_meta,
         }
 
         setup_help = next((e["help"] for e in required_env_vars if e.get("help")), None)
@@ -1629,7 +1727,7 @@ SKILLS_LIST_SCHEMA = {
 
 SKILL_VIEW_SCHEMA = {
     "name": "skill_view",
-    "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
+    "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load capped SKILL.md content or access linked files (references, templates, scripts). First call returns an outline/capped content slice plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter. Use full=true only when the complete file is genuinely needed.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1640,6 +1738,14 @@ SKILL_VIEW_SCHEMA = {
             "file_path": {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
+            },
+            "full": {
+                "type": "boolean",
+                "description": "Return full content instead of the default capped slice. Use sparingly for large skills.",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Optional content cap override when full is false. Values are clamped to a safe range.",
             },
         },
         "required": ["name"],
@@ -1661,7 +1767,11 @@ def _skill_view_with_bump(args, **kw):
     telemetry failure never breaks the tool call."""
     name = args.get("name", "")
     result = skill_view(
-        name, file_path=args.get("file_path"), task_id=kw.get("task_id")
+        name,
+        file_path=args.get("file_path"),
+        task_id=kw.get("task_id"),
+        full=bool(args.get("full")),
+        max_chars=args.get("max_chars"),
     )
     try:
         parsed = json.loads(result)

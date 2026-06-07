@@ -9,7 +9,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import { FullWindowAurora } from "@/components/FullWindowAurora";
 import type {
   AdminSetupItemStatus,
   AgentSetupItem,
@@ -17,6 +16,7 @@ import type {
   AgentSetupSnapshot,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { cn } from "@/lib/utils";
 import {
   AgentOnboardingWelcome,
@@ -1223,13 +1223,7 @@ export function AgentOnboardingPage() {
   }, [setSetup]);
 
   if (loading) {
-    return (
-      <FullWindowAurora
-        label="Agent · onboarding"
-        title="Loading your setup"
-        subtitle="Reading existing connectors, memory wiring, and outbound channels."
-      />
-    );
+    return <RouteSkeleton path="/agent-onboarding" className="p-4" />;
   }
   if (error) {
     return (

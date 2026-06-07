@@ -241,3 +241,45 @@ def recent_turns(
                 db.close()
             except Exception:
                 pass
+
+
+def sum_recent_tokens(
+    *,
+    since: float,
+    source: str | None = None,
+    session_key: str | None = None,
+    session_db: Any | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Return total tokens for recent usage rows.
+
+    Prefer the Postgres helper. The SQLite fallback filters the bounded recent
+    rows in memory, which is good enough when PG is unavailable and keeps the
+    guardrail fail-open instead of breaking message dispatch.
+    """
+    try:
+        from elevate_cli.data.usage_ledger import sum_recent_tokens as _pg_sum
+
+        return _pg_sum(since=since, source=source, session_key=session_key)
+    except Exception as exc:
+        logger.debug(
+            "PG usage ledger token sum failed, falling back to recent rows: %s",
+            exc,
+        )
+
+    total = 0
+    for row in recent_turns(limit=1000, session_db=session_db, db_path=db_path):
+        try:
+            if float(row.get("timestamp") or 0) < float(since):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if source and row.get("source") != source:
+            continue
+        if session_key and row.get("session_key") != session_key:
+            continue
+        try:
+            total += int(row.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+    return max(0, total)

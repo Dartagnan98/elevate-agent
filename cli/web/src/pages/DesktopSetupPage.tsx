@@ -43,6 +43,7 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { Input } from "@/components/ui/input";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
@@ -788,9 +789,7 @@ export default function DesktopSetupPage() {
   );
 
   if (loading && !state.status && !state.hub) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading desktop setup…</p>
-    );
+    return <RouteSkeleton path="/desktop-setup" />;
   }
 
   return (

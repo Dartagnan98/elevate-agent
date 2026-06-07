@@ -47,13 +47,13 @@ _ELEVATE_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory",
+    "todo", "present_plan", "memory",
     # Session history search
     "session_search",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task", "agent_handoff", "admin_profile",
+    "execute_code", "delegate_task", "agent_handoff", "agent_bus", "admin_profile",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -156,6 +156,12 @@ TOOLSETS = {
     "agent_handoff": {
         "description": "Durable visible-agent handoff bus for routing tasks between specialist agents",
         "tools": ["agent_handoff"],
+        "includes": []
+    },
+
+    "agent_bus": {
+        "description": "Native Elevate agent bus for tasks, approvals, activity, heartbeat, worker ticks, experiments, catalog, and skills",
+        "tools": ["agent_bus"],
         "includes": []
     },
 

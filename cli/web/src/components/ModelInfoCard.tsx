@@ -5,10 +5,10 @@ import {
   Gauge,
   Lightbulb,
   Wrench,
-  Loader2,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ModelInfoResponse } from "@/lib/api";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatTokenCount } from "@/lib/format";
 
 interface ModelInfoCardProps {
@@ -39,9 +39,13 @@ export function ModelInfoCard({ currentModel, refreshKey = 0 }: ModelInfoCardPro
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
-        <Loader2 className="h-3 w-3 animate-spin" />
-        Loading model info…
+      <div className="space-y-2 rounded-md border border-border bg-card px-3 py-2.5">
+        <Skeleton className="h-4 w-52 max-w-full" />
+        <Skeleton className="h-4 w-36 max-w-full" />
+        <div className="flex gap-1.5">
+          <Skeleton className="h-5 w-14" />
+          <Skeleton className="h-5 w-16" />
+        </div>
       </div>
     );
   }

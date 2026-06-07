@@ -145,6 +145,9 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       lastTouch: ageLabel(p.statusUpdatedAt || p.latestAt),
       sourceId,
       threadId,
+      contactIds: p.contactIds || [],
+      favorite: Boolean(p.favorite),
+      favoritedAt: p.favoritedAt ?? null,
     };
   });
 }

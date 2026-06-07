@@ -85,6 +85,8 @@ import { Backdrop } from "@/components/Backdrop";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
+import { RouteSkeleton } from "@/components/route-skeletons";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useI18n } from "@/i18n";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
@@ -94,6 +96,7 @@ import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { markStartup, reportStartup } from "@/lib/startup-performance";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
+import { useIconButtonTitles } from "@/hooks/useIconButtonTitles";
 import { useSystemActions } from "@/contexts/useSystemActions";
 
 const loadConfigPage = () => import("@/pages/ConfigPage");
@@ -105,6 +108,7 @@ const loadAnalyticsPage = () => import("@/pages/AnalyticsPage");
 const loadCronPage = () => import("@/pages/CronPage");
 const loadHeartbeatPage = () => import("@/pages/HeartbeatPage");
 const loadExperimentsPage = () => import("@/pages/ExperimentsPage");
+const loadOverviewPage = () => import("@/pages/OverviewPage");
 const loadCommsPage = () => import("@/pages/CommsPage");
 const loadActivityPage2 = () => import("@/pages/ActivityPage");
 const loadTasksPage = () => import("@/pages/TasksPage");
@@ -137,6 +141,7 @@ const AnalyticsPage = lazy(loadAnalyticsPage);
 const CronPage = lazy(loadCronPage);
 const HeartbeatPage = lazy(loadHeartbeatPage);
 const ExperimentsPage = lazy(loadExperimentsPage);
+const OverviewPage = lazy(loadOverviewPage);
 const CommsPage = lazy(loadCommsPage);
 const ActivityFeedPage = lazy(loadActivityPage2);
 const TasksPage = lazy(loadTasksPage);
@@ -172,6 +177,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/cron": loadCronPage,
   "/heartbeat": loadHeartbeatPage,
   "/experiments": loadExperimentsPage,
+  "/overview": loadOverviewPage,
   "/comms": loadCommsPage,
   "/activity": loadActivityPage2,
   "/tasks": loadTasksPage,
@@ -188,7 +194,6 @@ function normalizePreloadPath(path: string): string {
   const base = path.split(/[?#]/)[0]?.replace(/\/$/, "") || "/";
   if (base === "/marketing") return "/social-media";
   if (base === "/listings" || base === "/deals") return "/admin";
-  if (base === "/approvals") return "/today";
   return base;
 }
 
@@ -314,15 +319,8 @@ function AccessLoadingPage() {
 }
 
 function RouteBundleFallback() {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="min-h-[20rem] w-full"
-    >
-      <span className="sr-only">Loading view</span>
-    </div>
-  );
+  const location = useLocation();
+  return <RouteSkeleton path={location.pathname} />;
 }
 
 // Soft-locked page shown when a user lands on a route whose skill pack
@@ -400,10 +398,6 @@ function AdminRedirect() {
   return <Navigate to="/admin" replace />;
 }
 
-function ApprovalsRedirect() {
-  return <Navigate to="/today" replace />;
-}
-
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -423,6 +417,7 @@ const BUILTIN_ROUTES_BASE: Record<string, ComponentType> = {
   "/cron": CronPage,
   "/heartbeat": HeartbeatPage,
   "/experiments": ExperimentsPage,
+  "/overview": OverviewPage,
   "/comms": CommsPage,
   "/activity": ActivityFeedPage,
   "/tasks": TasksPage,
@@ -638,7 +633,6 @@ function buildAccessControlledBuiltinRoutes(
       ? RealEstateSocialMediaPage
       : PendingOrLocked,
     "/marketing": packs.realEstateMarketing ? MarketingRedirect : PendingOrLocked,
-    "/approvals": packs.realEstateAdmin ? ApprovalsRedirect : PendingOrLocked,
     "/memory": RealEstateMemoryPage,
     ...BUILTIN_ROUTES_BASE,
     ...(embeddedChat ? { "/chat": ChatPage } : {}),
@@ -646,6 +640,7 @@ function buildAccessControlledBuiltinRoutes(
 }
 
 export default function App() {
+  useIconButtonTitles();
   const { t } = useI18n();
   const { pathname } = useLocation();
   const { manifests } = usePlugins();
@@ -1672,6 +1667,7 @@ function DesktopSidebar({
     realEstateNavItems.push({ icon: Megaphone, label: "Social Media", path: "/social-media" });
   }
   // Agents = the Agent Hub (single config page): identity + skills + the cortextOS loops.
+  realEstateNavItems.push({ icon: BarChart3, label: "Overview", path: "/overview" });
   realEstateNavItems.push({ icon: Bot, label: "Agents", path: "/hub" });
   // Heartbeat = the simple scheduled check-in surface; Automations = power cron.
   realEstateNavItems.push({ icon: Activity, label: "Heartbeat", path: "/heartbeat" });
@@ -2363,7 +2359,14 @@ function SessionSection({
 
       {(loading || statusText) && sessions.length === 0 && (
         <div className="px-2.5 py-1 text-[0.8rem] text-[var(--sidebar-text-muted)]">
-          {loading ? "Loading chats" : statusText}
+          {loading ? (
+            <div className="space-y-1.5 py-1">
+              <Skeleton className="h-3 w-full bg-[var(--sidebar-border)]" />
+              <Skeleton className="h-3 w-4/5 bg-[var(--sidebar-border)]" />
+            </div>
+          ) : (
+            statusText
+          )}
         </div>
       )}
     </div>

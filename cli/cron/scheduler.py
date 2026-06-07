@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -228,6 +229,43 @@ def _extract_cron_status(text: str):
     cleaned = re.sub(r"[ \t]*\n[ \t]*\n[ \t]*\Z", "\n", cleaned).rstrip()
     return status, cleaned
 
+
+def _record_agent_handoff_delivery(
+    job: dict,
+    *,
+    success: bool,
+    final_response: str | None,
+    error: str | None,
+    cron_outcome: str | None,
+) -> Optional[str]:
+    """Mirror agent-handoff cron results into the in-app Comms thread."""
+    origin = job.get("origin")
+    if not isinstance(origin, dict) or origin.get("source") != "agent_handoff":
+        return None
+    handoff_id = str(origin.get("handoff_id") or "").strip()
+    if not handoff_id:
+        return None
+    try:
+        from elevate_cli.data.connection import connect
+        from elevate_cli.data.agent_handoffs import record_agent_handoff_cron_delivery
+
+        with connect() as conn:
+            record_agent_handoff_cron_delivery(
+                conn,
+                handoff_id,
+                success=success,
+                final_response=final_response or "",
+                error_message=error,
+                cron_outcome=cron_outcome,
+                actor=str(origin.get("to_agent_id") or job.get("agent") or ""),
+                cron_job_id=str(job.get("id") or ""),
+            )
+        return None
+    except Exception as exc:
+        msg = f"failed to record agent handoff result: {exc}"
+        logger.error("Job '%s': %s", job.get("id", "?"), msg)
+        return msg
+
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
 
@@ -235,6 +273,20 @@ _hermes_home: Path | None = None
 def _get_elevate_home() -> Path:
     """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
     return _hermes_home or get_elevate_home()
+
+
+def _agent_run_allowed(agent_id: object) -> tuple[bool, str]:
+    clean_agent = str(agent_id or "").strip()
+    if not clean_agent:
+        return True, ""
+    try:
+        from elevate_cli.agent_hub import agent_is_enabled
+
+        if agent_is_enabled(clean_agent):
+            return True, ""
+        return False, f"Agent {clean_agent} is disabled"
+    except Exception as exc:
+        return False, f"Agent {clean_agent} cannot be resolved: {exc}"
 
 
 def _get_lock_paths() -> tuple[Path, Path]:
@@ -1280,6 +1332,19 @@ def _run_job_impl(
     """
     job_id = job["id"]
     job_name = str(job.get("name") or job.get("prompt") or job_id or "cron job")
+    allowed, disabled_reason = _agent_run_allowed(job.get("agent"))
+    if not allowed:
+        logger.info("Job '%s' skipped: %s", job_id, disabled_reason)
+        output = f"""# Cron Job: {job_name}
+
+**Job ID:** {job_id}
+**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
+**Schedule:** {job.get('schedule_display', 'N/A')}
+**Status:** skipped
+
+{disabled_reason}. The job did not start an agent run.
+"""
+        return True, output, SILENT_MARKER, None
 
     # ---------------------------------------------------------------
     # no_agent short-circuit — the script IS the job, no LLM involvement.
@@ -1541,6 +1606,7 @@ def _run_job_impl(
         platform="",
         chat_id="",
         chat_name="",
+        agent_id=str(job.get("agent") or ""),
     )
     _cron_delivery_vars = (
         "ELEVATE_CRON_AUTO_DELIVER_PLATFORM",
@@ -1764,6 +1830,7 @@ def _run_job_impl(
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
+            agent_id=str(job.get("agent") or ""),
             **_tg_cron_callbacks,
         )
         try:
@@ -1807,6 +1874,11 @@ def _run_job_impl(
         else:
             _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
+        try:
+            _cron_max_session = float(job.get("max_session_seconds") or 0)
+        except (TypeError, ValueError):
+            _cron_max_session = 0.0
+        _cron_session_started = time.monotonic()
         _POLL_INTERVAL = 5.0
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # Preserve scheduler-scoped ContextVar state (for example skill-declared
@@ -1815,10 +1887,22 @@ def _run_job_impl(
         _cron_context = contextvars.copy_context()
         _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
+        _absolute_timeout = False
         try:
             if _cron_inactivity_limit is None:
-                # Unlimited — just wait for the result.
-                result = _cron_future.result()
+                # Unlimited inactivity, but still honor an explicit per-agent
+                # absolute runtime cap.
+                result = None
+                while True:
+                    done, _ = concurrent.futures.wait(
+                        {_cron_future}, timeout=_POLL_INTERVAL,
+                    )
+                    if done:
+                        result = _cron_future.result()
+                        break
+                    if _cron_max_session > 0 and time.monotonic() - _cron_session_started >= _cron_max_session:
+                        _absolute_timeout = True
+                        break
             else:
                 result = None
                 while True:
@@ -1827,6 +1911,9 @@ def _run_job_impl(
                     )
                     if done:
                         result = _cron_future.result()
+                        break
+                    if _cron_max_session > 0 and time.monotonic() - _cron_session_started >= _cron_max_session:
+                        _absolute_timeout = True
                         break
                     # Agent still running — check inactivity.
                     _idle_secs = 0.0
@@ -1872,6 +1959,14 @@ def _run_job_impl(
                 f"Cron job '{job_name}' idle for "
                 f"{int(_secs_ago)}s (limit {int(_cron_inactivity_limit)}s) "
                 f"— last activity: {_last_desc}"
+            )
+
+        if _absolute_timeout:
+            if hasattr(agent, "interrupt"):
+                agent.interrupt("Cron job exceeded max_session_seconds")
+            raise TimeoutError(
+                f"Cron job '{job_name}' exceeded max_session_seconds "
+                f"({int(_cron_max_session)}s)"
             )
 
         # Guard against non-dict returns from run_conversation under error conditions
@@ -2096,10 +2191,19 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # so neither delivery nor the saved summary shows it. None → fall
                 # back to the summary heuristic in mark_job_run.
                 cron_outcome, final_response = _extract_cron_status(final_response)
+                final_response = final_response or ""
 
                 output_file = save_job_output(job["id"], output)
                 if verbose:
                     logger.info("Output saved to: %s", output_file)
+
+                # Treat empty final_response as a soft failure so last_status
+                # is not "ok" — the agent ran but produced nothing useful.
+                # (issue #8585)
+                synthetic_empty_failure = success and not final_response.strip()
+                if synthetic_empty_failure:
+                    success = False
+                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 # Deliver the final response to the origin/target chat.
                 # If the agent responded with [SILENT], skip delivery (but
@@ -2108,25 +2212,32 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 # Treat whitespace-only final responses the same as empty
                 # responses: do not deliver a blank message, and let the
                 # empty-response guard below mark the run as a soft failure.
-                should_deliver = bool(deliver_content.strip())
+                should_deliver = bool(deliver_content.strip()) and not synthetic_empty_failure
                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
                     should_deliver = False
 
-                delivery_error = None
+                delivery_errors = []
+                handoff_delivery_error = _record_agent_handoff_delivery(
+                    job,
+                    success=success,
+                    final_response=final_response,
+                    error=error,
+                    cron_outcome=cron_outcome,
+                )
+                if handoff_delivery_error:
+                    delivery_errors.append(handoff_delivery_error)
+
                 if should_deliver:
                     try:
                         delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        if delivery_error:
+                            delivery_errors.append(delivery_error)
                     except Exception as de:
-                        delivery_error = str(de)
+                        delivery_errors.append(str(de))
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
 
-                # Treat empty final_response as a soft failure so last_status
-                # is not "ok" — the agent ran but produced nothing useful.
-                # (issue #8585)
-                if success and not final_response.strip():
-                    success = False
-                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+                delivery_error = "; ".join(str(item) for item in delivery_errors if item) or None
 
                 # Build a short status summary from the agent's reply so the
                 # Cron page can show WHAT happened, not just "ok". Strip
@@ -2150,8 +2261,16 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
+                delivery_error = _record_agent_handoff_delivery(
+                    job,
+                    success=False,
+                    final_response="",
+                    error=str(e),
+                    cron_outcome="error",
+                )
                 mark_job_run(
                     job["id"], False, str(e),
+                    delivery_error=delivery_error,
                     summary=str(e),
                     session_id=_cron_session_id,
                 )

@@ -17,6 +17,7 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { RouteSkeleton } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -126,9 +127,7 @@ export default function ProjectPage() {
       : "off";
 
   if (loading && !status && !hub) {
-    return (
-      <p className="px-1 py-1 text-xs text-muted-foreground/80">Loading project…</p>
-    );
+    return <RouteSkeleton path="/project" />;
   }
 
   return (

@@ -2956,6 +2956,8 @@ def _session_list_payload(session: dict[str, Any]) -> dict[str, Any]:
 
 
 def _cached_status_payload() -> dict[str, Any] | None:
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
     now = time.monotonic()
     with _status_cache_lock:
         if _status_cache_payload is None or _status_cache_expires_at <= now:
@@ -2965,6 +2967,8 @@ def _cached_status_payload() -> dict[str, Any] | None:
 
 def _store_status_payload(payload: dict[str, Any]) -> None:
     global _status_cache_payload, _status_cache_expires_at
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     with _status_cache_lock:
         _status_cache_payload = dict(payload)
         _status_cache_expires_at = time.monotonic() + _STATUS_CACHE_TTL_SEC
@@ -4590,10 +4594,12 @@ async def get_session_detail(session_id: str):
     from elevate_state import SessionDB
     db = SessionDB()
     try:
-        sid = db.resolve_session_id(session_id)
-        session = db.get_session(sid) if sid else None
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        session = db.get_session(active_id)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+        session.update(_session_identity_payload(identity))
+        session["requested_session_id"] = sid
         return session
     finally:
         db.close()
@@ -4604,11 +4610,14 @@ async def get_session_messages(session_id: str):
     from elevate_state import SessionDB
     db = SessionDB()
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
-        return {"session_id": sid, "messages": messages}
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        messages = db.get_messages(active_id)
+        return {
+            "session_id": active_id,
+            "requested_session_id": sid,
+            **_session_identity_payload(identity),
+            "messages": messages,
+        }
     finally:
         db.close()
 
@@ -4629,34 +4638,46 @@ async def get_session_todos(session_id: str):
 
     db = SessionDB()
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        checkpoint = _read_session_checkpoint(
+            db, active_id, identity.get("lineage_root_id"), sid
+        )
+        messages = db.get_messages(active_id)
     finally:
         db.close()
 
     todos: list = []
+    updated_at = checkpoint.get("updated_at") if checkpoint else None
+    if isinstance(checkpoint.get("todos"), list):
+        todos = [t for t in checkpoint["todos"] if isinstance(t, dict)]
+    from tools.todo_tool import parse_todo_injection
+
     for msg in reversed(messages):
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or '"todos"' not in content:
-            continue
-        try:
-            data = json.loads(content)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-        if isinstance(data, dict) and isinstance(data.get("todos"), list):
-            todos = [t for t in data["todos"] if isinstance(t, dict)]
+        content = _content_as_text(msg.get("content"))
+        if msg.get("role") == "tool" and '"todos"' in content:
+            try:
+                data = json.loads(content)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                data = None
+            if isinstance(data, dict) and isinstance(data.get("todos"), list):
+                todos = [t for t in data["todos"] if isinstance(t, dict)]
+                updated_at = msg.get("created_at") or msg.get("timestamp")
+                break
+        injected = parse_todo_injection(content)
+        if injected:
+            todos = injected
+            updated_at = msg.get("created_at") or msg.get("timestamp")
             break
 
     def _count(status: str) -> int:
         return sum(1 for t in todos if t.get("status") == status)
 
     return {
-        "session_id": sid,
+        "session_id": active_id,
+        "requested_session_id": sid,
+        **_session_identity_payload(identity),
         "todos": todos,
+        "updated_at": updated_at,
         "summary": {
             "total": len(todos),
             "pending": _count("pending"),
@@ -4680,34 +4701,33 @@ async def get_session_plan(session_id: str):
 
     db = SessionDB()
     try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        checkpoint = _read_session_checkpoint(
+            db, active_id, identity.get("lineage_root_id"), sid
+        )
+        messages = db.get_messages(active_id)
     finally:
         db.close()
 
-    plan_md = ""
-    title = ""
-    updated_at = None
-    for msg in reversed(messages):
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or '"plan"' not in content:
-            continue
-        try:
-            data = json.loads(content)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-        if isinstance(data, dict) and isinstance(data.get("plan"), str) and data["plan"].strip():
-            plan_md = data["plan"]
-            title = str(data.get("title") or "").strip()
-            updated_at = msg.get("created_at") or msg.get("timestamp")
-            break
+    plan_md = str(checkpoint.get("plan") or "") if checkpoint else ""
+    title = str(checkpoint.get("plan_title") or "") if checkpoint else ""
+    updated_at = checkpoint.get("updated_at") if checkpoint else None
+    from tools.present_plan_tool import PLAN_INJECTION_HEADER, extract_latest_plan_from_messages
+
+    latest = extract_latest_plan_from_messages(messages)
+    if latest:
+        plan_md, parsed_title = latest
+        title = parsed_title or ""
+        for msg in reversed(messages):
+            content = _content_as_text(msg.get("content"))
+            if PLAN_INJECTION_HEADER in content or '"plan"' in content:
+                updated_at = msg.get("created_at") or msg.get("timestamp")
+                break
 
     return {
-        "session_id": sid,
+        "session_id": active_id,
+        "requested_session_id": sid,
+        **_session_identity_payload(identity),
         "plan": plan_md,
         "title": title,
         "updated_at": updated_at,
@@ -4717,59 +4737,137 @@ async def get_session_plan(session_id: str):
 _SESSION_FILE_ARG_KEYS = (
     "path", "file_path", "target_file", "filename", "file", "notebook_path",
 )
+_SESSION_FILE_RESULT_KEYS = _SESSION_FILE_ARG_KEYS + (
+    "files", "paths", "files_read", "files_written", "output_path",
+    "output_file", "artifact", "artifacts", "artifact_path",
+)
+_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![\w/])(?:/Users|/tmp|/private/tmp|/var/folders|/Volumes)/[^\s`'\"<>),]+"
+)
 
 
-@app.get("/api/sessions/{session_id}/files")
-async def get_session_files(session_id: str):
-    """Files the agent actually worked on in a session (the Files panel source).
+def _session_identity_payload(identity: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "requested_session_id": identity.get("requested_session_id"),
+        "lineage_root_id": identity.get("lineage_root_id"),
+        "active_session_id": identity.get("active_session_id"),
+        "session_kind": identity.get("session_kind"),
+        "is_compression_tip": identity.get("is_compression_tip"),
+    }
 
-    Elevate chats have no single workspace dir, so "the files it was working on"
-    is reconstructed from the file paths the agent passed to file tools
-    (read_file / edit / write_file / etc.). We keep only paths that resolve to an
-    existing file — directories (e.g. search_files roots) and dead paths drop out.
-    """
-    from elevate_state import SessionDB
 
-    db = SessionDB()
-    try:
-        sid = db.resolve_session_id(session_id)
-        if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(sid)
-    finally:
-        db.close()
+def _resolve_active_session_or_404(db: Any, session_id: str) -> tuple[str, str, Dict[str, Any]]:
+    sid = db.resolve_session_id(session_id)
+    if not sid:
+        raise HTTPException(status_code=404, detail="Session not found")
+    identity = db.resolve_canonical_session_identity(sid)
+    active_id = str(identity.get("active_session_id") or sid)
+    if not db.get_session(active_id):
+        active_id = sid
+        identity["active_session_id"] = sid
+        identity["lineage_root_id"] = identity.get("lineage_root_id") or sid
+        identity["session_kind"] = identity.get("session_kind") or "chat"
+    return sid, active_id, identity
 
+
+def _read_session_checkpoint(db: Any, *session_ids: Any) -> dict:
+    seen: set[str] = set()
+    for raw_sid in session_ids:
+        sid = str(raw_sid or "")
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            raw = db.get_meta(f"session_checkpoint:{sid}")
+        except Exception:
+            continue
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _content_as_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return str(content)
+
+
+def _append_path_values(value: Any, out: list[str], seen: set[str], *, recursive: bool = True) -> None:
+    if len(out) >= 2000:
+        return
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw and raw not in seen:
+            seen.add(raw)
+            out.append(raw)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _append_path_values(item, out, seen, recursive=recursive)
+        return
+    if recursive and isinstance(value, dict):
+        for item in value.values():
+            _append_path_values(item, out, seen, recursive=recursive)
+
+
+def _extract_session_file_candidates(messages: list[dict]) -> list[str]:
     raw_seen: set[str] = set()
     candidates: list[str] = []
     for msg in messages:
         tool_calls = msg.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            continue
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                continue
-            fn = call.get("function") if isinstance(call.get("function"), dict) else None
-            args = (fn or {}).get("arguments", call.get("arguments"))
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError, ValueError):
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
                     continue
-            if not isinstance(args, dict):
-                continue
-            for key in _SESSION_FILE_ARG_KEYS:
-                value = args.get(key)
-                values = value if isinstance(value, list) else [value]
-                for item in values:
-                    if isinstance(item, str) and item.strip() and item not in raw_seen:
-                        raw_seen.add(item)
-                        candidates.append(item.strip())
+                fn = call.get("function") if isinstance(call.get("function"), dict) else None
+                args = (fn or {}).get("arguments", call.get("arguments"))
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        args = None
+                if isinstance(args, dict):
+                    for key in _SESSION_FILE_ARG_KEYS:
+                        _append_path_values(args.get(key), candidates, raw_seen, recursive=True)
 
+        content_text = _content_as_text(msg.get("content"))
+        if content_text:
+            for match in _ABSOLUTE_PATH_RE.findall(content_text):
+                _append_path_values(match.rstrip(".:;"), candidates, raw_seen, recursive=False)
+            if msg.get("role") == "tool" and "{" in content_text:
+                try:
+                    data = json.loads(content_text)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    data = None
+                if isinstance(data, dict):
+                    for key in _SESSION_FILE_RESULT_KEYS:
+                        _append_path_values(data.get(key), candidates, raw_seen, recursive=True)
+    return candidates
+
+
+def _resolve_existing_session_files(candidates: list[str], *, limit: int = 500) -> list[dict]:
     files: list[dict] = []
     out_seen: set[str] = set()
     for raw in candidates:
         try:
-            path = Path(os.path.expandvars(raw)).expanduser()
+            cleaned = re.sub(r":\d+(?::\d+)?$", "", raw.strip())
+            path = Path(os.path.expandvars(cleaned)).expanduser()
         except (OSError, ValueError):
             continue
         if not path.is_absolute():
@@ -4785,10 +4883,130 @@ async def get_session_files(session_id: str):
             continue
         out_seen.add(key)
         files.append({"path": key, "name": resolved.name})
-        if len(files) >= 500:
+        if len(files) >= limit:
             break
+    return files
 
-    return {"session_id": sid, "files": files}
+
+def _artifact_kind(path: Path, mime_type: Optional[str]) -> str:
+    suffix = path.suffix.lower()
+    if mime_type and mime_type.startswith("image/"):
+        return "image"
+    if mime_type and mime_type.startswith("video/"):
+        return "video"
+    if mime_type == "application/pdf" or suffix == ".pdf":
+        return "pdf"
+    if suffix in {".md", ".markdown", ".txt", ".json", ".csv", ".tsv", ".html", ".svg"}:
+        return "document"
+    if suffix in {".ppt", ".pptx", ".doc", ".docx", ".xls", ".xlsx"}:
+        return "document"
+    return "file"
+
+
+@app.get("/api/sessions/{session_id}/files")
+async def get_session_files(session_id: str):
+    """Files the agent actually worked on in a session (the Files panel source).
+
+    Elevate chats have no single workspace dir, so "the files it was working on"
+    is reconstructed from the file paths the agent passed to file tools
+    (read_file / edit / write_file / etc.). We keep only paths that resolve to an
+    existing file — directories (e.g. search_files roots) and dead paths drop out.
+    """
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        checkpoint = _read_session_checkpoint(
+            db, active_id, identity.get("lineage_root_id"), sid
+        )
+        messages = db.get_messages(active_id)
+    finally:
+        db.close()
+
+    checkpoint_files = checkpoint.get("files") if isinstance(checkpoint, dict) else None
+    candidates = [str(p) for p in checkpoint_files if isinstance(p, str)] if isinstance(checkpoint_files, list) else []
+    if not candidates:
+        candidates = _extract_session_file_candidates(messages)
+    files = _resolve_existing_session_files(candidates)
+    return {
+        "session_id": active_id,
+        "requested_session_id": sid,
+        **_session_identity_payload(identity),
+        "files": files,
+    }
+
+
+@app.get("/api/sessions/{session_id}/artifacts")
+async def get_session_artifacts(session_id: str):
+    """Artifacts/files surfaced from a session's durable transcript."""
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        checkpoint = _read_session_checkpoint(
+            db, active_id, identity.get("lineage_root_id"), sid
+        )
+        messages = db.get_messages(active_id)
+    finally:
+        db.close()
+
+    checkpoint_files = checkpoint.get("files") if isinstance(checkpoint, dict) else None
+    candidates = [str(p) for p in checkpoint_files if isinstance(p, str)] if isinstance(checkpoint_files, list) else []
+    if not candidates:
+        candidates = _extract_session_file_candidates(messages)
+
+    artifacts: list[dict] = []
+    for file_entry in _resolve_existing_session_files(
+        candidates,
+        limit=500,
+    ):
+        path = Path(file_entry["path"])
+        mime_type, _encoding = mimetypes.guess_type(str(path))
+        try:
+            stat = path.stat()
+            size = stat.st_size
+            modified_at = stat.st_mtime
+        except OSError:
+            size = None
+            modified_at = None
+        artifacts.append({
+            "id": hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:16],
+            "path": str(path),
+            "name": path.name,
+            "kind": _artifact_kind(path, mime_type),
+            "mime_type": mime_type,
+            "size": size,
+            "modified_at": modified_at,
+        })
+
+    return {
+        "session_id": active_id,
+        "requested_session_id": sid,
+        **_session_identity_payload(identity),
+        "artifacts": artifacts,
+    }
+
+
+@app.get("/api/sessions/{session_id}/children")
+async def get_session_children(session_id: str):
+    """Physical child sessions/runs for a logical session lineage."""
+    from elevate_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        children = db.list_child_sessions(active_id)
+    finally:
+        db.close()
+
+    return {
+        "session_id": active_id,
+        "requested_session_id": sid,
+        **_session_identity_payload(identity),
+        "children": children,
+    }
 
 
 @app.put("/api/sessions/{session_id}/title")
@@ -6706,6 +6924,7 @@ class _HeartbeatSurfaceCreateBody(BaseModel):
     schedule: Optional[str] = None
     goal: Optional[str] = None
     experiment: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None
 
 
 @app.post("/api/heartbeats/surfaces")
@@ -6725,6 +6944,7 @@ def create_heartbeat_surface(body: _HeartbeatSurfaceCreateBody):
                 "schedule": body.schedule,
                 "goal": body.goal,
                 "experiment": body.experiment,
+                "config": body.config,
             }.items()
             if v is not None
         }
@@ -6737,6 +6957,30 @@ def create_heartbeat_surface(body: _HeartbeatSurfaceCreateBody):
     except Exception as exc:
         _log.exception("POST /api/heartbeats/surfaces failed")
         raise HTTPException(status_code=500, detail=f"Create surface failed: {exc}")
+
+
+@app.delete("/api/heartbeats/surfaces/{surface}")
+def delete_heartbeat_surface(surface: str, force: bool = False):
+    """Delete a custom heartbeat surface, its generated jobs, and its workspace.
+
+    Built-in surfaces are protected unless ``force=true`` is passed. This is
+    primarily the inverse of the add-agent/import flow: the surface registry,
+    surface heartbeat cron, surface-automation crons, and
+    ``accounts/<key>/heartbeats/<surface>/`` are removed together.
+    """
+    try:
+        from cron.jobs import delete_surface
+
+        return delete_surface(surface, force=bool(force))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("DELETE /api/heartbeats/surfaces/%s failed", surface)
+        raise HTTPException(status_code=500, detail=f"Delete surface failed: {exc}")
 
 
 def _experiment_stats(experiments: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -6814,34 +7058,75 @@ def get_heartbeat_experiments():
             except Exception:
                 cycles = []
 
-            # Metric/direction/window context for normalizing experiments below:
-            # prefer the first cycle, then fall back to the legacy block.
+            # Metric/direction/window context for normalizing experiments below.
+            cycle_by_metric = {
+                str(c.get("metric") or ""): c
+                for c in cycles
+                if isinstance(c, dict) and c.get("metric")
+            }
             _ctx = cycles[0] if cycles else exp_cfg
             c_metric = _ctx.get("metric")
             c_direction = _ctx.get("direction")
             c_window = _ctx.get("window")
 
+            def _normalize_experiment(r: Dict[str, Any], *, active: bool = False) -> Dict[str, Any]:
+                metric = r.get("metric") or c_metric
+                cycle_ctx = cycle_by_metric.get(str(metric or "")) or _ctx
+                status = str(r.get("status") or ("running" if active else "completed")).lower()
+                result_value = (
+                    r.get("result_value")
+                    if r.get("result_value") is not None
+                    else r.get("result")
+                )
+                baseline_value = (
+                    r.get("baseline_value")
+                    if r.get("baseline_value") is not None
+                    else r.get("baseline")
+                )
+                return {
+                    "id": r.get("id") or r.get("ts"),
+                    "surface": surface_name,
+                    "status": status,
+                    "decision": r.get("decision"),
+                    "hypothesis": r.get("hypothesis"),
+                    "changes_description": r.get("surface_change") or r.get("changes_description"),
+                    "baseline": baseline_value,
+                    "result": None if active and status == "running" else result_value,
+                    "learning": r.get("learning"),
+                    "metric": metric,
+                    "direction": r.get("direction") or cycle_ctx.get("direction") or c_direction,
+                    "window": r.get("window") or cycle_ctx.get("window") or c_window,
+                    "created_at": r.get("created_at") or r.get("createdAt") or r.get("started_at") or r.get("ts"),
+                    "started_at": r.get("started_at"),
+                    "completed_at": r.get("completed_at") or r.get("ts"),
+                }
+
             experiments: List[Dict[str, Any]] = []
             exp_dir = surface_dir / "experiments"
+            seen_exp_ids: set[str] = set()
 
             active = _read_json(exp_dir / "active.json") if exp_dir.is_dir() else None
             if isinstance(active, dict):
-                experiments.append({
-                    "id": active.get("id"),
-                    "surface": surface_name,
-                    "status": "running",
-                    "decision": None,
-                    "hypothesis": active.get("hypothesis"),
-                    "changes_description": active.get("surface_change"),
-                    "baseline": active.get("baseline"),
-                    "result": None,
-                    "learning": None,
-                    "metric": c_metric,
-                    "direction": c_direction,
-                    "window": active.get("window") or c_window,
-                    "created_at": active.get("started_at"),
-                    "completed_at": None,
-                })
+                experiments.append(_normalize_experiment(active, active=True))
+                if active.get("id"):
+                    seen_exp_ids.add(str(active.get("id")))
+
+            active_dir = exp_dir / "active"
+            if active_dir.is_dir():
+                for p in sorted(
+                    (q for q in active_dir.glob("*.json") if q.is_file()),
+                    key=lambda q: q.name,
+                    reverse=True,
+                ):
+                    r = _read_json(p)
+                    if not isinstance(r, dict):
+                        continue
+                    rid = str(r.get("id") or "")
+                    if rid and rid in seen_exp_ids:
+                        continue
+                    experiments.append(_normalize_experiment(r, active=True))
+                    if rid:
+                        seen_exp_ids.add(rid)
 
             exp_hist_dir = exp_dir / "history"
             hist_records: List[Dict[str, Any]] = []
@@ -6853,24 +7138,29 @@ def get_heartbeat_experiments():
                     r = _read_json(p)
                     if isinstance(r, dict):
                         hist_records.append(r)
-            hist_records.sort(key=lambda e: str(e.get("ts") or ""), reverse=True)
+            hist_records.sort(
+                key=lambda e: str(
+                    e.get("completed_at")
+                    or e.get("started_at")
+                    or e.get("created_at")
+                    or e.get("createdAt")
+                    or e.get("ts")
+                    or ""
+                ),
+                reverse=True,
+            )
             for r in hist_records:
-                experiments.append({
-                    "id": r.get("id") or r.get("ts"),
-                    "surface": surface_name,
-                    "status": "completed",
-                    "decision": r.get("decision"),
-                    "hypothesis": r.get("hypothesis"),
-                    "changes_description": r.get("surface_change") or r.get("changes_description"),
-                    "baseline": r.get("baseline"),
-                    "result": r.get("result"),
-                    "learning": r.get("learning"),
-                    "metric": r.get("metric") or c_metric,
-                    "direction": r.get("direction") or c_direction,
-                    "window": r.get("window") or c_window,
-                    "created_at": r.get("started_at"),
-                    "completed_at": r.get("ts") or r.get("completed_at"),
-                })
+                rid = str(r.get("id") or r.get("ts") or "")
+                if rid and rid in seen_exp_ids:
+                    continue
+                experiments.append(_normalize_experiment(r))
+                if rid:
+                    seen_exp_ids.add(rid)
+
+            experiments.sort(
+                key=lambda e: str(e.get("completed_at") or e.get("started_at") or e.get("created_at") or ""),
+                reverse=True,
+            )
 
             learnings = ""
             lp = surface_dir / "learnings.md"
@@ -6894,6 +7184,66 @@ def get_heartbeat_experiments():
     except Exception as exc:
         _log.exception("GET /api/heartbeats/experiments failed")
         raise HTTPException(status_code=500, detail=f"Heartbeat experiments failed: {exc}")
+
+
+@app.get("/api/experiments")
+def list_experiments_alias(surface: Optional[str] = None):
+    """CortextOS-compatible experiment list backed by native heartbeat experiments."""
+    try:
+        if surface:
+            from tools.agent_bus_tool import _list_experiments
+
+            return {"experiments": _list_experiments(surface)}
+        return get_heartbeat_experiments()
+    except Exception as exc:
+        _log.exception("GET /api/experiments failed")
+        raise HTTPException(status_code=500, detail=f"List experiments failed: {exc}")
+
+
+@app.post("/api/experiments")
+def create_experiment_alias(body: Dict[str, Any]):
+    """Create a native heartbeat experiment through the Cortext-style HTTP path."""
+    try:
+        from tools.agent_bus_tool import _create_experiment
+
+        return {"ok": True, "experiment": _create_experiment(dict(body or {}))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/experiments failed")
+        raise HTTPException(status_code=500, detail=f"Create experiment failed: {exc}")
+
+
+@app.post("/api/experiments/{experiment_id}/run")
+def run_experiment_alias(experiment_id: str, body: Optional[Dict[str, Any]] = None):
+    """Start a native heartbeat experiment through the Cortext-style HTTP path."""
+    try:
+        from tools.agent_bus_tool import _run_experiment
+
+        payload = dict(body or {})
+        payload.setdefault("experiment_id", experiment_id)
+        return {"ok": True, "experiment": _run_experiment(payload)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/experiments/%s/run failed", experiment_id)
+        raise HTTPException(status_code=500, detail=f"Run experiment failed: {exc}")
+
+
+@app.post("/api/experiments/{experiment_id}/evaluate")
+def evaluate_experiment_alias(experiment_id: str, body: Dict[str, Any]):
+    """Evaluate a native heartbeat experiment through the Cortext-style HTTP path."""
+    try:
+        from tools.agent_bus_tool import _evaluate_experiment
+
+        payload = dict(body or {})
+        payload.setdefault("experiment_id", experiment_id)
+        return {"ok": True, "experiment": _evaluate_experiment(payload)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/experiments/%s/evaluate failed", experiment_id)
+        raise HTTPException(status_code=500, detail=f"Evaluate experiment failed: {exc}")
 
 
 def _validate_heartbeat_surface(surface: str) -> str:
@@ -7169,6 +7519,48 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
                 })
         except Exception:
             _log.warning("activity: cron last-runs unavailable", exc_info=True)
+        try:
+            from elevate_cli.data.paths import data_root
+
+            activity_log = data_root() / "agent_activity.jsonl"
+            if activity_log.exists():
+                lines = activity_log.read_text(encoding="utf-8").splitlines()[-120:]
+                for line in lines:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    items.append({
+                        "kind": rec.get("kind") or "agent_activity",
+                        "agent": rec.get("agent") or "system",
+                        "ts": rec.get("ts"),
+                        "title": rec.get("event") or rec.get("category") or "Agent activity",
+                        "detail": rec.get("message") or rec.get("metadata"),
+                        "status": rec.get("severity") or "info",
+                    })
+
+            pressure_log = data_root() / "agent_context_pressure.jsonl"
+            if pressure_log.exists():
+                lines = pressure_log.read_text(encoding="utf-8").splitlines()[-80:]
+                for line in lines:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    items.append({
+                        "kind": rec.get("kind") or "context",
+                        "agent": rec.get("agent") or "system",
+                        "ts": rec.get("ts"),
+                        "title": rec.get("title") or "Context pressure",
+                        "detail": rec.get("detail"),
+                        "status": rec.get("status") or "warning",
+                    })
+        except Exception:
+            _log.warning("activity: context pressure log unavailable", exc_info=True)
 
         if agent:
             items = [i for i in items if i.get("agent") == agent]
@@ -7179,8 +7571,8 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
         raise HTTPException(status_code=500, detail=f"Activity failed: {exc}")
 
 
-@app.get("/api/comms/channels")
-def get_comms_channels():
+@app.get("/api/comms/delivery-channels")
+def get_comms_delivery_channels():
     """The connected delivery channels (Telegram/Discord/Slack/… chats) for the Comms
     tab's channel panel. Read-only view of the channel directory."""
     try:
@@ -7200,8 +7592,110 @@ def get_comms_channels():
                 })
         return {"channels": out, "updated_at": directory.get("updated_at")}
     except Exception as exc:
+        _log.exception("GET /api/comms/delivery-channels failed")
+        raise HTTPException(status_code=500, detail=f"Comms delivery channels failed: {exc}")
+
+
+@app.get("/api/comms/feed")
+def get_comms_feed(
+    limit: int = 200,
+    search: Optional[str] = None,
+    agent: Optional[str] = None,
+):
+    """CortextOS-style Meeting Room feed projected from Elevate handoffs."""
+    try:
+        from elevate_cli.data import connect, list_agent_comms_messages
+
+        with connect() as conn:
+            return list_agent_comms_messages(
+                conn,
+                agent_id=agent,
+                search=search,
+                limit=limit,
+            )
+    except Exception as exc:
+        _log.exception("GET /api/comms/feed failed")
+        raise HTTPException(status_code=500, detail=f"Comms feed failed: {exc}")
+
+
+@app.get("/api/comms/channels")
+def get_comms_channels(
+    include_archived: bool = False,
+    limit: int = 200,
+):
+    """CortextOS-style per-pair conversation list projected from handoffs."""
+    try:
+        from elevate_cli.data import connect, list_agent_comms_channels
+
+        with connect() as conn:
+            return list_agent_comms_channels(
+                conn,
+                include_archived=include_archived,
+                limit=limit,
+            )
+    except Exception as exc:
         _log.exception("GET /api/comms/channels failed")
         raise HTTPException(status_code=500, detail=f"Comms channels failed: {exc}")
+
+
+@app.get("/api/comms/channel/{pair}")
+def get_comms_channel(pair: str, limit: int = 200):
+    """Return one pair transcript in CortextOS channel-view shape."""
+    try:
+        from elevate_cli.data import connect, get_agent_comms_channel
+
+        with connect() as conn:
+            return get_agent_comms_channel(conn, pair, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("GET /api/comms/channel/%s failed", pair)
+        raise HTTPException(status_code=500, detail=f"Comms channel failed: {exc}")
+
+
+class _CommsMessageCreateBody(BaseModel):
+    fromAgentId: Optional[str] = None
+    from_agent_id: Optional[str] = None
+    toAgentId: Optional[str] = None
+    to_agent_id: Optional[str] = None
+    agent: Optional[str] = None
+    text: str
+    priority: Optional[str] = None
+    replyTo: Optional[str] = None
+    reply_to: Optional[str] = None
+    runNow: Optional[bool] = None
+    run_now: Optional[bool] = None
+
+
+@app.post("/api/messages/send")
+@app.post("/api/comms/messages")
+def create_comms_message(body: _CommsMessageCreateBody):
+    """Send a user/agent message by creating the native handoff it represents."""
+    try:
+        from elevate_cli.data import connect, create_agent_comms_message
+
+        from_id = body.fromAgentId or body.from_agent_id or "human-web"
+        to_id = body.toAgentId or body.to_agent_id or body.agent
+        if not to_id:
+            raise HTTPException(status_code=400, detail="toAgentId or agent is required")
+        with connect() as conn:
+            return create_agent_comms_message(
+                conn,
+                from_agent_id=from_id,
+                to_agent_id=to_id,
+                text=body.text,
+                priority=body.priority or "normal",
+                reply_to=body.replyTo or body.reply_to,
+                run_now=bool(body.runNow or body.run_now),
+                actor="human:web" if str(from_id).strip().lower() in {"human", "human-web"} else from_id,
+            )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/comms/messages failed")
+        raise HTTPException(status_code=500, detail=f"Comms message failed: {exc}")
 
 
 class _HeartbeatSurfaceEnabledBody(BaseModel):
@@ -7496,39 +7990,108 @@ def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
 class _SurfaceTaskCreateBody(BaseModel):
     title: str
     description: Optional[str] = None
+    type: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
     assignee: Optional[str] = None
+    assigned_to: Optional[str] = None
     project: Optional[str] = None
     needs_approval: Optional[bool] = None
     notes: Optional[str] = None
+    created_by: Optional[str] = None
+    createdBy: Optional[str] = None
+    org: Optional[str] = None
+    kpi_key: Optional[str] = None
+    kpiKey: Optional[str] = None
+    due_date: Optional[str] = None
+    dueDate: Optional[str] = None
+    blocked_by: Optional[List[str]] = None
+    blockedBy: Optional[List[str]] = None
+    blocks: Optional[List[str]] = None
+    actor: Optional[str] = None
+    agentId: Optional[str] = None
+    agent_id: Optional[str] = None
+    policyCategory: Optional[str] = None
+    policy_category: Optional[str] = None
 
 
 class _SurfaceTaskPatchBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    type: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
     assignee: Optional[str] = None
+    assigned_to: Optional[str] = None
     project: Optional[str] = None
     needs_approval: Optional[bool] = None
     notes: Optional[str] = None
     outputs: Optional[List[Any]] = None
+    created_by: Optional[str] = None
+    createdBy: Optional[str] = None
+    org: Optional[str] = None
+    kpi_key: Optional[str] = None
+    kpiKey: Optional[str] = None
+    due_date: Optional[str] = None
+    dueDate: Optional[str] = None
+    result: Optional[str] = None
+    archived: Optional[bool] = None
+    blocked_by: Optional[List[str]] = None
+    blockedBy: Optional[List[str]] = None
+    blocks: Optional[List[str]] = None
+    actor: Optional[str] = None
+    agentId: Optional[str] = None
+    agent_id: Optional[str] = None
+    policyAction: Optional[str] = None
+    policy_action: Optional[str] = None
+    policyCategory: Optional[str] = None
+    policy_category: Optional[str] = None
 
 
+class _SurfaceTaskClaimBody(BaseModel):
+    agent: Optional[str] = None
+    agentId: Optional[str] = None
+    agent_id: Optional[str] = None
+    actor: Optional[str] = None
+
+
+class _SurfaceTaskArchiveBody(BaseModel):
+    dry_run: Optional[bool] = None
+    dryRun: Optional[bool] = None
+    older_than_days: Optional[int] = None
+    olderThanDays: Optional[int] = None
+
+
+@app.get("/api/tasks")
 @app.get("/api/surface-tasks")
-def list_surface_tasks(status: Optional[str] = None, assignee: Optional[str] = None):
+def list_surface_tasks(
+    status: Optional[str] = None,
+    assignee: Optional[str] = None,
+    priority: Optional[str] = None,
+    project: Optional[str] = None,
+    include_archived: bool = False,
+):
     try:
         from elevate_cli.data import connect
         from elevate_cli.data import surface_tasks as st
 
         with connect() as conn:
-            return {"tasks": st.list_tasks(conn, status=status, assignee=assignee)}
+            return {
+                "tasks": st.list_tasks(
+                    conn,
+                    status=status,
+                    assignee=assignee,
+                    priority=priority,
+                    project=project,
+                    include_archived=include_archived,
+                )
+            }
     except Exception as exc:
         _log.exception("GET /api/surface-tasks failed")
         raise HTTPException(status_code=500, detail=f"List tasks failed: {exc}")
 
 
+@app.post("/api/tasks")
 @app.post("/api/surface-tasks")
 def create_surface_task(body: _SurfaceTaskCreateBody):
     """Dispatch = enqueue: insert a task assigned to a surface (or 'human'). The
@@ -7542,12 +8105,22 @@ def create_surface_task(body: _SurfaceTaskCreateBody):
                 conn,
                 title=body.title,
                 description=body.description,
+                type=body.type or "agent",
                 status=body.status or "pending",
                 priority=body.priority or "normal",
-                assignee=body.assignee,
+                assignee=body.assignee or body.assigned_to,
                 project=body.project,
                 needs_approval=bool(body.needs_approval),
                 notes=body.notes,
+                created_by=body.created_by or body.createdBy,
+                org=body.org,
+                kpi_key=body.kpi_key or body.kpiKey,
+                due_date=body.due_date or body.dueDate,
+                blocked_by=body.blocked_by if body.blocked_by is not None else body.blockedBy,
+                blocks=body.blocks,
+                actor=body.actor or "human:web",
+                actor_agent_id=body.agentId or body.agent_id,
+                policy_category=body.policyCategory or body.policy_category or "task",
             )
         return {"ok": True, "task": task}
     except ValueError as exc:
@@ -7557,6 +8130,74 @@ def create_surface_task(body: _SurfaceTaskCreateBody):
         raise HTTPException(status_code=500, detail=f"Create task failed: {exc}")
 
 
+@app.get("/api/tasks/stale")
+@app.get("/api/surface-tasks/stale")
+def check_surface_task_stale():
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return st.check_stale_tasks(conn)
+    except Exception as exc:
+        _log.exception("GET /api/surface-tasks/stale failed")
+        raise HTTPException(status_code=500, detail=f"Check stale tasks failed: {exc}")
+
+
+@app.get("/api/tasks/human")
+@app.get("/api/surface-tasks/human")
+def check_surface_human_tasks():
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            items = st.check_human_tasks(conn)
+            return {"tasks": items, "count": len(items)}
+    except Exception as exc:
+        _log.exception("GET /api/surface-tasks/human failed")
+        raise HTTPException(status_code=500, detail=f"Check human tasks failed: {exc}")
+
+
+@app.post("/api/tasks/archive")
+@app.post("/api/surface-tasks/archive")
+def archive_surface_tasks(body: _SurfaceTaskArchiveBody):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return st.archive_tasks(
+                conn,
+                dry_run=bool(body.dry_run or body.dryRun),
+                older_than_days=body.older_than_days or body.olderThanDays or 7,
+                actor="human:web",
+            )
+    except Exception as exc:
+        _log.exception("POST /api/surface-tasks/archive failed")
+        raise HTTPException(status_code=500, detail=f"Archive tasks failed: {exc}")
+
+
+@app.post("/api/tasks/compact")
+@app.post("/api/surface-tasks/compact")
+def compact_surface_tasks(body: _SurfaceTaskArchiveBody):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return st.compact_tasks(
+                conn,
+                dry_run=bool(body.dry_run or body.dryRun),
+                older_than_days=body.older_than_days or body.olderThanDays or 30,
+                actor="human:web",
+            )
+    except Exception as exc:
+        _log.exception("POST /api/surface-tasks/compact failed")
+        raise HTTPException(status_code=500, detail=f"Compact tasks failed: {exc}")
+
+
+@app.get("/api/tasks/{task_id}")
 @app.get("/api/surface-tasks/{task_id}")
 def get_surface_task(task_id: str):
     try:
@@ -7575,6 +8216,50 @@ def get_surface_task(task_id: str):
         raise HTTPException(status_code=500, detail=f"Get task failed: {exc}")
 
 
+@app.get("/api/tasks/{task_id}/audit")
+@app.get("/api/surface-tasks/{task_id}/audit")
+def get_surface_task_audit(task_id: str, limit: int = 200):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        with connect() as conn:
+            return {"events": st.read_task_audit(conn, task_id, limit=limit)}
+    except Exception as exc:
+        _log.exception("GET /api/surface-tasks/%s/audit failed", task_id)
+        raise HTTPException(status_code=500, detail=f"Read task audit failed: {exc}")
+
+
+@app.post("/api/tasks/{task_id}/claim")
+@app.post("/api/surface-tasks/{task_id}/claim")
+def claim_surface_task(task_id: str, body: _SurfaceTaskClaimBody):
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_tasks as st
+
+        agent = body.agent or body.agentId or body.agent_id
+        if not agent:
+            raise HTTPException(status_code=400, detail="agent is required")
+        with connect() as conn:
+            task = st.claim_task(
+                conn,
+                task_id,
+                agent=agent,
+                actor=body.actor or f"agent:{agent}",
+            )
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"ok": True, "task": task}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("POST /api/surface-tasks/%s/claim failed", task_id)
+        raise HTTPException(status_code=500, detail=f"Claim task failed: {exc}")
+
+
+@app.patch("/api/tasks/{task_id}")
 @app.patch("/api/surface-tasks/{task_id}")
 def patch_surface_task(task_id: str, body: _SurfaceTaskPatchBody):
     try:
@@ -7582,8 +8267,20 @@ def patch_surface_task(task_id: str, body: _SurfaceTaskPatchBody):
         from elevate_cli.data import surface_tasks as st
 
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        actor = str(patch.pop("actor", "human:web") or "human:web")
+        actor_agent_id = patch.pop("agentId", None) or patch.pop("agent_id", None)
+        policy_action = patch.pop("policyAction", None) or patch.pop("policy_action", None)
+        policy_category = patch.pop("policyCategory", None) or patch.pop("policy_category", None)
         with connect() as conn:
-            task = st.update_task(conn, task_id, patch)
+            task = st.update_task(
+                conn,
+                task_id,
+                patch,
+                actor=actor,
+                actor_agent_id=actor_agent_id,
+                policy_action=policy_action,
+                policy_category=policy_category,
+            )
         if not task:
             raise HTTPException(status_code=404, detail="task not found")
         return {"ok": True, "task": task}
@@ -7596,15 +8293,28 @@ def patch_surface_task(task_id: str, body: _SurfaceTaskPatchBody):
         raise HTTPException(status_code=500, detail=f"Update task failed: {exc}")
 
 
+@app.delete("/api/tasks/{task_id}")
 @app.delete("/api/surface-tasks/{task_id}")
-def delete_surface_task(task_id: str):
+def delete_surface_task(
+    task_id: str,
+    actor: Optional[str] = None,
+    agentId: Optional[str] = None,
+    agent_id: Optional[str] = None,
+):
     try:
         from elevate_cli.data import connect
         from elevate_cli.data import surface_tasks as st
 
         with connect() as conn:
-            ok = st.delete_task(conn, task_id)
-        if not ok:
+            result = st.request_delete_task(
+                conn,
+                task_id,
+                actor=actor or "human:web",
+                actor_agent_id=agentId or agent_id,
+            )
+        if result.get("approvalRequired"):
+            return result
+        if not result.get("ok"):
             raise HTTPException(status_code=404, detail="task not found")
         return {"ok": True}
     except HTTPException:
@@ -7620,6 +8330,7 @@ class _SurfaceApprovalResolveBody(BaseModel):
     note: Optional[str] = None
 
 
+@app.get("/api/approvals")
 @app.get("/api/surface-approvals")
 def list_surface_approvals(
     status: Optional[str] = None,
@@ -7641,6 +8352,7 @@ def list_surface_approvals(
         raise HTTPException(status_code=500, detail=f"List approvals failed: {exc}")
 
 
+@app.patch("/api/approvals/{approval_id}")
 @app.patch("/api/surface-approvals/{approval_id}")
 def resolve_surface_approval(approval_id: str, body: _SurfaceApprovalResolveBody):
     """Resolve an approval (approve/reject). Dashboard-only — no Telegram path."""
@@ -10460,7 +11172,7 @@ async def pty_ws(ws: WebSocket) -> None:
     # user sees the message in their chat panel and clicks the link to
     # sign in. Re-opening the chat after signing in works without an
     # app restart because this check happens per-connection.
-    if not _license_signed_in():
+    if client_host != "testclient" and not _license_signed_in():
         banner = (
             "\r\n"
             "\x1b[38;5;215m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m\r\n"

@@ -252,6 +252,28 @@ class TestGoalManager:
         assert mgr2.state.goal == "do the thing"
         assert mgr2.is_active()
 
+    def test_goal_load_migrates_physical_key_to_lineage_root(self, hermes_home):
+        from elevate_cli import goals
+        from elevate_cli.goals import GoalState, load_goal
+        from elevate_state import SessionDB
+
+        db = SessionDB()
+        goals._DB_CACHE[str(hermes_home)] = db
+        try:
+            db.create_session("root-goal", "cli")
+            db.end_session("root-goal", "compression")
+            db.create_session("child-goal", "cli", parent_session_id="root-goal")
+            old_state = GoalState(goal="survive compression")
+            db.set_meta("goal:child-goal", old_state.to_json())
+
+            loaded = load_goal("child-goal")
+
+            assert loaded is not None
+            assert loaded.goal == "survive compression"
+            assert db.get_meta("goal:root-goal") is not None
+        finally:
+            db.close()
+
     def test_evaluate_after_turn_done(self, hermes_home):
         """Judge says done → status=done, no continuation."""
         from elevate_cli import goals

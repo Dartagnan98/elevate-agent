@@ -1,8 +1,9 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { GatewayClient } from "@/lib/gatewayClient";
 import { cn } from "@/lib/utils";
-import { Check, Loader2, Search, X } from "lucide-react";
+import { Check, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
@@ -260,8 +261,10 @@ function ProviderColumn({
   return (
     <div className="overflow-y-auto border-r border-[var(--chat-border)]">
       {loading && (
-        <div className="flex items-center gap-2 p-4 text-xs text-[var(--chat-muted)]">
-          <Loader2 className="h-3 w-3 animate-spin" /> loading…
+        <div className="space-y-2 p-4" aria-busy="true">
+          <Skeleton className="h-8 w-full bg-[var(--chat-border)]" />
+          <Skeleton className="h-8 w-5/6 bg-[var(--chat-border)]" />
+          <Skeleton className="h-8 w-2/3 bg-[var(--chat-border)]" />
         </div>
       )}
 

@@ -15,11 +15,13 @@ Design:
 """
 
 import json
+import re
 from typing import Dict, Any, List, Optional
 
 
 # Valid status values for todo items
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
+TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
 
 
 class TodoStore:
@@ -114,7 +116,7 @@ class TodoStore:
         if not active_items:
             return None
 
-        lines = ["[Your active task list was preserved across context compression]"]
+        lines = [TODO_INJECTION_HEADER]
         for item in active_items:
             marker = markers.get(item["status"], "[?]")
             lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']})")
@@ -151,6 +153,34 @@ class TodoStore:
             item_id = str(item.get("id", "")).strip() or "?"
             last_index[item_id] = i
         return [todos[i] for i in sorted(last_index.values())]
+
+
+def parse_todo_injection(text: str) -> List[Dict[str, str]]:
+    """Parse the human-readable post-compression todo snapshot.
+
+    Fresh gateway agents rebuild TodoStore from history. After compaction the
+    original JSON tool result may be summarized away, leaving only this
+    injected checklist, so make the preserved context machine-readable again.
+    """
+    if not isinstance(text, str) or TODO_INJECTION_HEADER not in text:
+        return []
+
+    pattern = re.compile(
+        r"^-\s*(\[[ x>~]\])\s+(.+?)\.\s+(.+)\s+\((pending|in_progress|completed|cancelled)\)\s*$"
+    )
+    items: List[Dict[str, str]] = []
+    for line in text.splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        _marker, item_id, content, status = match.groups()
+        if status not in VALID_STATUSES:
+            continue
+        item_id = item_id.strip()
+        content = content.strip()
+        if item_id and content:
+            items.append({"id": item_id, "content": content, "status": status})
+    return TodoStore._dedupe_by_id(items)
 
 
 def todo_tool(

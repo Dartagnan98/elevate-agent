@@ -105,10 +105,9 @@ def _log_exit(reason: str) -> None:
 def _warm_slash_completions():
     """Pre-scan skill commands in the background at startup.
 
-    The first ``complete.slash`` RPC lazily triggers ``scan_skill_commands``,
-    a filesystem walk that takes ~3s — which the user feels as a lag between
-    typing ``/`` and the command popover appearing. Doing it once at startup,
-    off the request path, makes every ``/`` instant.
+    The first ``complete.slash`` RPC lazily triggers ``scan_skill_commands``;
+    keeping that work off the request path prevents visible lag between
+    typing ``/`` and seeing the command popover.
     """
     import threading
 

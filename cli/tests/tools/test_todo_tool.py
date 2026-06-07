@@ -2,7 +2,7 @@
 
 import json
 
-from tools.todo_tool import TodoStore, todo_tool
+from tools.todo_tool import TodoStore, parse_todo_injection, todo_tool
 
 
 class TestWriteAndRead:
@@ -70,6 +70,24 @@ class TestFormatForInjection:
         assert "Next" in text
         assert "Working" in text
         assert "context compression" in text.lower()
+
+
+class TestParseTodoInjection:
+    def test_parses_active_snapshot(self):
+        store = TodoStore()
+        store.write([
+            {"id": "1", "content": "Done already", "status": "completed"},
+            {"id": "2", "content": "Next", "status": "pending"},
+            {"id": "3", "content": "Working", "status": "in_progress"},
+        ])
+
+        assert parse_todo_injection(store.format_for_injection()) == [
+            {"id": "2", "content": "Next", "status": "pending"},
+            {"id": "3", "content": "Working", "status": "in_progress"},
+        ]
+
+    def test_ignores_unrelated_text(self):
+        assert parse_todo_injection("nothing to see") == []
 
 
 class TestMergeMode:

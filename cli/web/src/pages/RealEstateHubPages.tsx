@@ -76,6 +76,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectOption } from "@/components/ui/select";
+import { RouteSkeleton } from "@/components/route-skeletons";
+import { ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import { ThreadDrawerProvider, useThreadDrawer } from "@/pages/real-estate-hub/thread-drawer";
@@ -3284,9 +3286,8 @@ function TemplatesPanel() {
 
   if (loading && templates.length === 0) {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Loading templates…
+      <div className="rounded-md border border-border bg-card p-4">
+        <ListSkeleton rows={4} />
       </div>
     );
   }
@@ -3615,7 +3616,7 @@ function SentMessagesBoard({ filterSourceId }: { filterSourceId: string | null }
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-xs text-foreground/70">
-          {loading ? "Loading…" : `${visible.length} message${visible.length === 1 ? "" : "s"}`}
+          {loading ? <Skeleton className="h-4 w-24" /> : `${visible.length} message${visible.length === 1 ? "" : "s"}`}
           {includePending && !loading && " (including in-flight)"}
         </div>
         <div className="flex items-center gap-2">
@@ -3885,8 +3886,8 @@ function RealEstateLeadsPageLegacy() {
     >
       <div className="flex w-full flex-col gap-5">
         {leadsSetup.loading ? (
-          <div className="rounded-md border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
-            Loading leads onboarding…
+          <div className="rounded-md border border-border bg-card p-4">
+            <PageSkeleton rows={4} variant="form" />
           </div>
         ) : leadsSetup.error ? (
           <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
@@ -4088,11 +4089,7 @@ export function RealEstateLeadsPage() {
   const setupSnapshot = leadsSetup.setup;
 
   if (leadsSetup.loading) {
-    return (
-      <div className="rounded-md border border-border bg-card px-4 py-6 text-sm text-muted-foreground m-5">
-        Loading leads onboarding…
-      </div>
-    );
+    return <RouteSkeleton path="/leads" />;
   }
   if (leadsSetup.error) {
     return (

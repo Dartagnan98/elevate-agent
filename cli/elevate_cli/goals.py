@@ -7,8 +7,9 @@ continuation prompt back into the same session and keeps working until the
 goal is done, turn budget is exhausted, the user pauses/clears it, or the
 user sends a new message (which takes priority and pauses the goal loop).
 
-State is persisted in SessionDB's ``state_meta`` table keyed by
-``goal:<session_id>`` so ``/resume`` picks it up.
+State is persisted in SessionDB's ``state_meta`` table keyed by the logical
+lineage root (``goal:<lineage_root_id>``) so compression rotations keep the
+same active goal.
 
 Design notes / invariants:
 
@@ -236,6 +237,15 @@ def _get_session_db() -> Optional[Any]:
     return db
 
 
+def _canonical_goal_session_id(db: Any, session_id: str) -> str:
+    try:
+        identity = db.resolve_canonical_session_identity(session_id)
+    except Exception as exc:
+        logger.debug("GoalManager: canonical goal id lookup failed: %s", exc)
+        return session_id
+    return str(identity.get("lineage_root_id") or session_id)
+
+
 def load_goal(session_id: str) -> Optional[GoalState]:
     """Load the goal for a session, or None if none exists."""
     if not session_id:
@@ -243,17 +253,25 @@ def load_goal(session_id: str) -> Optional[GoalState]:
     db = _get_session_db()
     if db is None:
         return None
+    goal_session_id = _canonical_goal_session_id(db, session_id)
     try:
-        raw = db.get_meta(_meta_key(session_id))
+        raw = db.get_meta(_meta_key(goal_session_id))
     except Exception as exc:
         logger.debug("GoalManager: get_meta failed: %s", exc)
         return None
+    if not raw and goal_session_id != session_id:
+        try:
+            raw = db.get_meta(_meta_key(session_id))
+            if raw:
+                db.set_meta(_meta_key(goal_session_id), raw)
+        except Exception as exc:
+            logger.debug("GoalManager: fallback goal migration failed: %s", exc)
     if not raw:
         return None
     try:
         return GoalState.from_json(raw)
     except Exception as exc:
-        logger.warning("GoalManager: could not parse stored goal for %s: %s", session_id, exc)
+        logger.warning("GoalManager: could not parse stored goal for %s: %s", goal_session_id, exc)
         return None
 
 
@@ -264,8 +282,9 @@ def save_goal(session_id: str, state: GoalState) -> None:
     db = _get_session_db()
     if db is None:
         return
+    goal_session_id = _canonical_goal_session_id(db, session_id)
     try:
-        db.set_meta(_meta_key(session_id), state.to_json())
+        db.set_meta(_meta_key(goal_session_id), state.to_json())
     except Exception as exc:
         logger.debug("GoalManager: set_meta failed: %s", exc)
 

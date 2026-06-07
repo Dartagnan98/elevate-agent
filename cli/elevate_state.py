@@ -910,7 +910,6 @@ class SessionDB:
                 ),
             )
         self._execute_write(_do)
-        # PG shadow write — best-effort, swallows all errors.
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_insert_session
             shadow_insert_session(
@@ -922,8 +921,11 @@ class SessionDB:
                 parent_session_id=parent_session_id,
                 started_at=started_at,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary session insert failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow session insert failed for %s: %s", session_id, exc)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
         """Create a new session record. Returns the session_id."""
@@ -950,8 +952,11 @@ class SessionDB:
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_end_session
             shadow_end_session(session_id, ended_at, end_reason)
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary session end failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow session end failed for %s: %s", session_id, exc)
 
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
@@ -964,8 +969,11 @@ class SessionDB:
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_reopen_session
             shadow_reopen_session(session_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary session reopen failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow session reopen failed for %s: %s", session_id, exc)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
         """Store the full assembled system prompt snapshot."""
@@ -978,8 +986,11 @@ class SessionDB:
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_update_system_prompt
             shadow_update_system_prompt(session_id, system_prompt)
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary system prompt update failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow system prompt update failed for %s: %s", session_id, exc)
 
     def update_token_counts(
         self,
@@ -1100,8 +1111,11 @@ class SessionDB:
                 model=model,
                 api_call_count=api_call_count,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary token count update failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow token count update failed for %s: %s", session_id, exc)
 
     def ensure_session(
         self,
@@ -1330,8 +1344,11 @@ class SessionDB:
                 conn.commit()
         except ValueError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary title update failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow title update failed for %s: %s", session_id, exc)
         return (rowcount or 0) > 0 or pg_rowcount > 0
 
     def get_session_title(self, session_id: str) -> Optional[str]:
@@ -1441,8 +1458,8 @@ class SessionDB:
                     get_compression_tip as _pg_get_compression_tip,
                 )
                 return _pg_get_compression_tip(session_id)
-            except Exception:
-                pass  # fall back to SQLite walk below
+            except Exception as exc:
+                logger.debug("PG compression-tip lookup failed for %s: %s", session_id, exc)
 
         current = session_id
         # Bound the walk defensively — compression chains this deep are
@@ -1464,6 +1481,139 @@ class SessionDB:
                 return current
             current = row["id"]
         return current
+
+    def _get_lineage_root_sqlite(self, session_id: str) -> str:
+        if not session_id:
+            return session_id
+        current = session_id
+        seen = {current}
+        with self._lock:
+            for _ in range(100):
+                row = self._conn.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    (current,),
+                ).fetchone()
+                if row is None:
+                    return current
+                parent_id = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+                if not parent_id or parent_id in seen:
+                    return current
+                seen.add(parent_id)
+                current = parent_id
+        return current
+
+    def _infer_session_kind_sqlite(self, session_id: str) -> str:
+        if not session_id:
+            return "chat"
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, source, parent_session_id, started_at FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return "chat"
+            source = str(row["source"] or "")
+            sid = str(row["id"] or "")
+            if source == "cron" or sid.startswith("cron_"):
+                return "cron"
+            if sid.startswith(("bg_", "btw_")):
+                return "background"
+            parent_id = row["parent_session_id"]
+            if not parent_id:
+                return "chat"
+            parent = self._conn.execute(
+                "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is not None:
+                ended_at = parent["ended_at"] if hasattr(parent, "keys") else parent[0]
+                end_reason = parent["end_reason"] if hasattr(parent, "keys") else parent[1]
+                if end_reason == "compression" and ended_at is not None and row["started_at"] >= ended_at:
+                    return "compression"
+                if end_reason == "branched":
+                    return "branch"
+            return "subagent"
+
+    def resolve_canonical_session_identity(self, session_id: str) -> Dict[str, Any]:
+        """Resolve a physical session id to logical root + active continuation.
+
+        Compression creates child sessions while the user thinks of the chain as
+        one conversation.  This helper is the single public resolver for UI,
+        gateway, and side-panel callers that need both identities.
+        """
+        requested = session_id
+        if not session_id:
+            return {
+                "requested_session_id": requested,
+                "lineage_root_id": session_id,
+                "active_session_id": session_id,
+                "session_kind": "chat",
+                "is_compression_tip": True,
+            }
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import (
+                    resolve_canonical_session_identity as _pg_resolve_identity,
+                )
+                return _pg_resolve_identity(session_id)
+            except Exception as exc:
+                logger.debug(
+                    "resolve_canonical_session_identity PG read failed, falling back: %s",
+                    exc,
+                )
+        root_id = self._get_lineage_root_sqlite(session_id)
+        active_id = self.get_compression_tip(root_id) or root_id
+        return {
+            "requested_session_id": requested,
+            "lineage_root_id": root_id,
+            "active_session_id": active_id,
+            "session_kind": self._infer_session_kind_sqlite(active_id),
+            "is_compression_tip": active_id == session_id,
+        }
+
+    def list_child_sessions(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return descendant physical sessions for a logical conversation."""
+        if not session_id:
+            return []
+        if _read_from_pg():
+            try:
+                from elevate_cli.data.chat_sessions import (
+                    list_child_sessions as _pg_list_child_sessions,
+                )
+                return _pg_list_child_sessions(session_id)
+            except Exception as exc:
+                logger.debug("PG child-session lookup failed for %s: %s", session_id, exc)
+
+        root_id = self._get_lineage_root_sqlite(session_id)
+        active_id = self.get_compression_tip(root_id) or root_id
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                WITH RECURSIVE session_tree AS (
+                    SELECT *
+                    FROM sessions
+                    WHERE id = ?
+                  UNION ALL
+                    SELECT child.*
+                    FROM sessions child
+                    JOIN session_tree parent ON child.parent_session_id = parent.id
+                )
+                SELECT *
+                FROM session_tree
+                WHERE id != ?
+                ORDER BY started_at ASC, id ASC
+                """,
+                (root_id, root_id),
+            ).fetchall()
+        children: List[Dict[str, Any]] = []
+        for row in rows:
+            child = dict(row)
+            child["session_kind"] = self._infer_session_kind_sqlite(str(child.get("id") or ""))
+            child["lineage_root_id"] = root_id
+            child["active_session_id"] = active_id
+            child["is_active_session"] = child.get("id") == active_id
+            children.append(child)
+        return children
 
     def list_sessions_rich(
         self,
@@ -1877,8 +2027,11 @@ class SessionDB:
                 timestamp=msg_timestamp,
                 num_tool_calls=num_tool_calls,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary append_message failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow append_message failed for %s: %s", session_id, exc)
         return result
 
     # ------------------------------------------------------------------
@@ -2070,8 +2223,11 @@ class SessionDB:
         try:
             from elevate_cli.data.sessiondb_shadow import shadow_replace_messages
             shadow_replace_messages(session_id, _shadow_rows)
-        except Exception:
-            pass
+        except Exception as exc:
+            if _sqlite_writes_disabled():
+                logger.error("PG-primary replace_messages failed for %s: %s", session_id, exc)
+                raise
+            logger.debug("PG shadow replace_messages failed for %s: %s", session_id, exc)
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by insertion order.
@@ -3174,8 +3330,8 @@ class SessionDB:
             try:
                 from elevate_cli.data.sessiondb_shadow import shadow_set_meta
                 shadow_set_meta(key, value)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("PG shadow meta write failed for %s: %s", key, exc)
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.

@@ -139,6 +139,120 @@ def get_compression_tip(session_id: str) -> Optional[str]:
     return current
 
 
+def get_lineage_root(session_id: str) -> Optional[str]:
+    """Walk parent_session_id backward to the logical root."""
+    if not session_id:
+        return session_id
+    current = session_id
+    seen = {current}
+    with connect() as conn:
+        for _ in range(100):
+            row = conn.execute(
+                "SELECT parent_session_id FROM chat_sessions WHERE id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                return current
+            parent_id = row["parent_session_id"] if not isinstance(row, (tuple, list)) else row[0]
+            if not parent_id or parent_id in seen:
+                return current
+            seen.add(parent_id)
+            current = parent_id
+    return current
+
+
+def infer_session_kind(session_id: str) -> str:
+    """Infer the physical session kind from existing lineage fields."""
+    if not session_id:
+        return "chat"
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, source, parent_session_id, started_at FROM chat_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return "chat"
+        source = str(row["source"] or "")
+        sid = str(row["id"] or "")
+        if source == "cron" or sid.startswith("cron_"):
+            return "cron"
+        if sid.startswith(("bg_", "btw_")):
+            return "background"
+        parent_id = row["parent_session_id"]
+        if not parent_id:
+            return "chat"
+        parent = conn.execute(
+            "SELECT ended_at, end_reason FROM chat_sessions WHERE id = ?",
+            (parent_id,),
+        ).fetchone()
+        if parent is not None:
+            ended_at = parent["ended_at"]
+            end_reason = parent["end_reason"]
+            if end_reason == "compression" and ended_at is not None and row["started_at"] >= ended_at:
+                return "compression"
+            if end_reason == "branched":
+                return "branch"
+        return "subagent"
+
+
+def resolve_canonical_session_identity(session_id: str) -> Dict[str, Any]:
+    """Return the logical/root and active physical session ids for a target."""
+    requested = session_id
+    if not session_id:
+        return {
+            "requested_session_id": requested,
+            "lineage_root_id": session_id,
+            "active_session_id": session_id,
+            "session_kind": "chat",
+            "is_compression_tip": True,
+        }
+    root_id = get_lineage_root(session_id) or session_id
+    active_id = get_compression_tip(root_id) or root_id
+    return {
+        "requested_session_id": requested,
+        "lineage_root_id": root_id,
+        "active_session_id": active_id,
+        "session_kind": infer_session_kind(active_id),
+        "is_compression_tip": active_id == session_id,
+    }
+
+
+def list_child_sessions(session_id: str) -> List[Dict[str, Any]]:
+    """Return every physical descendant for a logical conversation lineage."""
+    if not session_id:
+        return []
+    root_id = get_lineage_root(session_id) or session_id
+    active_id = get_compression_tip(root_id) or root_id
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH RECURSIVE session_tree AS (
+                SELECT *
+                FROM chat_sessions
+                WHERE id = ?
+              UNION ALL
+                SELECT child.*
+                FROM chat_sessions child
+                JOIN session_tree parent ON child.parent_session_id = parent.id
+            )
+            SELECT *
+            FROM session_tree
+            WHERE id != ?
+            ORDER BY started_at ASC, id ASC
+            """,
+            (root_id, root_id),
+        ).fetchall()
+    children: List[Dict[str, Any]] = []
+    for row in rows:
+        child = dict(row)
+        child["session_kind"] = infer_session_kind(str(child.get("id") or ""))
+        child["lineage_root_id"] = root_id
+        child["active_session_id"] = active_id
+        child["is_active_session"] = child.get("id") == active_id
+        children.append(child)
+    return children
+
+
 def update_system_prompt(session_id: str, system_prompt: str) -> None:
     if not session_id:
         return
@@ -567,7 +681,52 @@ def list_session_summaries(
             """,
             tuple(params),
         ).fetchall()
-    return [dict(r) for r in rows]
+    sessions = [dict(r) for r in rows]
+    if include_children:
+        for s in sessions:
+            ident = resolve_canonical_session_identity(str(s.get("id") or ""))
+            s.update(ident)
+        return sessions
+
+    projected: List[Dict[str, Any]] = []
+    for s in sessions:
+        ident = resolve_canonical_session_identity(str(s.get("id") or ""))
+        active_id = ident.get("active_session_id")
+        if active_id and active_id != s.get("id"):
+            active = get_session(str(active_id))
+            if active:
+                merged = dict(s)
+                for key in (
+                    "id", "ended_at", "end_reason", "message_count",
+                    "tool_call_count", "title", "model", "system_prompt",
+                ):
+                    if key in active:
+                        merged[key] = active[key]
+                with connect() as conn:
+                    meta = conn.execute(
+                        """
+                        SELECT
+                          COALESCE(
+                            (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
+                             FROM chat_messages m
+                             WHERE m.session_id = ? AND m.role = 'user' AND m.content IS NOT NULL
+                             ORDER BY m.timestamp, m.id LIMIT 1),
+                            ''
+                          ) AS preview,
+                          COALESCE(
+                            (SELECT MAX(m2.timestamp) FROM chat_messages m2 WHERE m2.session_id = ?),
+                            ?
+                          ) AS last_active
+                        """,
+                        (active_id, active_id, active.get("started_at")),
+                    ).fetchone()
+                if meta:
+                    merged["preview"] = meta["preview"]
+                    merged["last_active"] = meta["last_active"]
+                s = merged
+        s.update(ident)
+        projected.append(s)
+    return projected
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
@@ -682,6 +841,11 @@ __all__ = [
     "message_count",
     "session_count",
     "active_session_count",
+    "get_compression_tip",
+    "get_lineage_root",
+    "infer_session_kind",
+    "resolve_canonical_session_identity",
+    "list_child_sessions",
     "list_session_summaries",
     "get_session",
     "get_messages",

@@ -197,3 +197,31 @@ class TestCompressionToolResultPreservation:
             if msg.get("role") == "tool":
                 assert msg["content"] != "[Result from earlier conversation — see context summary above]", \
                     f"Stub result found for {msg.get('tool_call_id')} — real result was lost"
+
+    def test_historical_auto_skill_payload_is_not_protected_head_context(self):
+        """Huge auto-loaded skill bootstrap messages must not survive compression."""
+        comp = _make_compressor(protect_first_n=1, protect_last_n=2)
+        huge_skill_payload = (
+            '[SYSTEM: The "admin-listing-import" skill is auto-loaded. '
+            "Follow its instructions for this session.]\n\n"
+            + ("skill instructions\n" * 4000)
+        )
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": huge_skill_payload},
+            {"role": "assistant", "content": "Ready."},
+            {"role": "user", "content": "Make a marketing PDF."},
+            {"role": "assistant", "content": "Working."},
+            {"role": "user", "content": "Now run the CMA."},
+            {"role": "assistant", "content": "Checking."},
+            {"role": "user", "content": "continue"},
+        ]
+
+        with patch.object(comp, "_generate_summary", return_value="[summary]"):
+            result = comp.compress(messages, current_tokens=70_000)
+
+        result_text = "\n".join(str(msg.get("content") or "") for msg in result)
+        assert len(result_text) < 30_000
+        assert "Historical auto-loaded skill payload omitted" in result_text
+        assert "skill instructions\nskill instructions\nskill instructions" not in result_text
+        assert result[-1]["content"] == "continue"

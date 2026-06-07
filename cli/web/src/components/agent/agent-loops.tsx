@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Modal } from "@/components/ui/modal";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
   CycleRow,
@@ -110,11 +111,7 @@ function TasksTab({ agentId, surfaceKey }: { agentId: string; surfaceKey: string
     };
   }, [agentId, surfaceKey]);
   if (tasks === null)
-    return (
-      <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
-      </div>
-    );
+    return <ListSkeleton rows={2} className="py-1" />;
   if (!tasks.length)
     return (
       <p className="text-[11px] italic text-muted-foreground/70">
@@ -137,8 +134,16 @@ function TasksTab({ agentId, surfaceKey }: { agentId: string; surfaceKey: string
   );
 }
 
-export function AgentLoops({ agentId, agentName }: { agentId: string; agentName: string }) {
-  const [open, setOpen] = useState(false);
+export function AgentLoops({
+  agentId,
+  agentName,
+  defaultOpen = false,
+}: {
+  agentId: string;
+  agentName: string;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<LoopTab>("heartbeat");
@@ -205,9 +210,7 @@ export function AgentLoops({ agentId, agentName }: { agentId: string; agentName:
       {open && (
         <div className="space-y-3 border-t border-border/70 p-3">
           {loading && !loaded ? (
-            <div className="flex items-center gap-2 py-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
-            </div>
+            <ListSkeleton rows={2} className="py-1" />
           ) : (
             <>
               <div className="flex flex-wrap gap-1.5">

@@ -381,11 +381,13 @@ def _seed_surface_heartbeat_workspace(
             "created_by": "system",
             "created_at": _hermes_now().isoformat(),
         }
+        extra_config = spec.get("config") if isinstance(spec.get("config"), dict) else {}
         cfg.write_text(json.dumps({
             "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
             "enabled": bool(enabled), "experiment": spec["experiment"],
             "cycles": [_seed_cycle],
             "created_by": "system", "created_at": _hermes_now().date().isoformat(),
+            **extra_config,
         }, indent=2))
     learn = ws / "learnings.md"
     if not learn.exists():
@@ -545,12 +547,76 @@ def create_surface(
         "schedule": spec.get("schedule") or SURFACE_TEMPLATE["schedule"],
         "goal": spec.get("goal") or SURFACE_TEMPLATE["goal"],
         "experiment": {**SURFACE_TEMPLATE["experiment"], **(spec.get("experiment") or {})},
+        "config": spec.get("config") if isinstance(spec.get("config"), dict) else {},
         "builtin": False,
         "created_by": created_by,
     }
     register_surface(key, merged)
     job = ensure_surface(key, merged, enabled=False)
     return {"surface": key, "spec": merged, "job": job}
+
+
+def delete_surface(
+    surface: str,
+    *,
+    force: bool = False,
+    remove_files: bool = True,
+) -> Dict[str, Any]:
+    """Remove a custom surface heartbeat and its generated cron jobs.
+
+    Built-in surfaces are protected unless ``force`` is explicitly set. This is
+    the inverse of ``create_surface``: remove the registry entry, delete the
+    surface heartbeat job and any surface-automation jobs tagged to the same
+    surface, then remove the heartbeat workspace folder.
+    """
+    key = (surface or "").strip().lower()
+    if not re.match(r"^[a-z][a-z0-9_-]{1,31}$", key):
+        raise ValueError(
+            "surface key must be 2-32 chars: a lowercase letter then letters/digits/-/_"
+        )
+
+    reg = load_surface_registry()
+    spec = reg.get(key)
+    from elevate_constants import get_account_data_dir
+
+    surface_dir = get_account_data_dir() / "heartbeats" / key
+    jobs = [
+        job
+        for job in load_jobs()
+        if (job.get("origin") or {}).get("surface") == key
+        and (job.get("origin") or {}).get("type") in {"surface-heartbeat", "surface-automation"}
+    ]
+    if not spec and not surface_dir.exists() and not jobs:
+        raise LookupError(f"surface '{key}' not found")
+    if spec and spec.get("builtin") and not force:
+        raise ValueError("built-in heartbeat surfaces cannot be deleted")
+
+    removed_jobs: List[str] = []
+    for job in jobs:
+        job_id = str(job.get("id") or "")
+        if job_id and remove_job(job_id):
+            removed_jobs.append(job_id)
+
+    removed_registry = False
+    if key in reg:
+        reg.pop(key, None)
+        _write_surface_registry(reg)
+        removed_registry = True
+
+    removed_files = False
+    if remove_files and surface_dir.exists():
+        shutil.rmtree(surface_dir)
+        removed_files = True
+
+    return {
+        "ok": True,
+        "surface": key,
+        "removed": {
+            "registry": removed_registry,
+            "files": removed_files,
+            "jobs": removed_jobs,
+        },
+    }
 
 
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
@@ -1246,6 +1312,7 @@ def create_job(
     tier: Optional[str] = None,
     expected_readiness_version: Optional[str] = None,
     backfill_pending: bool = False,
+    max_session_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1330,11 +1397,46 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_profile = _normalize_profile(profile)
     normalized_no_agent = bool(no_agent)
+    try:
+        normalized_max_session_seconds = int(max_session_seconds) if max_session_seconds not in (None, "") else None
+    except (TypeError, ValueError):
+        normalized_max_session_seconds = None
+    if normalized_max_session_seconds is not None and normalized_max_session_seconds <= 0:
+        normalized_max_session_seconds = None
 
     # Elevate /leads metadata normalization (agent picker, tier resolver
     # fallback, readiness gate, backfill iterator).
     normalized_agent = str(agent).strip() if isinstance(agent, str) else None
     normalized_agent = normalized_agent or None
+    if normalized_agent:
+        try:
+            from elevate_cli.agent_hub import agent_lifecycle_defaults, agent_runtime_defaults
+
+            runtime_defaults = agent_runtime_defaults(normalized_agent)
+            lifecycle_defaults = agent_lifecycle_defaults(normalized_agent)
+        except Exception:
+            runtime_defaults = {}
+            lifecycle_defaults = {}
+        normalized_model = normalized_model or str(runtime_defaults.get("model") or "").strip() or None
+        normalized_provider = normalized_provider or str(runtime_defaults.get("provider") or "").strip() or None
+        normalized_base_url = (
+            normalized_base_url
+            or str(runtime_defaults.get("base_url") or "").strip().rstrip("/")
+            or None
+        )
+        if normalized_workdir is None:
+            normalized_workdir = _normalize_workdir(runtime_defaults.get("workdir"))
+        if normalized_max_session_seconds is None:
+            try:
+                runtime_max_session = int(
+                    lifecycle_defaults.get("max_session_seconds")
+                    or runtime_defaults.get("max_session_seconds")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                runtime_max_session = 0
+            if runtime_max_session > 0:
+                normalized_max_session_seconds = runtime_max_session
     normalized_tier = str(tier).strip().lower() if isinstance(tier, str) else None
     if normalized_tier:
         try:
@@ -1398,6 +1500,7 @@ def create_job(
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
+        "max_session_seconds": normalized_max_session_seconds,
         "profile": normalized_profile,
         # /leads cron metadata
         "agent": normalized_agent,

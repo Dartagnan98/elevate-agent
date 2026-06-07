@@ -1,9 +1,7 @@
-import { Loader2 } from "lucide-react";
+import { useLocation } from "react-router-dom";
+import { RouteSkeleton } from "@/components/route-skeletons";
 
 export function LoadingState() {
-  return (
-    <div className="flex min-h-[42vh] items-center justify-center">
-      <Loader2 className="h-6 w-6 animate-spin text-primary" />
-    </div>
-  );
+  const location = useLocation();
+  return <RouteSkeleton path={location.pathname} />;
 }

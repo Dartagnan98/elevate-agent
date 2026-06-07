@@ -1663,6 +1663,8 @@ def _run_single_child(
 
             return {
                 "task_index": task_index,
+                "subagent_id": _subagent_id,
+                "child_session_id": getattr(child, "session_id", None),
                 "status": "timeout" if is_timeout else "error",
                 "summary": None,
                 "error": _err,
@@ -1752,6 +1754,8 @@ def _run_single_child(
 
         entry: Dict[str, Any] = {
             "task_index": task_index,
+            "subagent_id": _subagent_id,
+            "child_session_id": getattr(child, "session_id", None),
             "status": status,
             "summary": summary,
             "api_calls": api_calls,
@@ -1848,6 +1852,9 @@ def _run_single_child(
         )[:40]
 
         _output_tail = _extract_output_tail(result, max_entries=8, max_chars=600)
+        entry["files_read"] = _files_read
+        entry["files_written"] = _files_written
+        entry["output_tail"] = _output_tail
 
         complete_kwargs: Dict[str, Any] = {
             "preview": summary[:160] if summary else entry.get("error", ""),
@@ -1900,6 +1907,8 @@ def _run_single_child(
                 logger.debug("Progress callback failure relay failed: %s", e)
         return {
             "task_index": task_index,
+            "subagent_id": _subagent_id,
+            "child_session_id": getattr(child, "session_id", None),
             "status": "error",
             "summary": None,
             "error": str(exc),

@@ -67,11 +67,25 @@ import type {
   WorkspaceOpenResponse,
   StatusResponse,
   AgentHandoff,
+  AgentCommsChannel,
+  AgentCommsChannelResponse,
+  AgentCommsMessage,
+  AgentCommsMessageCreateRequest,
   AgentHandoffCreateRequest,
+  AgentHandoffMessage,
+  AgentHandoffMessageCreateRequest,
   AgentHandoffResultRequest,
   AgentHandoffApproveRequest,
   AgentWorkerSnapshot,
   AgentHubSnapshot,
+  AgentRuntimeConfig,
+  AgentRoutingConfig,
+  AgentSafetyConfig,
+  AgentIdentityConfig,
+  AgentSoulConfig,
+  AgentLifecycleConfig,
+  AgentEcosystemConfig,
+  AgentMemoryConfig,
   HarnessSnapshot,
   PaginatedSessions,
   EnvVarInfo,
@@ -79,6 +93,8 @@ import type {
   SessionTodosResponse,
   SessionPlanResponse,
   SessionFilesResponse,
+  SessionArtifactsResponse,
+  SessionChildrenResponse,
   FilesTreeResponse,
   LogsResponse,
   AnalyticsResponse,
@@ -102,6 +118,7 @@ import type {
   PluginManifestResponse,
   HeartbeatSurfacesResponse,
   HeartbeatExperimentsResponse,
+  SurfaceApproval,
 } from "./api-types";
 import { recordStartupApiTiming } from "./startup-performance";
 
@@ -113,7 +130,8 @@ declare global {
   }
 }
 let _sessionToken: string | null = null;
-const SESSION_HEADER = "X-Elevation-Session-Token";
+const SESSION_HEADER = "X-Elevate-Session-Token";
+const DEFAULT_GET_CACHE_TTL_MS = 2_500;
 const GET_CACHE = new Map<
   string,
   {
@@ -132,7 +150,54 @@ function clearGetCache(): void {
   GET_CACHE.clear();
 }
 
-export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+function extractErrorDetail(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      for (const key of ["detail", "error", "message", "reason"]) {
+        const value = record[key];
+        if (typeof value === "string" && value.trim()) {
+          return value.trim();
+        }
+      }
+      return JSON.stringify(parsed);
+    }
+  } catch {
+    // Plain-text response bodies are already useful as-is.
+  }
+  return trimmed;
+}
+
+async function responseError(res: Response, url: string): Promise<Error> {
+  const body = await res.text().catch(() => "");
+  const detail = extractErrorDetail(body);
+  const statusText = res.statusText || "Request failed";
+  const suffix = detail ? `: ${detail}` : ": no response body";
+  return new Error(`${res.status} ${statusText} on ${url}${suffix}`);
+}
+
+function shouldCacheGet(url: string, init?: RequestInit): boolean {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET") return false;
+  if (init?.signal) return false;
+  if (init?.cache === "no-store" || init?.cache === "reload") return false;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    if (parsed.searchParams.get("refresh") === "true") return false;
+    if (parsed.searchParams.get("fresh") === "true") return false;
+    if (parsed.searchParams.has("_")) return false;
+  } catch {
+    if (url.includes("refresh=true") || url.includes("fresh=true") || url.includes("_=")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function fetchJSONNetwork<T>(url: string, init?: RequestInit): Promise<T> {
   // Inject the session token into all /api/ requests.
   const headers = new Headers(init?.headers);
   const token = window.__ELEVATE_SESSION_TOKEN__;
@@ -146,8 +211,7 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
     const res = await fetch(`${BASE}${url}`, { ...init, headers });
     status = res.status;
     if (!res.ok) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new Error(`${res.status}: ${text}`);
+      throw await responseError(res, url);
     }
     if (method !== "GET") {
       clearGetCache();
@@ -163,7 +227,14 @@ export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> 
   }
 }
 
-function cachedFetchJSON<T>(url: string, ttlMs: number): Promise<T> {
+export function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  if (shouldCacheGet(url, init)) {
+    return cachedFetchJSON<T>(url, DEFAULT_GET_CACHE_TTL_MS, init);
+  }
+  return fetchJSONNetwork<T>(url, init);
+}
+
+function cachedFetchJSON<T>(url: string, ttlMs: number, init?: RequestInit): Promise<T> {
   const tokenKey = window.__ELEVATE_SESSION_TOKEN__ ? "session" : "anonymous";
   const key = `${tokenKey}:${url}`;
   const now = Date.now();
@@ -172,7 +243,7 @@ function cachedFetchJSON<T>(url: string, ttlMs: number): Promise<T> {
     return cached.promise as Promise<T>;
   }
 
-  const promise = fetchJSON<T>(url).catch((error) => {
+  const promise = fetchJSONNetwork<T>(url, init).catch((error) => {
     if (GET_CACHE.get(key)?.promise === promise) {
       GET_CACHE.delete(key);
     }
@@ -195,8 +266,7 @@ async function fetchBlob(url: string, init?: RequestInit): Promise<BlobResponse>
   }
   const res = await fetch(`${BASE}${url}`, { ...init, headers });
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    throw new Error(`${res.status}: ${text}`);
+    throw await responseError(res, url);
   }
   return {
     blob: await res.blob(),
@@ -332,6 +402,10 @@ export const api = {
     fetchJSON<SessionPlanResponse>(`/api/sessions/${encodeURIComponent(id)}/plan`),
   getSessionFiles: (id: string) =>
     fetchJSON<SessionFilesResponse>(`/api/sessions/${encodeURIComponent(id)}/files`),
+  getSessionArtifacts: (id: string) =>
+    fetchJSON<SessionArtifactsResponse>(`/api/sessions/${encodeURIComponent(id)}/artifacts`),
+  getSessionChildren: (id: string) =>
+    fetchJSON<SessionChildrenResponse>(`/api/sessions/${encodeURIComponent(id)}/children`),
   getFilesTree: (root?: string, depth?: number) => {
     const qs = new URLSearchParams();
     if (root) qs.set("root", root);
@@ -375,8 +449,7 @@ export const api = {
       { method: "POST", body: form, headers },
     );
     if (!res.ok) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new Error(`${res.status}: ${text}`);
+      throw await responseError(res, `/api/uploads/${encodeURIComponent(sessionId)}`);
     }
     return res.json();
   },
@@ -655,14 +728,30 @@ export const api = {
   createHeartbeatSurface: (body: {
     surface: string;
     title?: string;
+    name?: string;
     goal?: string;
     schedule?: string;
+    experiment?: Record<string, unknown>;
+    config?: Record<string, unknown>;
   }) =>
     fetchJSON<{ ok: boolean; surface: string }>("/api/heartbeats/surfaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  deleteHeartbeatSurface: (surface: string, options?: { force?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (options?.force) qs.set("force", "true");
+    const tail = qs.toString();
+    return fetchJSON<{
+      ok: boolean;
+      surface: string;
+      removed: { registry: boolean; files: boolean; jobs: string[] };
+    }>(
+      `/api/heartbeats/surfaces/${encodeURIComponent(surface)}${tail ? `?${tail}` : ""}`,
+      { method: "DELETE" },
+    );
+  },
   // Create a new experiment cycle on a surface (the analyst's lever — a new
   // self-improvement track). Mirrors cortextOS manage-cycle create.
   createHeartbeatCycle: (
@@ -758,7 +847,13 @@ export const api = {
       goals?: { id?: string; title: string; progress?: number; order?: number }[];
     },
   ) =>
-    fetchJSON<{ surface: string; goals: unknown[] }>(
+    fetchJSON<{
+      surface: string;
+      bottleneck: string;
+      daily_focus: string;
+      goals: { id: string; title: string; progress: number; order: number }[];
+      updated_at?: string | null;
+    }>(
       `/api/heartbeats/surfaces/${encodeURIComponent(surface)}/goals`,
       {
         method: "PATCH",
@@ -768,10 +863,13 @@ export const api = {
     ),
 
   // Surface Tasks — dispatch work to a surface (or 'human'); kanban board.
-  listSurfaceTasks: (params?: { status?: string; assignee?: string }) => {
+  listSurfaceTasks: (params?: { status?: string; assignee?: string; priority?: string; project?: string; include_archived?: boolean }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set("status", params.status);
     if (params?.assignee) qs.set("assignee", params.assignee);
+    if (params?.priority) qs.set("priority", params.priority);
+    if (params?.project) qs.set("project", params.project);
+    if (params?.include_archived) qs.set("include_archived", "true");
     const q = qs.toString();
     return fetchJSON<{ tasks: import("./api-types").SurfaceTask[] }>(
       `/api/surface-tasks${q ? `?${q}` : ""}`,
@@ -780,10 +878,28 @@ export const api = {
   createSurfaceTask: (body: {
     title: string;
     description?: string;
+    type?: string;
+    status?: string;
     assignee?: string;
+    assigned_to?: string;
     priority?: string;
     project?: string;
     needs_approval?: boolean;
+    created_by?: string;
+    createdBy?: string;
+    org?: string;
+    kpi_key?: string;
+    kpiKey?: string;
+    due_date?: string;
+    dueDate?: string;
+    blocked_by?: string[];
+    blockedBy?: string[];
+    blocks?: string[];
+    actor?: string;
+    agentId?: string;
+    agent_id?: string;
+    policyCategory?: string;
+    policy_category?: string;
   }) =>
     fetchJSON<{ ok: boolean; task: import("./api-types").SurfaceTask }>("/api/surface-tasks", {
       method: "POST",
@@ -799,16 +915,56 @@ export const api = {
         body: JSON.stringify(body),
       },
     ),
-  deleteSurfaceTask: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/surface-tasks/${encodeURIComponent(id)}`, {
+  claimSurfaceTask: (id: string, body: { agent: string; actor?: string; agentId?: string; agent_id?: string }) =>
+    fetchJSON<{ ok: boolean; task: import("./api-types").SurfaceTask }>(
+      `/api/surface-tasks/${encodeURIComponent(id)}/claim`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  getSurfaceTaskAudit: (id: string, limit = 200) =>
+    fetchJSON<{ events: import("./api-types").SurfaceTaskAuditEvent[] }>(
+      `/api/surface-tasks/${encodeURIComponent(id)}/audit?limit=${encodeURIComponent(String(limit))}`,
+    ),
+  checkSurfaceTaskStale: () =>
+    fetchJSON<import("./api-types").SurfaceTaskStaleReport>("/api/surface-tasks/stale"),
+  archiveSurfaceTasks: (body?: { dry_run?: boolean; dryRun?: boolean; older_than_days?: number; olderThanDays?: number }) =>
+    fetchJSON<{ archived: number; items: Array<Record<string, unknown>>; skipped: Array<Record<string, unknown>>; dry_run: boolean }>(
+      "/api/surface-tasks/archive",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      },
+    ),
+  compactSurfaceTasks: (body?: { dry_run?: boolean; dryRun?: boolean; older_than_days?: number; olderThanDays?: number }) =>
+    fetchJSON<{ archived: Array<Record<string, unknown>>; skipped: Array<Record<string, unknown>>; dry_run: boolean }>(
+      "/api/surface-tasks/compact",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      },
+    ),
+  deleteSurfaceTask: (id: string, params?: { actor?: string; agentId?: string; agent_id?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.actor) qs.set("actor", params.actor);
+    if (params?.agentId) qs.set("agentId", params.agentId);
+    if (params?.agent_id) qs.set("agent_id", params.agent_id);
+    const tail = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchJSON<{ ok: boolean; approvalRequired?: boolean; approval?: SurfaceApproval; task?: import("./api-types").SurfaceTask }>(`/api/surface-tasks/${encodeURIComponent(id)}${tail}`, {
       method: "DELETE",
-    }),
+    });
+  },
 
   // Surface Approvals — decisions kanban (dashboard-only resolve).
-  listSurfaceApprovals: (params?: { status?: string; surface?: string }) => {
+  listSurfaceApprovals: (params?: { status?: string; surface?: string; category?: string }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set("status", params.status);
     if (params?.surface) qs.set("surface", params.surface);
+    if (params?.category) qs.set("category", params.category);
     const q = qs.toString();
     return fetchJSON<{ approvals: import("./api-types").SurfaceApproval[] }>(
       `/api/surface-approvals${q ? `?${q}` : ""}`,
@@ -1205,13 +1361,42 @@ export const api = {
       }[];
     }>(`/api/activity${q ? `?${q}` : ""}`);
   },
-  // Comms — connected channels for the channel panel (agent-to-agent traffic is
-  // the handoff bus via getAgentHandoffs).
-  getCommsChannels: () =>
+  // Comms — CortextOS-style meeting room and pair channels, projected from the
+  // native handoff bus.
+  getCommsFeed: (params: { limit?: number; search?: string; agent?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    if (params.search) qs.set("search", params.search);
+    if (params.agent) qs.set("agent", params.agent);
+    const tail = qs.toString();
+    return fetchJSON<AgentCommsMessage[]>(`/api/comms/feed${tail ? `?${tail}` : ""}`);
+  },
+  getCommsChannels: (params: { includeArchived?: boolean; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.includeArchived) qs.set("include_archived", "true");
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    const tail = qs.toString();
+    return fetchJSON<AgentCommsChannel[]>(`/api/comms/channels${tail ? `?${tail}` : ""}`);
+  },
+  getCommsChannel: (pair: string, params: { limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit != null) qs.set("limit", String(params.limit));
+    const tail = qs.toString();
+    return fetchJSON<AgentCommsChannelResponse>(
+      `/api/comms/channel/${encodeURIComponent(pair)}${tail ? `?${tail}` : ""}`,
+    );
+  },
+  sendCommsMessage: (body: AgentCommsMessageCreateRequest) =>
+    fetchJSON<{ handoff: AgentHandoff; message: AgentCommsMessage }>("/api/comms/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  getCommsDeliveryChannels: () =>
     cachedFetchJSON<{
       channels: { platform: string; id: string; name: string; type?: string }[];
       updated_at?: string | null;
-    }>("/api/comms/channels", 30_000),
+    }>("/api/comms/delivery-channels", 30_000),
 
   // Agent Hub
   getAgentHub: (
@@ -1251,9 +1436,76 @@ export const api = {
       1_500,
     );
   },
+  createAgent: (body: {
+    [key: string]: unknown;
+    id?: string;
+    name: string;
+    role?: string;
+    description?: string;
+    prompt?: string;
+    enabled?: boolean;
+    skills?: string[];
+    toolsets?: string[];
+    platforms?: string[];
+    session_sources?: string[];
+    runtime?: AgentRuntimeConfig;
+    routing?: AgentRoutingConfig;
+    safety?: AgentSafetyConfig;
+    identity?: AgentIdentityConfig;
+    soul?: AgentSoulConfig;
+    lifecycle?: AgentLifecycleConfig;
+    ecosystem?: AgentEcosystemConfig;
+    memory?: AgentMemoryConfig;
+    memorySeed?: { content: string; source?: string; scopes?: string[] };
+    metadata?: Record<string, unknown>;
+  }) =>
+    fetchJSON<Record<string, unknown>>("/api/agent-hub/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  getCortextAgentPacks: () =>
+    fetchJSON<{
+      root: string | null;
+      packs: Array<{
+        id: string;
+        name: string;
+        role: string;
+        description: string;
+        sourcePath: string;
+        sourceExists: boolean;
+        includes: string[];
+        automationCount: number;
+        payload: {
+          [key: string]: unknown;
+          id?: string;
+          name: string;
+          role?: string;
+          description?: string;
+          prompt?: string;
+          enabled?: boolean;
+          skills?: string[];
+          toolsets?: string[];
+          platforms?: string[];
+          session_sources?: string[];
+          runtime?: AgentRuntimeConfig;
+          routing?: AgentRoutingConfig;
+          safety?: AgentSafetyConfig;
+          identity?: AgentIdentityConfig;
+          soul?: AgentSoulConfig;
+          lifecycle?: AgentLifecycleConfig;
+          ecosystem?: AgentEcosystemConfig;
+          memory?: AgentMemoryConfig;
+          memorySeed?: { content: string; source?: string; scopes?: string[] };
+          metadata?: Record<string, unknown>;
+        };
+      }>;
+    }>("/api/agent-hub/cortext-packs"),
   updateAgent: (
     agentId: string,
     patch: {
+      [key: string]: unknown;
+      name?: string;
       enabled?: boolean;
       role?: string;
       description?: string;
@@ -1262,6 +1514,15 @@ export const api = {
       toolsets?: string[];
       platforms?: string[];
       session_sources?: string[];
+      runtime?: AgentRuntimeConfig;
+      routing?: AgentRoutingConfig;
+      safety?: AgentSafetyConfig;
+      identity?: AgentIdentityConfig;
+      soul?: AgentSoulConfig;
+      lifecycle?: AgentLifecycleConfig;
+      ecosystem?: AgentEcosystemConfig;
+      memory?: AgentMemoryConfig;
+      metadata?: Record<string, unknown>;
     },
   ) =>
     fetchJSON<Record<string, unknown>>(`/api/agent-hub/agents/${encodeURIComponent(agentId)}`, {
@@ -1269,6 +1530,34 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }),
+  deleteAgent: (agentId: string) =>
+    fetchJSON<{ ok: boolean; id: string }>(`/api/agent-hub/agents/${encodeURIComponent(agentId)}`, {
+      method: "DELETE",
+    }),
+  cleanupAgentInstallArtifacts: (
+    agentId: string,
+    options?: { deleteAgent?: boolean; force?: boolean },
+  ) => {
+    const qs = new URLSearchParams();
+    if (options?.deleteAgent === false) qs.set("delete_agent", "false");
+    if (options?.force) qs.set("force", "true");
+    const tail = qs.toString();
+    return fetchJSON<{
+      ok: boolean;
+      id: string;
+      removed: {
+        agent: boolean;
+        heartbeatSurface:
+          | { ok: boolean; surface: string; missing?: boolean; removed?: Record<string, unknown> }
+          | null;
+        onboardingTasks: string[];
+        memory: { agent: string; removed: number; source?: string | null } | null;
+      };
+    }>(
+      `/api/agent-hub/agents/${encodeURIComponent(agentId)}/install-artifacts${tail ? `?${tail}` : ""}`,
+      { method: "DELETE" },
+    );
+  },
   getAgentHandoffs: (
     params: {
       toAgentId?: string;
@@ -1297,19 +1586,34 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  getAgentHandoff: (handoffId: string) =>
+    fetchJSON<AgentHandoff>(`/api/agent-handoffs/${encodeURIComponent(handoffId)}`),
+  createAgentHandoffMessage: (handoffId: string, body: AgentHandoffMessageCreateRequest) =>
+    fetchJSON<AgentHandoffMessage>(
+      `/api/agent-handoffs/${encodeURIComponent(handoffId)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   drainAgentHandoffs: (body: { toAgentId?: string; limit?: number } = {}) =>
     fetchJSON<{ items: AgentHandoff[]; count: number }>("/api/agent-handoffs/drain", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
-  runAgentWorkerTick: () =>
+  runAgentWorkerTick: (body: { agentId?: string } = {}) =>
     fetchJSON<AgentWorkerSnapshot>("/api/agent-worker/tick", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
-  wakeAgentWorker: () =>
+  wakeAgentWorker: (body: { agentId?: string } = {}) =>
     fetchJSON<AgentWorkerSnapshot>("/api/agent-worker/wake", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
   completeAgentHandoff: (handoffId: string, body: AgentHandoffResultRequest) =>
     fetchJSON<AgentHandoff>(`/api/agent-handoffs/${encodeURIComponent(handoffId)}/result`, {
@@ -1644,6 +1948,21 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profileId, status, returnInbox: options?.returnInbox ?? true }),
+    }),
+  updateSourceInboxProfileFavorite: (
+    profileId: string,
+    favorite: boolean,
+    options?: { contactId?: string | null; returnInbox?: boolean },
+  ) =>
+    fetchJSON<SourceInboxResponse>("/api/source-inbox/profile/favorite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profileId,
+        favorite,
+        contactId: options?.contactId ?? null,
+        returnInbox: options?.returnInbox ?? true,
+      }),
     }),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /

@@ -856,6 +856,26 @@ class TestHydrateTodoStore:
             agent._hydrate_todo_store(history)
         assert not agent._todo_store.has_items()
 
+    def test_recovers_from_post_compression_injection(self, agent):
+        from tools.todo_tool import TodoStore
+
+        store = TodoStore()
+        store.write([
+            {"id": "1", "content": "Done", "status": "completed"},
+            {"id": "2", "content": "Keep going", "status": "pending"},
+        ])
+        history = [
+            {"role": "user", "content": "before"},
+            {"role": "user", "content": store.format_for_injection()},
+        ]
+
+        with patch("run_agent._set_interrupt"):
+            agent._hydrate_todo_store(history)
+
+        assert agent._todo_store.read() == [
+            {"id": "2", "content": "Keep going", "status": "pending"},
+        ]
+
 
 class TestBuildSystemPrompt:
     def test_always_has_identity(self, agent):

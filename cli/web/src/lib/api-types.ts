@@ -236,6 +236,9 @@ export interface SourceInboxProfile {
   tags: string[];
   status: SourceInboxProfileStatus | null;
   statusUpdatedAt: string | null;
+  favorite?: boolean;
+  favoritedAt?: string | null;
+  favoritedBy?: string | null;
   leadSectionIds?: string[];
 }
 
@@ -1705,6 +1708,14 @@ export interface AgentHandoffCreateRequest {
   runNow?: boolean;
 }
 
+export interface AgentHandoffMessageCreateRequest {
+  fromAgentId: string;
+  toAgentId?: string | null;
+  kind?: "request" | "note" | "status" | "result" | "human_prompt" | "error" | string;
+  content: string;
+  payload?: Record<string, unknown> | null;
+}
+
 export interface AgentHandoffResultRequest {
   status?: Exclude<AgentHandoffStatus, "queued">;
   result?: Record<string, unknown> | null;
@@ -1718,6 +1729,64 @@ export interface AgentHandoffApproveRequest {
   approved?: boolean;
   runNow?: boolean;
   actor?: string;
+}
+
+export interface AgentCommsMessage {
+  id: string;
+  source: "handoff" | "handoff_message" | string;
+  handoffId: string;
+  messageId?: string | null;
+  pair: string;
+  from: string;
+  to: string;
+  priority: "low" | "normal" | "high" | "urgent" | string;
+  timestamp: string;
+  createdAt?: string;
+  text: string;
+  replyTo?: string | null;
+  reply_to?: string | null;
+  kind: string;
+  title?: string | null;
+  handoffStatus?: string;
+  archived?: boolean;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface AgentCommsChannel {
+  pair: string;
+  agents: [string, string] | string[];
+  message_count: number;
+  messageCount?: number;
+  last_message: {
+    id?: string;
+    from: string;
+    to?: string;
+    text: string;
+    timestamp: string;
+    kind?: string;
+    priority?: string;
+  } | null;
+  lastMessage?: AgentCommsChannel["last_message"];
+  last_activity: string | null;
+  lastActivity?: string | null;
+  archived: boolean;
+}
+
+export interface AgentCommsChannelResponse {
+  pair: string;
+  agents: [string, string] | string[];
+  messages: AgentCommsMessage[];
+  count: number;
+}
+
+export interface AgentCommsMessageCreateRequest {
+  fromAgentId?: string;
+  toAgentId?: string;
+  agent?: string;
+  text: string;
+  priority?: "low" | "normal" | "high" | "urgent";
+  replyTo?: string | null;
+  runNow?: boolean;
 }
 
 export interface AgentHandoffSummary {
@@ -1744,6 +1813,7 @@ export interface AgentHandoffSummary {
 
 export interface AgentWorkerSnapshot {
   enabled: boolean;
+  agentId?: string | null;
   mode?: string;
   state: "idle" | "ok" | "disabled" | "locked" | "error" | string;
   lastReason?: string;
@@ -1774,12 +1844,179 @@ export interface AgentWorkerSnapshot {
     pending: boolean;
     lastWakeAt: string | null;
     lastReason: string;
+    agentId?: string | null;
     count: number;
   };
   loop?: {
     running: boolean;
     startedAt: string | null;
   };
+}
+
+export interface AgentRuntimeConfig {
+  model?: string;
+  provider?: string;
+  base_url?: string;
+  workdir?: string;
+  timezone?: string;
+  context_warning_threshold?: number | null;
+  context_handoff_threshold?: number | null;
+  runtime_type?: string;
+  codex_context_cap?: number | null;
+}
+
+export interface AgentRoutingConfig {
+  owns: string[];
+  handoff_targets: string[];
+  escalation_target?: string;
+  default_priority?: string;
+}
+
+export interface AgentSafetyConfig {
+  approval_mode?: string;
+  always_ask: string[];
+  never_ask: string[];
+  dangerously_skip_permissions?: boolean;
+}
+
+export interface AgentIdentityConfig {
+  emoji?: string;
+  vibe?: string;
+  work_style?: string;
+}
+
+export interface AgentSoulConfig {
+  autonomy_rules?: string;
+  communication_style?: string;
+  day_mode?: string;
+  night_mode?: string;
+  day_mode_start?: string;
+  day_mode_end?: string;
+  core_truths?: string;
+}
+
+export interface AgentLifecycleConfig {
+  startup_delay?: number | null;
+  max_session_seconds?: number | null;
+  max_crashes_per_day?: number | null;
+  crash_window_seconds?: number | null;
+  crash_window_max?: number | null;
+  telegram_polling?: boolean | null;
+}
+
+export interface AgentEcosystemConfig {
+  local_version_control?: boolean;
+  upstream_sync?: boolean;
+  catalog_browse?: boolean;
+  community_publish?: boolean;
+}
+
+export interface AgentMemoryConfig {
+  mode?: string;
+  scopes: string[];
+  sources: string[];
+  recall_policy?: string;
+  write_policy?: string;
+  handoff_policy?: string;
+}
+
+export interface AgentQueueSummary {
+  total: number;
+  queued: number;
+  running: number;
+  waitingHuman: number;
+  completed: number;
+  failed: number;
+  staleRecovered: number;
+  lastWorkerTickAt: string | null;
+}
+
+export interface AgentAutomationSummary {
+  total: number;
+  enabled: number;
+  paused: number;
+  failures: number;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+}
+
+export interface AgentContextPressureSummary {
+  lastEventAt: string | null;
+  kind: string;
+  percent: number | null;
+  tokens: number | null;
+  contextLimit: number | null;
+  status: string;
+  detail: string;
+  thresholds: Record<string, unknown>;
+}
+
+export interface AgentLifecycleSummary {
+  agentId?: string;
+  startupDelay?: number | null;
+  maxSessionSeconds?: number | null;
+  maxCrashesPerDay?: number | null;
+  crashWindowSeconds?: number | null;
+  crashWindowMax?: number | null;
+  dailyFailures?: number;
+  windowFailures?: number;
+  suspended?: boolean;
+  reason?: string;
+}
+
+export interface AgentMemorySummary {
+  mode?: string;
+  scopes: string[];
+  sources: string[];
+  recallPolicy?: string;
+  writePolicy?: string;
+  handoffPolicy?: string;
+  nativeFacts?: number;
+  nativeFactsCapped?: boolean;
+  lastMemoryAt?: string | null;
+  recentFacts?: Array<{
+    id?: string;
+    fact?: string;
+    source?: string;
+    ts?: string;
+  }>;
+  handoffResults?: number;
+  handoffFailures?: number;
+}
+
+export interface AgentObservabilitySummary {
+  lastWakeAt: string | null;
+  lastScopedTickAt: string | null;
+  lastCronResultAt: string | null;
+  retryOrCrashCount: number;
+  approvalBlockers: number;
+  staleRecovered: number;
+}
+
+export interface AgentCompatConfig {
+  cortext?: {
+    runtime?: string;
+    runtime_type?: string;
+    model?: string;
+    provider?: string;
+    base_url?: string;
+    working_directory?: string;
+    timezone?: string;
+    ctx_warning_threshold?: number | null;
+    ctx_handoff_threshold?: number | null;
+    codex_context_cap?: number | null;
+    dangerously_skip_permissions?: boolean;
+    approval_rules?: { always_ask?: string[]; never_ask?: string[] };
+    communication_style?: string;
+    day_mode_start?: string;
+    day_mode_end?: string;
+    startup_delay?: number | null;
+    max_session_seconds?: number | null;
+    max_crashes_per_day?: number | null;
+    crash_window?: { seconds?: number | null; max_crashes?: number | null };
+    telegram_polling?: boolean | null;
+  };
+  notes?: string[];
 }
 
 export interface AgentHubAgent {
@@ -1792,6 +2029,23 @@ export interface AgentHubAgent {
   session_sources: string[];
   skills: string[];
   toolsets: string[];
+  runtime: AgentRuntimeConfig;
+  routing: AgentRoutingConfig;
+  safety: AgentSafetyConfig;
+  identity: AgentIdentityConfig;
+  soul: AgentSoulConfig;
+  lifecycle: AgentLifecycleConfig;
+  ecosystem: AgentEcosystemConfig;
+  memory: AgentMemoryConfig;
+  metadata?: Record<string, unknown>;
+  compat?: AgentCompatConfig;
+  canDelete: boolean;
+  queueSummary: AgentQueueSummary;
+  automationSummary: AgentAutomationSummary;
+  lifecycleSummary?: AgentLifecycleSummary;
+  contextPressure?: AgentContextPressureSummary;
+  memorySummary?: AgentMemorySummary;
+  observability?: AgentObservabilitySummary;
   status: "online" | "ready" | "offline" | "disabled" | "needs_model" | "needs_telegram" | string;
   session_count: number;
   active_session_count: number;
@@ -2134,6 +2388,11 @@ export interface SessionMessage {
 
 export interface SessionMessagesResponse {
   session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
   messages: SessionMessage[];
 }
 
@@ -2147,7 +2406,13 @@ export interface TodoItem {
 
 export interface SessionTodosResponse {
   session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
   todos: TodoItem[];
+  updated_at?: number | string | null;
   summary: {
     total: number;
     pending: number;
@@ -2159,6 +2424,11 @@ export interface SessionTodosResponse {
 
 export interface SessionPlanResponse {
   session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
   plan: string;
   title: string;
   updated_at?: number | string | null;
@@ -2184,7 +2454,59 @@ export interface SessionFileItem {
 
 export interface SessionFilesResponse {
   session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
   files: SessionFileItem[];
+}
+
+export interface SessionArtifactItem {
+  id: string;
+  path: string;
+  name: string;
+  kind: "image" | "video" | "pdf" | "document" | "file" | string;
+  mime_type?: string | null;
+  size?: number | null;
+  modified_at?: number | string | null;
+}
+
+export interface SessionArtifactsResponse {
+  session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
+  artifacts: SessionArtifactItem[];
+}
+
+export interface SessionChildItem {
+  id: string;
+  source?: string | null;
+  parent_session_id?: string | null;
+  started_at?: number | string | null;
+  ended_at?: number | string | null;
+  end_reason?: string | null;
+  message_count?: number | null;
+  tool_call_count?: number | null;
+  title?: string | null;
+  model?: string | null;
+  session_kind?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  is_active_session?: boolean | null;
+}
+
+export interface SessionChildrenResponse {
+  session_id: string;
+  requested_session_id?: string | null;
+  lineage_root_id?: string | null;
+  active_session_id?: string | null;
+  session_kind?: string | null;
+  is_compression_tip?: boolean | null;
+  children: SessionChildItem[];
 }
 
 export interface LogsResponse {
@@ -2686,22 +3008,72 @@ export interface SurfaceTask {
   id: string;
   title: string;
   description?: string | null;
-  status: "pending" | "in_progress" | "blocked" | "completed";
+  type?: string | null;
+  status: "pending" | "in_progress" | "blocked" | "completed" | "cancelled";
   priority: "urgent" | "high" | "normal" | "low";
   assignee?: string | null;
+  assigned_to?: string | null;
   project?: string | null;
   needsApproval: boolean;
+  needs_approval?: boolean;
+  createdBy?: string | null;
+  created_by?: string | null;
+  org?: string | null;
+  kpiKey?: string | null;
+  kpi_key?: string | null;
   createdAt?: string | null;
+  created_at?: string | null;
   updatedAt?: string | null;
+  updated_at?: string | null;
   completedAt?: string | null;
+  completed_at?: string | null;
+  dueDate?: string | null;
+  due_date?: string | null;
+  archived?: boolean;
+  result?: string | null;
+  claimedAt?: string | null;
+  claimed_at?: string | null;
+  claimOwner?: string | null;
+  claim_owner?: string | null;
   notes?: string | null;
   outputs?: unknown[];
+  blockedBy?: string[];
+  blocked_by?: string[];
+  blocks?: string[];
+  unresolvedDependencyIds?: string[];
+  unresolvedDependencies?: Array<{
+    id: string;
+    title?: string | null;
+    status?: string | null;
+  }>;
+}
+
+export interface SurfaceTaskAuditEvent {
+  id: string;
+  taskId: string;
+  event: string;
+  actor?: string | null;
+  from?: string | null;
+  to?: string | null;
+  note?: string | null;
+  payload?: Record<string, unknown>;
+  createdAt?: string | null;
+  ts?: string | null;
+}
+
+export interface SurfaceTaskStaleReport {
+  stale_in_progress: SurfaceTask[];
+  stale_pending: SurfaceTask[];
+  stale_human: SurfaceTask[];
+  overdue: SurfaceTask[];
+  counts?: Record<string, number>;
+  total?: number;
 }
 
 export interface SurfaceApproval {
   id: string;
   title: string;
-  category: "deployment" | "cost" | "access" | "other";
+  category: "external-comms" | "financial" | "deployment" | "data-deletion" | "cost" | "access" | "other";
   description?: string | null;
   status: "pending" | "approved" | "rejected";
   surface?: string | null;

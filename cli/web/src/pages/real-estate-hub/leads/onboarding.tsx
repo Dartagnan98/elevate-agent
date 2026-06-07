@@ -13,6 +13,7 @@ import type {
   SourceConnectorStatus,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
   playOnboardingChime,
@@ -734,7 +735,9 @@ function LeadsOnboardingWizard({
                     </li>
                   )}
                   {outreachSourceConnectors.length === 0 && sourceConnectorsLoading && (
-                    <li className="px-3 py-4 text-[12px] text-muted-foreground">Loading connector blueprints…</li>
+                    <li className="px-3 py-4">
+                      <ListSkeleton rows={3} />
+                    </li>
                   )}
                   {outreachSourceConnectors.map((connector) => {
                     const total = connectorRecordTotal(connector);
@@ -1326,9 +1329,7 @@ function OutreachConnectorsCard({
 
       <div className="space-y-1.5">
         {connectors.length === 0 ? (
-          <p className="text-[11.5px] text-muted-foreground">
-            Loading connector state…
-          </p>
+          <ListSkeleton rows={3} />
         ) : (
           connectors.map((connector) => {
             const hint = OUTREACH_HINTS[connector.id];

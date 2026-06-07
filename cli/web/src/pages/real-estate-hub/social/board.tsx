@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState, type SVGProps, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import type { SocialIdea } from "@/lib/api";
+import { ListSkeleton } from "@/components/ui/skeleton";
 import type {
   AnalyticsVM,
   DesignPost,
@@ -166,13 +167,15 @@ function IdeaQueue({
         </div>
       </div>
       <div className="sm-queue-body">
-        {items.length === 0 ? (
+        {loading && items.length === 0 ? (
+          <ListSkeleton rows={3} />
+        ) : items.length === 0 ? (
           <div className="sm-empty">
             <div className="sm-empty-mark">
               <IcoSparkles width="15" height="15" />
             </div>
             <div className="sm-empty-text">
-              <div className="sm-empty-title">{loading ? "Loading ideas…" : "No ideas waiting"}</div>
+              <div className="sm-empty-title">No ideas waiting</div>
               <div className="sm-empty-sub">The engine queues 5–10 fresh concepts every Monday morning.</div>
             </div>
             <button className="ab-btn ghost" type="button" onClick={onRefresh}>

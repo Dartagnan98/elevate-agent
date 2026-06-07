@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import type { ComponentType, SVGProps } from "react";
 import { Brain, CheckCircle2, Clock, Network } from "lucide-react";
 import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
+import { Skeleton } from "@/components/ui/skeleton";
 import { isoTimeAgo } from "@/lib/utils";
 import { LoadingState, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import "./memory.css";
@@ -27,7 +28,7 @@ function MemoryGraphView({
     );
   }
   return (
-    <Suspense fallback={<div className="mem-graph-empty mono">Loading graph…</div>}>
+    <Suspense fallback={<div className="mem-graph-empty mono"><Skeleton className="h-24 w-full" /></div>}>
       <MemoryConstellation className="mem-constellation-host" compact={compact} edges={edges} nodes={nodes} />
     </Suspense>
   );

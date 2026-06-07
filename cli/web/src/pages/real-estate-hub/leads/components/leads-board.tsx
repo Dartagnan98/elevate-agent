@@ -36,6 +36,7 @@ import {
 } from "../leads-data";
 import { api } from "@/lib/api";
 import type { ThreadContextResponse } from "@/lib/api-types";
+import { ListSkeleton } from "@/components/ui/skeleton";
 
 // ─────────────────────────────────────────────────────────────────
 // Activity ticker
@@ -751,11 +752,13 @@ function StatusPill({
 // ProfileRow
 // ─────────────────────────────────────────────────────────────────
 function ProfileRow({
-  profile, onOpen, onStatusChange,
+  profile, onOpen, onStatusChange, onFavoriteChange, favoriteBusy,
 }: {
   profile: LeadsProfile;
   onOpen?: (p: LeadsProfile) => void;
   onStatusChange?: (id: string, value: string) => void;
+  onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
+  favoriteBusy?: boolean;
 }) {
   const heatTone = profile.heat >= 80 ? "hot" : profile.heat >= 50 ? "warm" : "cool";
   const initials = profile.name
@@ -771,14 +774,31 @@ function ProfileRow({
       onOpen && onOpen(profile);
     }
   };
+  const isFavorite = Boolean(profile.favorite);
   return (
     <div
       role="button"
       tabIndex={0}
-      className="lb-profile-row"
+      className={"lb-profile-row" + (isFavorite ? " favorite" : "")}
       onClick={() => onOpen && onOpen(profile)}
       onKeyDown={handleKeyDown}
     >
+      <div className="lb-profile-favorite-cell" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className={"lb-profile-star" + (isFavorite ? " active" : "")}
+          aria-label={isFavorite ? `Remove ${profile.name} from favorites` : `Add ${profile.name} to favorites`}
+          aria-pressed={isFavorite}
+          title={isFavorite ? "Remove favorite" : "Add favorite"}
+          disabled={favoriteBusy || !onFavoriteChange}
+          onClick={(e) => {
+            e.stopPropagation();
+            onFavoriteChange && void onFavoriteChange(profile, !isFavorite);
+          }}
+        >
+          {isFavorite ? "★" : "☆"}
+        </button>
+      </div>
       <div className="lb-profile-avatar" data-tone={heatTone}>{initials}</div>
       <div className="lb-profile-name-cell">
         <span className="lb-profile-name">{profile.name}</span>
@@ -813,15 +833,18 @@ function ProfileRow({
 // ProfilesList
 // ─────────────────────────────────────────────────────────────────
 function ProfilesList({
-  profiles: profilesProp, sourceFilter, onOpen, statusOverrides, onStatusChange,
+  profiles: profilesProp, sourceFilter, onOpen, statusOverrides, onStatusChange, onFavoriteChange,
 }: {
   profiles: LeadsProfile[];
   sourceFilter: string;
   onOpen: (p: LeadsProfile) => void;
   statusOverrides: Record<string, string>;
   onStatusChange: (id: string, value: string) => void;
+  onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
 }) {
-  const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "unverified" | "potential">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "unverified" | "potential" | "favorites">("all");
+  const [favoriteBusy, setFavoriteBusy] = useState<Record<string, boolean>>({});
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
 
   const profiles = useMemo(() => (
     profilesProp.map(p => (statusOverrides && statusOverrides[p.id]) ? { ...p, status: statusOverrides[p.id] } : p)
@@ -834,7 +857,8 @@ function ProfilesList({
     if (statusFilter === "verified") list = list.filter(p => p.verified);
     if (statusFilter === "unverified") list = list.filter(p => !p.verified);
     if (statusFilter === "potential") list = list.filter(p => !p.verified);
-    return list;
+    if (statusFilter === "favorites") list = list.filter(p => Boolean(p.favorite));
+    return [...list].sort((a, b) => Number(Boolean(b.favorite)) - Number(Boolean(a.favorite)));
   }, [profiles, sourceFilter, statusFilter]);
 
   const grouped = useMemo(() => {
@@ -845,6 +869,19 @@ function ProfilesList({
 
   const verifiedCount = profiles.filter(p => p.verified).length;
   const potentialCount = profiles.filter(p => !p.verified).length;
+  const favoriteCount = profiles.filter(p => Boolean(p.favorite)).length;
+  const handleFavoriteChange = async (profile: LeadsProfile, favorite: boolean) => {
+    if (!onFavoriteChange) return;
+    setFavoriteError(null);
+    setFavoriteBusy((state) => ({ ...state, [profile.id]: true }));
+    try {
+      await onFavoriteChange(profile, favorite);
+    } catch (err) {
+      setFavoriteError(err instanceof Error ? err.message : "Could not update favorite.");
+    } finally {
+      setFavoriteBusy((state) => ({ ...state, [profile.id]: false }));
+    }
+  };
 
   const sections: Array<{ id: "active" | "verified" | "unverified"; label: string; desc: string }> = [
     { id: "active", label: "Active conversations", desc: "People they are actively messaging stay first, sorted by the newest conversation activity." },
@@ -872,6 +909,14 @@ function ProfilesList({
           </button>
           <button
             type="button"
+            className={"lb-pbadge favorite" + (statusFilter === "favorites" ? " active" : "")}
+            onClick={() => setStatusFilter(s => s === "favorites" ? "all" : "favorites")}
+          >
+            <span className="lb-pbadge-num mono">{favoriteCount}</span>
+            <span>favorites</span>
+          </button>
+          <button
+            type="button"
             className={"lb-pbadge verified" + (statusFilter === "verified" ? " active" : "")}
             onClick={() => setStatusFilter(s => s === "verified" ? "all" : "verified")}
           >
@@ -889,6 +934,10 @@ function ProfilesList({
         </div>
       </header>
 
+      {favoriteError && (
+        <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{favoriteError}</div>
+      )}
+
       {sections.map(sec => {
         const items = grouped[sec.id] || [];
         if (items.length === 0) return null;
@@ -899,6 +948,7 @@ function ProfilesList({
               <span className="lb-profiles-section-count mono">{items.length}</span>
             </div>
             <div className="lb-profiles-colhead">
+              <span className="mono">Fav</span>
               <span></span>
               <span className="mono">Name</span>
               <span className="mono">Email</span>
@@ -911,7 +961,16 @@ function ProfilesList({
               <span></span>
             </div>
             <div className="lb-profiles-list">
-              {items.map(p => <ProfileRow key={p.id} profile={p} onOpen={onOpen} onStatusChange={onStatusChange} />)}
+              {items.map(p => (
+                <ProfileRow
+                  key={p.id}
+                  profile={p}
+                  onOpen={onOpen}
+                  onStatusChange={onStatusChange}
+                  onFavoriteChange={handleFavoriteChange}
+                  favoriteBusy={Boolean(favoriteBusy[p.id])}
+                />
+              ))}
             </div>
           </div>
         );
@@ -1384,7 +1443,7 @@ function ProfileDrawer({
         <div className="lb-drawer-body">
           <div className="lb-drawer-thread">
             {loadingCtx ? (
-              <div className="lb-drawer-empty">Loading thread…</div>
+              <ListSkeleton rows={4} />
             ) : ctxError ? (
               <div className="lb-drawer-empty">{ctxError}</div>
             ) : messages.length === 0 ? (
@@ -1526,6 +1585,7 @@ export interface LeadsBoardProps {
   loading?: boolean;
   error?: string | null;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
   onSentRefresh?: (includePending: boolean) => Promise<void>;
@@ -1555,6 +1615,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const pipeline = props.pipeline ?? DEFAULT_PIPELINE;
   const activity = props.activity ?? DEFAULT_ACTIVITY;
   const profiles = props.profiles ?? DEFAULT_PROFILES;
+  const profilesWithFavoriteOverrides = profiles;
 
   // Open the profile drawer for a hot-lead queue entry. Prefer a real profile
   // match (carries full thread context); otherwise synthesize a minimal one
@@ -1687,11 +1748,12 @@ export function LeadsBoard(props: LeadsBoardProps) {
 
         {tab === "profiles" && (
           <ProfilesList
-            profiles={profiles}
+            profiles={profilesWithFavoriteOverrides}
             sourceFilter={sourceFilter}
             onOpen={setActiveProfile}
             statusOverrides={statusOverrides}
             onStatusChange={handleStatusChange}
+            onFavoriteChange={props.onProfileFavoriteChange}
           />
         )}
 
