@@ -45,7 +45,11 @@ _CRON_THREAT_PATTERNS = [
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
-    (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
+    # Match a READ of a secret file, not a heredoc WRITE. `cat > foo.env << EOF`
+    # (scaffolding an .env — common in agent-setup skills) is not exfiltration;
+    # the negative lookahead `(?!>)` between `cat` and the filename excludes any
+    # `>`/`>>` redirect target, so only `cat <secret>` style reads still trip.
+    (r'cat\s+(?:(?!>)[^\n])*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
