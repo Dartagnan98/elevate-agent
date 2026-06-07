@@ -1411,6 +1411,14 @@ function attachLiveActivitySnapshots(
 function mergeServerWithCache(
   serverMessages: ChatMessage[],
   cached: ChatMessage[] | null,
+  // When true the server transcript is AUTHORITATIVE and may legitimately be
+  // shorter than the cache (a compaction summarized older turns away). Only the
+  // contiguous unsynced tail is recovered then; compacted messages stay gone.
+  // When false (the default — plain resume/reconnect/rehydrate) the server may
+  // instead be STALE: a WS that dropped mid-turn never flushed the streamed
+  // answers, so the server can be missing MIDDLE turns. There we rebuild in
+  // cache order so nothing rendered is lost.
+  serverAuthoritative = false,
 ): ChatMessage[] {
   if (!cached?.length) return serverMessages;
   // Fingerprint is whitespace-normalized: live-cached content vs
@@ -1466,27 +1474,56 @@ function mergeServerWithCache(
     return next;
   });
 
-  const tail: ChatMessage[] = [];
-  for (let i = cached.length - 1; i >= 0; i--) {
-    const msg = cached[i];
-    if (serverFingerprints.has(fp(msg))) break;
-    tail.unshift(msg);
+  if (serverAuthoritative) {
+    // Compaction path: trust the server's (intentionally shorter) transcript and
+    // only re-append the contiguous tail of cached messages it doesn't yet have
+    // (a turn that streamed after the compaction snapshot). Walking from the end
+    // and breaking at the first server-known message keeps compacted-away turns
+    // gone — resurrecting them would make compaction visually do nothing.
+    const tail: ChatMessage[] = [];
+    for (let i = cached.length - 1; i >= 0; i--) {
+      if (serverFingerprints.has(fp(cached[i]))) break;
+      tail.unshift(cached[i]);
+    }
+    const merged = tail.length ? [...enriched, ...tail] : enriched;
+    if (merged.length < 2) return merged;
+    const seen = new Set<string>();
+    const out: ChatMessage[] = [];
+    for (const m of merged) {
+      const key = fp(m);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(m);
+    }
+    blankTraceIfDropped(cached, out, fp, serverMessages.length);
+    return out;
   }
 
-  // Safety net: even with the normalized fingerprint, dedupe the final
-  // array by fingerprint. If two messages still collide (e.g. the same
-  // assistant turn lives in both server and tail because of an
-  // unforeseen format quirk), keep the first (server/enriched) copy and
-  // drop the second so the chat panel never renders a Q+A twice.
-  const merged = tail.length ? [...enriched, ...tail] : enriched;
-  if (merged.length < 2) return merged;
+  // Default (stale-server) path: the server can be missing MIDDLE turns, not
+  // just a clean suffix (the throttled persist never flushed them before the WS
+  // dropped). The old contiguous-tail recovery broke the instant it hit a
+  // server-known message — so a truncated server list that still ended on a
+  // cached message recovered NOTHING and silently dropped the gap (the 14->4
+  // vanish). Rebuild in CACHE order instead: emit the server-canonical copy
+  // where the server has it (enriched with cache snapshots), otherwise recover
+  // the cached copy verbatim. Nothing rendered is ever dropped.
+  const enrichedByFp = new Map<string, ChatMessage>();
+  for (const m of enriched) enrichedByFp.set(fp(m), m);
   const seen = new Set<string>();
   const out: ChatMessage[] = [];
-  for (const m of merged) {
-    const key = fp(m);
+  for (const cm of cached) {
+    const key = fp(cm);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(m);
+    out.push(enrichedByFp.get(key) ?? cm);
+  }
+  // Anything the server has that the cache never saw (a turn that completed
+  // server-side after the cache snapshot) — append in server order.
+  for (const sm of enriched) {
+    const key = fp(sm);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(sm);
   }
   blankTraceIfDropped(cached, out, fp, serverMessages.length);
   return out;
@@ -3567,6 +3604,20 @@ export default function ChatPage() {
     };
   }, [gw, sessionId]);
 
+  // If the gateway connection drops mid-turn, no message.complete will ever
+  // arrive — so the busy spinner would hang forever on a phantom "running"
+  // turn (the composer stays locked, the row keeps its working dot). Clear it
+  // the moment the socket goes closed/error. If the turn is genuinely still
+  // alive server-side, the reconnect + session.resume re-sets busy via the
+  // message.start/delta handlers; if it died with the socket (the common
+  // case), the composer unlocks instead of spinning on nothing.
+  useEffect(() => {
+    if ((state === "closed" || state === "error") && busy) {
+      setBusy(false);
+      setStatusText("Connection lost — reconnecting...");
+    }
+  }, [state, busy]);
+
   // Debug: catch the moment a rendered assistant answer disappears from the
   // on-screen list (the "render then vanish" bug). Reports what it was and how
   // many messages were in the list before/after.
@@ -3787,7 +3838,7 @@ export default function ChatPage() {
             // in-flight assistant turn that session.resume just replayed.
             const base = prev.length ? prev : restoredCached;
             const merged = mergeActiveTurnSnapshot(
-              mergeServerWithCache(hydrated, base),
+              mergeServerWithCache(hydrated, base, compactionGuardRef.current),
               latestActiveSnapshot,
             );
             rememberTranscript(canonicalSessionId, merged);
@@ -4529,7 +4580,7 @@ export default function ChatPage() {
               Array.isArray(resumed.messages) ? resumed.messages : undefined,
             );
             const cached = resumeId ? restoreTranscript(resumeId) : null;
-            const merged = mergeServerWithCache(hydrated, cached);
+            const merged = mergeServerWithCache(hydrated, cached, compactionGuardRef.current);
             const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
             setMessages((prev) => {
               if (
@@ -4582,7 +4633,7 @@ export default function ChatPage() {
                   chatKey: _chatKey,
                 });
                 renderedChatKeyRef.current = _chatKey;
-                return mergeServerWithCache(merged, prev);
+                return mergeServerWithCache(merged, prev, compactionGuardRef.current);
               }
               renderedChatKeyRef.current = _chatKey;
               return merged;
