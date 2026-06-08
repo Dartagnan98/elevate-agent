@@ -1112,6 +1112,7 @@ function sessionTitle(session: SessionInfo): string {
 
 const SIDEBAR_ACTIVE_STALE_SECONDS = 120;
 const SIDEBAR_CRON_RECENT_EMPTY_SECONDS = 120;
+const SIDEBAR_LOCAL_TURN_STALE_MS = 30 * 60 * 1000;
 const CRON_SESSION_ID_RE = /^cron_([^_]+)_\d{8}_\d{6}$/;
 
 function sessionActivitySeconds(session: SessionInfo): number {
@@ -1185,6 +1186,38 @@ type SessionMenuState = {
   x: number;
   y: number;
 };
+
+type LocalActiveTurn = {
+  startedAt: number;
+  title?: string;
+};
+
+function applyLocalActiveTurns(
+  sessions: SessionInfo[],
+  activeTurns: Map<string, LocalActiveTurn>,
+  nowMs = Date.now(),
+): SessionInfo[] {
+  if (!activeTurns.size) return sessions;
+  const nowSec = nowMs / 1000;
+  const liveIds = new Set<string>();
+  for (const [sid, turn] of activeTurns) {
+    if (nowMs - turn.startedAt > SIDEBAR_LOCAL_TURN_STALE_MS) {
+      activeTurns.delete(sid);
+      continue;
+    }
+    liveIds.add(sid);
+  }
+  if (!liveIds.size) return sessions;
+  return sessions.map((session) =>
+    liveIds.has(session.id)
+      ? {
+          ...session,
+          is_active: true,
+          last_active: Math.max(sessionActivitySeconds(session), nowSec),
+        }
+      : session,
+  );
+}
 
 type DesktopUpdaterState = {
   status?: string;
@@ -1294,6 +1327,7 @@ function DesktopSidebar({
   const optimisticSessionsRef = useRef<Map<string, { session: SessionInfo; ts: number }>>(
     new Map(),
   );
+  const localActiveTurnsRef = useRef<Map<string, LocalActiveTurn>>(new Map());
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
     try {
@@ -1502,6 +1536,7 @@ function DesktopSidebar({
         if (survivors.length) loadedSessions = [...survivors, ...loadedSessions];
       }
 
+      loadedSessions = applyLocalActiveTurns(loadedSessions, localActiveTurnsRef.current);
       setSessions(loadedSessions);
       writeCachedSessions(loadedSessions);
       setSessionError(false);
@@ -1578,13 +1613,25 @@ function DesktopSidebar({
       const detail = (event as CustomEvent<{ sessionId?: string; title?: string }>)
         .detail;
       const sid = detail?.sessionId;
+      const title = detail?.title?.trim();
+      if (event.type === "elevate:agent-turn-complete" && sid) {
+        localActiveTurnsRef.current.delete(sid);
+      }
       if (sid) {
         const nowSec = Date.now() / 1000;
+        if (event.type === "elevate:agent-turn-start") {
+          localActiveTurnsRef.current.set(sid, {
+            startedAt: Date.now(),
+            title,
+          });
+        }
         setSessions((prev) => {
           const existing = prev.find((item) => item.id === sid);
           if (existing) {
             return prev.map((item) =>
-              item.id === sid ? { ...item, last_active: nowSec, is_active: true } : item,
+              item.id === sid && event.type === "elevate:agent-turn-start"
+                ? { ...item, last_active: nowSec, is_active: true }
+                : item,
             );
           }
           // Only synthesize a row when the event carries a title — that signals
@@ -1592,7 +1639,7 @@ function DesktopSidebar({
           // existing chat floating) must NOT insert: the chat may simply be
           // off the loaded sidebar page, and a blank "Untitled" ghost would be
           // wrong. Those reconcile via the loadSessions refresh below.
-          if (!detail?.title?.trim()) return prev;
+          if (!title) return prev;
           // Brand new chat the server list doesn't carry yet — synthesize a row
           // so it appears the instant the user sends, instead of waiting up to
           // 12s for the next poll. message_count:1 keeps it past the sidebar's
@@ -1601,7 +1648,7 @@ function DesktopSidebar({
             id: sid,
             source: "tui",
             model: null,
-            title: detail?.title?.trim() || null,
+            title,
             started_at: nowSec,
             ended_at: null,
             last_active: nowSec,
@@ -1610,7 +1657,7 @@ function DesktopSidebar({
             tool_call_count: 0,
             input_tokens: 0,
             output_tokens: 0,
-            preview: detail?.title?.trim() || null,
+            preview: title,
           };
           optimisticSessionsRef.current.set(sid, { session: optimistic, ts: Date.now() });
           return [optimistic, ...prev];
@@ -2557,14 +2604,10 @@ function SessionStatusDot({
       <span
         aria-label={label}
         title={label}
-        className="inline-flex items-center gap-[2px]"
+        className="dots-working"
       >
         {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            className="h-1 w-1 rounded-full bg-[var(--color-success)] animate-pulse"
-            style={{ animationDelay: `${i * 200}ms`, animationDuration: "1000ms" }}
-          />
+          <span key={i} />
         ))}
       </span>
     );

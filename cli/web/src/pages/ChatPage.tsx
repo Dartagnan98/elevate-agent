@@ -4243,7 +4243,15 @@ export default function ChatPage() {
         // listener only fires while its page is mounted. Background
         // (cron/heartbeat) changes still ride the per-page poll as a fallback.
         if (typeof window !== "undefined") {
-          window.dispatchEvent(new Event("elevate:agent-turn-complete"));
+          const sidebarSessionId =
+            persistedSessionIdRef.current ??
+            activeSessionRef.current ??
+            (typeof ev.session_id === "string" ? ev.session_id : null);
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId ?? undefined },
+            }),
+          );
         }
 
         // Snapshot the finished turn's tools + reasoning traces onto the
@@ -5496,7 +5504,9 @@ export default function ChatPage() {
       // agent-turn-complete event fired on message.complete.) Keep it after
       // the first chat paint so sidebar work cannot block the user's bubble.
       window.dispatchEvent(
-        new CustomEvent("elevate:agent-turn-start", { detail: { sessionId } }),
+        new CustomEvent("elevate:agent-turn-start", {
+          detail: { sessionId: persistedSessionIdRef.current ?? sessionId },
+        }),
       );
 
       const historyArtifacts = previewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
