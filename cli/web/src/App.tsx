@@ -1286,6 +1286,14 @@ function DesktopSidebar({
     () => readCachedSessions().length === 0,
   );
   const [sessionError, setSessionError] = useState(false);
+  // Optimistically-inserted new chats, keyed by id, with the insert timestamp.
+  // A brand new chat's row doesn't exist server-side for a beat (the row +
+  // first message persist asynchronously), so loadSessions preserves these
+  // until the server list catches up or a short grace window elapses —
+  // otherwise the reconciling refetch would wipe the row we just inserted.
+  const optimisticSessionsRef = useRef<Map<string, { session: SessionInfo; ts: number }>>(
+    new Map(),
+  );
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
     try {
@@ -1471,7 +1479,29 @@ function DesktopSidebar({
         }
       }
 
-      const loadedSessions = Array.from(byId.values());
+      let loadedSessions = Array.from(byId.values());
+
+      // Preserve optimistically-inserted new chats the server list doesn't
+      // carry yet. Once the server returns the id, drop the optimistic copy
+      // (server wins); after a short grace window give up either way so a
+      // failed send can't leave a ghost row.
+      const optimistic = optimisticSessionsRef.current;
+      if (optimistic.size) {
+        const OPTIMISTIC_GRACE_MS = 30_000;
+        const now = Date.now();
+        const survivors: SessionInfo[] = [];
+        for (const [sid, entry] of optimistic) {
+          if (byId.has(sid)) {
+            optimistic.delete(sid); // server caught up — its copy is in loadedSessions
+          } else if (now - entry.ts < OPTIMISTIC_GRACE_MS) {
+            survivors.push(entry.session); // keep showing until the server has it
+          } else {
+            optimistic.delete(sid); // grace elapsed — stop forcing it
+          }
+        }
+        if (survivors.length) loadedSessions = [...survivors, ...loadedSessions];
+      }
+
       setSessions(loadedSessions);
       writeCachedSessions(loadedSessions);
       setSessionError(false);
@@ -1545,14 +1575,46 @@ function DesktopSidebar({
     const onActivity = (event: Event) => {
       // Optimistically float the active chat to the top right away, then
       // reconcile with the server so it stays put.
-      const sid = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      const detail = (event as CustomEvent<{ sessionId?: string; title?: string }>)
+        .detail;
+      const sid = detail?.sessionId;
       if (sid) {
         const nowSec = Date.now() / 1000;
-        setSessions((prev) =>
-          prev.map((item) =>
-            item.id === sid ? { ...item, last_active: nowSec, is_active: true } : item,
-          ),
-        );
+        setSessions((prev) => {
+          const existing = prev.find((item) => item.id === sid);
+          if (existing) {
+            return prev.map((item) =>
+              item.id === sid ? { ...item, last_active: nowSec, is_active: true } : item,
+            );
+          }
+          // Only synthesize a row when the event carries a title — that signals
+          // a brand new chat's first send. A title-less activity ping (an
+          // existing chat floating) must NOT insert: the chat may simply be
+          // off the loaded sidebar page, and a blank "Untitled" ghost would be
+          // wrong. Those reconcile via the loadSessions refresh below.
+          if (!detail?.title?.trim()) return prev;
+          // Brand new chat the server list doesn't carry yet — synthesize a row
+          // so it appears the instant the user sends, instead of waiting up to
+          // 12s for the next poll. message_count:1 keeps it past the sidebar's
+          // fresh-only filter; loadSessions preserves it until the server has it.
+          const optimistic: SessionInfo = {
+            id: sid,
+            source: "tui",
+            model: null,
+            title: detail?.title?.trim() || null,
+            started_at: nowSec,
+            ended_at: null,
+            last_active: nowSec,
+            is_active: true,
+            message_count: 1,
+            tool_call_count: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            preview: detail?.title?.trim() || null,
+          };
+          optimisticSessionsRef.current.set(sid, { session: optimistic, ts: Date.now() });
+          return [optimistic, ...prev];
+        });
       }
       loadSessions({ refresh: true });
     };

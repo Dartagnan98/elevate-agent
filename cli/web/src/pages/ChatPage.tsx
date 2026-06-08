@@ -1461,10 +1461,18 @@ function mergeServerWithCache(
       match &&
       (match.tools?.length ||
         match.traces?.length ||
-        typeof match.tokenCount === "number")
+        typeof match.tokenCount === "number" ||
+        typeof match.completedAt === "number")
     ) {
       return {
         ...next,
+        // Preserve the cached START time, not just completedAt. The server
+        // stores a single timestamp per message (~completion), so keeping
+        // next.createdAt collapses the turn duration to ~0 ("Worked for 0s")
+        // on re-hydrate. The cached createdAt is the true turn-start captured
+        // live, so completedAt - createdAt stays the real elapsed time.
+        createdAt:
+          typeof match.createdAt === "number" ? match.createdAt : next.createdAt,
         completedAt: match.completedAt,
         tools: match.tools,
         traces: match.traces,
@@ -5559,6 +5567,24 @@ export default function ChatPage() {
         setQueuedInputs((prev) => [...prev, queued].slice(-5));
         setStatusText("Queued until connected");
         return;
+      }
+
+      // New chat: surface its sidebar row the instant we have a confirmed
+      // session, instead of waiting up to 12s for the next poll. This fires
+      // for BOTH the fresh path (needsSession above) and the prewarmed path
+      // (session minted on chat-open, so needsSession was false) — gated on
+      // draftChat so an existing resumed chat is never re-inserted. Use the
+      // PERSISTED id (what session.list keys rows by); a title makes the
+      // sidebar INSERT the row optimistically (see App.tsx onActivity).
+      if (draftChat) {
+        const sidebarSessionId = persistedSessionIdRef.current ?? targetSessionId;
+        if (sidebarSessionId) {
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-start", {
+              detail: { sessionId: sidebarSessionId, title: trimmed.slice(0, 80) },
+            }),
+          );
+        }
       }
 
       if (busy) {
