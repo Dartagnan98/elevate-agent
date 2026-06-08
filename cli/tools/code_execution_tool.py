@@ -47,6 +47,8 @@ import uuid
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
 
+from agent.cwd import safe_getcwd
+
 # Availability gate.  On Windows we fall back to loopback TCP for the
 # sandbox RPC transport (AF_UNIX is unreliable on Windows Python) — see
 # ``_use_tcp_rpc`` in ``_execute_local`` below.  That makes execute_code
@@ -1635,7 +1637,7 @@ def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
         expanded = os.path.expanduser(raw)
         if os.path.isdir(expanded):
             return expanded
-    here = os.getcwd()
+    here = safe_getcwd()
     if os.path.isdir(here):
         return here
     return staging_dir

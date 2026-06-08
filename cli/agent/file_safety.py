@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from agent.cwd import safe_realpath
+
 
 def _elevate_home_path() -> Path:
     """Resolve the active ELEVATE_HOME (profile-aware) without circular imports."""
@@ -88,8 +90,8 @@ def get_safe_write_root() -> Optional[str]:
 
 def is_write_denied(path: str) -> bool:
     """Return True if path is blocked by the write denylist or safe root."""
-    home = os.path.realpath(os.path.expanduser("~"))
-    resolved = os.path.realpath(os.path.expanduser(str(path)))
+    home = safe_realpath("~")
+    resolved = safe_realpath(str(path))
 
     if resolved in build_write_denied_paths(home):
         return True

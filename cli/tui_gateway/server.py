@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from agent.cwd import safe_getcwd
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -29,6 +30,10 @@ from tui_gateway.transport import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _terminal_cwd() -> str:
+    return os.getenv("TERMINAL_CWD") or safe_getcwd()
 
 _elevate_home = get_elevate_home()
 load_elevate_dotenv(
@@ -256,7 +261,7 @@ class _SlashWorker:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            cwd=os.getcwd(),
+            cwd=safe_getcwd(),
             env=os.environ.copy(),
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()
@@ -1099,7 +1104,7 @@ def _session_info(agent) -> dict:
         "model": getattr(agent, "model", ""),
         "tools": {},
         "skills": {},
-        "cwd": os.getcwd(),
+        "cwd": safe_getcwd(),
         "version": "",
         "release_date": "",
         "update_behind": None,
@@ -1151,7 +1156,7 @@ def _light_session_info(agent=None) -> dict:
         "model": getattr(agent, "model", None) or _resolve_model(),
         "tools": {},
         "skills": {},
-        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "cwd": _terminal_cwd(),
     }
 
 
@@ -1718,7 +1723,7 @@ def _new_session_key() -> str:
 
 
 def _with_checkpoints(session, fn):
-    return fn(session["agent"]._checkpoint_mgr, os.getenv("TERMINAL_CWD", os.getcwd()))
+    return fn(session["agent"]._checkpoint_mgr, _terminal_cwd())
 
 
 def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
@@ -2305,7 +2310,7 @@ def _(rid, params: dict) -> dict:
                 "model": _resolve_model(),
                 "tools": {},
                 "skills": {},
-                "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+                "cwd": _terminal_cwd(),
             },
         },
     )
@@ -3308,8 +3313,8 @@ def _(rid, params: dict) -> dict:
                 )
                 ctx = preprocess_context_references(
                     prompt,
-                    cwd=os.environ.get("TERMINAL_CWD", os.getcwd()),
-                    allowed_root=os.environ.get("TERMINAL_CWD", os.getcwd()),
+                    cwd=_terminal_cwd(),
+                    allowed_root=_terminal_cwd(),
                     context_length=ctx_len,
                 )
                 if ctx.blocked:
@@ -4514,7 +4519,7 @@ def _(rid, params: dict) -> dict:
             capture_output=True,
             text=True,
             timeout=min(int(params.get("timeout", 240)), 600),
-            cwd=os.getcwd(),
+            cwd=safe_getcwd(),
             env=os.environ.copy(),
         )
         parts = [r.stdout or "", r.stderr or ""]
@@ -4993,7 +4998,7 @@ def _(rid, params: dict) -> dict:
         # `/`, `./`, `~/`, `/abs`) fall through to the directory-listing
         # path so explicit navigation intent is preserved.
         if is_context and path_part and "/" not in path_part and prefix_tag != "folder":
-            root = os.getcwd()
+            root = safe_getcwd()
             ranked: list[tuple[tuple[int, int], str, str]] = []
             for rel in _list_repo_files(root):
                 basename = os.path.basename(rel)
@@ -5850,7 +5855,7 @@ def _(rid, params: dict) -> dict:
             {
                 "title": "Environment",
                 "rows": [
-                    ["Working Dir", os.getcwd()],
+                    ["Working Dir", safe_getcwd()],
                     ["Config File", str(_elevate_home / "config.yaml")],
                 ],
             },
@@ -6160,7 +6165,7 @@ def _(rid, params: dict) -> dict:
         pass
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
+            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=safe_getcwd()
         )
         return _ok(
             rid,

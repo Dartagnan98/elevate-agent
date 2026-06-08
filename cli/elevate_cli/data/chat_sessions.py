@@ -253,6 +253,33 @@ def list_child_sessions(session_id: str) -> List[Dict[str, Any]]:
     return children
 
 
+def delete_session(session_id: str) -> bool:
+    """Delete one chat session row and its messages.
+
+    Mirrors ``SessionDB.delete_session`` for the PG-backed session list: child
+    sessions are orphaned so they remain independently accessible, while
+    messages cascade through the FK.
+    """
+    if not session_id:
+        return False
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM chat_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        count = row[0] if isinstance(row, (tuple, list)) else row["count"]
+        if int(count or 0) == 0:
+            return False
+        conn.execute(
+            "UPDATE chat_sessions SET parent_session_id = NULL "
+            "WHERE parent_session_id = ?",
+            (session_id,),
+        )
+        conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+        conn.commit()
+    return True
+
+
 def update_system_prompt(session_id: str, system_prompt: str) -> None:
     if not session_id:
         return

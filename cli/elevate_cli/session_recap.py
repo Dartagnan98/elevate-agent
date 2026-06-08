@@ -23,6 +23,8 @@ import os
 from collections import Counter
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from agent.cwd import safe_getcwd
+
 # How many recent user/assistant turns we consider "recent activity".
 _RECENT_TURN_WINDOW = 20
 
@@ -187,7 +189,7 @@ def _shortened_path(path: str) -> str:
         return path
     try:
         abs_path = os.path.abspath(os.path.expanduser(path))
-        cwd = os.getcwd()
+        cwd = safe_getcwd()
         if abs_path == cwd:
             return "."
         if abs_path.startswith(cwd + os.sep):

@@ -5069,10 +5069,19 @@ async def reveal_session_endpoint(session_id: str):
 async def delete_session_endpoint(session_id: str):
     from elevate_state import SessionDB
     db = SessionDB()
+    deleted = False
     try:
         resolver = getattr(db, "resolve_session_id", None)
         sid = resolver(session_id) if callable(resolver) else session_id
-        if not sid or not db.delete_session(sid):
+        if sid:
+            deleted = bool(db.delete_session(sid))
+        try:
+            from elevate_cli.data.chat_sessions import delete_session as delete_chat_session
+
+            deleted = bool(delete_chat_session(sid or session_id)) or deleted
+        except Exception:
+            _log.debug("PG chat session delete failed", exc_info=True)
+        if not deleted:
             raise HTTPException(status_code=404, detail="Session not found")
         return {"ok": True}
     finally:

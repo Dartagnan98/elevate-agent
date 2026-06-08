@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+from agent.cwd import safe_abspath, safe_getcwd
+
 logger = logging.getLogger("agent.lsp.workspace")
 
 # Cache: cwd → (worktree_root, is_git) so repeated calls don't re-stat.
@@ -38,7 +40,7 @@ def normalize_path(path: str) -> str:
     LSP servers (rust-analyzer cares about Cargo workspace identity)
     and we want the canonical path the user typed when possible.
     """
-    return os.path.abspath(os.path.expanduser(path))
+    return safe_abspath(path)
 
 
 def find_git_worktree(start: str) -> Optional[str]:
@@ -190,7 +192,7 @@ def resolve_workspace_for_file(
 
     Returns ``(None, False)`` when neither path is in a git worktree.
     """
-    cwd = cwd or os.getcwd()
+    cwd = cwd or safe_getcwd()
     cwd_root = find_git_worktree(cwd)
     if cwd_root is not None:
         if is_inside_workspace(file_path, cwd_root):
