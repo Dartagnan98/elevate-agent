@@ -1384,8 +1384,16 @@ export default function CronPage() {
 
   useLayoutEffect(() => {
     if (loading) {
-      setAfterTitle(null);
-      setEnd(null);
+      // Skeleton the header bar (count + agent filter + search + New) so the
+      // top bar holds its shape during load instead of popping in.
+      setAfterTitle(<Skeleton className="h-4 w-56 max-w-[60vw]" />);
+      setEnd(
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Skeleton className="h-8 w-28 rounded-md" />
+          <Skeleton className="h-8 w-full min-w-0 rounded-md sm:max-w-xs sm:w-64" />
+          <Skeleton className="h-8 w-24 rounded-md" />
+        </div>,
+      );
       return;
     }
     setAfterTitle(

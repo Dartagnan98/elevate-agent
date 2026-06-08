@@ -99,11 +99,43 @@ function HandoffRow({
   );
 }
 
+function HandoffComposerSkeleton() {
+  // Mirrors the HandoffComposer card 1:1 so the right pane stays consistent
+  // (no real-form-with-empty-dropdowns pop) while comms data loads.
+  return (
+    <div className="rounded-lg border border-border bg-card/40 p-3">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="space-y-1.5">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="h-3 w-56 max-w-full" />
+        </div>
+        <Skeleton className="h-5 w-16 rounded-full" />
+      </div>
+      <div className="grid gap-2 md:grid-cols-2">
+        {Array.from({ length: 2 }).map((_, i) => (
+          <div key={i} className="grid gap-1">
+            <Skeleton className="h-3 w-10" />
+            <Skeleton className="h-8 rounded-md" />
+          </div>
+        ))}
+      </div>
+      <Skeleton className="mt-2 h-8 w-full rounded-md" />
+      <Skeleton className="mt-2 h-[4.5rem] w-full rounded-md" />
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <Skeleton className="h-8 w-32 rounded-md" />
+        <Skeleton className="h-8 w-32 rounded-md" />
+      </div>
+    </div>
+  );
+}
+
 function HandoffComposer({
   agents,
+  loading,
   onCreated,
 }: {
   agents: AgentOption[];
+  loading?: boolean;
   onCreated: (handoff: AgentHandoff) => void;
 }) {
   const executive = agents.find((agent) => agent.id === "executive-assistant") ?? agents[0];
@@ -146,6 +178,8 @@ function HandoffComposer({
       setBusy(false);
     }
   };
+
+  if (loading && agents.length === 0) return <HandoffComposerSkeleton />;
 
   return (
     <div className="rounded-lg border border-border bg-card/40 p-3">
@@ -1005,6 +1039,7 @@ export default function CommsPage() {
                   <div className="space-y-3">
                     <HandoffComposer
                       agents={agents}
+                      loading={loading}
                       onCreated={(handoff) => {
                         void load(true);
                         openPair([handoff.fromAgentId, handoff.toAgentId].sort().join("--"));
@@ -1094,6 +1129,7 @@ export default function CommsPage() {
                   <div className="space-y-3">
                     <HandoffComposer
                       agents={agents}
+                      loading={loading}
                       onCreated={(handoff) => {
                         void load(true);
                         void openHandoff(handoff.id);
