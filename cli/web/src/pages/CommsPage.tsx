@@ -7,7 +7,7 @@ import type { AgentCommsChannel, AgentCommsChannelResponse, AgentCommsMessage, A
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { ListSkeleton } from "@/components/ui/skeleton";
+import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
@@ -457,15 +457,20 @@ function HandoffThread({
 
 function CommsFeedList({
   messages,
+  loading,
   nameOf,
   onOpenPair,
   onOpenHandoff,
 }: {
   messages: AgentCommsMessage[];
+  loading?: boolean;
   nameOf: (id: string) => string;
   onOpenPair: (pair: string) => void;
   onOpenHandoff: (handoffId: string) => void;
 }) {
+  if (loading && messages.length === 0) {
+    return <ListSkeleton rows={6} />;
+  }
   if (messages.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
@@ -514,12 +519,14 @@ function CommsFeedList({
 
 function ChannelListPanel({
   channels,
+  loading,
   selectedPair,
   query,
   nameOf,
   onSelect,
 }: {
   channels: AgentCommsChannel[];
+  loading?: boolean;
   selectedPair: string | null;
   query: string;
   nameOf: (id: string) => string;
@@ -531,6 +538,9 @@ function ChannelListPanel({
     return channel.pair.toLowerCase().includes(q)
       || channel.agents.some((agent) => nameOf(agent).toLowerCase().includes(q));
   });
+  if (loading && channels.length === 0) {
+    return <ListSkeleton rows={6} />;
+  }
   if (visible.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border p-4 text-center text-[11px] italic text-muted-foreground/60">
@@ -904,9 +914,7 @@ export default function CommsPage() {
         </Button>
       </header>
 
-      {loading ? (
-        <ListSkeleton rows={6} />
-      ) : error ? (
+      {error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load comms: {error}
         </div>
@@ -958,6 +966,13 @@ export default function CommsPage() {
                       {nameOf(id)}
                     </button>
                   ))}
+                  {loading && agentIds.length === 0 && (
+                    <>
+                      <Skeleton className="h-7 w-16 rounded-md" />
+                      <Skeleton className="h-7 w-20 rounded-md" />
+                      <Skeleton className="h-7 w-16 rounded-md" />
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -975,6 +990,7 @@ export default function CommsPage() {
                     </div>
                     <CommsFeedList
                       messages={feedMessages}
+                      loading={loading}
                       nameOf={nameOf}
                       onOpenPair={(pair) => {
                         openPair(pair);
@@ -1000,7 +1016,12 @@ export default function CommsPage() {
                         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
                           Delivery
                         </span>
-                        {deliveryChannels.length === 0 ? (
+                        {loading && deliveryChannels.length === 0 ? (
+                          <div className="space-y-1.5">
+                            <Skeleton className="h-[2.625rem] w-full rounded-md" />
+                            <Skeleton className="h-[2.625rem] w-full rounded-md" />
+                          </div>
+                        ) : deliveryChannels.length === 0 ? (
                           <p className="text-[11px] italic text-muted-foreground/70">No delivery channels connected.</p>
                         ) : (
                           <ul className="space-y-1.5">
@@ -1046,6 +1067,7 @@ export default function CommsPage() {
                     </div>
                     <ChannelListPanel
                       channels={conversationChannels}
+                      loading={loading}
                       selectedPair={selectedPair}
                       query={channelSearch}
                       nameOf={nameOf}
@@ -1077,7 +1099,9 @@ export default function CommsPage() {
                         void openHandoff(handoff.id);
                       }}
                     />
-                    {handoffFeed.length === 0 ? (
+                    {loading && handoffFeed.length === 0 ? (
+                      <ListSkeleton rows={6} />
+                    ) : handoffFeed.length === 0 ? (
                       <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
                         No handoffs yet.
                       </div>

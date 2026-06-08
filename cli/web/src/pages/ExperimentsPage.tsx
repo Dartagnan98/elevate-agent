@@ -31,7 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
-import { ListSkeleton, PageSkeleton } from "@/components/ui/skeleton";
+import { PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -166,6 +166,39 @@ function StatTile({
         <p className="mt-0.5 text-[11px] text-muted-foreground">{subtitle}</p>
       )}
     </div>
+  );
+}
+
+/** Loading placeholder for a single stat tile — same frame as StatTile. */
+function StatTileSkeleton() {
+  return (
+    <div className="rounded-lg border border-border bg-card/40 p-3">
+      <Skeleton className="h-3 w-20" />
+      <Skeleton className="mt-1.5 h-8 w-12" />
+    </div>
+  );
+}
+
+/** Loading placeholder for an agent card — same frame as AgentExperimentCard header. */
+function AgentExperimentCardSkeleton() {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex w-full items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+              <Skeleton className="h-5 w-40" />
+            </div>
+            <div className="mt-1.5 ml-6 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Skeleton className="h-3.5 w-24" />
+              <Skeleton className="h-3.5 w-16" />
+              <Skeleton className="h-3.5 w-14" />
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+    </Card>
   );
 }
 
@@ -1259,29 +1292,31 @@ export default function ExperimentsPage() {
         </div>
       </header>
 
-      {loading ? (
-        <ListSkeleton rows={5} />
-      ) : error ? (
+      {error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load experiments: {error}
         </div>
       ) : (
         <>
-          {/* Stat tiles */}
-          {summary && (
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-              <StatTile label="Active Cycles" value={summary.cycles} />
-              <StatTile label="Running" value={summary.running} dot={summary.running > 0} />
-              <StatTile label="Completed" value={summary.completed} />
-              <StatTile
-                label="Keep Rate"
-                value={`${summary.keepRate}%`}
-                valueClass={TONE_TEXT[keepTone]}
-                subtitle={`${summary.kept} kept · ${summary.discarded} discarded`}
-              />
-              <StatTile label="Total" value={summary.total} />
-            </div>
-          )}
+          {/* Stat tiles — identical 5-col frame loading vs loaded */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {loading || !summary ? (
+              Array.from({ length: 5 }).map((_, i) => <StatTileSkeleton key={i} />)
+            ) : (
+              <>
+                <StatTile label="Active Cycles" value={summary.cycles} />
+                <StatTile label="Running" value={summary.running} dot={summary.running > 0} />
+                <StatTile label="Completed" value={summary.completed} />
+                <StatTile
+                  label="Keep Rate"
+                  value={`${summary.keepRate}%`}
+                  valueClass={TONE_TEXT[keepTone]}
+                  subtitle={`${summary.kept} kept · ${summary.discarded} discarded`}
+                />
+                <StatTile label="Total" value={summary.total} />
+              </>
+            )}
+          </div>
 
           {/* Tabs */}
           <div className="flex flex-wrap gap-1.5 border-b border-border pb-2">
@@ -1305,7 +1340,13 @@ export default function ExperimentsPage() {
             })}
           </div>
 
-          {empty ? (
+          {loading ? (
+            <div className="space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <AgentExperimentCardSkeleton key={i} />
+              ))}
+            </div>
+          ) : empty ? (
             <div className="rounded-lg border border-dashed border-border px-6 py-12 text-center">
               <FlaskConical className="mx-auto h-8 w-8 text-muted-foreground/50" />
               <h3 className="mt-4 text-base font-medium text-foreground">No experiments yet</h3>

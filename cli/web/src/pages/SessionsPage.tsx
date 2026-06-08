@@ -37,8 +37,7 @@ import { Toast } from "@/components/Toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { RouteSkeleton } from "@/components/route-skeletons";
-import { ListSkeleton } from "@/components/ui/skeleton";
+import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { Input } from "@/components/ui/input";
@@ -525,6 +524,43 @@ function LinkedSessionPanel({
   );
 }
 
+/** Skeleton placeholder matching a Recent-sessions preview card. */
+function RecentPreviewSkeleton() {
+  return (
+    <div className="flex w-full flex-col gap-2 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-1 min-w-0 w-full">
+        <Skeleton className="h-4 w-2/5" />
+        <Skeleton className="h-3 w-3/5" />
+        <Skeleton className="h-3 w-4/5" />
+      </div>
+      <Skeleton className="h-5 w-16 shrink-0 rounded-full self-start sm:self-center" />
+    </div>
+  );
+}
+
+/** Skeleton placeholder matching a SessionRow (icon + title + metadata + 2 actions). */
+function SessionRowSkeleton() {
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-card">
+      <div className="flex w-full items-center justify-between p-3">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <Skeleton className="h-4 w-4 shrink-0 rounded" />
+          <div className="flex flex-col gap-1.5 min-w-0">
+            <Skeleton className="h-4 w-48 max-w-full" />
+            <Skeleton className="h-3 w-64 max-w-full" />
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <Skeleton className="h-5 w-14 rounded-full" />
+          <Skeleton className="h-7 w-7 rounded-md" />
+          <Skeleton className="h-7 w-7 rounded-md" />
+          <Skeleton className="h-7 w-7 rounded-md" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [total, setTotal] = useState(0);
@@ -763,10 +799,6 @@ export default function SessionsPage() {
     }
   }
 
-  if (loading) {
-    return <RouteSkeleton path="/sessions" />;
-  }
-
   return (
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
@@ -882,7 +914,7 @@ export default function SessionsPage() {
         <PlatformsCard platforms={platformEntries} />
       )}
 
-      {recentSessions.length > 0 && (
+      {(loading || recentSessions.length > 0) && (
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
@@ -894,7 +926,11 @@ export default function SessionsPage() {
           </CardHeader>
 
           <CardContent className="grid gap-3">
-            {recentSessions.map((s) => (
+            {loading && recentSessions.length === 0
+              ? Array.from({ length: 5 }).map((_, i) => (
+                  <RecentPreviewSkeleton key={i} />
+                ))
+              : recentSessions.map((s) => (
               <div
                 key={s.id}
                 className="flex w-full cursor-pointer flex-col gap-2 rounded-md border border-border p-3 transition-colors hover:bg-muted sm:flex-row sm:items-center sm:justify-between"
@@ -941,7 +977,13 @@ export default function SessionsPage() {
         </Card>
       )}
 
-      {filtered.length === 0 ? (
+      {loading ? (
+        <div className="flex flex-col gap-1.5">
+          {Array.from({ length: PAGE_SIZE }).map((_, i) => (
+            <SessionRowSkeleton key={i} />
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
         <p className="px-1 py-1 text-xs text-muted-foreground/80">
           {search
             ? t.sessions.noMatch

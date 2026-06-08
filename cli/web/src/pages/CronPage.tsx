@@ -36,7 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Segmented } from "@/components/ui/segmented";
-import { RouteSkeleton } from "@/components/route-skeletons";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import type { AgentHubAgent } from "@/lib/api-types";
@@ -1531,11 +1531,6 @@ export default function CronPage() {
     ),
   });
 
-  /* ---- Loading ---- */
-  if (loading) {
-    return <RouteSkeleton path="/cron" />;
-  }
-
   const pendingJob = jobDelete.pendingId
     ? jobs.find((j) => j.id === jobDelete.pendingId)
     : null;
@@ -1654,38 +1649,46 @@ export default function CronPage() {
               <span>{t.cron.newJob}</span>
             </button>
 
-            <JobRailSection
-              label="Active"
-              items={activeJobs}
-              selectedId={selectedId}
-              onSelect={(id) => {
-                setSelectedId(id);
-                setShowCreate(false);
-              }}
-              defaultOpen
-            />
-            <JobRailSection
-              label="Paused"
-              items={pausedJobs}
-              selectedId={selectedId}
-              onSelect={(id) => {
-                setSelectedId(id);
-                setShowCreate(false);
-              }}
-              defaultOpen={pausedJobs.length > 0 && activeJobs.length === 0}
-            />
+            {loading ? (
+              <JobRailRowsSkeleton />
+            ) : (
+              <>
+                <JobRailSection
+                  label="Active"
+                  items={activeJobs}
+                  selectedId={selectedId}
+                  onSelect={(id) => {
+                    setSelectedId(id);
+                    setShowCreate(false);
+                  }}
+                  defaultOpen
+                />
+                <JobRailSection
+                  label="Paused"
+                  items={pausedJobs}
+                  selectedId={selectedId}
+                  onSelect={(id) => {
+                    setSelectedId(id);
+                    setShowCreate(false);
+                  }}
+                  defaultOpen={pausedJobs.length > 0 && activeJobs.length === 0}
+                />
 
-            {filteredJobs.length === 0 && (
-              <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
-                {lowerSearch ? "No jobs match your search." : emptyJobsMessage}
-              </p>
+                {filteredJobs.length === 0 && (
+                  <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
+                    {lowerSearch ? "No jobs match your search." : emptyJobsMessage}
+                  </p>
+                )}
+              </>
             )}
           </div>
         </aside>
 
         {/* ---- Right pane ---- */}
         <section className="flex min-w-0 flex-col">
-          {showCreate ? (
+          {loading ? (
+            <JobDetailSkeleton />
+          ) : showCreate ? (
             <div className="flex flex-1 flex-col overflow-y-auto">
               <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
                 <div className="flex items-start gap-3 px-5 py-4">
@@ -1752,6 +1755,104 @@ export default function CronPage() {
               </p>
             </div>
           )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Loading placeholders (slot into the identical shell)               */
+/* ------------------------------------------------------------------ */
+
+function JobRailRowsSkeleton() {
+  // Mirrors a JobRailSection header + a handful of JobRailRow rows so the
+  // rail keeps its exact width/rhythm while jobs load.
+  return (
+    <div className="mb-2" aria-busy="true">
+      <div className="flex w-full items-center gap-1.5 px-2 py-1">
+        <Skeleton className="h-3 w-3 rounded" />
+        <Skeleton className="h-2.5 w-12" />
+      </div>
+      <ul className="mt-0.5 space-y-px">
+        {Array.from({ length: 6 }).map((_, index) => (
+          <li key={index}>
+            <div className="w-full rounded-md px-2.5 py-2">
+              <div className="flex items-start gap-2">
+                <Skeleton className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1">
+                  <Skeleton className="h-3 w-3/4" />
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <Skeleton className="h-2.5 w-2.5 rounded" />
+                    <Skeleton className="h-2.5 w-20" />
+                    <Skeleton className="h-2.5 w-12 rounded border" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function JobDetailSkeleton() {
+  // Mirrors JobDetail: sticky header (title + badges + actions) and the
+  // body's meta grid + prompt section so the detail pane holds its frame.
+  return (
+    <div className="flex flex-1 flex-col overflow-y-auto" aria-busy="true">
+      {/* Header */}
+      <div className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur">
+        <div className="flex items-start gap-3 px-5 py-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <Skeleton className="h-5 w-48" />
+              <Skeleton className="h-5 w-16 rounded-full" />
+              <Skeleton className="h-5 w-20 rounded-full" />
+            </div>
+            <div className="mt-1 flex items-center gap-1.5">
+              <Skeleton className="h-3 w-3 rounded" />
+              <Skeleton className="h-3 w-32" />
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={index} className="h-9 w-9 rounded-md" />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 px-5 py-5">
+        {/* Meta grid */}
+        <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <div
+              key={index}
+              className="rounded-md border border-border bg-card/40 px-3 py-2"
+            >
+              <div className="flex items-center gap-1.5">
+                <Skeleton className="h-3 w-3 rounded" />
+                <Skeleton className="h-2.5 w-16" />
+              </div>
+              <Skeleton className="mt-1.5 h-3 w-2/3" />
+            </div>
+          ))}
+        </div>
+
+        {/* Prompt */}
+        <section>
+          <div className="mb-2 flex items-center gap-1.5">
+            <Skeleton className="h-3 w-3 rounded" />
+            <Skeleton className="h-2.5 w-16" />
+          </div>
+          <div className="rounded-md border border-border bg-card/50 px-3 py-3">
+            <Skeleton className="h-3 w-full" />
+            <Skeleton className="mt-2 h-3 w-5/6" />
+            <Skeleton className="mt-2 h-3 w-2/3" />
+          </div>
         </section>
       </div>
     </div>

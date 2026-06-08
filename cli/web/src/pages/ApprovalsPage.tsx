@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Modal } from "@/components/ui/modal";
 import { Select, SelectOption } from "@/components/ui/select";
-import { ListSkeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -302,6 +302,35 @@ function HumanTaskCard({
   );
 }
 
+function CardSkeleton() {
+  return (
+    <Card>
+      <CardContent className="space-y-2 p-3">
+        <div className="flex flex-wrap items-start gap-1.5">
+          <Skeleton className="h-5 min-w-0 flex-1" />
+          <Skeleton className="h-5 w-16 shrink-0 rounded-full" />
+          <Skeleton className="h-5 w-20 shrink-0 rounded-full" />
+        </div>
+        <Skeleton className="h-4 w-4/5" />
+        <div className="flex flex-wrap items-center gap-2">
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className="h-3 w-12" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CardListSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="grid gap-2" aria-busy="true">
+      {Array.from({ length: rows }).map((_, index) => (
+        <CardSkeleton key={index} />
+      ))}
+    </div>
+  );
+}
+
 export default function ApprovalsPage() {
   const [pending, setPending] = useState<SurfaceApproval[]>([]);
   const [resolved, setResolved] = useState<SurfaceApproval[]>([]);
@@ -453,14 +482,14 @@ export default function ApprovalsPage() {
         })}
       </div>
 
-      {loading ? (
-        <ListSkeleton rows={5} />
-      ) : error ? (
+      {error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load approvals: {error}
         </div>
       ) : tab === "human" ? (
-        humanTasks.length === 0 ? (
+        loading ? (
+          <CardListSkeleton rows={5} />
+        ) : humanTasks.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
             No tasks assigned to you right now.
           </div>
@@ -477,7 +506,9 @@ export default function ApprovalsPage() {
           </div>
         )
       ) : tab === "pending" ? (
-        pending.length === 0 ? (
+        loading ? (
+          <CardListSkeleton rows={5} />
+        ) : pending.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
             No pending approvals. You are all caught up.
           </div>
@@ -530,13 +561,19 @@ export default function ApprovalsPage() {
                   Clear filters
                 </Button>
               )}
-              <span className="ml-auto text-xs text-muted-foreground">
-                Showing {historyItems.length} of {resolved.length}
-              </span>
+              {loading ? (
+                <Skeleton className="ml-auto h-4 w-28" />
+              ) : (
+                <span className="ml-auto text-xs text-muted-foreground">
+                  Showing {historyItems.length} of {resolved.length}
+                </span>
+              )}
             </div>
           </section>
 
-          {historyItems.length === 0 ? (
+          {loading ? (
+            <CardListSkeleton rows={5} />
+          ) : historyItems.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
               No resolved approvals found.
             </div>

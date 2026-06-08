@@ -4,7 +4,7 @@ import { Activity, Clock, FlaskConical, Loader2, RefreshCw } from "lucide-react"
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ListSkeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
@@ -150,12 +150,32 @@ export default function ActivityPage() {
         </Button>
       </header>
 
-      {loading ? (
-        <ListSkeleton rows={6} />
-      ) : error ? (
+      {error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn't load activity: {error}
         </div>
+      ) : loading ? (
+        <ul className="space-y-2">
+          {Array.from({ length: 6 }).map((_, idx) => (
+            <li
+              key={idx}
+              className="flex items-start gap-3 rounded-md border border-border bg-card/40 p-2.5"
+            >
+              <div className="mt-0.5 shrink-0">
+                <Skeleton className="h-4 w-4 rounded" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-4 w-16 rounded-full" />
+                </div>
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-2/3" />
+              </div>
+              <Skeleton className="h-3 w-10 shrink-0" />
+            </li>
+          ))}
+        </ul>
       ) : (
         <>
           {agents.length > 1 && (

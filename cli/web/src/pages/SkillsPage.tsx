@@ -31,7 +31,6 @@ import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { RouteSkeleton } from "@/components/route-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Markdown } from "@/components/Markdown";
@@ -501,17 +500,16 @@ export default function SkillsPage() {
 
   /* ---- Page header ---- */
   useLayoutEffect(() => {
-    if (loading) {
-      setAfterTitle(null);
-      setEnd(null);
-      return;
-    }
     setAfterTitle(
-      <span className="whitespace-nowrap text-xs text-muted-foreground">
-        {t.skills.enabledOf
-          .replace("{enabled}", String(enabledCount))
-          .replace("{total}", String(skills.length))}
-      </span>,
+      loading ? (
+        <Skeleton className="h-4 w-24" />
+      ) : (
+        <span className="whitespace-nowrap text-xs text-muted-foreground">
+          {t.skills.enabledOf
+            .replace("{enabled}", String(enabledCount))
+            .replace("{total}", String(skills.length))}
+        </span>
+      ),
     );
     setEnd(
       <div className="flex items-center gap-2">
@@ -597,16 +595,11 @@ export default function SkillsPage() {
     });
   };
 
-  /* ---- Loading ---- */
-  if (loading) {
-    return <RouteSkeleton path="/skills" />;
-  }
-
   return (
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
 
-      {showWorkflows && (
+      {!loading && showWorkflows && (
         <section className="rounded-md border border-border bg-card p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
@@ -642,14 +635,20 @@ export default function SkillsPage() {
             <div className="flex items-center gap-2 text-[11px] font-medium tracking-normal text-muted-foreground">
               <Package className="h-3 w-3" />
               <span>{t.skills.title}</span>
-              <span className="text-muted-foreground/60">
-                ({skills.length})
-              </span>
+              {loading ? (
+                <Skeleton className="h-3 w-6" />
+              ) : (
+                <span className="text-muted-foreground/60">
+                  ({skills.length})
+                </span>
+              )}
             </div>
           </div>
 
           <div className="flex-1 overflow-y-auto px-1 py-2">
-            {skillGroups.map(({ definition, items }) => (
+            {loading && <SkillRailSkeleton />}
+            {!loading &&
+              skillGroups.map(({ definition, items }) => (
               <TreeSection
                 key={definition.key}
                 definition={definition}
@@ -670,7 +669,7 @@ export default function SkillsPage() {
               />
             ))}
 
-            {filteredSkills.length === 0 && (
+            {!loading && filteredSkills.length === 0 && (
               <p className="px-3 py-6 text-center text-[11px] text-muted-foreground">
                 {isSearching ? t.skills.noSkillsMatch : t.skills.noSkills}
               </p>
@@ -680,7 +679,9 @@ export default function SkillsPage() {
 
         {/* ---- Right detail pane ---- */}
         <section className="flex min-w-0 flex-col">
-          {activeSkill ? (
+          {loading ? (
+            <SkillDetailSkeleton />
+          ) : activeSkill ? (
             <SkillDetail
               skill={activeSkill}
               filePath={selectedPath}
@@ -983,6 +984,97 @@ function FileTreeList({
         );
       })}
     </ul>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Loading skeletons (same frame, data slots only)                    */
+/* ------------------------------------------------------------------ */
+
+function SkillRailSkeleton() {
+  // ~3 group headers, each followed by a few skill rows (~8-9 rows total).
+  const groups = [3, 2, 3];
+  return (
+    <div aria-hidden>
+      {groups.map((rowCount, groupIndex) => (
+        <div key={groupIndex} className="mb-2">
+          {/* group header — matches TreeSection button (px-2 py-1.5) */}
+          <div className="flex w-full items-center gap-2 px-2 py-1.5">
+            <Skeleton className="h-3 w-3 shrink-0" />
+            <Skeleton className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 space-y-1">
+              <Skeleton className="h-[11px] w-24" />
+              <Skeleton className="h-[9.5px] w-40" />
+            </span>
+            <Skeleton className="h-4 w-8 shrink-0" />
+          </div>
+          {/* skill rows — match SkillRailRow (px-1.5 py-1) */}
+          <ul className="mt-0.5 space-y-px">
+            {Array.from({ length: rowCount }).map((_, rowIndex) => (
+              <li key={rowIndex}>
+                <div className="flex w-full items-center gap-1 px-1.5 py-1">
+                  <Skeleton className="h-5 w-5 shrink-0 rounded-sm" />
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5">
+                    <Skeleton className="h-3 w-3 shrink-0" />
+                    <Skeleton className="h-3 w-28" />
+                  </div>
+                  <Skeleton className="h-4 w-7 shrink-0 rounded-full" />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkillDetailSkeleton() {
+  return (
+    <div className="flex flex-1 flex-col" aria-hidden>
+      {/* Header — matches SkillDetail header */}
+      <header className="flex items-start justify-between gap-4 border-b border-border px-5 pb-3 pt-4">
+        <div className="min-w-0 flex-1">
+          <Skeleton className="h-5 w-44" />
+          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 sm:max-w-md">
+            <Skeleton className="h-[11px] w-16" />
+            <Skeleton className="h-[11px] w-14" />
+            <Skeleton className="h-[11px] w-24" />
+            <Skeleton className="h-[11px] w-28" />
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-5 w-9 rounded-full" />
+          <Skeleton className="h-7 w-7 rounded-md" />
+        </div>
+      </header>
+
+      {/* Description block */}
+      <div className="border-b border-border px-5 py-3">
+        <Skeleton className="h-[11px] w-20" />
+        <div className="mt-1 space-y-1.5">
+          <Skeleton className="h-3 w-full" />
+          <Skeleton className="h-3 w-4/5" />
+        </div>
+      </div>
+
+      {/* Path crumb + render/raw toggle */}
+      <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-2">
+        <Skeleton className="h-[11px] w-24" />
+        <Skeleton className="h-6 w-14 rounded-md" />
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-5/6" />
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-4 w-2/3" />
+        </div>
+      </div>
+    </div>
   );
 }
 

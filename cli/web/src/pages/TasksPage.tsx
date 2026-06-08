@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Modal } from "@/components/ui/modal";
 import { Select, SelectOption } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 
 type TaskStatus = SurfaceTask["status"];
@@ -328,6 +329,48 @@ function KanbanBoard({
   );
 }
 
+function TaskCardSkeleton() {
+  return (
+    <div className="w-full rounded-md border border-border bg-card p-3">
+      <div className="space-y-2">
+        <Skeleton className="h-4 w-4/5" />
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Skeleton className="h-5 w-14 rounded-full" />
+          <Skeleton className="h-5 w-16 rounded-full" />
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="h-3 w-12" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KanbanBoardSkeleton() {
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {BOARD_COLUMNS.map((column, columnIndex) => (
+        <div key={column.key} className="flex flex-col gap-2">
+          <div className="flex items-center justify-between px-1">
+            <div className="flex items-center gap-2">
+              <StatusBadge status={column.key} />
+              <Skeleton className="h-3 w-4" />
+            </div>
+          </div>
+          <div className="h-[calc(100vh-280px)] min-h-[300px] overflow-y-auto pr-1">
+            <div className="flex flex-col gap-2 px-0.5 pb-1 pt-0.5">
+              {Array.from({ length: 3 - (columnIndex % 2) }).map((_, index) => (
+                <TaskCardSkeleton key={index} />
+              ))}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 type SortField = "title" | "status" | "priority" | "assignee" | "org" | "created_at";
 type SortDir = "asc" | "desc";
 
@@ -429,6 +472,40 @@ function TaskListTable({ tasks, onTaskClick }: { tasks: SurfaceTask[]; onTaskCli
               </tr>
             ))
           )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TaskListTableSkeleton() {
+  const headers = ["Title", "Status", "Priority", "Assignee", "Org", "Created"];
+  return (
+    <div className="overflow-x-auto rounded-md border border-border bg-card/40">
+      <table className="w-full min-w-[760px] text-left text-sm">
+        <thead className="border-b border-border text-xs text-muted-foreground">
+          <tr>
+            {headers.map((header) => (
+              <th key={header} className="px-3 py-2 font-medium">
+                <span className="inline-flex items-center gap-1">
+                  {header}
+                  <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground/50" />
+                </span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-border/70">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <tr key={index}>
+              <td className="px-3 py-2"><Skeleton className="h-4 w-48" /></td>
+              <td className="px-3 py-2"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              <td className="px-3 py-2"><Skeleton className="h-5 w-14 rounded-full" /></td>
+              <td className="px-3 py-2"><Skeleton className="h-4 w-24" /></td>
+              <td className="px-3 py-2"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              <td className="px-3 py-2"><Skeleton className="h-4 w-12" /></td>
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>
@@ -1158,22 +1235,6 @@ export default function TasksPage() {
     void fetchTasks(true);
   };
 
-  if (loading) {
-    return (
-      <div className="mx-auto w-full max-w-6xl space-y-6 pb-16">
-        <h1 className="text-2xl font-semibold text-foreground">Tasks</h1>
-        <div className="space-y-4">
-          <div className="h-10 w-full animate-pulse rounded-md bg-secondary/30" />
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {Array.from({ length: 4 }).map((_, index) => (
-              <div key={index} className="h-64 animate-pulse rounded-md bg-secondary/30" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="mx-auto w-full max-w-6xl space-y-4 pb-16">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1232,7 +1293,9 @@ export default function TasksPage() {
         </div>
       )}
 
-      {tasks.length === 0 ? (
+      {loading ? (
+        view === "kanban" ? <KanbanBoardSkeleton /> : <TaskListTableSkeleton />
+      ) : tasks.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-border py-16 text-center">
           <CheckSquare className="mb-4 h-12 w-12 text-muted-foreground/30" />
           <h3 className="mb-1 text-lg font-medium text-foreground">No tasks yet</h3>

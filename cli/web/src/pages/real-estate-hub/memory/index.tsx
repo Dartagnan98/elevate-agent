@@ -4,7 +4,7 @@ import { Brain, CheckCircle2, Clock, Network } from "lucide-react";
 import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { isoTimeAgo } from "@/lib/utils";
-import { LoadingState, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import "./memory.css";
 
 const MemoryConstellation = lazy(() =>
@@ -52,14 +52,11 @@ export function RealEstateMemoryPage() {
   });
   const memory = data.snapshot?.memory;
 
-  // Preserve HubShell's loading guard.
-  if (data.loading && !data.snapshot && !data.status) {
-    return (
-      <div className="mem-root">
-        <LoadingState />
-      </div>
-    );
-  }
+  // Mirror HubShell's loading guard, but as a flag — the page shell (header
+  // hook, 3-tile row, 2-col grid, card frames) renders identically whether
+  // loading or loaded. Only the data slots swap to skeletons while loading, so
+  // real data slots into the identical frame with zero layout shift.
+  const loading = data.loading && !data.snapshot && !data.status;
 
   const pending = memory?.journal.pending ?? 0;
   const failed = memory?.journal.failed ?? 0;
@@ -87,18 +84,26 @@ export function RealEstateMemoryPage() {
         {/* Title/status/job-count/Refresh all live in the app breadcrumb bar
             (useHubHeader) — no separate in-page hero or status row here. */}
         <div className="mem-tiles">
-          <SummaryTile icon={Clock} label="Pipeline" value={pipelineState.label} tone={pipelineState.tone} />
+          <SummaryTile
+            icon={Clock}
+            label="Pipeline"
+            value={pipelineState.label}
+            tone={pipelineState.tone}
+            loading={loading}
+          />
           <SummaryTile
             icon={CheckCircle2}
             label="Last ingest"
             value={latestIngest ? isoTimeAgo(latestIngest) : "Never"}
             tone={latestIngest ? "ok" : "warn"}
+            loading={loading}
           />
           <SummaryTile
             icon={Brain}
             label="Embeddings"
             value={embeddingsOn ? embeddingModel : "Off"}
             tone={embeddingsOn ? "neutral" : "warn"}
+            loading={loading}
           />
         </div>
 
@@ -114,11 +119,15 @@ export function RealEstateMemoryPage() {
               </span>
             </div>
             <div className="mem-card-body">
-              <MemoryGraphView
-                compact={false}
-                nodes={memory?.graph.nodes ?? []}
-                edges={memory?.graph.edges ?? []}
-              />
+              {loading ? (
+                <Skeleton className="h-full w-full rounded-[10px]" />
+              ) : (
+                <MemoryGraphView
+                  compact={false}
+                  nodes={memory?.graph.nodes ?? []}
+                  edges={memory?.graph.edges ?? []}
+                />
+              )}
             </div>
           </div>
 
@@ -129,16 +138,41 @@ export function RealEstateMemoryPage() {
             <div className="mem-card-body mem-ingest">
               <div className="mem-ingest-active">
                 <span className="dim">Active sessions</span>
-                <span className="mem-ingest-count mono">{activeSessionCount}</span>
+                {loading ? (
+                  <Skeleton className="h-3.5 w-8" />
+                ) : (
+                  <span className="mem-ingest-count mono">{activeSessionCount}</span>
+                )}
               </div>
               <div className="mem-provider">
-                <div className="mem-provider-name">
-                  {memory?.provider ?? "memory"} · {memory?.embedding.provider ?? "no embedding"}
-                </div>
-                <div className="mem-provider-path mono">{memory?.db_path ?? "No memory database path yet."}</div>
+                {loading ? (
+                  <>
+                    <Skeleton className="h-3.5 w-2/3" />
+                    <Skeleton className="mt-[5px] h-3 w-full" />
+                  </>
+                ) : (
+                  <>
+                    <div className="mem-provider-name">
+                      {memory?.provider ?? "memory"} · {memory?.embedding.provider ?? "no embedding"}
+                    </div>
+                    <div className="mem-provider-path mono">{memory?.db_path ?? "No memory database path yet."}</div>
+                  </>
+                )}
               </div>
               <div className="mem-sessions-label">Sessions</div>
-              {recentSessions.length > 0 ? (
+              {loading ? (
+                <div className="mem-sessions">
+                  {Array.from({ length: 4 }).map((_, index) => (
+                    <div className="mem-session" key={index}>
+                      <div className="mem-session-l">
+                        <Skeleton className="h-3.5 w-20" />
+                        <Skeleton className="h-3 w-12" />
+                      </div>
+                      <Skeleton className="h-5 w-9 rounded-md" />
+                    </div>
+                  ))}
+                </div>
+              ) : recentSessions.length > 0 ? (
                 <div className="mem-sessions">
                   {recentSessions.slice(0, 6).map((session) => (
                     <div className="mem-session" key={`${session.session_id}-${session.session_day}`}>
@@ -174,11 +208,13 @@ function SummaryTile({
   label,
   value,
   tone,
+  loading,
 }: {
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   label: string;
   value: string | number;
   tone: "ok" | "warn" | "active" | "neutral";
+  loading?: boolean;
 }) {
   return (
     <div className="mem-tile">
@@ -186,7 +222,13 @@ function SummaryTile({
         <Icon width="13" height="13" />
         {label}
       </div>
-      <div className={"mem-tile-value " + tone}>{value}</div>
+      {loading ? (
+        <div className="mem-tile-value">
+          <Skeleton className="h-5 w-24" />
+        </div>
+      ) : (
+        <div className={"mem-tile-value " + tone}>{value}</div>
+      )}
     </div>
   );
 }

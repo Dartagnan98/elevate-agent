@@ -29,7 +29,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { ListSkeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn, isoTimeAgo, timeAgo as epochTimeAgo } from "@/lib/utils";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 
@@ -159,6 +159,7 @@ function MetricTile({
   meta,
   tone = "default",
   href,
+  loading,
 }: {
   icon: ReactNode;
   label: string;
@@ -166,6 +167,7 @@ function MetricTile({
   meta: string;
   tone?: BadgeTone;
   href: string;
+  loading?: boolean;
 }) {
   return (
     <Link
@@ -176,15 +178,53 @@ function MetricTile({
         <div className="text-xs font-medium text-muted-foreground">{label}</div>
         <div className="text-muted-foreground group-hover:text-foreground">{icon}</div>
       </div>
-      <div className={cn("mt-2 text-2xl font-semibold tracking-normal", metricToneClass(tone))}>
-        {value}
-      </div>
-      <div className="mt-1 text-xs text-muted-foreground">{meta}</div>
+      {loading ? (
+        <>
+          <Skeleton className="mt-2 h-8 w-16" />
+          <Skeleton className="mt-1 h-3 w-28" />
+        </>
+      ) : (
+        <>
+          <div className={cn("mt-2 text-2xl font-semibold tracking-normal", metricToneClass(tone))}>
+            {value}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">{meta}</div>
+        </>
+      )}
     </Link>
   );
 }
 
-function ActionRequired({ items }: { items: ActionItem[] }) {
+function RowSkeleton() {
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-md border border-border bg-background/35 p-3">
+      <div className="min-w-0 flex-1 space-y-2">
+        <Skeleton className="h-4 w-2/5" />
+        <Skeleton className="h-3 w-3/5" />
+      </div>
+      <Skeleton className="h-5 w-14 shrink-0 rounded-full" />
+    </div>
+  );
+}
+
+function ActionRequired({ items, loading }: { items: ActionItem[]; loading?: boolean }) {
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader className="flex-row items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-warning" />
+            <CardTitle>Action Required</CardTitle>
+          </div>
+          <Skeleton className="h-5 w-8 rounded-full" />
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <RowSkeleton />
+          <RowSkeleton />
+        </CardContent>
+      </Card>
+    );
+  }
   if (!items.length) {
     return (
       <Card>
@@ -231,7 +271,7 @@ function ActionRequired({ items }: { items: ActionItem[] }) {
   );
 }
 
-function AgentFleet({ agents }: { agents: AgentHubAgent[] }) {
+function AgentFleet({ agents, loading }: { agents: AgentHubAgent[]; loading?: boolean }) {
   const ordered = useMemo(
     () =>
       [...agents].sort((a, b) => {
@@ -252,7 +292,14 @@ function AgentFleet({ agents }: { agents: AgentHubAgent[] }) {
         </Link>
       </CardHeader>
       <CardContent className="space-y-2">
-        {ordered.length === 0 ? (
+        {loading ? (
+          <>
+            <RowSkeleton />
+            <RowSkeleton />
+            <RowSkeleton />
+            <RowSkeleton />
+          </>
+        ) : ordered.length === 0 ? (
           <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
             No agents configured.
           </div>
@@ -297,7 +344,7 @@ function AgentFleet({ agents }: { agents: AgentHubAgent[] }) {
   );
 }
 
-function LiveActivity({ items }: { items: ActivityItem[] }) {
+function LiveActivity({ items, loading }: { items: ActivityItem[]; loading?: boolean }) {
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between gap-3">
@@ -310,7 +357,14 @@ function LiveActivity({ items }: { items: ActivityItem[] }) {
         </Link>
       </CardHeader>
       <CardContent className="space-y-2">
-        {items.length === 0 ? (
+        {loading ? (
+          <>
+            <RowSkeleton />
+            <RowSkeleton />
+            <RowSkeleton />
+            <RowSkeleton />
+          </>
+        ) : items.length === 0 ? (
           <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
             No recent activity.
           </div>
@@ -339,7 +393,19 @@ function LiveActivity({ items }: { items: ActivityItem[] }) {
   );
 }
 
-function FocusPanel({ surfaces, tasks }: { surfaces: HeartbeatSurface[]; tasks: SurfaceTask[] }) {
+function FocusCardSkeleton() {
+  return (
+    <div className="rounded-md border border-border bg-background/35 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <Skeleton className="h-4 w-2/5" />
+        <Skeleton className="h-5 w-10 shrink-0 rounded-full" />
+      </div>
+      <Skeleton className="h-3 w-4/5" />
+    </div>
+  );
+}
+
+function FocusPanel({ surfaces, tasks, loading }: { surfaces: HeartbeatSurface[]; tasks: SurfaceTask[]; loading?: boolean }) {
   const focusSurfaces = surfaces
     .filter((surface) => surface.config?.goal || surface.lastRun?.summary || surface.lastRun?.did)
     .slice(0, 5);
@@ -358,7 +424,13 @@ function FocusPanel({ surfaces, tasks }: { surfaces: HeartbeatSurface[]; tasks: 
       <CardContent className="grid gap-4 lg:grid-cols-2">
         <div className="space-y-2">
           <div className="text-xs font-medium uppercase tracking-[0.06em] text-muted-foreground">Work Loops</div>
-          {focusSurfaces.length === 0 ? (
+          {loading ? (
+            <>
+              <FocusCardSkeleton />
+              <FocusCardSkeleton />
+              <FocusCardSkeleton />
+            </>
+          ) : focusSurfaces.length === 0 ? (
             <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
               No active focus recorded.
             </div>
@@ -380,7 +452,13 @@ function FocusPanel({ surfaces, tasks }: { surfaces: HeartbeatSurface[]; tasks: 
         </div>
         <div className="space-y-2">
           <div className="text-xs font-medium uppercase tracking-[0.06em] text-muted-foreground">Today&apos;s Progress</div>
-          {completedToday.length === 0 ? (
+          {loading ? (
+            <>
+              <FocusCardSkeleton />
+              <FocusCardSkeleton />
+              <FocusCardSkeleton />
+            </>
+          ) : completedToday.length === 0 ? (
             <div className="rounded-md border border-dashed border-border p-4 text-sm text-muted-foreground">
               No completed tasks today.
             </div>
@@ -400,7 +478,7 @@ function FocusPanel({ surfaces, tasks }: { surfaces: HeartbeatSurface[]; tasks: 
   );
 }
 
-function SystemHealth({ agents, crons, surfaces }: { agents: AgentHubAgent[]; crons: CronJob[]; surfaces: HeartbeatSurface[] }) {
+function SystemHealth({ agents, crons, surfaces, loading }: { agents: AgentHubAgent[]; crons: CronJob[]; surfaces: HeartbeatSurface[]; loading?: boolean }) {
   const [open, setOpen] = useState(false);
   const enabledAgents = agents.filter((agent) => agent.enabled);
   const healthy = enabledAgents.filter(agentHealthy).length;
@@ -419,13 +497,21 @@ function SystemHealth({ agents, crons, surfaces }: { agents: AgentHubAgent[]; cr
           <ShieldCheck className={cn("h-5 w-5", tone === "success" ? "text-success" : "text-warning")} />
           <div>
             <div className="text-sm font-semibold text-foreground">System Health</div>
-            <div className="text-xs text-muted-foreground">
-              {healthy}/{enabledAgents.length} agents healthy · {cronFailures} cron failures · {disabledLoops} loops off
-            </div>
+            {loading ? (
+              <Skeleton className="mt-1 h-3 w-64" />
+            ) : (
+              <div className="text-xs text-muted-foreground">
+                {healthy}/{enabledAgents.length} agents healthy · {cronFailures} cron failures · {disabledLoops} loops off
+              </div>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant={tone}>{attention || cronFailures ? "Review" : "Healthy"}</Badge>
+          {loading ? (
+            <Skeleton className="h-5 w-16 rounded-full" />
+          ) : (
+            <Badge variant={tone}>{attention || cronFailures ? "Review" : "Healthy"}</Badge>
+          )}
           {open ? <ChevronDown className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
         </div>
       </button>
@@ -633,9 +719,7 @@ export default function OverviewPage() {
         </Button>
       </header>
 
-      {loading ? (
-        <ListSkeleton rows={8} />
-      ) : error ? (
+      {error ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
           Couldn&apos;t load overview: {error}
         </div>
@@ -649,6 +733,7 @@ export default function OverviewPage() {
               meta={`${attentionAgents.length} need review · ${generated}`}
               tone={attentionAgents.length ? "warning" : "success"}
               href="/hub"
+              loading={loading}
             />
             <MetricTile
               icon={<CheckCircle2 className="h-4 w-4" />}
@@ -657,6 +742,7 @@ export default function OverviewPage() {
               meta={`${openTasks.length} open · ${blockedTasks.length} blocked`}
               tone={blockedTasks.length ? "warning" : "default"}
               href="/tasks"
+              loading={loading}
             />
             <MetricTile
               icon={<ShieldCheck className="h-4 w-4" />}
@@ -665,6 +751,7 @@ export default function OverviewPage() {
               meta={`${humanTasks.length} human tasks`}
               tone={state.approvals.length ? "warning" : "success"}
               href="/approvals"
+              loading={loading}
             />
             <MetricTile
               icon={<Clock className="h-4 w-4" />}
@@ -673,19 +760,20 @@ export default function OverviewPage() {
               meta={`${cronFailures.length} failures · ${state.surfaces.length} loops`}
               tone={cronFailures.length ? "destructive" : "default"}
               href="/cron"
+              loading={loading}
             />
           </div>
 
-          <ActionRequired items={actions} />
+          <ActionRequired items={actions} loading={loading} />
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.85fr)]">
-            <AgentFleet agents={agents} />
-            <LiveActivity items={liveItems} />
+            <AgentFleet agents={agents} loading={loading} />
+            <LiveActivity items={liveItems} loading={loading} />
           </div>
 
-          <FocusPanel surfaces={state.surfaces} tasks={state.tasks} />
+          <FocusPanel surfaces={state.surfaces} tasks={state.tasks} loading={loading} />
 
-          <SystemHealth agents={agents} crons={state.crons} surfaces={state.surfaces} />
+          <SystemHealth agents={agents} crons={state.crons} surfaces={state.surfaces} loading={loading} />
         </>
       )}
     </div>
