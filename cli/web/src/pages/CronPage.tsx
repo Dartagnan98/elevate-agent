@@ -1390,7 +1390,7 @@ export default function CronPage() {
       setEnd(
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Skeleton className="h-8 w-28 rounded-md" />
-          <Skeleton className="h-8 w-full min-w-0 rounded-md sm:max-w-xs sm:w-64" />
+          <Skeleton className="h-8 w-40 min-w-0 rounded-md sm:w-56" />
           <Skeleton className="h-8 w-24 rounded-md" />
         </div>,
       );
@@ -1412,10 +1412,10 @@ export default function CronPage() {
             </SelectOption>
           ))}
         </Select>
-        <div className="relative w-full min-w-0 sm:max-w-xs">
+        <div className="relative w-40 min-w-0 sm:w-56">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
-            className="h-8 pl-8 pr-7 text-xs"
+            className="h-8 w-full pl-8 pr-7 text-xs"
             placeholder={t.common.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}

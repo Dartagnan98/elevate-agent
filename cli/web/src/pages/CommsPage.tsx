@@ -111,11 +111,11 @@ function HandoffComposerSkeleton() {
         </div>
         <Skeleton className="h-5 w-16 rounded-full" />
       </div>
-      <div className="grid gap-2 md:grid-cols-2">
+      <div className="grid grid-cols-2 gap-2">
         {Array.from({ length: 2 }).map((_, i) => (
-          <div key={i} className="grid gap-1">
+          <div key={i} className="grid min-w-0 gap-1">
             <Skeleton className="h-3 w-10" />
-            <Skeleton className="h-8 rounded-md" />
+            <Skeleton className="h-8 w-full min-w-0 rounded-md" />
           </div>
         ))}
       </div>
@@ -190,25 +190,25 @@ function HandoffComposer({
         </div>
         <Badge variant="outline">handoff</Badge>
       </div>
-      <div className="grid gap-2 md:grid-cols-2">
-        <label className="grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+      <div className="grid grid-cols-2 gap-2">
+        <label className="grid min-w-0 gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
           From
           <select
             value={fromAgentId}
             onChange={(event) => setFromAgentId(event.target.value)}
-            className="h-8 rounded-md border border-border bg-background px-2 text-xs normal-case text-foreground"
+            className="h-8 w-full min-w-0 rounded-md border border-border bg-background px-2 text-xs normal-case text-foreground"
           >
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>{agent.name}</option>
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+        <label className="grid min-w-0 gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
           To
           <select
             value={toAgentId}
             onChange={(event) => setToAgentId(event.target.value)}
-            className="h-8 rounded-md border border-border bg-background px-2 text-xs normal-case text-foreground"
+            className="h-8 w-full min-w-0 rounded-md border border-border bg-background px-2 text-xs normal-case text-foreground"
           >
             {agents.map((agent) => (
               <option key={agent.id} value={agent.id}>{agent.name}</option>
