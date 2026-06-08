@@ -162,6 +162,7 @@ function notifyCronSidebarChanged(): void {
 }
 
 type ScheduleMode =
+  | "interval"
   | "daily"
   | "weekdays"
   | "weekly"
@@ -170,6 +171,7 @@ type ScheduleMode =
   | "custom";
 
 const SCHEDULE_OPTIONS: Array<{ label: string; value: ScheduleMode }> = [
+  { label: "Interval", value: "interval" },
   { label: "Daily", value: "daily" },
   { label: "Weekdays", value: "weekdays" },
   { label: "Weekly", value: "weekly" },
@@ -177,6 +179,35 @@ const SCHEDULE_OPTIONS: Array<{ label: string; value: ScheduleMode }> = [
   { label: "Monthly", value: "monthly" },
   { label: "Custom", value: "custom" },
 ];
+
+// Preset recurring intervals. Value is total minutes; the saved expression is
+// `every <minutes>m`, which the backend parse_schedule normalizes to
+// {kind:"interval", minutes}. Keyed by minutes so it round-trips regardless of
+// whether a stored job reads back as "every 120m" or "every 2h".
+const INTERVAL_OPTIONS: Array<{ label: string; minutes: number }> = [
+  { label: "5 min", minutes: 5 },
+  { label: "15 min", minutes: 15 },
+  { label: "30 min", minutes: 30 },
+  { label: "1 hr", minutes: 60 },
+  { label: "2 hr", minutes: 120 },
+  { label: "3 hr", minutes: 180 },
+  { label: "4 hr", minutes: 240 },
+  { label: "5 hr", minutes: 300 },
+  { label: "6 hr", minutes: 360 },
+  { label: "12 hr", minutes: 720 },
+];
+const DEFAULT_INTERVAL_MINUTES = 30;
+
+// Parse an "every Nm" / "every Nh" / "every Nd" expression into total minutes.
+// Returns null when the expression isn't a recurring interval.
+function intervalMinutesFromExpr(expr: string): number | null {
+  const m = expr.trim().toLowerCase().match(/^every\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2][0];
+  return unit === "h" ? n * 60 : unit === "d" ? n * 1440 : n;
+}
 
 const WEEKDAYS = [
   { anchor: "Monday", cron: "1", label: "Monday", value: "monday" },
@@ -219,6 +250,20 @@ function buildSchedule({
       description: "Custom schedule",
       expression: customSchedule.trim(),
       helper: "Use cron, intervals like every 2h, or a one-time timestamp.",
+    };
+  }
+
+  if (mode === "interval") {
+    // The interval dropdown stores its selection in customSchedule as
+    // "every <minutes>m". Fall back to the default if it isn't a valid interval
+    // yet (e.g. just switched into interval mode from a cron schedule).
+    const minutes =
+      intervalMinutesFromExpr(customSchedule) ?? DEFAULT_INTERVAL_MINUTES;
+    const opt = INTERVAL_OPTIONS.find((o) => o.minutes === minutes);
+    return {
+      description: `Every ${opt ? opt.label : `${minutes} min`}`,
+      expression: `every ${minutes}m`,
+      helper: "Runs on a fixed repeating interval.",
     };
   }
 
@@ -282,6 +327,18 @@ function inferScheduleMode(expr: string): {
   };
   if (!expr) return fallback;
   const trimmed = expr.trim();
+  // Recurring interval ("every 30m", "every 2h", stored as "every 120m") →
+  // snap to the nearest preset so the dropdown shows it; keep the canonical
+  // "every <minutes>m" in customSchedule so it round-trips through buildSchedule.
+  const intervalMinutes = intervalMinutesFromExpr(trimmed);
+  if (intervalMinutes != null) {
+    const opt =
+      INTERVAL_OPTIONS.find((o) => o.minutes === intervalMinutes) ??
+      INTERVAL_OPTIONS.reduce((a, b) =>
+        Math.abs(b.minutes - intervalMinutes) < Math.abs(a.minutes - intervalMinutes) ? b : a,
+      );
+    return { ...fallback, mode: "interval", customSchedule: `every ${opt.minutes}m` };
+  }
   const biweeklyMatch = trimmed.match(
     /^every\s+2w\s+on\s+(\w+)\s+at\s+(\d{1,2}):(\d{2})$/i,
   );
@@ -401,6 +458,23 @@ function ScheduleFields({
             value={customSchedule}
             onChange={(e) => setCustomSchedule(e.target.value)}
           />
+        </div>
+      ) : scheduleMode === "interval" ? (
+        <div className="grid gap-2">
+          <Label htmlFor={`${idPrefix}-interval`}>Run every</Label>
+          <Select
+            id={`${idPrefix}-interval`}
+            value={String(
+              intervalMinutesFromExpr(customSchedule) ?? DEFAULT_INTERVAL_MINUTES,
+            )}
+            onValueChange={(v) => setCustomSchedule(`every ${v}m`)}
+          >
+            {INTERVAL_OPTIONS.map((opt) => (
+              <SelectOption key={opt.minutes} value={String(opt.minutes)}>
+                {opt.label}
+              </SelectOption>
+            ))}
+          </Select>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
