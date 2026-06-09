@@ -77,11 +77,19 @@ Do NOT add them as new agents. Per-agent map:
   coordination, CMA/pricing, offer strategy and negotiation, multiple-offer scenarios.
 Not stood up as its own agent.
 
-## Phasing
-1. **A — ship fix** first (unblocks customers; pure infra; safe).
-2. **B — EA merge** (keystone native agent).
-3. **C — native→installable conversion**.
-4. **D/E — enrichment** from staged material, agent by agent.
+## Phasing / status (branch `agent-packs-ship-2026-06-09`)
+1. **A — ship fix** — ✅ DONE (`e7bcf947d`). Presets bundled, `_cortext_root` fixed, verified on clean home.
+2. **B — EA merge** — ✅ DONE (`8ec7d0ad7`). Orchestrator folded into EA, duplicate installable retired.
+3. **C — native→installable conversion** — ⏳ NOT STARTED. Needs the seeding-default decision (open
+   confirmation #1). The most structural/risky phase; do it fresh with the decision locked.
+4. **D/E — enrichment** — ✅ DONE (`25edba535` Admin=TC + `aa70cb32e` Outreach/Ads/Marketing/Social/
+   Analyst). All 7 user-facing native agents enriched from staged material, real-estate-framed,
+   drafts-only. theta-wave left system-level.
+
+### EXACT NEXT STEP
+Phase C (native→installable). Decide seeding default first (keep real-estate set seeded-on for
+existing `real_estate_*` customers, everything else opt-in — recommended). Nothing is deployed; the
+agent work reaches customers only via a desktop release.
 
 ## Staged source material
 `docs/agent-source-material/` (11 files pulled from agency-agents): real-estate-buyer-seller,
