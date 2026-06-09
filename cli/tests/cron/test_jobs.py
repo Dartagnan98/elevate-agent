@@ -1,6 +1,5 @@
 """Tests for cron/jobs.py — schedule parsing, job CRUD, and due-job detection."""
 
-import json
 import threading
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -231,8 +230,31 @@ def tmp_cron_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture()
+def pg_state():
+    """Fresh per-test account database (surface state lives in PG since 0024).
+
+    Same pattern as tests/elevate_cli/test_surface_state.py: drop the cached
+    pool + embedded server so connect() boots against THIS test's isolated
+    ELEVATE_HOME instead of reusing a pool from a previous test's tempdir.
+    """
+    from elevate_cli.data.connection import _reset_schema_cache
+
+    _reset_schema_cache()
+    yield
+    _reset_schema_cache()
+
+
+def _pg_config(surface: str) -> dict:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        return surface_state.get_config(conn, surface)
+
+
 class TestThetaWaveSeed:
-    def test_ensure_theta_wave_creates_active_agent_job(self, tmp_cron_dir):
+    def test_ensure_theta_wave_creates_active_agent_job(self, tmp_cron_dir, pg_state):
         from elevate_constants import get_account_data_dir
 
         job = ensure_theta_wave()
@@ -243,14 +265,16 @@ class TestThetaWaveSeed:
         assert job["agent"] == "theta-wave"
         assert job["skill"] == THETA_WAVE_SKILL
         assert job["workdir"] == str(get_account_data_dir() / "system-review")
+        # Config is STATE → database, not a workspace config.json.
+        assert not (get_account_data_dir() / "system-review" / "config.json").exists()
 
-        config = json.loads((get_account_data_dir() / "system-review" / "config.json").read_text())
+        config = _pg_config("system-review")
         assert config["enabled"] is True
         assert config["auto_create_agent_cycles"] is True
         assert config["auto_modify_agent_cycles"] is True
         assert config["approval_required"] is False
 
-    def test_ensure_theta_wave_repairs_existing_paused_seed(self, tmp_cron_dir):
+    def test_ensure_theta_wave_repairs_existing_paused_seed(self, tmp_cron_dir, pg_state):
         """Repair fills in agent/workdir but RESPECTS the operator's pause.
 
         ensure_theta_wave used to force-resume a paused seed on every hourly
@@ -280,9 +304,93 @@ class TestThetaWaveSeed:
         assert job["agent"] == "theta-wave"
         assert job["workdir"] == str(get_account_data_dir() / "system-review")
 
-        config = json.loads((get_account_data_dir() / "system-review" / "config.json").read_text())
+        config = _pg_config("system-review")
         assert config["auto_create_agent_cycles"] is True
         assert config["auto_modify_agent_cycles"] is True
+
+    def test_ensure_theta_wave_never_rewrites_existing_config(self, tmp_cron_dir, pg_state):
+        """An existing stored config is never overwritten by the seeder."""
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            surface_state.set_config(
+                conn, "system-review",
+                {"enabled": False, "auto_create_agent_cycles": False, "custom": "kept"},
+            )
+
+        ensure_theta_wave()
+
+        config = _pg_config("system-review")
+        assert config["enabled"] is False
+        assert config["auto_create_agent_cycles"] is False
+        assert config["custom"] == "kept"
+
+
+class TestSurfaceRegistryPG:
+    """Registry + workspace seeding now persist to the account database."""
+
+    def test_load_surface_registry_seeds_builtins_idempotently(self, tmp_cron_dir, pg_state):
+        from cron.jobs import SURFACE_HEARTBEAT_DEFAULTS, load_surface_registry
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+        from elevate_constants import get_account_data_dir
+
+        reg = load_surface_registry()
+        for surface in SURFACE_HEARTBEAT_DEFAULTS:
+            assert surface in reg
+            assert reg[surface]["builtin"] is True
+            assert reg[surface]["created_by"] == "system"
+            assert reg[surface]["schedule"] == SURFACE_HEARTBEAT_DEFAULTS[surface]["schedule"]
+        # No surfaces.json written — registry lives in PG now.
+        assert not (get_account_data_dir() / "heartbeats" / "surfaces.json").exists()
+
+        # Idempotent: a second load returns the same registry, still one row each.
+        again = load_surface_registry()
+        assert set(again) == set(reg)
+        with connect() as conn:
+            rows = surface_state.list_registry(conn)
+        assert set(rows) == set(reg)
+
+    def test_register_surface_persists_custom_surface(self, tmp_cron_dir, pg_state):
+        from cron.jobs import load_surface_registry, register_surface
+
+        spec = {"name": "Custom Heartbeat", "schedule": "0 7 * * *",
+                "builtin": False, "created_by": "user"}
+        returned = register_surface("custom-x", spec)
+        assert returned is spec  # public contract: echoes the caller's spec
+
+        reg = load_surface_registry()
+        assert reg["custom-x"]["name"] == "Custom Heartbeat"
+        assert reg["custom-x"]["builtin"] is False
+        assert reg["custom-x"]["created_by"] == "user"
+
+    def test_seed_surface_workspace_config_in_pg_never_rewritten(self, tmp_cron_dir, pg_state):
+        from cron.jobs import SURFACE_HEARTBEAT_DEFAULTS, _seed_surface_heartbeat_workspace
+
+        spec = SURFACE_HEARTBEAT_DEFAULTS["leads"]
+        ws = _seed_surface_heartbeat_workspace("leads", spec, enabled=False)
+
+        # Markdown artifacts stay on disk…
+        assert (ws / "history").is_dir()
+        assert (ws / "experiments" / "history").is_dir()
+        assert (ws / "learnings.md").exists()
+        # …but the config is STATE → PG only, no config.json anymore.
+        assert not (ws / "config.json").exists()
+
+        config = _pg_config("leads")
+        assert config["surface"] == "leads"
+        assert config["enabled"] is False
+        assert config["goal"] == spec["goal"]
+        assert config["cadence"] == spec["schedule"]
+        # Legacy experiment block kept + exactly one cycle seeded from it.
+        assert config["experiment"] == spec["experiment"]
+        assert len(config["cycles"]) == 1
+        assert config["cycles"][0]["metric"] == spec["experiment"]["metric"]
+
+        # Re-seeding with a different enabled flag must NOT rewrite the config.
+        _seed_surface_heartbeat_workspace("leads", spec, enabled=True)
+        assert _pg_config("leads")["enabled"] is False
 
 
 class TestJobCRUD:

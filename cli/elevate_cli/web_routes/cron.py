@@ -254,6 +254,11 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
         queued_today: Optional[int] = None
         eligible_remaining: Optional[int] = None
         total_estimate: Optional[int] = None
+        # Crash-safe protocol: pass the same run_id on every report from one
+        # run (day bumps once per run); checkpoint=True marks an in-flight
+        # snapshot so a crashed run resumes from the last persisted state.
+        run_id: Optional[str] = None
+        checkpoint: bool = False
 
 
     @router.get("/api/cron/jobs/{job_id}/backfill")
@@ -284,6 +289,8 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
             queued_today=body.queued_today,
             eligible_remaining=body.eligible_remaining,
             total_estimate=body.total_estimate,
+            run_id=body.run_id,
+            checkpoint=body.checkpoint,
         )
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")

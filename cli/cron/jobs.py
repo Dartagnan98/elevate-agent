@@ -392,50 +392,57 @@ def resolve_surface_agent(surface: str, spec: Optional[Dict[str, Any]] = None) -
 def _seed_surface_heartbeat_workspace(
     surface: str, spec: Dict[str, Any], *, enabled: bool = True
 ) -> Path:
-    """Create accounts/<key>/heartbeats/<surface>/{config.json, learnings.md, history/,
-    experiments/history/} from defaults if absent. Returns the workspace Path.
+    """Create accounts/<key>/heartbeats/<surface>/{learnings.md, history/,
+    experiments/history/} on disk and seed the surface's config in the account
+    database (``surface_state``, migration 0024) from defaults if absent.
+    Returns the workspace Path.
 
-    ``enabled`` only governs a BRAND-NEW config.json — an existing config.json is
-    never rewritten, so a surface the realtor has already turned on stays on.
+    Markdown artifacts (learnings.md, history/) are documents and stay on disk;
+    the config is STATE and lives in the database. ``enabled`` only governs a
+    BRAND-NEW config — an existing stored config is never rewritten, so a
+    surface the realtor has already turned on stays on.
     """
     from elevate_constants import get_account_data_dir
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     ws = get_account_data_dir() / "heartbeats" / surface
     (ws / "history").mkdir(parents=True, exist_ok=True)
     (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
-    cfg = ws / "config.json"
-    if not cfg.exists():
-        # Build the new agent-creatable cycles[] from the spec's experiment block
-        # ADDITIVELY: keep the legacy single ``experiment`` key for back-compat
-        # (every reader tolerates both), and seed exactly one cycle from it so a
-        # brand-new surface already carries a real cycle.
-        exp = spec["experiment"]
-        _every_n = exp.get("every_n_runs", 7)
-        _seed_cycle = {
-            "name": exp.get("metric") or f"{surface} self-improvement",
-            "metric": exp.get("metric"),
-            "metric_type": exp.get("metric_type", "qualitative"),
-            "surface": "playbook",
-            "direction": exp.get("direction", "higher"),
-            "window": exp.get("window"),
-            "measurement": exp.get("measurement"),
-            "every_n_runs": _every_n,
-            "loop_interval": f"every {_every_n} runs",
-            "approval_required": bool(exp.get("approval_required", False)),
-            "enabled": True,
-            "created_by": "system",
-            "created_at": _hermes_now().isoformat(),
-        }
-        extra_config = spec.get("config") if isinstance(spec.get("config"), dict) else {}
-        resolved_agent = str(extra_config.get("agent") or resolve_surface_agent(surface, spec) or "").strip()
-        if resolved_agent and not extra_config.get("agent"):
-            extra_config = {**extra_config, "agent": resolved_agent}
-        cfg.write_text(json.dumps({
-            "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
-            "enabled": bool(enabled), "experiment": spec["experiment"],
-            "cycles": [_seed_cycle],
-            "created_by": "system", "created_at": _hermes_now().date().isoformat(),
-            **extra_config,
-        }, indent=2))
+    with connect() as conn:
+        if not surface_state.get_config(conn, surface):
+            # Build the new agent-creatable cycles[] from the spec's experiment block
+            # ADDITIVELY: keep the legacy single ``experiment`` key for back-compat
+            # (every reader tolerates both), and seed exactly one cycle from it so a
+            # brand-new surface already carries a real cycle.
+            exp = spec["experiment"]
+            _every_n = exp.get("every_n_runs", 7)
+            _seed_cycle = {
+                "name": exp.get("metric") or f"{surface} self-improvement",
+                "metric": exp.get("metric"),
+                "metric_type": exp.get("metric_type", "qualitative"),
+                "surface": "playbook",
+                "direction": exp.get("direction", "higher"),
+                "window": exp.get("window"),
+                "measurement": exp.get("measurement"),
+                "every_n_runs": _every_n,
+                "loop_interval": f"every {_every_n} runs",
+                "approval_required": bool(exp.get("approval_required", False)),
+                "enabled": True,
+                "created_by": "system",
+                "created_at": _hermes_now().isoformat(),
+            }
+            extra_config = spec.get("config") if isinstance(spec.get("config"), dict) else {}
+            resolved_agent = str(extra_config.get("agent") or resolve_surface_agent(surface, spec) or "").strip()
+            if resolved_agent and not extra_config.get("agent"):
+                extra_config = {**extra_config, "agent": resolved_agent}
+            surface_state.set_config(conn, surface, {
+                "surface": surface, "goal": spec["goal"], "cadence": spec["schedule"],
+                "enabled": bool(enabled), "experiment": spec["experiment"],
+                "cycles": [_seed_cycle],
+                "created_by": "system", "created_at": _hermes_now().date().isoformat(),
+                **extra_config,
+            })
     learn = ws / "learnings.md"
     if not learn.exists():
         learn.write_text(
@@ -448,11 +455,12 @@ def _seed_surface_heartbeat_workspace(
 
 # ─── Surface registry (surfaces are creatable, not hardcoded) ──────────────────
 # Built-in surfaces (leads, admin) are seed specs above; custom surfaces are added
-# at runtime via create_surface() and persisted to the account registry
-# accounts/<key>/heartbeats/surfaces.json — Elevate's analog of cortextOS
-# enabled-agents.json. ensure_surface() seeds ANY surface (built-in or custom) the
-# same way: workspace scaffold + opt-in cron job. SURFACE_TEMPLATE is the default
-# spec a new surface is filled from (cortextOS copyTemplateFiles equivalent).
+# at runtime via create_surface() and persisted to the account registry — the
+# ``surface_registry`` table (migration 0024; formerly heartbeats/surfaces.json) —
+# Elevate's analog of cortextOS enabled-agents.json. ensure_surface() seeds ANY
+# surface (built-in or custom) the same way: workspace scaffold + opt-in cron job.
+# SURFACE_TEMPLATE is the default spec a new surface is filled from (cortextOS
+# copyTemplateFiles equivalent).
 SURFACE_TEMPLATE: Dict[str, Any] = {
     "name": "{Title} Heartbeat",
     "schedule": "0 9 * * *",
@@ -470,64 +478,50 @@ SURFACE_TEMPLATE: Dict[str, Any] = {
 }
 
 
-def _surfaces_registry_path() -> Path:
-    from elevate_constants import get_account_data_dir
-    return get_account_data_dir() / "heartbeats" / "surfaces.json"
-
-
-def _write_surface_registry(reg: Dict[str, Dict[str, Any]]) -> None:
-    path = _surfaces_registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"surfaces": reg}, indent=2))
-    tmp.replace(path)
-
-
 def load_surface_registry() -> Dict[str, Dict[str, Any]]:
     """Return {surface: spec} for every registered surface — built-ins always present,
-    custom surfaces preserved. Seeds/repairs the on-disk registry with the built-ins so
-    a fresh account still gets Leads + Admin while custom surfaces persist across runs.
+    custom surfaces preserved. Seeds/repairs the database registry with the built-ins
+    so a fresh account still gets Leads + Admin while custom surfaces persist across
+    runs.
     """
-    path = _surfaces_registry_path()
-    reg: Dict[str, Any] = {}
-    if path.exists():
-        try:
-            reg = (json.loads(path.read_text()) or {}).get("surfaces") or {}
-        except Exception:
-            reg = {}
-    changed = not path.exists()
-    # Built-in surface KEYS are stable (leads, admin); only pay the backend fetch
-    # when one is actually missing (first seed). Backend mode honours the gate: seed
-    # ONLY the surfaces the entitled kit returned. Offline mode (kit is None) falls
-    # back to the full bundled SURFACE_HEARTBEAT_DEFAULTS.
-    missing = [s for s in SURFACE_HEARTBEAT_DEFAULTS if s not in reg]
-    if missing:
-        kit = _backend_kit()
-        if kit is not None:
-            hb = kit.get("heartbeats") or {}
-            for surface in missing:
-                spec = hb.get(surface)
-                if spec:  # entitled → seed; unentitled surface is skipped (gate)
-                    reg[surface] = {**spec, "builtin": True, "created_by": "system"}
-                    changed = True
-        else:
-            for surface in missing:  # offline fallback → bundled built-ins
-                reg[surface] = {
-                    **SURFACE_HEARTBEAT_DEFAULTS[surface],
-                    "builtin": True,
-                    "created_by": "system",
-                }
-                changed = True
-    if changed:
-        _write_surface_registry(reg)
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        reg = surface_state.list_registry(conn)
+        # Built-in surface KEYS are stable (leads, admin); only pay the backend fetch
+        # when one is actually missing (first seed). Backend mode honours the gate: seed
+        # ONLY the surfaces the entitled kit returned. Offline mode (kit is None) falls
+        # back to the full bundled SURFACE_HEARTBEAT_DEFAULTS.
+        missing = [s for s in SURFACE_HEARTBEAT_DEFAULTS if s not in reg]
+        if missing:
+            kit = _backend_kit()
+            if kit is not None:
+                hb = kit.get("heartbeats") or {}
+                for surface in missing:
+                    spec = hb.get(surface)
+                    if spec:  # entitled → seed; unentitled surface is skipped (gate)
+                        reg[surface] = surface_state.upsert_registry(
+                            conn, surface, {**spec, "created_by": "system"},
+                            builtin=True, created_by="system",
+                        )
+            else:
+                for surface in missing:  # offline fallback → bundled built-ins
+                    reg[surface] = surface_state.upsert_registry(
+                        conn, surface,
+                        {**SURFACE_HEARTBEAT_DEFAULTS[surface], "created_by": "system"},
+                        builtin=True, created_by="system",
+                    )
     return reg
 
 
 def register_surface(surface: str, spec: Dict[str, Any]) -> Dict[str, Any]:
     """Persist a surface spec to the account registry (add or replace)."""
-    reg = load_surface_registry()
-    reg[surface] = spec
-    _write_surface_registry(reg)
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        surface_state.upsert_registry(conn, surface, dict(spec))
     return spec
 
 
@@ -548,17 +542,31 @@ def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False)
         _seed_surface_heartbeat_workspace(
             surface, spec, enabled=bool(existing.get("enabled", False))
         )
+        patch: Dict[str, Any] = {}
         if not str(existing.get("agent") or "").strip():
             resolved_agent = resolve_surface_agent(surface, spec)
             if resolved_agent:
-                repaired = update_job(existing["id"], {"agent": resolved_agent})
-                return repaired or existing
+                patch["agent"] = resolved_agent
+        # Pre-0024 jobs instruct "read config.json" — that file is a frozen
+        # archive after the PG import, so an agent following it would read
+        # stale config. Repair the prompt once to the agent_bus contract.
+        old_prompt = str(existing.get("prompt") or "")
+        if "read config.json" in old_prompt:
+            patch["prompt"] = old_prompt.replace(
+                "read config.json",
+                "read your surface config via the agent_bus tool (action get_surface_config)",
+                1,
+            )
+        if patch:
+            repaired = update_job(existing["id"], patch)
+            return repaired or existing
         return existing
     ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=enabled)
     prompt = (
         f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
-        f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read config.json "
-        f"+ learnings.md, do the {surface} work, log to history/, distill learnings, and run "
+        f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read your surface "
+        f"config via the agent_bus tool (action get_surface_config) + the workspace "
+        f"learnings.md, do the {surface} work, log to history/, distill learnings, and run "
         f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
     )
     source = "system" if spec.get("created_by", "system") == "system" else "user"
@@ -650,11 +658,22 @@ def delete_surface(
         if job_id and remove_job(job_id):
             removed_jobs.append(job_id)
 
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     removed_registry = False
-    if key in reg:
-        reg.pop(key, None)
-        _write_surface_registry(reg)
-        removed_registry = True
+    with connect() as conn:
+        if key in reg:
+            removed_registry = bool(surface_state.remove_registry(conn, key))
+        if remove_files:
+            # State rows are part of the surface's data now (the old workspace
+            # config.json/goals.json/heartbeat.json/experiments lived in the
+            # folder being removed). surface_state has no bulk-delete helper, so
+            # clear the rows directly to keep delete_surface a true inverse of
+            # create_surface (a recreated surface seeds a fresh config).
+            conn.execute("DELETE FROM surface_state WHERE surface = ?", (key,))
+            conn.execute("DELETE FROM surface_experiments WHERE surface = ?", (key,))
+            conn.execute("DELETE FROM surface_goals_history WHERE surface = ?", (key,))
 
     removed_files = False
     if remove_files and surface_dir.exists():
@@ -765,17 +784,21 @@ def ensure_agent_heartbeat(agent_id: str, *, enabled: bool = False) -> Optional[
 def register_agent_surfaces() -> None:
     """Register one heartbeat surface per installed worker agent so the next
     ensure_surface_heartbeats() seeds them. Register-only (no job seeding here)."""
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     reg = load_surface_registry()
-    changed = False
+    missing: Dict[str, Dict[str, Any]] = {}
     for aid in _installed_agent_ids():
         if not aid or aid in _HEARTBEAT_EXCLUDED_AGENTS:
             continue
         surface, spec = _resolve_agent_surface(aid, reg)
-        if surface not in reg:
-            reg[surface] = spec
-            changed = True
-    if changed:
-        _write_surface_registry(reg)
+        if surface not in reg and surface not in missing:
+            missing[surface] = spec
+    if missing:
+        with connect() as conn:
+            for surface, spec in missing.items():
+                surface_state.upsert_registry(conn, surface, dict(spec))
 
 
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
@@ -784,7 +807,7 @@ def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
     the registry seed; custom surfaces created via create_surface() are seeded here too.
 
     Surface heartbeats run agent passes on the realtor's box, so a fresh install must
-    not auto-fire them: new seeds are DISABLED (config.json ``enabled: false`` + cron
+    not auto-fire them: new seeds are DISABLED (stored config ``enabled: false`` + cron
     paused). The realtor turns a surface on from the Heartbeat page. A surface whose
     cron job already exists is left exactly as-is. Mirrors the system-job seeders.
     """
@@ -999,37 +1022,34 @@ THETA_WAVE_SCHEDULE = "0 2 * * *"
 
 
 def _seed_theta_wave_workspace(*, enabled: bool = True) -> Path:
-    """Scaffold accounts/<key>/system-review/{config.json, learnings.md, history/,
-    experiments/history/, reviews/}. Repairs the config so the native fleet loop
-    can author heartbeat experiment cycles without a daemon or dashboard session."""
+    """Scaffold accounts/<key>/system-review/{learnings.md, history/,
+    experiments/history/, reviews/} on disk and seed the ``system-review``
+    config in the account database (``surface_state``) when absent, so the
+    native fleet loop can author heartbeat experiment cycles without a daemon
+    or dashboard session. Markdown artifacts stay on disk; an existing stored
+    config is never rewritten (same contract as the surface seeds)."""
     from elevate_constants import get_account_data_dir
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     ws = get_account_data_dir() / "system-review"
     (ws / "history").mkdir(parents=True, exist_ok=True)
     (ws / "experiments" / "history").mkdir(parents=True, exist_ok=True)
     (ws / "reviews").mkdir(parents=True, exist_ok=True)
-    cfg = ws / "config.json"
-    existing: Dict[str, Any] = {}
-    if cfg.exists():
-        try:
-            parsed = json.loads(cfg.read_text(encoding="utf-8"))
-            existing = parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            existing = {}
-    created_at = existing.get("created_at") or _hermes_now().date().isoformat()
-    config = {
-        "metric": "system_effectiveness",
-        "metric_type": "qualitative_compound",
-        "direction": "higher",
-        "schedule": THETA_WAVE_SCHEDULE,
-        "created_by": "system",
-        "created_at": created_at,
-        **existing,
-        "enabled": bool(enabled),
-        "auto_create_agent_cycles": True,
-        "auto_modify_agent_cycles": True,
-        "approval_required": False,
-    }
-    cfg.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+    with connect() as conn:
+        if not surface_state.get_config(conn, "system-review"):
+            surface_state.set_config(conn, "system-review", {
+                "metric": "system_effectiveness",
+                "metric_type": "qualitative_compound",
+                "direction": "higher",
+                "schedule": THETA_WAVE_SCHEDULE,
+                "created_by": "system",
+                "created_at": _hermes_now().date().isoformat(),
+                "enabled": bool(enabled),
+                "auto_create_agent_cycles": True,
+                "auto_modify_agent_cycles": True,
+                "approval_required": False,
+            })
     learn = ws / "learnings.md"
     if not learn.exists():
         learn.write_text(
@@ -1090,6 +1110,47 @@ def ensure_theta_wave() -> Dict[str, Any]:
     )
 
 
+# ─── Memory benchmark (weekly, read-only telemetry) ──────────────────────────
+MEMORY_BENCHMARK_JOB_NAME = "Memory Benchmark"
+MEMORY_BENCHMARK_SCHEDULE = "0 3 * * 0"  # weekly, Sunday 03:00
+
+
+def ensure_memory_benchmark_job() -> Dict[str, Any]:
+    """Idempotently seed the weekly Memory Benchmark system job.
+
+    Enabled by default — the benchmark is cheap and strictly read-only against
+    the memory store (it only appends telemetry to the account's
+    ``memory/benchmark_history.jsonl`` and posts one activity event). An
+    existing job is left exactly as-is (pause/edits respected, no repair).
+    """
+    existing = next(
+        (
+            j for j in load_jobs()
+            if (j.get("name") or "").strip().lower() == MEMORY_BENCHMARK_JOB_NAME.lower()
+        ),
+        None,
+    )
+    if existing:
+        return existing
+    prompt = (
+        "Run the weekly holographic memory benchmark. Execute `elevate memory benchmark --json` "
+        "in the terminal — it is read-only against the memory store, prints the score, appends it "
+        "to the account's memory/benchmark_history.jsonl, and posts a memory_benchmark activity "
+        "event. Then compare this run to the PREVIOUS line of benchmark_history.jsonl: if any "
+        "metric regressed more than 20% (recall_hit_rate down, duplicate_injection_rate up, "
+        "latency_ms.p95 up, or injected_token_estimate.mean_per_query up), post a one-line "
+        "agent_bus activity note (event 'memory_benchmark_regression') naming the metric and its "
+        "before/after values. If nothing regressed, stay silent. Never write to the memory store."
+    )
+    return create_job(
+        prompt=prompt,
+        schedule=MEMORY_BENCHMARK_SCHEDULE,
+        name=MEMORY_BENCHMARK_JOB_NAME,
+        deliver="local",
+        origin={"type": "system-maintenance", "source": "memory-benchmark"},
+    )
+
+
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
     # Give every installed worker agent its own heartbeat surface before seeding,
@@ -1102,6 +1163,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         *ensure_surface_heartbeats(),
         *ensure_surface_automations(),
         ensure_theta_wave(),
+        ensure_memory_benchmark_job(),
     ]
 
 
@@ -1840,32 +1902,69 @@ def update_backfill_state(
     queued_today: Optional[int] = None,
     eligible_remaining: Optional[int] = None,
     total_estimate: Optional[int] = None,
+    run_id: Optional[str] = None,
+    checkpoint: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Lane skill reports per-run backfill progress."""
-    job = get_job(job_id)
-    if not job:
-        return None
-    if not job.get("backfill_pending"):
-        return job
-    state = dict(job.get("backfill_state") or {
-        "day": 0,
-        "total_estimate": 0,
-        "queued_today": 0,
-        "eligible_remaining": None,
-        "updated_at": None,
-    })
-    state["day"] = int(state.get("day") or 0) + 1
-    if queued_today is not None:
-        state["queued_today"] = int(queued_today)
-    if eligible_remaining is not None:
-        state["eligible_remaining"] = int(eligible_remaining)
-    if total_estimate is not None:
-        state["total_estimate"] = int(total_estimate)
-    state["updated_at"] = _elevate_now().isoformat()
-    updates: Dict[str, Any] = {"backfill_state": state}
-    if state.get("eligible_remaining") == 0:
-        updates["backfill_pending"] = False
-    return update_job(job_id, updates)
+    """Lane skill reports per-run backfill progress.
+
+    Every call persists IMMEDIATELY, so callers can (and should) report
+    after each unit of work instead of only once at successful end-of-run.
+    Historically the lane skill reported once after a run completed — a
+    crash/timeout mid-run lost the whole run's progress and the iterator
+    resumed from the previous run's counters.
+
+    Crash-safe protocol: pass a stable ``run_id`` (e.g. the cron session id)
+    and call with ``checkpoint=True`` after each chunk.  ``day`` bumps once
+    per distinct run_id (first report wins; later reports from the same run
+    only refresh the counters), so mid-run checkpoints never inflate the day
+    counter and a final end-of-run report doesn't double-count.  If the run
+    dies between checkpoints, the last persisted checkpoint is the resume
+    point for the next run.
+
+    Backward compatible: calls without ``run_id`` keep the legacy behavior
+    (every call bumps ``day``), and state dicts written by older versions
+    load unchanged — the new ``last_run_id`` / ``checkpoint`` keys are
+    simply absent.
+    """
+    # Hold the jobs-file lock across the read-modify-write so concurrent
+    # checkpoint posts / mark_job_run calls can't clobber each other.
+    # (get_job/update_job do not themselves acquire the lock.)
+    with _jobs_file_lock:
+        job = get_job(job_id)
+        if not job:
+            return None
+        if not job.get("backfill_pending"):
+            return job
+        state = dict(job.get("backfill_state") or {
+            "day": 0,
+            "total_estimate": 0,
+            "queued_today": 0,
+            "eligible_remaining": None,
+            "updated_at": None,
+        })
+        same_run = bool(run_id) and state.get("last_run_id") == run_id
+        if not same_run:
+            state["day"] = int(state.get("day") or 0) + 1
+        if run_id:
+            state["last_run_id"] = str(run_id)
+        # Flag mid-run snapshots so observers (dashboard, next run) can tell
+        # "in-flight checkpoint" from "run finished cleanly".  A final
+        # (non-checkpoint) report clears it.
+        state["checkpoint"] = bool(checkpoint)
+        if queued_today is not None:
+            state["queued_today"] = int(queued_today)
+        if eligible_remaining is not None:
+            state["eligible_remaining"] = int(eligible_remaining)
+        if total_estimate is not None:
+            state["total_estimate"] = int(total_estimate)
+        # NOTE: was `_elevate_now()` — an undefined name, so EVERY progress
+        # report raised NameError and no backfill state ever persisted (the
+        # root of the "progress only survives a clean run" audit finding).
+        state["updated_at"] = _hermes_now().isoformat()
+        updates: Dict[str, Any] = {"backfill_state": state}
+        if state.get("eligible_remaining") == 0:
+            updates["backfill_pending"] = False
+        return update_job(job_id, updates)
 
 
 def pause_job(job_id: str, reason: Optional[str] = None) -> Optional[Dict[str, Any]]:

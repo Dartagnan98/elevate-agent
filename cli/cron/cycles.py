@@ -3,8 +3,9 @@
 Elevate-native port of cortextOS's ``manageCycle`` / ``findCycleDefaults``
 (``src/bus/experiment.ts``). A *cycle* is an agent-creatable, recurring
 self-improvement experiment definition that lives as DATA in a surface's
-``config.json`` under a ``cycles[]`` array — replacing the single hardcoded
-``experiment`` block.
+stored config (``surface_state`` table, migration 0024 — formerly the
+workspace ``config.json``) under a ``cycles[]`` array — replacing the single
+hardcoded ``experiment`` block.
 
 This module is ADDITIVE and TOLERANT:
   * Reads accept BOTH the new ``cycles[]`` array AND the legacy single
@@ -33,15 +34,11 @@ in addition to the cortextOS fields)::
       "created_at": str,
     }
 
-No external deps. Tolerant reads, atomic writes.
+Tolerant reads; writes persist through the account database.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -62,40 +59,27 @@ def _now_iso() -> str:
     return _hermes_now().isoformat()
 
 
-def _surface_config_path(surface: str) -> Path:
-    """``accounts/<key>/heartbeats/<surface>/config.json`` for the active account."""
-    from elevate_constants import get_account_data_dir
-
-    return get_account_data_dir() / "heartbeats" / surface / "config.json"
-
-
 def _read_config(surface: str) -> Dict[str, Any]:
-    """Tolerant read of a surface's config.json. Returns ``{}`` on any failure."""
-    path = _surface_config_path(surface)
+    """Tolerant read of a surface's stored config. Returns ``{}`` on any failure
+    (the old tolerant ``config.json`` read contract)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            return surface_state.get_config(conn, surface)
     except Exception:
         return {}
 
 
-def _atomic_write_config(surface: str, config: Dict[str, Any]) -> None:
-    """Atomic tmp+rename write of a surface's config.json."""
-    path = _surface_config_path(surface)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(config, fh, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+def _write_config(surface: str, config: Dict[str, Any]) -> None:
+    """Persist a surface's config to the account database (replaces the old
+    atomic ``config.json`` write)."""
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        surface_state.set_config(conn, surface, config)
 
 
 def _migrate_legacy(config: Dict[str, Any], surface: str) -> List[Dict[str, Any]]:
@@ -205,7 +189,7 @@ def manage_cycle(surface: str, action: str, **opts: Any) -> Dict[str, Any]:
             "created_at": _now_iso(),
         }
         cycles.append(cycle)
-        _atomic_write_config(surface, config)
+        _write_config(surface, config)
         return {"ok": True, "cycles": cycles}
 
     # modify / remove both need a name to locate the cycle (case-insensitive).
@@ -222,7 +206,7 @@ def manage_cycle(surface: str, action: str, **opts: Any) -> Dict[str, Any]:
 
     if action == "remove":
         cycles.pop(idx)
-        _atomic_write_config(surface, config)
+        _write_config(surface, config)
         return {"ok": True, "cycles": cycles}
 
     # modify: validate then patch only supplied keys.
@@ -238,7 +222,7 @@ def manage_cycle(surface: str, action: str, **opts: Any) -> Dict[str, Any]:
     for key in patchable:
         if key in opts and opts[key] is not None:
             cycles[idx][key] = opts[key]
-    _atomic_write_config(surface, config)
+    _write_config(surface, config)
     return {"ok": True, "cycles": cycles}
 
 
