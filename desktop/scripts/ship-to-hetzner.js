@@ -39,12 +39,16 @@ const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
 const selected = new Set(["latest-mac.yml"]);
 for (const file of feed.files || []) {
   selected.add(file.url);
-  // The updater uses zip blockmaps on macOS. DMG blockmaps are generated before
-  // finalize:mac signs/staples the DMGs, so do not upload stale DMG blockmaps.
-  if (file.url.endsWith(".zip")) {
-    const blockMap = `${file.url}.blockmap`;
-    if (fs.existsSync(path.join(DIST, blockMap))) selected.add(blockMap);
-  }
+  // Intentionally DO NOT ship zip blockmaps. Blockmaps are what enable
+  // differential updates, and differential reconstruction off a locally-mutated
+  // install is exactly what corrupts the new bundle's signature ("a sealed
+  // resource is missing or invalid" → ShipIt aborts → customer stuck).
+  // The app now sets autoUpdater.disableDifferentialDownload = true, but OLD
+  // installs predating that flag will still attempt a differential. With no
+  // blockmap on the server, their differential lookup 404s and they fall back
+  // to a full-zip download — pristine + notarized — which installs cleanly and
+  // lands them on a build that has the flag. That is how every stuck client
+  // self-recovers with no manual reinstall. Keep blockmaps off the server.
 }
 
 // Fresh-download DMGs: electron-updater never uses these (auto-update is the zip),
@@ -93,6 +97,19 @@ const chown = spawnSync(
 
 if (chown.status !== 0) {
   console.error("[ship] chown failed — may need to fix permissions manually");
+}
+
+// Purge any zip blockmaps already on the server. While a blockmap for the
+// current feed version exists, old (pre-flag) clients keep attempting the
+// differential path that corrupts the signature. Removing them forces the
+// full-zip fallback so stuck clients recover on their next poll.
+const dropBlockmaps = spawnSync(
+  "ssh",
+  [HOST, `rm -f ${REMOTE}*.zip.blockmap && echo "[remote] blockmaps purged"`],
+  { stdio: "inherit" },
+);
+if (dropBlockmaps.status !== 0) {
+  console.error("[ship] blockmap purge failed — remove them manually so old clients fall back to full download");
 }
 
 // Refresh the stable "latest" fresh-download aliases so a single permanent URL

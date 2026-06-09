@@ -22,6 +22,16 @@ log.transports.file.level = "info";
 autoUpdater.logger = log;
 autoUpdater.autoDownload = true; // download in background as soon as available
 autoUpdater.autoInstallOnAppQuit = true; // safety net if user ignores the toast
+// Always pull the full, notarized zip — never a differential reconstruction.
+// Differential updates rebuild the new .app from the *currently installed* app's
+// blocks. Older builds (before PYTHONPYCACHEPREFIX/PYTHONDONTWRITEBYTECODE) let
+// the bundled Python write .pyc into Contents/Resources at runtime, so the
+// reconstructed bundle carries stray .pyc + an altered web_dist/index.html that
+// aren't in the signature's sealed manifest. macOS then rejects it:
+//   "a sealed resource is missing or invalid" → ShipIt aborts → stuck on old ver.
+// The full zip is pristine (your DMG installs work for exactly this reason), so
+// forcing it sidesteps the whole class of failure.
+autoUpdater.disableDifferentialDownload = true;
 
 const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
