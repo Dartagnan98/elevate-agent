@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Clock, History, Loader2, RefreshCw, UserRound, X } from "lucide-react";
 import { api } from "@/lib/api";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import type { SurfaceApproval, SurfaceTask } from "@/lib/api-types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -332,41 +333,51 @@ function CardListSkeleton({ rows = 5 }: { rows?: number }) {
 }
 
 export default function ApprovalsPage() {
-  const [pending, setPending] = useState<SurfaceApproval[]>([]);
-  const [resolved, setResolved] = useState<SurfaceApproval[]>([]);
-  const [humanTasks, setHumanTasks] = useState<SurfaceTask[]>([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<ApprovalTab>("pending");
   const [surfaceFilter, setSurfaceFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [selectedApproval, setSelectedApproval] = useState<SurfaceApproval | null>(null);
   const [selectedTask, setSelectedTask] = useState<SurfaceTask | null>(null);
 
-  const load = useCallback(async (refresh = false) => {
-    if (refresh) setRefreshing(true);
-    try {
+  // Cached across tab switches: revisiting Approvals paints instantly and
+  // revalidates in the background (no skeleton flash).
+  const { data, loading, error: cacheError, refresh } = useCachedResource(
+    "approvals-page",
+    async () => {
       const [pendingResp, resolvedResp, humanResp] = await Promise.all([
         api.listSurfaceApprovals({ status: "pending" }),
         api.listSurfaceApprovals({ status: "resolved" }),
         api.listSurfaceTasks({ assignee: "human" }),
       ]);
-      setPending(pendingResp.approvals || []);
-      setResolved(resolvedResp.approvals || []);
-      setHumanTasks((humanResp.tasks || []).filter((task) => task.status !== "completed" && !task.archived));
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      return {
+        pending: pendingResp.approvals || [],
+        resolved: resolvedResp.approvals || [],
+        humanTasks: (humanResp.tasks || []).filter(
+          (task) => task.status !== "completed" && !task.archived,
+        ),
+      };
+    },
+    { ttl: 5000 },
+  );
+  const pending = data?.pending ?? [];
+  const resolved = data?.resolved ?? [];
+  const humanTasks = data?.humanTasks ?? [];
+  const error = cacheError ? String(cacheError) : null;
+
+  const load = useCallback(
+    async (showSpinner = false) => {
+      if (showSpinner) setRefreshing(true);
+      try {
+        await refresh();
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
-    setLoading(true);
-    load(false);
     const id = window.setInterval(() => load(true), 30000);
     return () => window.clearInterval(id);
   }, [load]);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
+import { useCachedResource } from "../hooks/useCachedResource";
 import {
   ArrowDown,
   ArrowUp,
@@ -1121,10 +1122,7 @@ export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const agentParam = searchParams.get("agent") || "";
   const [view, setView] = useState<ViewMode>("kanban");
-  const [tasks, setTasks] = useState<SurfaceTask[]>([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<TaskFiltersProps>({
     ...DEFAULT_FILTERS,
     agent: agentParam || "all",
@@ -1132,11 +1130,12 @@ export default function TasksPage() {
   const [selectedTask, setSelectedTask] = useState<SurfaceTask | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
-  const [agents, setAgents] = useState<string[]>([]);
 
-  const fetchTasks = useCallback(async (refresh = false) => {
-    if (refresh) setRefreshing(true);
-    try {
+  // Cached across tab switches: revisiting Tasks paints the last data
+  // instantly and revalidates in the background (no skeleton flash).
+  const { data, loading, error: cacheError, refresh } = useCachedResource(
+    "tasks-page",
+    async () => {
       const [taskRes, hubRes, experimentsRes] = await Promise.all([
         api.listSurfaceTasks(),
         api.getAgentHub({ lite: true }).catch(() => ({ agents: [] as AgentHubAgent[] })),
@@ -1144,20 +1143,31 @@ export default function TasksPage() {
       ]);
       const hubAgents = (hubRes.agents || []).map((agent) => agent.id);
       const heartbeatAgents = (experimentsRes.surfaces || []).map((surface) => surface.surface);
-      setTasks(taskRes.tasks || []);
-      setAgents(unique([...hubAgents, ...heartbeatAgents, ...(taskRes.tasks || []).map((task) => taskAssignee(task))]));
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      const taskList = taskRes.tasks || [];
+      const agentList = unique([
+        ...hubAgents,
+        ...heartbeatAgents,
+        ...taskList.map((task) => taskAssignee(task)),
+      ]);
+      return { tasks: taskList, agents: agentList };
+    },
+    { ttl: 5000 },
+  );
+  const tasks = data?.tasks ?? [];
+  const agents = data?.agents ?? [];
+  const error = cacheError ? String(cacheError) : null;
 
-  useEffect(() => {
-    void fetchTasks(false);
-  }, [fetchTasks]);
+  const fetchTasks = useCallback(
+    async (showSpinner = false) => {
+      if (showSpinner) setRefreshing(true);
+      try {
+        await refresh();
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     const id = window.setInterval(() => void fetchTasks(true), 30000);

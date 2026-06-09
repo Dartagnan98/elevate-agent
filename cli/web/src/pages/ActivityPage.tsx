@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { Activity, Clock, FlaskConical, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -95,28 +96,35 @@ function KindGlyph({ kind }: { kind: string }) {
 }
 
 export default function ActivityPage() {
-  const [items, setItems] = useState<Item[]>([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [agentFilter, setAgentFilter] = useState("");
 
-  const load = useCallback(async (refresh: boolean) => {
-    if (refresh) setRefreshing(true);
-    try {
+  // Cached across tab switches (server-side TTL-cached too) so revisiting
+  // Activity paints instantly and revalidates in the background.
+  const { data, loading, error: cacheError, refresh } = useCachedResource(
+    "activity-feed",
+    async () => {
       const resp = await api.getActivity({ limit: 150 });
-      setItems(((resp.items || []) as RawItem[]).map(normalizeItem));
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      return ((resp.items || []) as RawItem[]).map(normalizeItem);
+    },
+    { ttl: 5000 },
+  );
+  const items = data ?? [];
+  const error = cacheError ? String(cacheError) : null;
+
+  const load = useCallback(
+    async (showSpinner: boolean) => {
+      if (showSpinner) setRefreshing(true);
+      try {
+        await refresh();
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
-    load(false);
     const id = window.setInterval(() => load(true), 20000);
     return () => window.clearInterval(id);
   }, [load]);
