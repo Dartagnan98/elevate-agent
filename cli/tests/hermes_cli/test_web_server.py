@@ -120,6 +120,27 @@ class TestWebServerEndpoints:
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
+    @pytest.fixture(autouse=True)
+    def _fresh_surface_state(self):
+        """Surface heartbeat STATE lives in the account DB (migration 0024).
+
+        Reset the cached schema/pool/embedded-server state so each test's
+        ``connect()`` targets its own isolated ELEVATE_HOME, and clear the
+        web_server FS-scan TTL cache so one test's surfaces snapshot never
+        leaks into the next (the cache is keyed on the account key, which is
+        constant across tests).
+        """
+        from elevate_cli.data.connection import _reset_schema_cache
+        import elevate_cli.web_server as _ws
+
+        _reset_schema_cache()
+        with _ws._FS_SCAN_CACHE_LOCK:
+            _ws._FS_SCAN_CACHE.clear()
+        yield
+        _reset_schema_cache()
+        with _ws._FS_SCAN_CACHE_LOCK:
+            _ws._FS_SCAN_CACHE.clear()
+
     def test_get_status(self):
         resp = self.client.get("/api/status")
         assert resp.status_code == 200
@@ -143,27 +164,23 @@ class TestWebServerEndpoints:
         assert resp.json()["agents"] == []
 
     def test_get_heartbeat_experiments_reads_proposed_and_running_records(self):
-        from elevate_constants import get_account_data_dir
+        from elevate_cli.data import connect, surface_state
 
-        surface_dir = get_account_data_dir() / "heartbeats" / "theta-wave-test"
-        active_dir = surface_dir / "experiments" / "active"
-        history_dir = surface_dir / "experiments" / "history"
-        active_dir.mkdir(parents=True)
-        history_dir.mkdir(parents=True)
-        (surface_dir / "config.json").write_text(
-            json.dumps(
+        with connect() as conn:
+            surface_state.set_config(
+                conn,
+                "theta-wave-test",
                 {
                     "experiment": {
                         "metric": "stale_handoffs",
                         "direction": "lower",
                         "window": "7d",
                     }
-                }
-            ),
-            encoding="utf-8",
-        )
-        (history_dir / "proposed.json").write_text(
-            json.dumps(
+                },
+            )
+            surface_state.upsert_experiment(
+                conn,
+                "theta-wave-test",
                 {
                     "id": "exp-proposed",
                     "status": "proposed",
@@ -171,23 +188,21 @@ class TestWebServerEndpoints:
                     "metric": "stale_handoffs",
                     "baseline_value": 7,
                     "created_at": "2026-06-06T10:00:00Z",
-                }
-            ),
-            encoding="utf-8",
-        )
-        (active_dir / "stale_handoffs.json").write_text(
-            json.dumps(
+                },
+            )
+            surface_state.upsert_experiment(
+                conn,
+                "theta-wave-test",
                 {
                     "id": "exp-running",
                     "status": "running",
+                    "cycle": "stale_handoffs",
                     "hypothesis": "Native loops improve recovery.",
                     "metric": "stale_handoffs",
                     "baseline_value": 7,
                     "started_at": "2026-06-06T11:00:00Z",
-                }
-            ),
-            encoding="utf-8",
-        )
+                },
+            )
 
         resp = self.client.get("/api/heartbeats/experiments")
 
@@ -207,14 +222,17 @@ class TestWebServerEndpoints:
     def test_heartbeat_surface_config_patch_updates_config_and_job(self):
         from cron.jobs import create_job, load_jobs
         from elevate_constants import get_account_data_dir
+        from elevate_cli.data import connect, surface_state
 
         surface = "admin-edit-test"
         surface_dir = get_account_data_dir() / "heartbeats" / surface
         surface_dir.mkdir(parents=True)
-        (surface_dir / "config.json").write_text(
-            json.dumps({"enabled": True, "goal": "Old admin loop", "cadence": "30 7 * * *"}),
-            encoding="utf-8",
-        )
+        with connect() as conn:
+            surface_state.set_config(
+                conn,
+                surface,
+                {"enabled": True, "goal": "Old admin loop", "cadence": "30 7 * * *"},
+            )
         job = create_job(
             prompt="Run the admin heartbeat.",
             schedule="30 7 * * *",
@@ -247,10 +265,13 @@ class TestWebServerEndpoints:
         assert payload["config"]["cadence"] == "every 2h"
         assert payload["config"]["agent"] == "executive-assistant"
         assert payload["config"]["model"] == "gpt-5.1"
-        saved_config = json.loads((surface_dir / "config.json").read_text(encoding="utf-8"))
+        with connect() as conn:
+            saved_config = surface_state.get_config(conn, surface)
         assert saved_config["timezone"] == "America/Vancouver"
         assert saved_config["heartbeat_report_mode"] == "notify"
         assert saved_config["approval_rules"]["always_ask"] == ["deployment", "data-deletion"]
+        # Allowlist-merge preserved the keys the patch didn't touch.
+        assert saved_config["enabled"] is True
 
         updated_job = next(j for j in load_jobs() if j["id"] == job["id"])
         assert updated_job["agent"] == "executive-assistant"
@@ -263,14 +284,19 @@ class TestWebServerEndpoints:
     def test_heartbeat_surface_snapshot_infers_matching_agent(self):
         from cron.jobs import create_job
         from elevate_constants import get_account_data_dir
+        from elevate_cli.data import connect, surface_state
 
         surface = "admin"
         surface_dir = get_account_data_dir() / "heartbeats" / surface
+        # The dir exists only as the cron job's workdir — config/state live in
+        # the account DB (no config.json on disk).
         surface_dir.mkdir(parents=True)
-        (surface_dir / "config.json").write_text(
-            json.dumps({"enabled": True, "goal": "Admin loop", "cadence": "30 7 * * *"}),
-            encoding="utf-8",
-        )
+        with connect() as conn:
+            surface_state.set_config(
+                conn,
+                surface,
+                {"enabled": True, "goal": "Admin loop", "cadence": "30 7 * * *"},
+            )
         create_job(
             prompt="Run the admin heartbeat.",
             schedule="30 7 * * *",
@@ -302,6 +328,81 @@ class TestWebServerEndpoints:
 
         assert resp.status_code == 400
         assert "invalid cadence" in resp.json()["detail"]
+
+    def test_heartbeat_surface_goals_roundtrip_pg(self):
+        from elevate_cli.data import connect, surface_state
+
+        surface = "goals-test"
+        with connect() as conn:
+            surface_state.set_config(conn, surface, {"goal": "g"})
+
+        resp = self.client.get(f"/api/heartbeats/surfaces/{surface}/goals")
+        assert resp.status_code == 200
+        assert resp.json()["goals"] == []
+
+        resp = self.client.patch(
+            f"/api/heartbeats/surfaces/{surface}/goals",
+            json={
+                "bottleneck": "follow-ups",
+                "daily_focus": "drain the queue",
+                "goals": [
+                    {"title": "Second", "progress": 250, "order": 5},
+                    {"id": "g-keep", "title": "First", "progress": -3, "order": 0},
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["bottleneck"] == "follow-ups"
+        assert payload["daily_focus"] == "drain the queue"
+        assert payload["daily_focus_set_at"]  # stamped when the focus changes
+        # progress clamped 0-100, order re-minted 0..n, ids preserved/minted
+        assert [g["title"] for g in payload["goals"]] == ["First", "Second"]
+        assert payload["goals"][0]["id"] == "g-keep"
+        assert payload["goals"][0]["progress"] == 0
+        assert payload["goals"][1]["progress"] == 100
+        assert payload["goals"][1]["id"]
+
+        # GET reads back the persisted DB state; exactly ONE history row appended.
+        resp = self.client.get(f"/api/heartbeats/surfaces/{surface}/goals")
+        assert resp.status_code == 200
+        assert resp.json()["bottleneck"] == "follow-ups"
+        with connect() as conn:
+            hist = surface_state.list_goals_history(conn, surface)
+        assert len(hist) == 1
+        assert hist[0]["bottleneck"] == "follow-ups"
+
+        resp = self.client.patch(
+            f"/api/heartbeats/surfaces/{surface}/goals",
+            json={"goals": [{"title": "x" * 201}]},
+        )
+        assert resp.status_code == 400
+
+    def test_heartbeat_surface_create_and_delete_purge_db_state(self):
+        from elevate_cli.data import connect, surface_state
+
+        resp = self.client.post(
+            "/api/heartbeats/surfaces",
+            json={"surface": "concierge", "schedule": "0 9 * * *", "goal": "Test loop"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["surface"] == "concierge"
+        with connect() as conn:
+            assert "concierge" in surface_state.list_registry(conn)
+            surface_state.upsert_experiment(
+                conn, "concierge", {"id": "exp-x", "status": "completed"}
+            )
+
+        resp = self.client.delete("/api/heartbeats/surfaces/concierge")
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        with connect() as conn:
+            assert "concierge" not in surface_state.list_registry(conn)
+            assert "concierge" not in surface_state.list_state_surfaces(conn)
+            assert surface_state.list_experiments(conn, "concierge") == []
+
+        resp = self.client.delete("/api/heartbeats/surfaces/concierge")
+        assert resp.status_code == 404
 
     def test_update_session_title(self):
         from elevate_state import SessionDB

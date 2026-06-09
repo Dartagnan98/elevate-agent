@@ -583,8 +583,12 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "category": "agent_hub",
     },
     "agent_hub.agents": {
+        # NOTE: agent definitions are authoritative in the per-account DB
+        # (hub_agents, migration 0026). config.yaml's copy is a frozen
+        # one-shot-import archive — edits here are inert on read. Manage
+        # agents via /api/agent-hub/agents. Kept in the schema for back-compat.
         "type": "json",
-        "description": "Agent Hub personas/orchestration metadata",
+        "description": "Agent Hub personas/orchestration metadata (read-only archive; manage via Agent Hub)",
         "category": "agent_hub",
     },
     "display.resume_display": {
@@ -6906,25 +6910,26 @@ def get_heartbeat_surfaces():
 def _compute_heartbeat_surfaces():
     """Per-surface heartbeat state for the CURRENT account.
 
-    Scans ``<account_data_dir>/heartbeats/<surface>/`` (admin, leads, …) and
-    returns each surface's config, run history, accumulated learnings, and
-    experiment keep/discard record. Mirrors the cortextOS experiments scan but
-    Elevate-native and per-account-scoped. Missing dirs/files degrade to empty
-    so a surface that has never fired still renders.
+    Surface STATE (config, heartbeat record, experiments) lives in the account
+    database (migration 0024); markdown artifacts (learnings.md, history/ run
+    records) stay in ``<account_data_dir>/heartbeats/<surface>/``. Surfaces
+    enumerate from the DB, unioned with any workspace dirs that exist
+    (back-compat). Mirrors the cortextOS experiments scan but Elevate-native
+    and per-account-scoped. Missing rows/files degrade to empty so a surface
+    that has never fired still renders.
     """
     try:
         from elevate_constants import get_account_data_dir
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
 
         heartbeats_dir = get_account_data_dir() / "heartbeats"
         surfaces: List[Dict[str, Any]] = []
 
-        if not heartbeats_dir.is_dir():
-            return {"surfaces": surfaces}
-
-        # Authoritative enabled state lives on the cron job, not config.json — a
+        # Authoritative enabled state lives on the cron job, not the config — a
         # paused/resumed toggle updates the job first. Map surface -> job.enabled
         # so a card reflects whether the heartbeat will actually fire, even if a
-        # stale config.json copy disagrees.
+        # stale config copy disagrees.
         job_by_surface: Dict[str, Dict[str, Any]] = {}
         job_enabled_by_surface: Dict[str, bool] = {}
         # Surface automations are the per-surface "kit" cron jobs that pair with
@@ -6960,7 +6965,7 @@ def _compute_heartbeat_surfaces():
                         }
                     )
         except Exception:
-            # No cron access -> fall back to config.json's own enabled below.
+            # No cron access -> fall back to the config's own enabled below.
             job_enabled_by_surface = {}
             automations_by_surface = {}
 
@@ -6974,139 +6979,158 @@ def _compute_heartbeat_surfaces():
             except Exception:
                 return None
 
-        for surface_dir in sorted(heartbeats_dir.iterdir(), key=lambda p: p.name):
-            if not surface_dir.is_dir():
-                continue
-            surface_name = surface_dir.name
-
-            # Config
-            config = _read_json(surface_dir / "config.json")
-            # Overlay the AUTHORITATIVE enabled from the cron job so the card
-            # never shows a stale config.json value (the toggle writes the job
-            # first). Falls back to config.json's own enabled when no job exists.
-            if surface_name in job_enabled_by_surface:
-                if not isinstance(config, dict):
-                    config = {}
-                config["enabled"] = job_enabled_by_surface[surface_name]
-            job = job_by_surface.get(surface_name)
-            if job:
-                if not isinstance(config, dict):
-                    config = {}
-                if job.get("agent"):
-                    config["agent"] = job.get("agent")
-                if job.get("deliver"):
-                    config["deliver"] = job.get("deliver")
-                if job.get("model"):
-                    config["model"] = job.get("model")
-                if not config.get("cadence"):
-                    schedule = job.get("schedule") or {}
-                    config["cadence"] = (
-                        job.get("schedule_display")
-                        or (schedule.get("display") if isinstance(schedule, dict) else None)
-                        or (schedule.get("expr") if isinstance(schedule, dict) else None)
-                    )
-            if isinstance(config, dict) and not str(config.get("agent") or "").strip():
-                try:
-                    from cron.jobs import resolve_surface_agent
-
-                    inferred_agent = resolve_surface_agent(surface_name, {"config": config})
-                    if inferred_agent:
-                        config["agent"] = inferred_agent
-                except Exception:
-                    pass
-
-            # Work-run history (history/*.json), newest first.
-            history_files: List[Path] = []
-            hist_dir = surface_dir / "history"
-            if hist_dir.is_dir():
-                history_files = sorted(
-                    (p for p in hist_dir.glob("*.json") if p.is_file()),
-                    key=lambda p: p.name,
-                    reverse=True,
+        with connect() as conn:
+            # Surfaces enumerate from the account DB (state + registry rows),
+            # unioned with any workspace dirs that exist (back-compat / markdown).
+            surface_names = set(surface_state.list_state_surfaces(conn))
+            if heartbeats_dir.is_dir():
+                surface_names.update(
+                    p.name for p in heartbeats_dir.iterdir() if p.is_dir()
                 )
-            run_count = len(history_files)
-            last_run = _read_json(history_files[0]) if history_files else None
 
-            # Learnings (raw markdown)
-            learnings = ""
-            learnings_path = surface_dir / "learnings.md"
-            if learnings_path.is_file():
-                try:
-                    learnings = learnings_path.read_text(encoding="utf-8")
-                except Exception:
-                    learnings = ""
+            for surface_name in sorted(surface_names):
+                surface_dir = heartbeats_dir / surface_name
 
-            # Experiments: active.json + history/*.json
-            exp_dir = surface_dir / "experiments"
-            active_exp = _read_json(exp_dir / "active.json") if exp_dir.is_dir() else None
-            exp_history: List[Any] = []
-            exp_hist_dir = exp_dir / "history"
-            if exp_hist_dir.is_dir():
-                exp_history_files = sorted(
-                    (p for p in exp_hist_dir.glob("*.json") if p.is_file()),
-                    key=lambda p: p.name,
-                    reverse=True,
+                # Config (account DB; missing row degrades to None like the old
+                # missing config.json read).
+                config: Optional[Dict[str, Any]] = (
+                    surface_state.get_config(conn, surface_name) or None
                 )
-                for p in exp_history_files:
-                    parsed = _read_json(p)
-                    if parsed is not None:
-                        exp_history.append(parsed)
+                # Overlay the AUTHORITATIVE enabled from the cron job so the card
+                # never shows a stale config value (the toggle writes the job
+                # first). Falls back to the config's own enabled when no job exists.
+                if surface_name in job_enabled_by_surface:
+                    if not isinstance(config, dict):
+                        config = {}
+                    config["enabled"] = job_enabled_by_surface[surface_name]
+                job = job_by_surface.get(surface_name)
+                if job:
+                    if not isinstance(config, dict):
+                        config = {}
+                    if job.get("agent"):
+                        config["agent"] = job.get("agent")
+                    if job.get("deliver"):
+                        config["deliver"] = job.get("deliver")
+                    if job.get("model"):
+                        config["model"] = job.get("model")
+                    if not config.get("cadence"):
+                        schedule = job.get("schedule") or {}
+                        config["cadence"] = (
+                            job.get("schedule_display")
+                            or (schedule.get("display") if isinstance(schedule, dict) else None)
+                            or (schedule.get("expr") if isinstance(schedule, dict) else None)
+                        )
+                if isinstance(config, dict) and not str(config.get("agent") or "").strip():
+                    try:
+                        from cron.jobs import resolve_surface_agent
 
-            # Newest first by timestamp when present (filename sort is the fallback).
-            def _exp_ts(e: Any) -> str:
-                return str(e.get("ts") or "") if isinstance(e, dict) else ""
+                        inferred_agent = resolve_surface_agent(surface_name, {"config": config})
+                        if inferred_agent:
+                            config["agent"] = inferred_agent
+                    except Exception:
+                        pass
 
-            exp_history.sort(key=_exp_ts, reverse=True)
+                # Work-run history: prefer the DB run index (surface_runs,
+                # migration 0027) — newest row wins. Surfaces that never
+                # logged/imported runs to the DB fall back to the legacy
+                # history/*.json file scan (markdown transcripts and old
+                # json run records stay on disk).
+                db_runs = surface_state.list_runs(conn, surface_name, limit=1)
+                if db_runs:
+                    newest_run = db_runs[0]
+                    run_count = surface_state.count_runs(conn, surface_name)
+                    last_run = newest_run.get("record") or {
+                        "ran_at": newest_run.get("ran_at"),
+                        "summary": newest_run.get("summary"),
+                        "status": newest_run.get("status"),
+                    }
+                else:
+                    history_files: List[Path] = []
+                    hist_dir = surface_dir / "history"
+                    if hist_dir.is_dir():
+                        history_files = sorted(
+                            (p for p in hist_dir.glob("*.json") if p.is_file()),
+                            key=lambda p: p.name,
+                            reverse=True,
+                        )
+                    run_count = len(history_files)
+                    last_run = _read_json(history_files[0]) if history_files else None
+                if last_run is None:
+                    # Fall back to the agent_bus heartbeat record (account DB).
+                    last_run = surface_state.get_heartbeat(conn, surface_name)
 
-            kept = sum(
-                1
-                for e in exp_history
-                if isinstance(e, dict) and e.get("decision") == "keep"
-            )
-            discarded = sum(
-                1
-                for e in exp_history
-                if isinstance(e, dict) and e.get("decision") == "discard"
-            )
-            decided = kept + discarded
-            keep_rate = round((kept / decided) * 100) if decided else 0
+                # Learnings (raw markdown, stays on disk)
+                learnings = ""
+                learnings_path = surface_dir / "learnings.md"
+                if learnings_path.is_file():
+                    try:
+                        learnings = learnings_path.read_text(encoding="utf-8")
+                    except Exception:
+                        learnings = ""
 
-            # Job health: stall backoff + last status, so a backed-off
-            # heartbeat is visible on its card instead of silently sleeping
-            # for up to 6h (the stall cap) with no explanation.
-            job_health: Optional[Dict[str, Any]] = None
-            if job:
-                job_health = {
-                    "lastStatus": job.get("last_status"),
-                    "lastRunAt": job.get("last_run_at"),
-                    "nextRunAt": job.get("next_run_at"),
-                    "stallCount": job.get("stall_count") or 0,
-                    "backoffUntil": job.get("backoff_until"),
-                    "backoffMinutes": job.get("backoff_minutes"),
-                    "lastError": job.get("last_error"),
-                }
+                # Experiments (account DB): most recent active record + the
+                # completed keep/discard history.
+                active_exp = surface_state.get_experiment(conn, surface_name)
+                exp_history: List[Any] = surface_state.list_experiments(
+                    conn, surface_name, status="completed"
+                )
 
-            surfaces.append(
-                {
-                    "surface": surface_name,
-                    "config": config,
-                    "runCount": run_count,
-                    "lastRun": last_run,
-                    "jobHealth": job_health,
-                    "learnings": learnings,
-                    "automations": automations_by_surface.get(surface_name, []),
-                    "experiments": {
-                        "active": active_exp,
-                        "history": exp_history,
-                        "stats": {
-                            "total": len(exp_history),
-                            "kept": kept,
-                            "discarded": discarded,
-                            "keepRate": keep_rate,
+                # Newest first by timestamp when present (updated_at order is
+                # the fallback, matching the old filename sort).
+                def _exp_ts(e: Any) -> str:
+                    return str(e.get("ts") or "") if isinstance(e, dict) else ""
+
+                exp_history.sort(key=_exp_ts, reverse=True)
+
+                kept = sum(
+                    1
+                    for e in exp_history
+                    if isinstance(e, dict) and e.get("decision") == "keep"
+                )
+                discarded = sum(
+                    1
+                    for e in exp_history
+                    if isinstance(e, dict) and e.get("decision") == "discard"
+                )
+                decided = kept + discarded
+                keep_rate = round((kept / decided) * 100) if decided else 0
+
+                # Job health: stall backoff + last status, so a backed-off
+                # heartbeat is visible on its card instead of silently sleeping
+                # for up to 6h (the stall cap) with no explanation.
+                job_health: Optional[Dict[str, Any]] = None
+                if job:
+                    job_health = {
+                        "lastStatus": job.get("last_status"),
+                        "lastRunAt": job.get("last_run_at"),
+                        "nextRunAt": job.get("next_run_at"),
+                        "stallCount": job.get("stall_count") or 0,
+                        "backoffUntil": job.get("backoff_until"),
+                        "backoffMinutes": job.get("backoff_minutes"),
+                        "lastError": job.get("last_error"),
+                    }
+
+                surfaces.append(
+                    {
+                        "surface": surface_name,
+                        "config": config,
+                        "runCount": run_count,
+                        "lastRun": last_run,
+                        "jobHealth": job_health,
+                        "learnings": learnings,
+                        "automations": automations_by_surface.get(surface_name, []),
+                        "experiments": {
+                            "active": active_exp,
+                            "history": exp_history,
+                            "stats": {
+                                "total": len(exp_history),
+                                "kept": kept,
+                                "discarded": discarded,
+                                "keepRate": keep_rate,
+                            },
                         },
-                    },
-                }
-            )
+                    }
+                )
 
         return {"surfaces": surfaces}
     except HTTPException:
@@ -7148,6 +7172,23 @@ def create_heartbeat_surface(body: _HeartbeatSurfaceCreateBody):
             if v is not None
         }
         result = create_surface(body.surface, spec, created_by="user")
+        # Mirror the registry write into the account DB (migration 0024) so
+        # PG-backed reads see the new surface immediately, whichever storage
+        # cron.jobs.register_surface targets.
+        try:
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            with connect() as conn:
+                surface_state.upsert_registry(
+                    conn,
+                    result["surface"],
+                    dict(result.get("spec") or {}),
+                    created_by="user",
+                )
+        except Exception:
+            _log.warning("surface registry DB mirror failed", exc_info=True)
+        _fs_cache_invalidate("surfaces")
         return {"ok": True, **result}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -7169,8 +7210,40 @@ def delete_heartbeat_surface(surface: str, force: bool = False):
     """
     try:
         from cron.jobs import delete_surface
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
 
-        return delete_surface(surface, force=bool(force))
+        key = (surface or "").strip().lower()
+        try:
+            result: Optional[Dict[str, Any]] = delete_surface(surface, force=bool(force))
+        except LookupError:
+            result = None  # may still exist only in the account DB — checked below
+
+        # Purge the account-DB state (migration 0024): registry row, state row,
+        # experiments, and goals history all go with the surface.
+        with connect() as conn:
+            spec = surface_state.list_registry(conn).get(key)
+            if result is None:
+                known = key in surface_state.list_state_surfaces(conn)
+                if spec is None and not known:
+                    raise LookupError(f"surface '{key}' not found")
+                if spec and spec.get("builtin") and not force:
+                    raise ValueError("built-in heartbeat surfaces cannot be deleted")
+            removed_registry = surface_state.remove_registry(conn, key)
+            conn.execute("DELETE FROM surface_state WHERE surface = ?", (key,))
+            conn.execute("DELETE FROM surface_experiments WHERE surface = ?", (key,))
+            conn.execute("DELETE FROM surface_goals_history WHERE surface = ?", (key,))
+
+        if result is None:
+            result = {
+                "ok": True,
+                "surface": key,
+                "removed": {"registry": removed_registry, "files": False, "jobs": []},
+            }
+        elif removed_registry and isinstance(result.get("removed"), dict):
+            result["removed"]["registry"] = True
+        _fs_cache_invalidate("surfaces")
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -7221,123 +7294,114 @@ def _experiment_summary(surfaces: List[Dict[str, Any]]) -> Dict[str, int]:
 @app.get("/api/heartbeats/experiments")
 def get_heartbeat_experiments():
     """Dedicated experiments view for the CURRENT account — the data behind the
-    Experiments page. For every surface, reads the cycle definition (config.json's
-    ``experiment`` block), the running experiment (experiments/active.json), and the
-    completed ones (experiments/history/*.json), normalizes each to one shape, folds in
-    learnings.md, and computes per-surface + fleet stats. Read-only; the surface-heartbeat
-    EXPERIMENT loop owns all writes. Elevate-native port of cortextOS scanExperiments().
+    Experiments page. For every surface, reads the cycle definition (the config's
+    ``experiment`` block / ``cycles[]``), the active (proposed+running) experiments,
+    and the completed ones — all from the account DB (migration 0024) — normalizes
+    each to one shape, folds in learnings.md (still on disk), and computes
+    per-surface + fleet stats. Read-only; the surface-heartbeat EXPERIMENT loop owns
+    all writes. Elevate-native port of cortextOS scanExperiments().
     """
     try:
         from elevate_constants import get_account_data_dir
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
 
         heartbeats_dir = get_account_data_dir() / "heartbeats"
         out_surfaces: List[Dict[str, Any]] = []
-        if not heartbeats_dir.is_dir():
-            return {"surfaces": out_surfaces, "summary": _experiment_summary([])}
 
-        def _read_json(path: Path) -> Optional[Any]:
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                return None
-
-        for surface_dir in sorted(heartbeats_dir.iterdir(), key=lambda p: p.name):
-            if not surface_dir.is_dir():
-                continue
-            surface_name = surface_dir.name
-            config = _read_json(surface_dir / "config.json")
-            try:
-                from cron.jobs import resolve_surface_agent
-
-                agent_name = resolve_surface_agent(
-                    surface_name,
-                    {"config": config if isinstance(config, dict) else {}},
+        with connect() as conn:
+            # Surfaces enumerate from the account DB (state + registry rows),
+            # unioned with any workspace dirs that exist (markdown back-compat).
+            surface_names = set(surface_state.list_state_surfaces(conn))
+            if heartbeats_dir.is_dir():
+                surface_names.update(
+                    p.name for p in heartbeats_dir.iterdir() if p.is_dir()
                 )
-            except Exception:
-                agent_name = (
-                    str(config.get("agent") or "").strip()
-                    if isinstance(config, dict)
-                    else ""
-                )
-            agent_name = agent_name or surface_name
-            exp_cfg = config.get("experiment") if isinstance(config, dict) else None
-            exp_cfg = exp_cfg if isinstance(exp_cfg, dict) else {}
+            if not surface_names:
+                return {"surfaces": out_surfaces, "summary": _experiment_summary([])}
 
-            # Cycles are agent-creatable DATA: the real config.cycles[] array,
-            # falling back (read-only) to the migrated legacy ``experiment`` block.
-            try:
-                from cron.cycles import list_cycles as _list_cycles
-                cycles: List[Dict[str, Any]] = _list_cycles(surface_name)
-            except Exception:
-                cycles = []
-            cycles = [
-                {**c, "agent": c.get("agent") or agent_name}
-                for c in cycles
-                if isinstance(c, dict)
-            ]
+            for surface_name in sorted(surface_names):
+                surface_dir = heartbeats_dir / surface_name
+                config = surface_state.get_config(conn, surface_name)
+                try:
+                    from cron.jobs import resolve_surface_agent
 
-            # Metric/direction/window context for normalizing experiments below.
-            cycle_by_metric = {
-                str(c.get("metric") or ""): c
-                for c in cycles
-                if isinstance(c, dict) and c.get("metric")
-            }
-            _ctx = cycles[0] if cycles else exp_cfg
-            c_metric = _ctx.get("metric")
-            c_direction = _ctx.get("direction")
-            c_window = _ctx.get("window")
+                    agent_name = resolve_surface_agent(
+                        surface_name,
+                        {"config": config if isinstance(config, dict) else {}},
+                    )
+                except Exception:
+                    agent_name = (
+                        str(config.get("agent") or "").strip()
+                        if isinstance(config, dict)
+                        else ""
+                    )
+                agent_name = agent_name or surface_name
+                exp_cfg = config.get("experiment") if isinstance(config, dict) else None
+                exp_cfg = exp_cfg if isinstance(exp_cfg, dict) else {}
 
-            def _normalize_experiment(r: Dict[str, Any], *, active: bool = False) -> Dict[str, Any]:
-                metric = r.get("metric") or c_metric
-                cycle_ctx = cycle_by_metric.get(str(metric or "")) or _ctx
-                status = str(r.get("status") or ("running" if active else "completed")).lower()
-                result_value = (
-                    r.get("result_value")
-                    if r.get("result_value") is not None
-                    else r.get("result")
-                )
-                baseline_value = (
-                    r.get("baseline_value")
-                    if r.get("baseline_value") is not None
-                    else r.get("baseline")
-                )
-                return {
-                    "id": r.get("id") or r.get("ts"),
-                    "surface": surface_name,
-                    "agent": agent_name,
-                    "status": status,
-                    "decision": r.get("decision"),
-                    "hypothesis": r.get("hypothesis"),
-                    "changes_description": r.get("surface_change") or r.get("changes_description"),
-                    "baseline": baseline_value,
-                    "result": None if active and status == "running" else result_value,
-                    "learning": r.get("learning"),
-                    "metric": metric,
-                    "direction": r.get("direction") or cycle_ctx.get("direction") or c_direction,
-                    "window": r.get("window") or cycle_ctx.get("window") or c_window,
-                    "created_at": r.get("created_at") or r.get("createdAt") or r.get("started_at") or r.get("ts"),
-                    "started_at": r.get("started_at"),
-                    "completed_at": r.get("completed_at") or r.get("ts"),
+                # Cycles are agent-creatable DATA: the real config.cycles[] array,
+                # falling back (read-only) to the migrated legacy ``experiment`` block.
+                try:
+                    from cron.cycles import list_cycles as _list_cycles
+                    cycles: List[Dict[str, Any]] = _list_cycles(surface_name)
+                except Exception:
+                    cycles = []
+                cycles = [
+                    {**c, "agent": c.get("agent") or agent_name}
+                    for c in cycles
+                    if isinstance(c, dict)
+                ]
+
+                # Metric/direction/window context for normalizing experiments below.
+                cycle_by_metric = {
+                    str(c.get("metric") or ""): c
+                    for c in cycles
+                    if isinstance(c, dict) and c.get("metric")
                 }
+                _ctx = cycles[0] if cycles else exp_cfg
+                c_metric = _ctx.get("metric")
+                c_direction = _ctx.get("direction")
+                c_window = _ctx.get("window")
 
-            experiments: List[Dict[str, Any]] = []
-            exp_dir = surface_dir / "experiments"
-            seen_exp_ids: set[str] = set()
+                def _normalize_experiment(r: Dict[str, Any], *, active: bool = False) -> Dict[str, Any]:
+                    metric = r.get("metric") or c_metric
+                    cycle_ctx = cycle_by_metric.get(str(metric or "")) or _ctx
+                    status = str(r.get("status") or ("running" if active else "completed")).lower()
+                    result_value = (
+                        r.get("result_value")
+                        if r.get("result_value") is not None
+                        else r.get("result")
+                    )
+                    baseline_value = (
+                        r.get("baseline_value")
+                        if r.get("baseline_value") is not None
+                        else r.get("baseline")
+                    )
+                    return {
+                        "id": r.get("id") or r.get("ts"),
+                        "surface": surface_name,
+                        "agent": agent_name,
+                        "status": status,
+                        "decision": r.get("decision"),
+                        "hypothesis": r.get("hypothesis"),
+                        "changes_description": r.get("surface_change") or r.get("changes_description"),
+                        "baseline": baseline_value,
+                        "result": None if active and status == "running" else result_value,
+                        "learning": r.get("learning"),
+                        "metric": metric,
+                        "direction": r.get("direction") or cycle_ctx.get("direction") or c_direction,
+                        "window": r.get("window") or cycle_ctx.get("window") or c_window,
+                        "created_at": r.get("created_at") or r.get("createdAt") or r.get("started_at") or r.get("ts"),
+                        "started_at": r.get("started_at"),
+                        "completed_at": r.get("completed_at") or r.get("ts"),
+                    }
 
-            active = _read_json(exp_dir / "active.json") if exp_dir.is_dir() else None
-            if isinstance(active, dict):
-                experiments.append(_normalize_experiment(active, active=True))
-                if active.get("id"):
-                    seen_exp_ids.add(str(active.get("id")))
+                experiments: List[Dict[str, Any]] = []
+                seen_exp_ids: set[str] = set()
 
-            active_dir = exp_dir / "active"
-            if active_dir.is_dir():
-                for p in sorted(
-                    (q for q in active_dir.glob("*.json") if q.is_file()),
-                    key=lambda q: q.name,
-                    reverse=True,
-                ):
-                    r = _read_json(p)
+                # Active (proposed + running) experiments from the account DB.
+                for r in surface_state.list_experiments(conn, surface_name, status="active"):
                     if not isinstance(r, dict):
                         continue
                     rid = str(r.get("id") or "")
@@ -7347,56 +7411,54 @@ def get_heartbeat_experiments():
                     if rid:
                         seen_exp_ids.add(rid)
 
-            exp_hist_dir = exp_dir / "history"
-            hist_records: List[Dict[str, Any]] = []
-            if exp_hist_dir.is_dir():
-                for p in sorted(
-                    (q for q in exp_hist_dir.glob("*.json") if q.is_file()),
-                    key=lambda q: q.name, reverse=True,
-                ):
-                    r = _read_json(p)
-                    if isinstance(r, dict):
-                        hist_records.append(r)
-            hist_records.sort(
-                key=lambda e: str(
-                    e.get("completed_at")
-                    or e.get("started_at")
-                    or e.get("created_at")
-                    or e.get("createdAt")
-                    or e.get("ts")
-                    or ""
-                ),
-                reverse=True,
-            )
-            for r in hist_records:
-                rid = str(r.get("id") or r.get("ts") or "")
-                if rid and rid in seen_exp_ids:
-                    continue
-                experiments.append(_normalize_experiment(r))
-                if rid:
-                    seen_exp_ids.add(rid)
+                # Completed (keep/discard) experiments from the account DB.
+                hist_records: List[Dict[str, Any]] = [
+                    r
+                    for r in surface_state.list_experiments(
+                        conn, surface_name, status="completed"
+                    )
+                    if isinstance(r, dict)
+                ]
+                hist_records.sort(
+                    key=lambda e: str(
+                        e.get("completed_at")
+                        or e.get("started_at")
+                        or e.get("created_at")
+                        or e.get("createdAt")
+                        or e.get("ts")
+                        or ""
+                    ),
+                    reverse=True,
+                )
+                for r in hist_records:
+                    rid = str(r.get("id") or r.get("ts") or "")
+                    if rid and rid in seen_exp_ids:
+                        continue
+                    experiments.append(_normalize_experiment(r))
+                    if rid:
+                        seen_exp_ids.add(rid)
 
-            experiments.sort(
-                key=lambda e: str(e.get("completed_at") or e.get("started_at") or e.get("created_at") or ""),
-                reverse=True,
-            )
+                experiments.sort(
+                    key=lambda e: str(e.get("completed_at") or e.get("started_at") or e.get("created_at") or ""),
+                    reverse=True,
+                )
 
-            learnings = ""
-            lp = surface_dir / "learnings.md"
-            if lp.is_file():
-                try:
-                    learnings = lp.read_text(encoding="utf-8")
-                except Exception:
-                    learnings = ""
+                learnings = ""
+                lp = surface_dir / "learnings.md"
+                if lp.is_file():
+                    try:
+                        learnings = lp.read_text(encoding="utf-8")
+                    except Exception:
+                        learnings = ""
 
-            out_surfaces.append({
-                "surface": surface_name,
-                "agent": agent_name,
-                "cycles": cycles,
-                "experiments": experiments,
-                "learnings": learnings,
-                "stats": _experiment_stats(experiments),
-            })
+                out_surfaces.append({
+                    "surface": surface_name,
+                    "agent": agent_name,
+                    "cycles": cycles,
+                    "experiments": experiments,
+                    "learnings": learnings,
+                    "stats": _experiment_stats(experiments),
+                })
 
         return {"surfaces": out_surfaces, "summary": _experiment_summary(out_surfaces)}
     except HTTPException:
@@ -7467,9 +7529,10 @@ def evaluate_experiment_alias(experiment_id: str, body: Dict[str, Any]):
 
 
 def _validate_heartbeat_surface(surface: str) -> str:
-    """Return the trimmed surface name if it has a heartbeat workspace dir for the
-    current account, else raise 400/404. Cycle endpoints are scoped to real
-    surfaces only.
+    """Return the trimmed surface name if it's a known surface for the current
+    account — present in the account DB (state/registry rows, migration 0024)
+    OR with a heartbeat workspace dir (back-compat) — else raise 400/404.
+    Cycle endpoints are scoped to real surfaces only.
     """
     from elevate_constants import get_account_data_dir
 
@@ -7477,9 +7540,18 @@ def _validate_heartbeat_surface(surface: str) -> str:
     if not surface_key:
         raise HTTPException(status_code=400, detail="surface is required")
     surface_dir = get_account_data_dir() / "heartbeats" / surface_key
-    if not surface_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"No heartbeat surface '{surface_key}'")
-    return surface_key
+    if surface_dir.is_dir():
+        return surface_key
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            if surface_key in surface_state.list_state_surfaces(conn):
+                return surface_key
+    except Exception:
+        _log.warning("surface validation DB lookup failed", exc_info=True)
+    raise HTTPException(status_code=404, detail=f"No heartbeat surface '{surface_key}'")
 
 
 @app.get("/api/heartbeats/surfaces/{surface}/cycles")
@@ -7646,11 +7718,11 @@ class _HeartbeatRouteBody(BaseModel):
 @app.post("/api/heartbeats/surfaces/{surface}/route")
 def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
     """Route a surface's heartbeat output to a channel/bot (or 'local' = in-app).
-    Updates the authoritative cron job's ``deliver`` + mirrors to config.json."""
+    Updates the authoritative cron job's ``deliver`` + mirrors to the surface
+    config in the account DB."""
     try:
         surface_key = _validate_heartbeat_surface(surface)
         from cron.jobs import update_job
-        from elevate_constants import get_account_data_dir
 
         deliver = (body.deliver or "local").strip() or "local"
         valid = {r["value"] for r in _delivery_routes()}
@@ -7669,14 +7741,11 @@ def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
             )
         updated = update_job(job["id"], {"deliver": deliver})
         try:
-            cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
-            if cfg_path.is_file():
-                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                if isinstance(cfg, dict):
-                    cfg["deliver"] = deliver
-                    tmp = cfg_path.with_suffix(".json.tmp")
-                    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-                    tmp.replace(cfg_path)
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            with connect() as conn:
+                surface_state.patch_config(conn, surface_key, {"deliver": deliver})
         except Exception:
             _log.warning("route config mirror failed for %s", surface_key, exc_info=True)
         return {"surface": surface_key, "deliver": (updated or {}).get("deliver", deliver)}
@@ -7728,11 +7797,45 @@ def _build_activity_items() -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     base = get_account_data_dir() / "heartbeats"
     try:
+        # Heartbeat run records: prefer the DB run index (surface_runs,
+        # migration 0027) — one query overall, capped per surface. Surfaces
+        # with no DB rows fall back to the legacy history/*.json file scan
+        # below (same item shape either way).
+        runs_by_surface: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            from elevate_cli.data import connect as _runs_connect
+            from elevate_cli.data import surface_state as _runs_state
+
+            with _runs_connect() as _conn:
+                for run in _runs_state.list_runs(_conn, limit=400):
+                    bucket = runs_by_surface.setdefault(
+                        str(run.get("surface") or "") or "system", []
+                    )
+                    if len(bucket) < 30:
+                        bucket.append(run)
+        except Exception:
+            _log.warning("activity: surface_runs unavailable", exc_info=True)
+            runs_by_surface = {}
+        for surface, runs in runs_by_surface.items():
+            for run in runs:
+                rec = run.get("record") if isinstance(run.get("record"), dict) else {}
+                items.append({
+                    "kind": "heartbeat",
+                    "agent": surface,
+                    "ts": _activity_text(rec.get("ran_at") or run.get("ran_at")) or "",
+                    "title": _activity_text(
+                        run.get("summary") or rec.get("summary") or rec.get("did")
+                    ) or "ran",
+                    "detail": _activity_text(rec.get("found") or rec.get("checked")),
+                    "status": _activity_text(run.get("status")) or "ok",
+                })
         if base.is_dir():
             for sdir in base.iterdir():
                 if not sdir.is_dir():
                     continue
                 surface = sdir.name
+                if runs_by_surface.get(surface):
+                    continue  # DB rows already cover this surface
                 hist = sdir / "history"
                 if not hist.is_dir():
                     continue
@@ -7770,25 +7873,30 @@ def _build_activity_items() -> List[Dict[str, Any]]:
         try:
             from elevate_cli.data.paths import data_root
 
-            activity_log = data_root() / "agent_activity.jsonl"
-            if activity_log.exists():
-                lines = activity_log.read_text(encoding="utf-8").splitlines()[-120:]
-                for line in lines:
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    items.append({
-                        "kind": _activity_text(rec.get("kind")) or "agent_activity",
-                        "agent": _activity_text(rec.get("agent")) or "system",
-                        "ts": _activity_text(rec.get("ts")),
-                        "title": _activity_text(rec.get("event") or rec.get("category"))
-                        or "Agent activity",
-                        "detail": _activity_text(rec.get("message") or rec.get("metadata")),
-                        "status": _activity_text(rec.get("severity")) or "info",
-                    })
+            # Agent activity is DB-backed (surface_activity, migration 0025);
+            # the legacy agent_activity.jsonl is frozen after the one-shot
+            # import in tools/agent_bus_tool.py. kind/category/severity ride
+            # inside the metadata payload — same unwrap as _activity_record.
+            try:
+                from elevate_cli.data import connect as _data_connect
+                from elevate_cli.data import surface_state as _surface_state
+
+                with _data_connect() as _conn:
+                    activity_rows = _surface_state.list_activity(_conn, limit=120)
+            except Exception:
+                _log.warning("activity: surface_activity unavailable", exc_info=True)
+                activity_rows = []
+            for rec in activity_rows:
+                meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
+                items.append({
+                    "kind": _activity_text(meta.get("kind")) or "agent_activity",
+                    "agent": _activity_text(rec.get("agent")) or "system",
+                    "ts": _activity_text(rec.get("at")),
+                    "title": _activity_text(rec.get("event") or meta.get("category"))
+                    or "Agent activity",
+                    "detail": _activity_text(rec.get("message") or meta.get("metadata")),
+                    "status": _activity_text(meta.get("severity")) or "info",
+                })
 
             pressure_log = data_root() / "agent_context_pressure.jsonl"
             if pressure_log.exists():
@@ -7976,10 +8084,9 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
     box). The realtor opts in here. This flips the AUTHORITATIVE cron job via the
     canonical resume/pause paths — ``resume_job`` recomputes a fresh future
     ``next_run_at`` so an enabled heartbeat actually schedules and never gets
-    stuck — then mirrors ``enabled`` into the workspace ``config.json``.
+    stuck — then mirrors ``enabled`` into the surface config (account DB).
     """
     try:
-        from elevate_constants import get_account_data_dir
         from cron.jobs import list_jobs, pause_job, resume_job
 
         want = bool(body.enabled)
@@ -8011,18 +8118,16 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
         if not updated:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        # Keep the workspace config.json in sync so it never drifts from the job.
+        # Keep the surface config (account DB) in sync so it never drifts from the job.
         try:
-            cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
-            if cfg_path.is_file():
-                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                if not isinstance(cfg, dict):
-                    cfg = {}
-                cfg["enabled"] = want
-                cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            with connect() as conn:
+                surface_state.patch_config(conn, surface_key, {"enabled": want})
         except Exception:
-            # Job state is authoritative; a config.json write hiccup is non-fatal.
-            _log.warning("heartbeat %s: config.json enabled sync failed", surface_key, exc_info=True)
+            # Job state is authoritative; a config write hiccup is non-fatal.
+            _log.warning("heartbeat %s: config enabled sync failed", surface_key, exc_info=True)
 
         _fs_cache_invalidate("surfaces")  # reflect the toggle immediately
         return {"surface": surface_key, "enabled": bool(updated.get("enabled", want))}
@@ -8066,18 +8171,15 @@ def _normalize_heartbeat_report_mode(value: Any) -> str:
 
 @app.get("/api/heartbeats/surfaces/{surface}/config")
 def get_heartbeat_surface_config(surface: str):
-    """Return a surface's config.json plus its current day/night mode. Read-only."""
+    """Return a surface's config (account DB) plus its current day/night mode. Read-only."""
     try:
         surface_key = _validate_heartbeat_surface(surface)
-        from elevate_constants import get_account_data_dir
         from cron.jobs import day_night_mode
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
 
-        cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
-        cfg: Dict[str, Any] = {}
-        if cfg_path.is_file():
-            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cfg = loaded
+        with connect() as conn:
+            cfg: Dict[str, Any] = surface_state.get_config(conn, surface_key)
         if not str(cfg.get("agent") or "").strip():
             try:
                 from cron.jobs import resolve_surface_agent
@@ -8113,14 +8215,13 @@ class _HeartbeatConfigPatchBody(BaseModel):
 
 @app.patch("/api/heartbeats/surfaces/{surface}/config")
 def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody):
-    """Allowlist-merge editable settings into a heartbeat config.json.
+    """Allowlist-merge editable settings into a surface's config (account DB).
 
     Mirrors job-owned fields (cadence, agent, model) onto the surface heartbeat
     cron job so the settings are functional, not just prompt-visible.
     """
     try:
         surface_key = _validate_heartbeat_surface(surface)
-        from elevate_constants import get_account_data_dir
         from cron.jobs import day_night_mode
 
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -8161,16 +8262,13 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
         # Only allowlisted keys survive (belt-and-suspenders over the typed body).
         patch = {k: v for k, v in patch.items() if k in _SURFACE_CONFIG_EDITABLE}
 
-        cfg_path = get_account_data_dir() / "heartbeats" / surface_key / "config.json"
-        cfg: Dict[str, Any] = {}
-        if cfg_path.is_file():
-            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cfg = loaded
-        cfg.update(patch)
-        tmp = cfg_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        tmp.replace(cfg_path)
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            # Shallow merge: preserves goal/cadence/experiment/cycles/playbook
+            # and every other non-allowlisted key already in the config.
+            cfg: Dict[str, Any] = surface_state.patch_config(conn, surface_key, patch)
         job_updates: Dict[str, Any] = {}
         if "model" in patch:
             job_updates["model"] = patch.get("model") or None
@@ -8201,16 +8299,13 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
 
 
 def _read_surface_goals(surface_key: str) -> Dict[str, Any]:
-    """Read + normalize a surface's goals.json. Tolerant: coerces legacy string goal
-    entries into the rich {id,title,progress,order} shape."""
-    from elevate_constants import get_account_data_dir
+    """Read + normalize a surface's goals (account DB). Tolerant: coerces legacy
+    string goal entries into the rich {id,title,progress,order} shape."""
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
 
-    path = get_account_data_dir() / "heartbeats" / surface_key / "goals.json"
-    data: Dict[str, Any] = {}
-    if path.is_file():
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    with connect() as conn:
+        data: Dict[str, Any] = surface_state.get_goals(conn, surface_key)
     raw_goals = data.get("goals") if isinstance(data.get("goals"), list) else []
     goals: List[Dict[str, Any]] = []
     for i, g in enumerate(raw_goals):
@@ -8265,7 +8360,6 @@ def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
     clamps progress 0-100, mints ids + order, stamps updated_at. Appends a history row."""
     try:
         surface_key = _validate_heartbeat_surface(surface)
-        from elevate_constants import get_account_data_dir
         from datetime import datetime, timezone
 
         current = _read_surface_goals(surface_key)
@@ -8297,20 +8391,12 @@ def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
             current["goals"] = cleaned
         current["updated_at"] = now_iso
 
-        path = get_account_data_dir() / "heartbeats" / surface_key / "goals.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
-        tmp.replace(path)
-        # Append-only history (Elevate has no event bus).
-        try:
-            hist = path.parent / "goals_history.jsonl"
-            with hist.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"at": now_iso, "goals": current["goals"],
-                                     "bottleneck": current["bottleneck"],
-                                     "daily_focus": current["daily_focus"]}) + "\n")
-        except Exception:
-            _log.warning("goals history append failed for %s", surface_key, exc_info=True)
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            # set_goals appends the history row itself (the old goals_history.jsonl).
+            surface_state.set_goals(conn, surface_key, current)
         return {"surface": surface_key, **current}
     except HTTPException:
         raise
