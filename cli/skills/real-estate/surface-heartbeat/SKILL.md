@@ -1,7 +1,7 @@
 ---
 name: surface-heartbeat
-description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. A faithful port of the cortextOS theta-wave autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path.
-version: 0.2.0
+description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. A faithful port of the cortextOS theta-wave autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
+version: 0.3.1
 platforms:
   - macos
   - linux
@@ -14,16 +14,32 @@ metadata:
 
 You run on a clock for ONE dashboard surface. Your prompt gives you:
 - **Surface** — e.g. `leads` or `admin`.
-- **Workspace** — an absolute path holding `config.json`, `learnings.md`, `history/`, `experiments/`.
+- **Workspace** — an absolute path holding your FILE artifacts: `learnings.md`, `history/`
+  run records, playbook files, `experiments/results.tsv`.
 
-Everything you read/write lives in that Workspace. **Drafts and recommendations only** — the
-realtor acts; you never send messages, move money, or commit changes on their behalf unless
-`config.json.goal` explicitly says to. An experiment only ever changes HOW YOU WORK (your
-playbook), never the realtor's leads, calendar, or data.
+**Where state lives.** Your JSON state is in the account database, shared with the dashboard
+cards — read and write it through the `agent_bus` tool, never raw JSON files:
+- config (your `goal`, `playbook`, `cycles[]`): `get_surface_config` / `update_surface_config`
+- goals (daily focus, bottleneck, goal list): `get_goals` / `update_goals`
+- heartbeat status: `update_heartbeat` / `read_heartbeats`
+- run index (one row per run, drives the experiment cadence): `log_run` / `run_count`
+- experiment records: `create_experiment` / `run_experiment` / `evaluate_experiment` /
+  `list_experiments` / `gather_experiment_context`
+- cycles (read-only for you): `list_cycles`
+
+Markdown artifacts stay in the Workspace on disk (they are documents, not state):
+`learnings.md`, `history/` run records, playbook files, `experiments/results.tsv`.
+
+**Drafts and recommendations only** — the realtor acts; you never send messages, move money,
+or commit changes on their behalf unless your config `goal` explicitly says to. An experiment
+only ever changes HOW YOU WORK (your playbook), never the realtor's leads, calendar, or data.
 
 ## Every run — WORK loop
-1. **Load context.** Read `config.json` (your `goal`, your `playbook` if present) and the whole
-   `learnings.md` (apply it). Count prior runs: `ls "<Workspace>/history" | wc -l`.
+1. **Load context.** `agent_bus {action:"get_surface_config", surface:"<surface>"}` for your
+   `goal` and `playbook` (if present); `agent_bus {action:"get_goals", surface:"<surface>"}` for
+   the current daily focus / bottleneck / goal list (apply them if set). Read the whole
+   `learnings.md` (apply it). Count prior runs:
+   `agent_bus {action:"run_count", surface:"<surface>"}` → use its `count`.
 2. **Drain dispatched tasks.** Pull work the realtor (or the analyst) queued to you:
    `GET ${ELEVATE_DASHBOARD_URL:-http://127.0.0.1:9120}/api/surface-tasks?assignee=<surface>&status=pending&limit=10`.
    At most 10 per run (oldest first) — a backed-up queue drains across runs, never in one
@@ -33,15 +49,21 @@ playbook), never the realtor's leads, calendar, or data.
    leave a draft and it surfaces for sign-off (see below). Skip tasks assigned to `human`.
    If a pulled task's notes say "auto-reset to pending", a previous run crashed mid-task:
    check for partial work (existing drafts/outputs) before redoing it.
-3. **Do the work** in `config.json.goal`, sharpened by your learnings + playbook, using your
+3. **Do the work** in your config `goal`, sharpened by your learnings + playbook, using your
    normal Elevate tools/skills for this surface.
 4. **Surface anything needing sign-off.** When you produce a draft/recommendation that must NOT
    go out without the realtor's yes, it shows on the Approvals board — resolved on the dashboard
    only, never auto-sent. (Approvals are created for you; you never send on the realtor's behalf.)
-6. **Log** → write `history/<UTC-ISO-timestamp>.json`:
+5. **Heartbeat.** `agent_bus {action:"update_heartbeat", message:"<one-line summary>",
+   status:"active"}` so the dashboard card shows what you did this run.
+6. **Log** → write `history/<UTC-ISO-timestamp>.json` (file run record, stays on disk):
    ```json
    {"ran_at":"<iso>","checked":"<what you looked at>","did":"<actions/drafts>","found":"<key findings>","summary":"<one line>"}
    ```
+   then ALSO index the run in the database (this is what `run_count` counts):
+   `agent_bus {action:"log_run", surface:"<surface>", summary:"<one line>", status:"ok",
+   record:{...the same json...}}`. Pass `kind:"experiment"` instead when the run was an
+   autoresearch-only run.
 7. **Distill** — if you learned something durable (a pattern, a preference, what landed), append
    ONE tight bullet to `learnings.md`. Dedupe. No noise.
 8. **Report** one tight summary to your delivery channel. Nothing changed → "all quiet."
@@ -50,9 +72,10 @@ playbook), never the realtor's leads, calendar, or data.
 
 ## Autoresearch — the EXPERIMENT loop (per cycle)
 
-Research is a SEPARATE system from work. It is driven by `config.json.cycles[]` — each cycle is
-one self-improvement track the analyst (theta-wave) set up for you. You never create, modify, or
-remove cycles yourself; you only RUN the cycles you're given.
+Research is a SEPARATE system from work. It is driven by your config's `cycles[]` — each cycle
+is one self-improvement track the analyst (theta-wave) set up for you. You never create, modify,
+or remove cycles yourself; you only RUN the cycles you're given. Read them with
+`agent_bus {action:"list_cycles", surface:"<surface>"}`.
 
 A `cycle` looks like:
 ```json
@@ -61,34 +84,38 @@ A `cycle` looks like:
  "loop_interval":"every 7 runs","every_n_runs":7,"approval_required":false,
  "enabled":true,"created_by":"system","created_at":"<iso>"}
 ```
-Legacy: if there's no `cycles[]` but a `config.experiment` block exists, treat that block as a
+Legacy: if there are no `cycles[]` but a `config.experiment` block exists, treat that block as a
 single implicit cycle (its `every_n_runs`, `metric`, etc.).
 
 After the WORK loop, for **each enabled cycle** where
-`(history count) % cycle.every_n_runs == 0`, run the 6-step autoresearch loop below. Each cycle
-keeps its own active experiment at `experiments/active/<cycle.name>.json`; records and rollups
-are shared in `experiments/history/`, `experiments/results.tsv`, and
-`experiments/surfaces/<metric>/current.md`.
+`run_count % cycle.every_n_runs == 0` (the `count` from
+`agent_bus {action:"run_count", surface:"<surface>"}` — never a file count), run the 6-step
+autoresearch loop below. Experiment
+records live in the database — `list_experiments` returns `{active, activeByCycle, history}` for
+your surface; each cycle has at most one active (proposed/running) experiment in `activeByCycle`.
+Rollups stay file-based: `experiments/results.tsv` and `experiments/surfaces/<metric>/current.md`.
 
 ### 1. Gather context
-Read `experiments/results.tsv` and the cycle's recent `experiments/history/*.json` (filter to this
-cycle's `metric`). Note the last few decisions and your **keep rate** for this metric.
+`agent_bus {action:"gather_experiment_context", surface:"<surface>"}` — it returns total
+experiments, running count, keeps/discards, keep rate, your `learnings.md`, and `results.tsv`.
+Filter the history to this cycle's `metric` (via `list_experiments` if you need full records).
+Note the last few decisions and your **keep rate** for this metric.
 
 ### 2. Evaluate the previous experiment (if one is active)
-If `experiments/active/<cycle.name>.json` exists:
+If `list_experiments` shows an active experiment for this cycle (`activeByCycle["<cycle.name>"]`):
 - **Measure** `cycle.metric` over `cycle.window` per `cycle.measurement`. Quantitative → a number.
   Qualitative → a 1–10 self-score WITH a written justification.
-- **Decide** using the cycle's `direction`:
-  - `higher`: `measured > baseline_value` → **keep**, else **discard**.
-  - `lower`:  `measured < baseline_value` → **keep**, else **discard**.
-- **Write the completed record** to `experiments/history/<id>.json` (full shape below): set
-  `status:"completed"`, `result_value`, `decision`, `completed_at`, and a one-line `learning`.
-- **Ratchet** — on **keep**, the change earned its place: set this cycle's `baseline_value =
-  measured` for the NEXT experiment (the bar goes up). On **discard**, baseline stays where it was
-  and you revert the playbook change you made for this experiment.
-- **Append** one row to `experiments/results.tsv` (`ts<TAB>cycle<TAB>metric<TAB>baseline<TAB>result<TAB>decision`)
-  and fold the `learning` into `learnings.md`. Update `experiments/surfaces/<metric>/current.md`
-  with the current best playbook for this metric. **Delete** `experiments/active/<cycle.name>.json`.
+- **Evaluate** with `agent_bus {action:"evaluate_experiment", surface:"<surface>",
+  experiment_id:"<id>", measured_value:<number>, learning:"<one line>"}`. It decides using the
+  experiment's `direction` (`higher`: measured > baseline → **keep**; `lower`: measured <
+  baseline → **keep**; else **discard**) — or pass `decision` explicitly. It marks the record
+  `completed` (with `result_value`, `decision`, `completed_at`), **ratchets** the baseline to the
+  measured value on keep, appends the `results.tsv` row, and folds the `learning` into
+  `learnings.md` for you.
+- **On discard**: the baseline stays where it was — revert the playbook change you made for this
+  experiment (git makes it revertible).
+- Update `experiments/surfaces/<metric>/current.md` with the current best playbook for this
+  metric.
 
 ### 3. Hypothesize ONE change (exploit vs explore)
 Evidence-backed from this cycle's history:
@@ -98,32 +125,31 @@ Evidence-backed from this cycle's history:
 - Otherwise: the most promising single tweak to HOW you do the work for this surface.
 
 ### 4. Create the experiment record (`proposed`)
-Mint `id = exp_<unix-epoch-seconds>_<5 random base36 chars>` and write the FULL record to
-`experiments/history/<id>.json`:
-```json
-{"id":"exp_1717000000_a1b2c","agent":"<cycle.agent>","metric":"<cycle.metric>","metric_type":"<cycle.metric_type>",
- "hypothesis":"<what you believe will move the metric and why>","surface":"<cycle.surface>",
- "direction":"<cycle.direction>","window":"<cycle.window>","measurement":"<cycle.measurement>",
- "status":"proposed","baseline_value":<current baseline number>,"result_value":null,"decision":null,
- "learning":null,"changes_description":null,"experiment_commit":null,"tracking_commit":"<git HEAD sha now>",
- "created_at":"<iso>","started_at":null,"completed_at":null}
-```
+`agent_bus {action:"create_experiment", surface:"<surface>", cycle:"<cycle.name>",
+metric:"<cycle.metric>", metric_type:"<cycle.metric_type>", direction:"<cycle.direction>",
+window:"<cycle.window>", measurement:"<cycle.measurement>",
+hypothesis:"<what you believe will move the metric and why>",
+baseline_value:<current baseline number>, tracking_commit:"<git HEAD sha of the Workspace now>",
+title:"<short name>"}`.
+The bus mints the id (`exp_<unix-epoch-seconds>_<5 random chars>`) and stores the full record
+(`status:"proposed"`, `result_value:null`, `decision:null`, ...) in the database.
 If `cycle.approval_required` is true: stop here, surface the proposed experiment for dashboard
 approval, and do NOT proceed to step 5 until approved. (Approvals are dashboard-only.)
 
 ### 5. Run it — change your playbook + commit
-- **Apply the change to YOUR playbook**: edit `config.json.playbook` (or the cycle's entry in
-  `experiments/surfaces/<metric>/current.md`) and/or add a learnings rule the next WORK run will
-  follow. NEVER the realtor's data.
+- **Apply the change to YOUR playbook**: patch your config playbook via
+  `agent_bus {action:"update_surface_config", surface:"<surface>", patch:{"playbook":"<new playbook>"}}`
+  and mirror it in the cycle's `experiments/surfaces/<metric>/current.md` file (and/or add a
+  learnings rule the next WORK run will follow). NEVER the realtor's data.
 - **Commit the playbook change with git** so the change is a real, revertible artifact:
   ```
   git -C "<Workspace>" add -A && git -C "<Workspace>" commit -m "exp <id>: <changes_description>"
   ```
-  If the Workspace isn't a git repo, `git init` it first (it holds only your config/learnings/
-  experiment files — never realtor data). Capture the resulting SHA.
-- **Promote the record to `running`**: set `status:"running"`, `started_at:"<iso>"`,
-  `changes_description:"<what you changed>"`, `experiment_commit:"<the SHA>"`. Re-write
-  `experiments/history/<id>.json` AND copy it to `experiments/active/<cycle.name>.json`.
+  If the Workspace isn't a git repo, `git init` it first (it holds only your learnings/playbook/
+  run-record files — never realtor data). Capture the resulting SHA.
+- **Promote the record to `running`**: `agent_bus {action:"run_experiment",
+  surface:"<surface>", experiment_id:"<id>", changes_description:"<what you changed>",
+  experiment_commit:"<the SHA>"}`.
 - You'll measure it on this cycle's next interval (step 2).
 
 ### 6. Wait
@@ -140,11 +166,31 @@ autoresearch loop for the cycle.
 
 ## Rules
 - Stay in your Workspace and your one Surface. Idempotent — if interrupted, the next run resumes
-  from the files on disk (active experiments live in `experiments/active/`).
+  from the database (`list_experiments` shows the active experiment per cycle) and the files on
+  disk.
+- State goes through `agent_bus`, never raw JSON files — the dashboard reads the same rows.
+  Files are for documents only: `learnings.md`, `history/` run records, playbooks, `results.tsv`.
 - You RUN cycles; you never author them. Cycle create/modify/remove is the analyst's job
   (theta-wave) via the dashboard.
 - Keep `learnings.md` tight; it's read every run, so bloat dilutes signal.
 - An experiment changes how *you* work, never the realtor's leads / calendar / data. The git
   commit makes every change revertible.
-- Keep → ratchet the baseline. Discard → revert the change and keep the old baseline.
+- Keep → ratchet the baseline (evaluate_experiment does this). Discard → revert the change and
+  keep the old baseline.
 - Be fast and quiet: most runs should end in a one-line summary, not a wall of text.
+
+## Version history
+- **0.3.1** — Run index moved to the account database: every run ends with `agent_bus log_run`
+  (kind `work`|`experiment`), and the experiment-cadence check uses `agent_bus run_count`
+  instead of counting `history/` files. The markdown/json transcripts in `history/` stay on
+  disk as before (legacy files are lazily imported once).
+- **0.3.0** — Surface STATE moved to the account database: config/goals/heartbeat/experiment
+  records now read+written through `agent_bus` actions (`get_surface_config`,
+  `update_surface_config`, `get_goals`, `update_goals`, `update_heartbeat`,
+  `create_experiment`, `run_experiment`, `evaluate_experiment`, `list_experiments`,
+  `gather_experiment_context`, `list_cycles`) instead of raw `config.json` /
+  `experiments/active/<cycle>.json` / `goals.json` files. File artifacts unchanged:
+  `learnings.md`, `history/` run records, playbooks, `results.tsv`, git commits.
+- **0.2.0** — Cycles as data: experiments driven by `cycles[]` (theta-wave authored), per-cycle
+  active experiment, keep/ratchet + exploit/explore semantics, approval gating.
+- **0.1.0** — Initial WORK loop + single-experiment autoresearch port from cortextOS.

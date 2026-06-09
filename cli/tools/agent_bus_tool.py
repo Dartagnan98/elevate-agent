@@ -2,6 +2,16 @@
 
 This is the in-app replacement for CortextOS' shell-based ``cortextos bus``
 commands. It deliberately writes to Elevate's existing stores only.
+
+Surface STATE (heartbeat records, surface config, goals, experiment records,
+activity events, the run index) lives in the account database via
+``elevate_cli.data.surface_state`` — the same tables the dashboard cards
+read, one source of truth. The legacy ``agent_activity.jsonl`` feed is
+lazily bulk-imported once (sentinel: ``agent_activity.jsonl.imported``) and
+never deleted; likewise each surface's legacy ``history/*.json`` run records
+(sentinel: ``history/.runs_imported``). Markdown artifacts
+stay on disk by design: ``learnings.md``, ``history/*.md`` run transcripts,
+playbooks, and ``experiments/results.tsv``.
 """
 
 from __future__ import annotations
@@ -93,9 +103,69 @@ def _status(value: Any, default: str = "pending") -> str:
 
 
 def _activity_log_path() -> Path:
+    """Legacy JSONL feed location — only used by the one-shot importer
+    (and still read by web_server until it's repointed)."""
     from elevate_cli.data.paths import data_root
 
     return data_root() / "agent_activity.jsonl"
+
+
+def _activity_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the original jsonl record shape from a surface_activity row.
+    category/severity/kind ride inside the metadata JSON payload."""
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    inner = meta.get("metadata")
+    return {
+        "kind": str(meta.get("kind") or "agent_activity"),
+        "agent": str(row.get("agent") or ""),
+        "category": str(meta.get("category") or "action"),
+        "event": str(row.get("event") or "event"),
+        "severity": str(meta.get("severity") or "info"),
+        "message": str(row.get("message") or ""),
+        "metadata": inner if isinstance(inner, dict) else {},
+        "ts": str(row.get("at") or ""),
+    }
+
+
+def _import_legacy_activity() -> None:
+    """One-shot lazy import of the legacy agent_activity.jsonl into
+    surface_activity. Gated by a sentinel marker file written only after
+    the insert transaction commits, so a crash mid-import just re-runs.
+    The jsonl itself is never deleted (web_server still reads it)."""
+    path = _activity_log_path()
+    marker = path.parent / (path.name + ".imported")
+    if marker.exists() or not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict) or not str(rec.get("agent") or "").strip():
+                continue
+            surface_state.append_activity(
+                conn,
+                str(rec.get("agent")),
+                str(rec.get("event") or "event"),
+                message=str(rec.get("message") or ""),
+                metadata={
+                    "kind": str(rec.get("kind") or "agent_activity"),
+                    "category": str(rec.get("category") or "action"),
+                    "severity": str(rec.get("severity") or "info"),
+                    "metadata": rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {},
+                },
+                at=str(rec.get("ts") or "") or None,
+            )
+    # connect() commits on clean exit — only now is the import durable.
+    marker.write_text(_now_iso() + "\n", encoding="utf-8")
 
 
 def _append_activity(
@@ -107,59 +177,132 @@ def _append_activity(
     message: str = "",
     metadata: Any = None,
 ) -> dict[str, Any]:
-    rec = {
-        "kind": "agent_activity",
-        "agent": agent_id,
-        "category": str(category or "action"),
-        "event": str(event or "event"),
-        "severity": str(severity or "info"),
-        "message": str(message or ""),
-        "metadata": metadata if isinstance(metadata, dict) else {},
-        "ts": _now_iso(),
-    }
-    path = _activity_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, separators=(",", ":"), default=str) + "\n")
-    return rec
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    _import_legacy_activity()
+    with connect() as conn:
+        row = surface_state.append_activity(
+            conn,
+            agent_id,
+            str(event or "event"),
+            message=str(message or ""),
+            metadata={
+                "kind": "agent_activity",
+                "category": str(category or "action"),
+                "severity": str(severity or "info"),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            },
+        )
+    return _activity_record(row)
 
 
 def _read_activity(agent_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
-    path = _activity_log_path()
-    if not path.exists():
-        return []
-    items: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-max(1, min(limit * 3, 300)):]
-    except Exception:
-        return []
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    _import_legacy_activity()
     clean_agent = _slug(agent_id) if agent_id else ""
-    for line in lines:
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(rec, dict):
-            continue
-        if clean_agent and _slug(rec.get("agent")) != clean_agent:
-            continue
-        items.append(rec)
-    items.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
-    return items[: max(1, min(limit, 100))]
+    with connect() as conn:
+        rows = surface_state.list_activity(
+            conn, agent=clean_agent or None, limit=max(1, min(limit, 100))
+        )
+    return [_activity_record(row) for row in rows]
 
 
 def _heartbeat_dir(agent_id: str) -> Path:
+    """Workspace dir for a surface's FILE artifacts (learnings.md,
+    history/*.md transcripts, experiments/results.tsv). JSON state lives in
+    the account database (surface_state), not here."""
     from elevate_constants import get_account_data_dir
 
     return get_account_data_dir() / "heartbeats" / agent_id
 
 
+def _import_legacy_runs(surface: str) -> None:
+    """One-shot lazy import of a surface's legacy ``history/*.json`` run
+    records into surface_runs (migration 0027). Same pattern as
+    ``_import_legacy_activity``: gated by a ``history/.runs_imported``
+    sentinel marker written only after the insert transaction commits, so a
+    crash mid-import just re-runs. The json files are never deleted (the
+    markdown transcripts + json run records stay on disk by design)."""
+    hist_dir = _heartbeat_dir(surface) / "history"
+    marker = hist_dir / ".runs_imported"
+    if marker.exists() or not hist_dir.is_dir():
+        return
+    files = sorted(p for p in hist_dir.glob("*.json") if p.is_file())
+    if not files:
+        return
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        for path in files:
+            try:
+                rec = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                rec = None
+            if not isinstance(rec, dict):
+                # Corrupt records still index (count parity with the old
+                # `ls history | wc -l` cadence check) as empty payloads.
+                rec = {}
+            surface_state.append_run(
+                conn,
+                surface,
+                kind="work",
+                status="ok",
+                summary=str(rec.get("summary") or rec.get("did") or "") or None,
+                record=rec,
+                ran_at=str(rec.get("ran_at") or "").strip() or path.stem,
+            )
+    # connect() commits on clean exit — only now is the import durable.
+    marker.write_text(_now_iso() + "\n", encoding="utf-8")
+
+
+def _log_run(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    surface = _surface_for_experiment(args, parent_agent)
+    _import_legacy_runs(surface)
+    summary = str(args.get("summary") or args.get("message") or "").strip()
+    with connect() as conn:
+        run = surface_state.append_run(
+            conn,
+            surface,
+            kind=str(args.get("kind") or "work"),
+            status=str(args.get("status") or "ok"),
+            summary=summary or None,
+            record=args.get("record") if isinstance(args.get("record"), dict) else None,
+        )
+        count = surface_state.count_runs(conn, surface)
+    return {"run": run, "run_count": count}
+
+
+def _count_runs(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    surface = _surface_for_experiment(args, parent_agent)
+    _import_legacy_runs(surface)
+    with connect() as conn:
+        total = surface_state.count_runs(conn, surface)
+        work = surface_state.count_runs(conn, surface, kind="work")
+        experiment = surface_state.count_runs(conn, surface, kind="experiment")
+    return {
+        "surface": surface,
+        "count": total,
+        "count_by_kind": {"work": work, "experiment": experiment},
+    }
+
+
 def _update_heartbeat(agent_id: str, message: str, status: str = "active", metadata: Any = None) -> dict[str, Any]:
-    hb_dir = _heartbeat_dir(agent_id)
-    hist_dir = hb_dir / "history"
-    hist_dir.mkdir(parents=True, exist_ok=True)
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     ts = _now_iso()
     rec = {
+        "at": ts,
         "surface": agent_id,
         "agent": agent_id,
         "status": str(status or "active"),
@@ -169,54 +312,39 @@ def _update_heartbeat(agent_id: str, message: str, status: str = "active", metad
         "metadata": metadata if isinstance(metadata, dict) else {},
         "source": "agent_bus",
     }
-    (hb_dir / "heartbeat.json").write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
-    (hist_dir / f"{ts.replace(':', '-')}.json").write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
-    cfg_path = hb_dir / "config.json"
-    if not cfg_path.exists():
-        cfg_path.write_text(
-            json.dumps(
+    with connect() as conn:
+        surface_state.set_heartbeat(conn, agent_id, rec)
+        if not surface_state.get_config(conn, agent_id):
+            surface_state.set_config(
+                conn,
+                agent_id,
                 {
                     "surface": agent_id,
                     "title": agent_id.replace("-", " ").title(),
                     "enabled": False,
                     "source": "agent_bus",
                 },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+            )
     return rec
 
 
 def _read_heartbeats(agent_id: str | None = None, *, limit: int = 50) -> list[dict[str, Any]]:
-    from elevate_constants import get_account_data_dir
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
 
-    root = get_account_data_dir() / "heartbeats"
-    if not root.exists():
-        return []
+    limit = max(1, min(limit, 100))
     target = _slug(agent_id) if agent_id else ""
-    out: list[dict[str, Any]] = []
-    for hb_dir in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name):
-        if target and hb_dir.name != target:
-            continue
-        rec: dict[str, Any] = {"agent": hb_dir.name, "status": "unknown"}
-        try:
-            parsed = json.loads((hb_dir / "heartbeat.json").read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                rec.update(parsed)
-        except Exception:
-            hist = hb_dir / "history"
-            files = sorted(hist.glob("*.json"), reverse=True) if hist.exists() else []
-            if files:
-                try:
-                    parsed = json.loads(files[0].read_text(encoding="utf-8"))
-                    if isinstance(parsed, dict):
-                        rec.update(parsed)
-                except Exception:
-                    pass
-        out.append(rec)
-    out.sort(key=lambda item: str(item.get("ran_at") or item.get("ts") or ""), reverse=True)
-    return out[: max(1, min(limit, 100))]
+    with connect() as conn:
+        if target:
+            rec = surface_state.get_heartbeat(conn, target)
+            if rec:
+                rec.setdefault("agent", target)
+            items = [rec] if rec else []
+        else:
+            items = surface_state.list_heartbeats(conn, limit=limit)
+    for rec in items:
+        rec.setdefault("status", "unknown")
+    return items[:limit]
 
 
 def _agent_memory_policy(agent_id: str) -> dict[str, Any]:
@@ -236,32 +364,13 @@ def _surface_for_experiment(args: dict[str, Any], parent_agent: Any = None) -> s
 
 
 def _experiments_dir(surface: str) -> Path:
+    """File-artifact dir for a surface's experiments (results.tsv only —
+    experiment RECORDS live in the account database)."""
     return _heartbeat_dir(surface) / "experiments"
-
-
-def _experiment_history_dir(surface: str) -> Path:
-    return _experiments_dir(surface) / "history"
-
-
-def _experiment_active_dir(surface: str) -> Path:
-    return _experiments_dir(surface) / "active"
 
 
 def _cycle_key(value: Any) -> str:
     return _slug(value) or "default"
-
-
-def _read_json_file(path: Path) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def _experiment_id() -> str:
@@ -309,61 +418,6 @@ def _cycle_defaults(surface: str, metric: str) -> dict[str, Any]:
         return {}
 
 
-def _load_experiment(surface: str, experiment_id: str | None = None) -> dict[str, Any] | None:
-    exp_dir = _experiments_dir(surface)
-    wanted = str(experiment_id or "").strip()
-    if wanted:
-        hist = _read_json_file(_experiment_history_dir(surface) / f"{wanted}.json")
-        if hist:
-            return hist
-        for path in _experiment_active_dir(surface).glob("*.json"):
-            rec = _read_json_file(path)
-            if rec and str(rec.get("id") or "") == wanted:
-                return rec
-        legacy = _read_json_file(exp_dir / "active.json")
-        if legacy and str(legacy.get("id") or "") == wanted:
-            return legacy
-        return None
-
-    legacy = _read_json_file(exp_dir / "active.json")
-    if legacy:
-        return legacy
-    active_files = sorted(_experiment_active_dir(surface).glob("*.json"), reverse=True)
-    for path in active_files:
-        rec = _read_json_file(path)
-        if rec:
-            return rec
-    return None
-
-
-def _save_experiment_history(surface: str, rec: dict[str, Any]) -> None:
-    exp_id = str(rec.get("id") or _experiment_id())
-    rec["id"] = exp_id
-    _write_json_file(_experiment_history_dir(surface) / f"{exp_id}.json", rec)
-
-
-def _save_active_experiment(surface: str, rec: dict[str, Any]) -> None:
-    cycle = _cycle_key(rec.get("cycle") or rec.get("metric") or "default")
-    _write_json_file(_experiment_active_dir(surface) / f"{cycle}.json", rec)
-    _write_json_file(_experiments_dir(surface) / "active.json", rec)
-
-
-def _remove_active_experiment(surface: str, rec: dict[str, Any]) -> None:
-    exp_id = str(rec.get("id") or "")
-    cycle = _cycle_key(rec.get("cycle") or rec.get("metric") or "default")
-    for path in (
-        _experiment_active_dir(surface) / f"{cycle}.json",
-        _experiments_dir(surface) / "active.json",
-    ):
-        current = _read_json_file(path)
-        if current and exp_id and str(current.get("id") or "") != exp_id:
-            continue
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def _append_experiment_result(surface: str, rec: dict[str, Any], measured: float | None) -> None:
     exp_dir = _experiments_dir(surface)
     exp_dir.mkdir(parents=True, exist_ok=True)
@@ -403,27 +457,16 @@ def _append_learning(surface: str, rec: dict[str, Any]) -> None:
 
 
 def _list_experiments(surface: str) -> dict[str, Any]:
-    exp_dir = _experiments_dir(surface)
-    active = None
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        history = surface_state.list_experiments(conn, surface, limit=100)
+        active_records = surface_state.list_experiments(conn, surface, status="active")
     active_by_cycle: dict[str, Any] = {}
-    history: list[dict[str, Any]] = []
-    legacy_active = _read_json_file(exp_dir / "active.json")
-    if legacy_active:
-        active = legacy_active
-        active_by_cycle[_cycle_key(legacy_active.get("cycle") or legacy_active.get("metric"))] = legacy_active
-    active_dir = _experiment_active_dir(surface)
-    if active_dir.exists():
-        for path in sorted(active_dir.glob("*.json"), reverse=True):
-            rec = _read_json_file(path)
-            if rec:
-                active_by_cycle[path.stem] = rec
-                active = active or rec
-    hist_dir = exp_dir / "history"
-    if hist_dir.exists():
-        for path in sorted(hist_dir.glob("*.json"), reverse=True)[:100]:
-            rec = _read_json_file(path)
-            if rec:
-                history.append(rec)
+    for rec in active_records:  # newest first — keep the freshest per cycle
+        active_by_cycle.setdefault(_cycle_key(rec.get("cycle") or rec.get("metric")), rec)
+    active = active_records[0] if active_records else None
     history.sort(
         key=lambda item: str(
             item.get("completed_at")
@@ -534,9 +577,11 @@ def _create_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[s
         "createdBy": _actor_agent(args, parent_agent),
         "payload": args.get("payload") if isinstance(args.get("payload"), dict) else {},
     }
-    _save_experiment_history(surface, rec)
-    if status == "running":
-        _save_active_experiment(surface, rec)
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        surface_state.upsert_experiment(conn, surface, rec)
     _append_activity(
         agent_id=rec["createdBy"],
         category="experiment",
@@ -548,21 +593,26 @@ def _create_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[s
 
 
 def _run_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     surface = _surface_for_experiment(args, parent_agent)
-    rec = _load_experiment(surface, str(args.get("experiment_id") or args.get("id") or "").strip() or None)
-    if not rec:
-        raise ValueError("experiment not found")
-    if str(rec.get("status") or "").lower() == "completed":
-        raise ValueError("completed experiments cannot be run")
-    now = _now_iso()
-    rec["status"] = "running"
-    rec["started_at"] = rec.get("started_at") or now
-    if args.get("changes_description") or args.get("change") or args.get("summary"):
-        rec["changes_description"] = str(args.get("changes_description") or args.get("change") or args.get("summary"))
-    if args.get("experiment_commit") or args.get("commit"):
-        rec["experiment_commit"] = str(args.get("experiment_commit") or args.get("commit"))
-    _save_experiment_history(surface, rec)
-    _save_active_experiment(surface, rec)
+    with connect() as conn:
+        rec = surface_state.get_experiment(
+            conn, surface, str(args.get("experiment_id") or args.get("id") or "").strip() or None
+        )
+        if not rec:
+            raise ValueError("experiment not found")
+        if str(rec.get("status") or "").lower() == "completed":
+            raise ValueError("completed experiments cannot be run")
+        now = _now_iso()
+        rec["status"] = "running"
+        rec["started_at"] = rec.get("started_at") or now
+        if args.get("changes_description") or args.get("change") or args.get("summary"):
+            rec["changes_description"] = str(args.get("changes_description") or args.get("change") or args.get("summary"))
+        if args.get("experiment_commit") or args.get("commit"):
+            rec["experiment_commit"] = str(args.get("experiment_commit") or args.get("commit"))
+        surface_state.upsert_experiment(conn, surface, rec)
     actor = _actor_agent(args, parent_agent)
     _append_activity(
         agent_id=actor,
@@ -575,8 +625,14 @@ def _run_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[str,
 
 
 def _evaluate_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     surface = _surface_for_experiment(args, parent_agent)
-    active = _load_experiment(surface, str(args.get("experiment_id") or args.get("id") or "").strip() or None)
+    with connect() as conn:
+        active = surface_state.get_experiment(
+            conn, surface, str(args.get("experiment_id") or args.get("id") or "").strip() or None
+        )
     if not active:
         raise ValueError("experiment not found")
     measured = _float_arg(
@@ -618,10 +674,10 @@ def _evaluate_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict
     }
     if decision == "keep" and measured is not None:
         rec["baseline_value"] = measured
-    _save_experiment_history(surface, rec)
+    with connect() as conn:
+        surface_state.upsert_experiment(conn, surface, rec)
     _append_experiment_result(surface, rec, measured)
     _append_learning(surface, rec)
-    _remove_active_experiment(surface, rec)
     _append_activity(
         agent_id=rec["evaluatedBy"],
         category="experiment",
@@ -633,6 +689,9 @@ def _evaluate_experiment(args: dict[str, Any], parent_agent: Any = None) -> dict
 
 
 def _gather_experiment_context(args: dict[str, Any], parent_agent: Any = None) -> dict[str, Any]:
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
     surface = _surface_for_experiment(args, parent_agent)
     listed = _list_experiments(surface)
     history = [item for item in listed["history"] if isinstance(item, dict)]
@@ -651,7 +710,8 @@ def _gather_experiment_context(args: dict[str, Any], parent_agent: Any = None) -
             learnings = text
         else:
             results_tsv = text
-    config = _read_json_file(_heartbeat_dir(surface) / "config.json") or {}
+    with connect() as conn:
+        config = surface_state.get_config(conn, surface)
     return {
         "agent": surface,
         "surface": surface,
@@ -956,6 +1016,19 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
             items = _read_heartbeats(args.get("agent_id") or args.get("agentId"), limit=int(args.get("limit") or 50))
             return tool_result(success=True, items=items, count=len(items))
 
+        if action in {"log_run", "run_log"}:
+            logged = _log_run(args, parent_agent)
+            return tool_result(success=True, run=logged["run"], run_count=logged["run_count"])
+
+        if action in {"run_count", "count_runs"}:
+            counted = _count_runs(args, parent_agent)
+            return tool_result(
+                success=True,
+                surface=counted["surface"],
+                count=counted["count"],
+                count_by_kind=counted["count_by_kind"],
+            )
+
         if action in {"write_memory", "memory_write"}:
             from agent.memory_manager import memory_policy_allows_write
             from elevate_cli.agent_hub import seed_agent_memory
@@ -1028,6 +1101,50 @@ def _agent_bus_tool(args: dict[str, Any], **kw: Any) -> str:
         if action in {"gather_experiment_context", "experiment_context", "context_experiments"}:
             return tool_result(success=True, context=_gather_experiment_context(args, parent_agent))
 
+        if action in {"get_surface_config", "surface_config"}:
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            surface = _surface_for_experiment(args, parent_agent)
+            with connect() as conn:
+                config = surface_state.get_config(conn, surface)
+            return tool_result(success=True, surface=surface, config=config)
+
+        if action in {"update_surface_config", "surface_config_update"}:
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            surface = _surface_for_experiment(args, parent_agent)
+            patch = args.get("patch")
+            if not isinstance(patch, dict) or not patch:
+                return tool_error("patch (object) is required")
+            with connect() as conn:
+                config = surface_state.patch_config(conn, surface, patch)
+            return tool_result(success=True, surface=surface, config=config)
+
+        if action in {"get_goals", "surface_goals"}:
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            surface = _surface_for_experiment(args, parent_agent)
+            with connect() as conn:
+                goals = surface_state.get_goals(conn, surface)
+            return tool_result(success=True, surface=surface, goals=goals)
+
+        if action in {"update_goals", "goals_update", "surface_goals_update"}:
+            from elevate_cli.data import connect
+            from elevate_cli.data import surface_state
+
+            surface = _surface_for_experiment(args, parent_agent)
+            goals = args.get("goals")
+            if not isinstance(goals, dict):
+                return tool_error("goals (object) is required")
+            goals = dict(goals)
+            goals["updated_at"] = _now_iso()
+            with connect() as conn:
+                saved = surface_state.set_goals(conn, surface, goals)
+            return tool_result(success=True, surface=surface, goals=saved)
+
         if action in {"list_cycles", "cycles", "cycle_list"}:
             return tool_result(success=True, **_list_cycles(args, parent_agent))
 
@@ -1060,7 +1177,12 @@ AGENT_BUS_SCHEMA = {
         "description": (
             "Native Elevate replacement for CortextOS bus commands. Use it for "
             "agent-visible tasks, approvals, activity events, heartbeat status, "
-            "memory, worker wake/tick, experiments, catalog browse, and installed skills."
+            "run records (log_run after every heartbeat run / run_count for the "
+            "experiment cadence — the database-backed run index the dashboard "
+            "also reads), memory, worker wake/tick, experiments, surface config "
+            "+ goals (get_surface_config / update_surface_config / get_goals / "
+            "update_goals — the database-backed surface state the dashboard also "
+            "reads), catalog browse, and installed skills."
         ),
         "parameters": {
             "type": "object",
@@ -1086,6 +1208,8 @@ AGENT_BUS_SCHEMA = {
                         "list_activity",
                         "update_heartbeat",
                         "read_heartbeats",
+                        "log_run",
+                        "run_count",
                         "write_memory",
                         "list_memory",
                         "wake_agent",
@@ -1095,6 +1219,10 @@ AGENT_BUS_SCHEMA = {
                         "list_experiments",
                         "evaluate_experiment",
                         "gather_experiment_context",
+                        "get_surface_config",
+                        "update_surface_config",
+                        "get_goals",
+                        "update_goals",
                         "list_cycles",
                         "create_cycle",
                         "modify_cycle",
@@ -1142,6 +1270,15 @@ AGENT_BUS_SCHEMA = {
                 "fact": {"type": "string"},
                 "metadata": {"type": "object"},
                 "meta": {"type": "object"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["work", "experiment"],
+                    "description": "Run kind for log_run (default 'work')",
+                },
+                "record": {
+                    "type": "object",
+                    "description": "Full run-record JSON payload for log_run",
+                },
                 "scopes": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1199,6 +1336,14 @@ AGENT_BUS_SCHEMA = {
                 "source": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200},
                 "payload": {"type": "object"},
+                "patch": {
+                    "type": "object",
+                    "description": "Shallow-merge patch for update_surface_config",
+                },
+                "goals": {
+                    "type": "object",
+                    "description": "Full goals object for update_goals (replaces the stored goals)",
+                },
                 "policy_action": {"type": "string"},
                 "policy_category": {"type": "string"},
             },
@@ -1213,6 +1358,6 @@ registry.register(
     toolset="agent_bus",
     schema=AGENT_BUS_SCHEMA,
     handler=lambda args, **kw: _agent_bus_tool(args, **kw),
-    description="Native Elevate agent bus for tasks, approvals, heartbeat, activity, experiments, and catalog",
+    description="Native Elevate agent bus for tasks, approvals, heartbeat, activity, run records, experiments, surface config/goals, and catalog",
     emoji="",
 )

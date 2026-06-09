@@ -1,6 +1,16 @@
 import json
 
+import pytest
+
+from elevate_cli.data.connection import _reset_schema_cache
 from tools.agent_bus_tool import _agent_bus_tool
+
+
+@pytest.fixture(autouse=True)
+def _fresh_schema_cache():
+    _reset_schema_cache()
+    yield
+    _reset_schema_cache()
 
 
 def _call(body):
@@ -293,3 +303,282 @@ def test_agent_bus_claim_audit_stale_and_archive_task_actions():
     archive = _call({"action": "archive_tasks", "agent_id": "executive-assistant", "dry_run": True})
     assert archive["success"] is True
     assert archive["report"]["dry_run"] is True
+
+
+def test_agent_bus_heartbeat_and_experiments_persist_in_surface_state():
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    _call(
+        {
+            "action": "update_heartbeat",
+            "agent_id": "leads",
+            "message": "WORKING ON: db-backed state",
+        }
+    )
+    created = _call(
+        {
+            "action": "create_experiment",
+            "agent_id": "leads",
+            "surface": "leads",
+            "title": "DB-backed experiment",
+            "metric": "hot_leads",
+            "cycle": "rank-intent",
+            "baseline_value": 2,
+        }
+    )
+    assert created["success"] is True
+    exp_id = created["experiment"]["id"]
+
+    with connect() as conn:
+        hb = surface_state.get_heartbeat(conn, "leads")
+        assert hb["summary"] == "WORKING ON: db-backed state"
+        # heartbeat seeds a disabled config card for unknown surfaces
+        assert surface_state.get_config(conn, "leads")["enabled"] is False
+        stored = surface_state.get_experiment(conn, "leads", exp_id)
+        assert stored["title"] == "DB-backed experiment"
+        active = surface_state.get_active_experiment_for_cycle(conn, "leads", "rank-intent")
+        assert active["id"] == exp_id
+
+
+def test_agent_bus_activity_roundtrip_persists_in_surface_activity():
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    posted = _call(
+        {
+            "action": "post_activity",
+            "agent_id": "leads",
+            "event": "draft_created",
+            "category": "outreach",
+            "severity": "warn",
+            "message": "Drafted 3 follow-ups.",
+            "metadata": {"count": 3},
+        }
+    )
+    assert posted["success"] is True
+    rec = posted["event"]
+    assert rec["kind"] == "agent_activity"
+    assert rec["agent"] == "leads"
+    assert rec["category"] == "outreach"
+    assert rec["severity"] == "warn"
+    assert rec["message"] == "Drafted 3 follow-ups."
+    assert rec["metadata"] == {"count": 3}
+    assert rec["ts"]
+
+    listed = _call({"action": "list_activity", "agent_id": "leads"})
+    assert listed["success"] is True
+    assert listed["count"] == 1
+    assert listed["items"][0] == rec  # byte-compatible record shape
+
+    # rows land in PG, not the jsonl
+    with connect() as conn:
+        rows = surface_state.list_activity(conn, agent="leads")
+    assert len(rows) == 1
+    assert rows[0]["event"] == "draft_created"
+    assert rows[0]["metadata"]["category"] == "outreach"
+
+    from tools.agent_bus_tool import _activity_log_path
+
+    assert not _activity_log_path().exists()
+
+
+def test_agent_bus_imports_legacy_activity_jsonl_once():
+    from tools.agent_bus_tool import _activity_log_path
+
+    path = _activity_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps(
+            {
+                "kind": "agent_activity",
+                "agent": "leads",
+                "category": "action",
+                "event": "old_event",
+                "severity": "info",
+                "message": "legacy row",
+                "metadata": {"n": 1},
+                "ts": "2026-01-01T00:00:00+00:00",
+            }
+        ),
+        "not json {{{",
+        json.dumps({"agent": "admin", "event": "older", "ts": "2025-12-31T00:00:00+00:00"}),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    listed = _call({"action": "list_activity"})
+    assert listed["success"] is True
+    assert [item["event"] for item in listed["items"]] == ["old_event", "older"]
+    legacy = listed["items"][0]
+    assert legacy["agent"] == "leads"
+    assert legacy["message"] == "legacy row"
+    assert legacy["metadata"] == {"n": 1}
+    assert legacy["severity"] == "info"
+    assert legacy["ts"] == "2026-01-01T00:00:00+00:00"
+
+    marker = path.parent / (path.name + ".imported")
+    assert marker.exists()
+    assert path.exists()  # never deleted
+    original = path.read_text(encoding="utf-8")
+
+    # marker gates re-import: new writes don't duplicate the legacy rows
+    _call({"action": "post_activity", "agent_id": "leads", "event": "new_event"})
+    relisted = _call({"action": "list_activity"})
+    assert relisted["count"] == 3
+    assert [item["event"] for item in relisted["items"]][0] == "new_event"
+    assert path.read_text(encoding="utf-8") == original  # jsonl untouched
+
+
+def test_agent_bus_log_run_and_run_count():
+    logged = _call(
+        {
+            "action": "log_run",
+            "agent_id": "leads",
+            "surface": "leads",
+            "summary": "drafted 3 follow-ups",
+            "record": {"ran_at": "2026-06-09T01:00:00+00:00", "found": "2 hot"},
+        }
+    )
+    assert logged["success"] is True
+    assert logged["run"]["surface"] == "leads"
+    assert logged["run"]["kind"] == "work"
+    assert logged["run"]["status"] == "ok"
+    assert logged["run"]["summary"] == "drafted 3 follow-ups"
+    assert logged["run"]["record"] == {"ran_at": "2026-06-09T01:00:00+00:00", "found": "2 hot"}
+    assert logged["run_count"] == 1
+
+    second = _call(
+        {"action": "run_log", "surface": "leads", "agent_id": "leads",
+         "kind": "experiment", "status": "error"}
+    )
+    assert second["success"] is True
+    assert second["run"]["kind"] == "experiment"
+    assert second["run_count"] == 2
+
+    counted = _call({"action": "run_count", "surface": "leads", "agent_id": "leads"})
+    assert counted["success"] is True
+    assert counted["surface"] == "leads"
+    assert counted["count"] == 2
+    assert counted["count_by_kind"] == {"work": 1, "experiment": 1}
+
+    # alias + surface defaulting to the calling agent
+    other = _call({"action": "count_runs", "agent_id": "admin"})
+    assert other["surface"] == "admin"
+    assert other["count"] == 0
+    assert other["count_by_kind"] == {"work": 0, "experiment": 0}
+
+    # rows land in the DB run index
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        runs = surface_state.list_runs(conn, "leads")
+    assert len(runs) == 2
+
+
+def test_agent_bus_imports_legacy_history_runs_once():
+    from elevate_constants import get_account_data_dir
+
+    hist = get_account_data_dir() / "heartbeats" / "leads" / "history"
+    hist.mkdir(parents=True, exist_ok=True)
+    (hist / "2026-01-01T00:00:00+00:00.json").write_text(
+        json.dumps(
+            {"ran_at": "2026-01-01T00:00:00+00:00", "did": "stuff",
+             "summary": "old run", "found": "x"}
+        ),
+        encoding="utf-8",
+    )
+    # no ran_at -> falls back to the filename stem; no summary -> uses "did"
+    (hist / "2026-01-02T000000.json").write_text(
+        json.dumps({"did": "older stuff"}), encoding="utf-8"
+    )
+    (hist / "broken.json").write_text("{not json", encoding="utf-8")
+
+    counted = _call({"action": "run_count", "surface": "leads", "agent_id": "leads"})
+    assert counted["success"] is True
+    assert counted["count"] == 3  # count parity with `ls history | wc -l`
+    assert counted["count_by_kind"]["work"] == 3
+
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state
+
+    with connect() as conn:
+        runs = {r["ran_at"]: r for r in surface_state.list_runs(conn, "leads")}
+    assert runs["2026-01-01T00:00:00+00:00"]["summary"] == "old run"
+    assert runs["2026-01-01T00:00:00+00:00"]["record"]["found"] == "x"
+    assert runs["2026-01-02T000000"]["summary"] == "older stuff"  # did fallback + stem ran_at
+    assert runs["broken"]["record"] == {}
+
+    marker = hist / ".runs_imported"
+    assert marker.exists()
+    assert (hist / "broken.json").exists()  # files never deleted
+
+    # marker gates re-import: a fresh log_run doesn't duplicate the legacy rows
+    logged = _call({"action": "log_run", "surface": "leads", "agent_id": "leads",
+                    "summary": "new run"})
+    assert logged["run_count"] == 4
+    assert len(list(hist.glob("*.json"))) == 3  # nothing written back to disk
+
+
+def test_agent_bus_surface_config_get_and_update():
+    fetched = _call({"action": "get_surface_config", "surface": "leads", "agent_id": "leads"})
+    assert fetched["success"] is True
+    assert fetched["surface"] == "leads"
+    assert fetched["config"] == {}
+
+    updated = _call(
+        {
+            "action": "update_surface_config",
+            "surface": "leads",
+            "agent_id": "leads",
+            "patch": {"goal": "drain the queue", "model": "harness-default"},
+        }
+    )
+    assert updated["success"] is True
+    assert updated["config"]["goal"] == "drain the queue"
+
+    merged = _call(
+        {
+            "action": "surface_config_update",
+            "surface": "leads",
+            "agent_id": "leads",
+            "patch": {"model": "haiku"},
+        }
+    )
+    assert merged["success"] is True
+    assert merged["config"] == {"goal": "drain the queue", "model": "haiku"}
+
+    refetched = _call({"action": "surface_config", "surface": "leads", "agent_id": "leads"})
+    assert refetched["config"]["model"] == "haiku"
+
+    missing = _call({"action": "update_surface_config", "surface": "leads", "agent_id": "leads"})
+    assert "patch" in missing["error"]
+
+
+def test_agent_bus_goals_get_and_update():
+    defaults = _call({"action": "get_goals", "surface": "admin", "agent_id": "admin"})
+    assert defaults["success"] is True
+    assert defaults["goals"]["goals"] == []
+    assert defaults["goals"]["bottleneck"] == ""
+
+    updated = _call(
+        {
+            "action": "update_goals",
+            "surface": "admin",
+            "agent_id": "admin",
+            "goals": {
+                "bottleneck": "follow-ups",
+                "daily_focus": "drain queue",
+                "goals": [{"id": "g1", "title": "t", "progress": 40, "order": 0}],
+            },
+        }
+    )
+    assert updated["success"] is True
+    assert updated["goals"]["bottleneck"] == "follow-ups"
+    assert updated["goals"]["updated_at"]
+
+    refetched = _call({"action": "surface_goals", "surface": "admin", "agent_id": "admin"})
+    assert refetched["goals"]["goals"][0]["progress"] == 40
+
+    missing = _call({"action": "update_goals", "surface": "admin", "agent_id": "admin"})
+    assert "goals" in missing["error"]
