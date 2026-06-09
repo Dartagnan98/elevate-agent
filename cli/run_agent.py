@@ -1808,7 +1808,11 @@ class AIAgent:
         _compression_cfg = _agent_cfg.get("compression", {})
         if not isinstance(_compression_cfg, dict):
             _compression_cfg = {}
-        compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+        # Default raised 0.50 -> 0.72 (2026-06): every compaction costs an LLM
+        # summarization call, a full prompt-cache prefix rebuild, and permanent
+        # info loss. The cheap prune_only stage (below, at 60%) now relieves
+        # pressure first, so full compaction can fire later.
+        compression_threshold = float(_compression_cfg.get("threshold", 0.72))
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
@@ -12925,6 +12929,21 @@ class AIAgent:
                         # _flush_messages_to_session_db writes compressed messages
                         # to the new session (see preflight compression comment).
                         conversation_history = None
+                    elif (
+                        self.compression_enabled
+                        and _compressor.should_prune_only(_real_tokens)
+                    ):
+                        # Soft stage: cheap no-LLM hygiene (strip historical
+                        # media, compact skill payloads, prune old tool
+                        # results) relieves pressure before full compaction is
+                        # needed. No session rotation — message contents are
+                        # rewritten in place; the session DB keeps the full-
+                        # fidelity originals.
+                        messages, _pruned = _compressor.prune_only(
+                            messages, current_tokens=_real_tokens,
+                        )
+                        if _pruned:
+                            self._safe_print("  ⟳ pruned stale context (no summary)")
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages

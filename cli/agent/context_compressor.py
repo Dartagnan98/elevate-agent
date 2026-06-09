@@ -21,7 +21,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent.auxiliary_client import call_llm, _is_connection_error
 from agent.context_engine import ContextEngine
@@ -64,6 +64,10 @@ _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
 # Absolute ceiling for summary tokens (even on very large context windows)
 _SUMMARY_TOKENS_CEILING = 12_000
+
+# Soft bar for the cheap no-LLM prune_only pass: runs in the band between
+# this fraction of the context window and the full compaction threshold.
+_PRUNE_SOFT_PERCENT = 0.60
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -574,7 +578,7 @@ class ContextCompressor(ContextEngine):
     def __init__(
         self,
         model: str,
-        threshold_percent: float = 0.50,
+        threshold_percent: float = 0.72,
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
@@ -650,6 +654,8 @@ class ContextCompressor(ContextEngine):
         self._previous_summary: Optional[str] = None
         # Anti-thrashing: track whether last compression was effective
         self._last_compression_savings_pct: float = 100.0
+        # Rate limit for the cheap prune_only pass (see should_prune_only)
+        self._last_prune_attempt_tokens: int = 0
         self._ineffective_compression_count: int = 0
         self._summary_failure_cooldown_until: float = 0.0
         self._last_summary_error: Optional[str] = None
@@ -1647,6 +1653,56 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     # ------------------------------------------------------------------
     # Main compression entry point
     # ------------------------------------------------------------------
+
+    def should_prune_only(self, prompt_tokens: int) -> bool:
+        """True when the cheap no-LLM hygiene pass should run.
+
+        Fires in the band between the soft bar (60% of context) and the full
+        compaction threshold. Rate-limited: after an attempt, waits until the
+        prompt has grown another 5% of the context window before retrying, so
+        a session hovering in the band doesn't re-prune (and re-invalidate the
+        provider prompt cache) every turn.
+        """
+        if prompt_tokens <= 0:
+            return False
+        soft_tokens = int(self.context_length * _PRUNE_SOFT_PERCENT)
+        if not (soft_tokens <= prompt_tokens < self.threshold_tokens):
+            return False
+        regrow = int(self.context_length * 0.05)
+        return prompt_tokens >= self._last_prune_attempt_tokens + regrow
+
+    def prune_only(
+        self, messages: List[Dict[str, Any]], current_tokens: int = 0
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """Cheap hygiene pass: strip historical media, compact auto-skill
+        payloads, prune old tool results. No LLM call, no session rotation,
+        no information loss beyond what full compaction would drop anyway.
+
+        Returns ``(messages, changed)``. ``changed`` is False when the pass
+        would save less than ~3% — mutating history invalidates the provider
+        prompt cache from the first changed byte, so a tiny saving costs more
+        than it returns and the original list is kept untouched.
+        """
+        self._last_prune_attempt_tokens = current_tokens or 0
+        before = estimate_messages_tokens_rough(messages)
+
+        pruned = _strip_historical_media(messages)
+        pruned, _skills = _compact_historical_auto_skill_payloads(pruned)
+        pruned, _results = self._prune_old_tool_results(
+            pruned, protect_tail_count=self.protect_last_n,
+            protect_tail_tokens=self.tail_token_budget,
+        )
+
+        after = estimate_messages_tokens_rough(pruned)
+        saved = before - after
+        if saved < max(2000, int(before * 0.03)):
+            return messages, False
+        if not self.quiet_mode:
+            logger.info(
+                "Prune-only pass: ~%s -> ~%s tokens (saved ~%s, no LLM call)",
+                f"{before:,}", f"{after:,}", f"{saved:,}",
+            )
+        return pruned, True
 
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.

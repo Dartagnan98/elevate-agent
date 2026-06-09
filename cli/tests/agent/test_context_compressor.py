@@ -1375,13 +1375,13 @@ class TestSummaryTargetRatio:
         """Tail token budget should be threshold_tokens * summary_target_ratio."""
         with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.40)
-        # 200K * 0.50 threshold * 0.40 ratio = 40K
-        assert c.tail_token_budget == 40_000
+        # 200K * 0.72 threshold * 0.40 ratio = 57.6K
+        assert c.tail_token_budget == 57_600
 
         with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.40)
-        # 1M * 0.50 threshold * 0.40 ratio = 200K
-        assert c.tail_token_budget == 200_000
+        # 1M * 0.72 threshold * 0.40 ratio = 288K
+        assert c.tail_token_budget == 288_000
 
     def test_summary_cap_scales_with_context(self):
         """Max summary tokens should be 5% of context, capped at 12K."""
@@ -1403,20 +1403,49 @@ class TestSummaryTargetRatio:
             c = ContextCompressor(model="test", quiet_mode=True, summary_target_ratio=0.95)
         assert c.summary_target_ratio == 0.80
 
-    def test_default_threshold_is_50_percent(self):
-        """Default compression threshold should be 50%, with a 64K floor."""
-        with patch("agent.context_compressor.get_model_context_length", return_value=100_000):
+    def test_default_threshold_is_72_percent(self):
+        """Default compression threshold should be 72%, with a 64K floor."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=80_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        assert c.threshold_percent == 0.50
-        # 50% of 100K = 50K, but the floor is 64K
+        assert c.threshold_percent == 0.72
+        # 72% of 80K = 57.6K, but the floor is 64K
         assert c.threshold_tokens == 64_000
 
-    def test_threshold_floor_does_not_apply_above_128k(self):
-        """On large-context models the 50% percentage is used directly."""
+    def test_threshold_floor_does_not_apply_above_floor(self):
+        """On large-context models the 72% percentage is used directly."""
         with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
             c = ContextCompressor(model="test", quiet_mode=True)
-        # 50% of 200K = 100K, which is above the 64K floor
-        assert c.threshold_tokens == 100_000
+        # 72% of 200K = 144K, which is above the 64K floor
+        assert c.threshold_tokens == 144_000
+
+    def test_should_prune_only_band_and_rate_limit(self):
+        """prune_only fires between 60% of context and the full threshold,
+        and is rate-limited until the prompt regrows 5% of the context."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        # threshold = 144K, soft bar = 120K
+        assert not c.should_prune_only(0)
+        assert not c.should_prune_only(100_000)   # below soft bar
+        assert c.should_prune_only(125_000)       # in band
+        assert not c.should_prune_only(150_000)   # full-compress territory
+        c._last_prune_attempt_tokens = 125_000
+        assert not c.should_prune_only(126_000)   # rate limited
+        assert c.should_prune_only(136_000)       # regrew 5% (10K)
+
+    def test_prune_only_keeps_original_when_savings_tiny(self):
+        """A pass that saves <3% must return the original list untouched
+        (mutating history would invalidate the provider prompt cache)."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=200_000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+        out, changed = c.prune_only(msgs, current_tokens=125_000)
+        assert out is msgs
+        assert changed is False
+        assert c._last_prune_attempt_tokens == 125_000
 
     def test_default_protect_last_n_is_20(self):
         """Default protect_last_n should be 20."""
