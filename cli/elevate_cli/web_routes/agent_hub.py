@@ -159,10 +159,15 @@ def _read_text(path: Path) -> str:
 
 
 def _cortext_root() -> Optional[Path]:
+    # Installable-pack content is bundled inside the app (cli/elevate_cli/
+    # agent_presets) so packs resolve on every box — customers have no
+    # ~/cortextos checkout. Resolution order: explicit env override, a live
+    # local cortextos checkout if present (dev), then the bundled copy.
+    bundled = Path(__file__).resolve().parent.parent / "agent_presets"
     candidates = [
         os.environ.get("CORTEXTOS_ROOT"),
         str(Path.home() / "cortextos"),
-        "/Users/dartagnanpatricio/cortextos",
+        str(bundled),
     ]
     for item in candidates:
         if not item:
