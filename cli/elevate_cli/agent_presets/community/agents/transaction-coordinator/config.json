@@ -1,0 +1,20 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 7200,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Walk every live deal's milestone checklist, chase outstanding documents, and surface condition and deadline risk before it lapses."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": { "enabled": true }
+  }
+}

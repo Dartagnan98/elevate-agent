@@ -1,0 +1,20 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 7200,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Work the sphere and farm programs: draft today's anniversary and milestone touches, advance market-update and farm sequences, and queue referral asks where a touch earned one."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": { "enabled": true }
+  }
+}

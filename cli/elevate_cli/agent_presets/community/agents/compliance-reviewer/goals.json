@@ -1,0 +1,12 @@
+{
+  "focus": "Every live deal file reviewed on cadence, every gap flagged with an owner, zero files reaching closing with unresolved flags.",
+  "goals": [
+    { "title": "Every live deal file reviewed for completeness each week", "progress": 0 },
+    { "title": "Every flagged gap becomes an assigned task within one cycle", "progress": 0 },
+    { "title": "Identification and record-keeping checklist current on every file", "progress": 0 },
+    { "title": "Zero files reach closing with unresolved compliance flags", "progress": 0 }
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

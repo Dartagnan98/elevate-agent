@@ -1,6 +1,18 @@
 import json
 
+import pytest
 import yaml
+
+from elevate_cli.data.connection import _reset_schema_cache
+
+
+@pytest.fixture(autouse=True)
+def _fresh_schema_cache():
+    """Agent defs are PG-backed (hub_agents) — bind the pool to this test's
+    ELEVATE_HOME instead of a previous test's torn-down embedded server."""
+    _reset_schema_cache()
+    yield
+    _reset_schema_cache()
 
 
 def test_agent_hub_snapshot_reflects_local_state_without_raw_secrets(tmp_path, monkeypatch):

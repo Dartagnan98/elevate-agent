@@ -1,0 +1,20 @@
+{
+  "agent_name": "{{agent_name}}",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 7200,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Review live deal files for completeness, walk the disclosure checklists, check identification and record-keeping items (FINTRAC where applicable in Canada), and flag every gap as a task — flag, never fix."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": { "enabled": true }
+  }
+}

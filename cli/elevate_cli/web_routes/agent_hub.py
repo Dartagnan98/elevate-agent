@@ -98,6 +98,112 @@ _CORTEXT_AGENT_PACKS = [
         "memory_scopes": ["tasks", "handoffs", "worklog"],
         "includes": ["Identity", "Soul", "Heartbeat", "Tasks", "Comms", "Memory"],
     },
+    # ── Real-estate-native packs (authored for Elevate, not imported from
+    # cortextOS community). Each ships a complete config.json — no `template`
+    # key on purpose: a template merge would flip runtime_type away from
+    # native. Authoring/parser notes: agent_presets/REGISTRATION_STAGING.md.
+    {
+        "id": "transaction-coordinator",
+        "name": "Transaction Coordinator",
+        "role": "transactions",
+        "emoji": "T",
+        "source": "community/agents/transaction-coordinator",
+        "description": "Deal-milestone coordinator that chases documents, watches conditions and deadlines, and runs closing checklists so nothing in a live file slips.",
+        "owns": ["deal-milestones", "document-chasing", "condition-deadline-watch", "closing-checklists"],
+        "handoff_targets": ["admin", "executive-assistant"],
+        "escalation_target": "admin",
+        "day_start": "08:00",
+        "day_end": "18:00",
+        "day_mode": "Walk every live deal's milestone list, chase outstanding documents, and surface today's condition and deadline risk.",
+        "night_mode": "Refresh deal timelines and prepare next-day chase drafts and checklist updates; no external sends.",
+        "memory_scopes": ["transactions", "deadlines", "documents", "closings"],
+        "includes": ["Identity", "Soul", "Guardrails", "Milestone checklists", "Document chasing", "Closing playbook"],
+    },
+    {
+        "id": "listing-marketing",
+        "name": "Listing Marketing",
+        "role": "listing-launch",
+        "emoji": "L",
+        "source": "community/agents/listing-marketing",
+        "description": "Listing-launch specialist that runs launch checklists, drafts MLS copy, coordinates photo and staging tasks, and prepares open-house promotion drafts.",
+        "owns": ["listing-launch-checklists", "mls-copy-drafts", "photo-staging-coordination", "open-house-promo"],
+        "handoff_targets": ["marketing", "social-media", "executive-assistant"],
+        "escalation_target": "marketing",
+        "day_start": "09:00",
+        "day_end": "18:00",
+        "day_mode": "Advance every active launch checklist, draft and refine listing copy, chase photo/staging coordination, and keep open-house promo on schedule.",
+        "night_mode": "Prepare draft copy variants and promo drafts, and queue next-day coordination tasks; no publishing or sends.",
+        "memory_scopes": ["listings", "launches", "marketing-drafts", "open-houses"],
+        "includes": ["Identity", "Soul", "Guardrails", "Launch checklists", "MLS copy drafts", "Open-house promo"],
+    },
+    {
+        "id": "isa-lead-nurture",
+        "name": "ISA Lead Nurture",
+        "role": "lead-nurture",
+        "emoji": "I",
+        "source": "community/agents/isa-lead-nurture",
+        "description": "Inside sales agent for the leads board: drafts a first response for every new lead fast, runs follow-up cadences, watches hot leads, and re-engages cold ones.",
+        "owns": ["new-lead-response-drafts", "follow-up-cadences", "hot-lead-watch", "re-engagement"],
+        "handoff_targets": ["outreach", "executive-assistant"],
+        "escalation_target": "outreach",
+        "day_start": "07:00",
+        "day_end": "21:00",
+        "day_mode": "Work the leads lanes hard: new-lead drafts, due cadence touches, hot-lead review, and approvals-queue hygiene.",
+        "night_mode": "Prepare next-morning drafts and re-engagement batches and recompute cadence due-dates; no external sends.",
+        "memory_scopes": ["leads", "follow-up", "cadences", "re-engagement"],
+        "includes": ["Identity", "Soul", "Guardrails", "Speed-to-draft", "Cadence engine", "Hot-lead watch"],
+    },
+    {
+        "id": "market-analyst",
+        "name": "Market Analyst",
+        "role": "market-analysis",
+        "emoji": "M",
+        "source": "community/agents/market-analyst",
+        "description": "Market-data specialist that preps CMA support packets, digests neighborhood and market stats, and writes pricing-trend briefs for listing appointments.",
+        "owns": ["cma-prep-support", "market-stat-digests", "pricing-trend-briefs", "neighborhood-profiles"],
+        "handoff_targets": ["analyst", "admin"],
+        "escalation_target": "analyst",
+        "day_start": "08:00",
+        "day_end": "17:00",
+        "day_mode": "Work due CMA requests and appointment briefs first, then refresh neighborhood digests and watch pricing trends.",
+        "night_mode": "Refresh stat digests and pre-build packets for upcoming appointments; no external delivery.",
+        "memory_scopes": ["market-data", "cma", "pricing", "neighborhoods"],
+        "includes": ["Identity", "Soul", "Guardrails", "CMA prep", "Market digests", "Appointment briefs"],
+    },
+    {
+        "id": "compliance-reviewer",
+        "name": "Compliance Reviewer",
+        "role": "compliance",
+        "emoji": "C",
+        "source": "community/agents/compliance-reviewer",
+        "description": "Deal-file completeness reviewer that checks disclosures, identification, and record-keeping (FINTRAC where applicable in Canada) and flags gaps without fixing them.",
+        "owns": ["deal-file-review", "disclosure-checklists", "id-record-keeping-checks", "compliance-flags"],
+        "handoff_targets": ["admin", "executive-assistant"],
+        "escalation_target": "admin",
+        "day_start": "09:00",
+        "day_end": "17:00",
+        "day_mode": "Review files on cadence, triage new flags, verify resolved flags, and keep the closing-blocker list current.",
+        "night_mode": "Pre-stage the next day's review queue and summarize open flags by severity; no external anything, no flag closures.",
+        "memory_scopes": ["compliance", "deal-files", "disclosures", "approvals"],
+        "includes": ["Identity", "Soul", "Guardrails", "File review", "Disclosure watch", "Flag-don't-fix posture"],
+    },
+    {
+        "id": "sphere-farming",
+        "name": "Sphere Farming",
+        "role": "sphere",
+        "emoji": "F",
+        "source": "community/agents/sphere-farming",
+        "description": "Sphere and farm program operator: drafts anniversary and milestone touches, market updates for past clients, earned referral asks, and geographic-farm sequences.",
+        "owns": ["past-client-touches", "anniversary-milestones", "referral-asks", "geo-farm-sequences"],
+        "handoff_targets": ["outreach", "marketing"],
+        "escalation_target": "outreach",
+        "day_start": "09:00",
+        "day_end": "18:00",
+        "day_mode": "Draft today's due touches, advance farm sequences, queue earned referral asks, and keep the touch calendar honest.",
+        "night_mode": "Pre-draft upcoming anniversaries and market updates and refresh farm-sequence schedules; no sends or program changes.",
+        "memory_scopes": ["sphere", "past-clients", "referrals", "farm"],
+        "includes": ["Identity", "Soul", "Guardrails", "Touch calendar", "Farm sequences", "Referral asks"],
+    },
 ]
 
 
@@ -133,7 +239,8 @@ def _cortext_root() -> Optional[Path]:
     # local cortextos checkout if present (dev), then the bundled copy.
     bundled = Path(__file__).resolve().parent.parent / "agent_presets"
     candidates = [
-        os.environ.get("CORTEXTOS_ROOT"),
+        os.environ.get("ELEVATE_AGENT_PRESETS_ROOT"),
+        os.environ.get("CORTEXTOS_ROOT"),  # legacy alias
         str(Path.home() / "cortextos"),
         str(bundled),
     ]
@@ -617,7 +724,7 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "default_priority": "high" if spec.get("id") in {"security", "theta-wave"} else "normal",
         },
         "safety": {
-            "approval_mode": "always_confirm" if spec.get("id") in {"security", "agentic-crm-assistant"} else "confirm_external_send",
+            "approval_mode": "always_confirm" if spec.get("id") in {"security", "agentic-crm-assistant", "compliance-reviewer"} else "confirm_external_send",
             "always_ask": _merge_unique(
                 ["external_send", "data_deletion", "deployment", "financial", "legal"],
                 ["credential_change", "security_incident"] if spec.get("id") == "security" else [],
@@ -737,11 +844,27 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bundled_presets_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "agent_presets"
+
+
 def _build_cortext_agent_packs() -> dict[str, Any]:
     root = _cortext_root()
     if root is None:
         return {"root": None, "packs": []}
-    packs = [_build_cortext_pack(root, spec) for spec in _CORTEXT_AGENT_PACKS]
+    # Per-pack root: the Elevate-native packs live only in the bundled
+    # agent_presets/, while a dev box may resolve a ~/cortextos checkout as
+    # the primary root. Fall back to the bundled copy whenever the resolved
+    # root doesn't carry a pack's source dir, so one global root can't hide
+    # bundled packs.
+    bundled = _bundled_presets_root()
+    packs = []
+    for spec in _CORTEXT_AGENT_PACKS:
+        pack_root = root
+        source = str(spec.get("source") or "").strip().strip("/")
+        if source and not (root / source).exists() and (bundled / source).exists():
+            pack_root = bundled
+        packs.append(_build_cortext_pack(pack_root, spec))
     return {"root": str(root), "packs": packs}
 
 
@@ -879,14 +1002,15 @@ def create_agent_hub_router(
             raise HTTPException(status_code=500, detail=f"Agent Hub failed: {exc}")
 
 
-    @router.get("/api/agent-hub/cortext-packs")
+    @router.get("/api/agent-hub/agent-packs")
+    @router.get("/api/agent-hub/cortext-packs")  # legacy alias
     async def get_cortext_agent_packs():
-        """Return installable CortextOS agent presets converted to native Agent Hub payloads."""
+        """Return installable agent-pack presets converted to native Agent Hub payloads."""
         try:
             return _build_cortext_agent_packs()
         except Exception as exc:
-            _log.exception("GET /api/agent-hub/cortext-packs failed")
-            raise HTTPException(status_code=500, detail=f"Cortext agent packs failed: {exc}")
+            _log.exception("GET /api/agent-hub/agent-packs failed")
+            raise HTTPException(status_code=500, detail=f"Agent packs failed: {exc}")
 
 
     @router.post("/api/agent-hub/agents")

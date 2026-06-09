@@ -1,0 +1,12 @@
+{
+  "focus": "Every active listing has a launch checklist that is moving: copy drafted, photos coordinated, promo ready before it matters.",
+  "goals": [
+    { "title": "Launch checklist created within one cycle of a new listing", "progress": 0 },
+    { "title": "MLS copy draft ready before photos are delivered", "progress": 0 },
+    { "title": "Photo and staging tasks scheduled with owners and dates", "progress": 0 },
+    { "title": "Open-house promo drafts ready 5 days before each open house", "progress": 0 }
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

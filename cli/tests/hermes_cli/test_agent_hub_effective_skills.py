@@ -1,16 +1,32 @@
 import copy
 
+import pytest
+
 from elevate_cli.agent_hub import (
     AGENT_ARTIFACT_SKILLS,
     SHARED_AGENT_SKILLS,
     agent_effective_skills,
     agent_run_context,
+    create_agent_config,
     get_agent_def,
     reconcile_agent_hub_defaults,
+    update_agent_config,
 )
+from elevate_cli.data.connection import _reset_schema_cache
+
+
+@pytest.fixture(autouse=True)
+def _fresh_schema_cache():
+    """Agent defs are PG-backed (hub_agents) — bind the pool to this test's
+    ELEVATE_HOME instead of a previous test's torn-down embedded server."""
+    _reset_schema_cache()
+    yield
+    _reset_schema_cache()
 
 
 def test_builtin_agents_include_shared_artifact_capabilities():
+    # Admin is an installable default — patching it installs a fresh copy.
+    update_agent_config("admin", {"enabled": True})
     agent = get_agent_def("admin", config={})
 
     assert agent is not None
@@ -21,19 +37,11 @@ def test_builtin_agents_include_shared_artifact_capabilities():
 
 
 def test_effective_skills_merge_shared_agent_and_run_specific_without_duplicates():
-    config = {
-        "agent_hub": {
-            "agents": [
-                {
-                    "id": "custom",
-                    "name": "Custom",
-                    "skills": ["custom-skill", "nano-pdf"],
-                }
-            ]
-        }
-    }
+    # Agent definitions persist in the account DB now (hub_agents), not in a
+    # caller-supplied config dict.
+    create_agent_config({"id": "custom", "name": "Custom", "skills": ["custom-skill", "nano-pdf"]})
 
-    skills = agent_effective_skills("custom", ["job-skill", "custom-skill"], config=config)
+    skills = agent_effective_skills("custom", ["job-skill", "custom-skill"], config={})
 
     assert skills[: len(SHARED_AGENT_SKILLS)] == list(SHARED_AGENT_SKILLS)
     assert skills.count("nano-pdf") == 1
@@ -46,6 +54,7 @@ def test_unknown_agent_effective_skills_keep_only_explicit_run_skills():
 
 
 def test_agent_run_context_names_specialization_handoff_and_artifacts():
+    update_agent_config("admin", {"enabled": True})
     context = agent_run_context("admin", config={})
 
     assert "AGENT HUB CONTEXT" in context
@@ -56,6 +65,8 @@ def test_agent_run_context_names_specialization_handoff_and_artifacts():
 
 
 def test_analyst_and_theta_wave_are_backend_defaults():
+    update_agent_config("analyst", {"enabled": True})
+    update_agent_config("theta-wave", {"enabled": True})
     analyst = get_agent_def("analyst", config={})
     theta_wave = get_agent_def("theta-wave", config={})
 
@@ -66,7 +77,7 @@ def test_analyst_and_theta_wave_are_backend_defaults():
     assert theta_wave["routing"]["escalation_target"] == "executive-assistant"
 
 
-def test_reconcile_agent_hub_defaults_repairs_saved_config_without_overwriting_user_state(monkeypatch):
+def test_reconcile_agent_hub_defaults_repairs_persisted_rows_without_overwriting_user_state(monkeypatch):
     config = {
         "agent_hub": {
             "agents": [
@@ -82,6 +93,8 @@ def test_reconcile_agent_hub_defaults_repairs_saved_config_without_overwriting_u
     }
     saved: dict = {}
 
+    # The legacy config.yaml shape is consumed once by the one-shot import;
+    # reconcile then repairs the persisted hub_agents rows, never the yaml.
     monkeypatch.setattr("elevate_cli.agent_hub.load_config", lambda: copy.deepcopy(config))
     monkeypatch.setattr("elevate_cli.config.save_config", lambda cfg: saved.update(copy.deepcopy(cfg)))
 
@@ -93,8 +106,16 @@ def test_reconcile_agent_hub_defaults_repairs_saved_config_without_overwriting_u
     assert "executive-assistant" in report["created"]
     assert "analyst" not in report["created"]
     assert "theta-wave" not in report["created"]
+    # Only the default_agent housekeeping key goes back to config.yaml.
     assert saved["agent_hub"]["default_agent"] == "executive-assistant"
-    admin = next(agent for agent in saved["agent_hub"]["agents"] if agent["id"] == "admin")
+    assert saved["agent_hub"]["agents"] == config["agent_hub"]["agents"]  # frozen archive
+
+    from elevate_cli.data import connect, surface_state
+
+    with connect() as conn:
+        rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
+    admin = rows["admin"]["config"]
+    assert rows["admin"]["builtin"] is True
     assert admin["name"] == "My Admin"
     assert admin["enabled"] is False
     assert "custom-admin-skill" in admin["skills"]

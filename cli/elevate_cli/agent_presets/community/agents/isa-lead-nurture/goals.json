@@ -1,0 +1,12 @@
+{
+  "focus": "Speed-to-draft on every new lead, a live cadence on every active lead, and no warm lead going quietly cold.",
+  "goals": [
+    { "title": "Every new lead has a response draft within one heartbeat cycle", "progress": 0 },
+    { "title": "No active lead goes 7 days without a scheduled next touch", "progress": 0 },
+    { "title": "Hot leads reviewed and advanced every cycle", "progress": 0 },
+    { "title": "One re-engagement batch drafted per week for cold leads", "progress": 0 }
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

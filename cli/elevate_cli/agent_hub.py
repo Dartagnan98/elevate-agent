@@ -1203,29 +1203,101 @@ def _removed_default_ids(hub_cfg: dict[str, Any]) -> set[str]:
     return {_slug(str(item)) for item in raw if isinstance(item, str) and _slug(str(item))}
 
 
-def _set_removed_default_ids(hub_cfg: dict[str, Any], ids: set[str]) -> None:
-    # Only removable built-ins can be parked; never the permanent EA.
-    cleaned = sorted(i for i in ids if _is_removable_default(i))
-    if cleaned:
-        hub_cfg["removed_default_agents"] = cleaned
-    else:
-        hub_cfg.pop("removed_default_agents", None)
-
-
 def _agent_config_id(raw: dict[str, Any]) -> str:
     return _slug(str(raw.get("id") or raw.get("slug") or raw.get("name") or ""))
 
 
-def _persisted_agents(config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    hub_cfg = config.get("agent_hub")
-    if not isinstance(hub_cfg, dict):
-        hub_cfg = {}
-        config["agent_hub"] = hub_cfg
+# ─── PG-backed agent roster (hub_agents, migration 0026) ────────────────
+#
+# Agent definitions used to persist per-MACHINE in config.yaml under
+# ``agent_hub.agents`` (plus a ``removed_default_agents`` housekeeping list).
+# They now live per-ACCOUNT in the ``hub_agents`` table: one row per agent,
+# ``builtin=1`` for DEFAULT_AGENT_DEFS ids, ``removed=1`` tombstones for
+# REMOVED defaults so reconcile doesn't re-seed them. config.yaml is left
+# untouched as a frozen archive — nothing writes agent lists back to it.
+
+# One-shot import guard. After the first PG read imports the legacy
+# config.yaml agents (and removed-ids as tombstones), this marker row
+# (builtin=0, removed=1) is written so an account that later legitimately
+# ends up with zero agent rows is not re-imported from the frozen archive.
+# ``_slug()`` never produces an id containing "_", so it cannot collide.
+_HUB_IMPORT_MARKER = "_imported"
+
+
+def _ensure_hub_agents_imported(conn: Any, config: dict[str, Any] | None = None) -> None:
+    """One-shot lazy import: config.yaml ``agent_hub`` state → ``hub_agents``.
+
+    Runs on every PG read but exits immediately once the table has any row
+    (the import always leaves at least the marker). config.yaml keys are NOT
+    deleted — the yaml stays a frozen archive. ``config`` must be a FULL
+    loaded config when provided (reconcile passes its own); plain readers
+    leave it None so the import never sources from a caller's partial dict.
+    """
+    from elevate_cli.data import surface_state as ss
+
+    row = conn.execute("SELECT 1 FROM hub_agents LIMIT 1").fetchone()
+    if row:
+        return
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            config = {}
+    hub_cfg = config.get("agent_hub") if isinstance(config.get("agent_hub"), dict) else {}
     raw_agents = hub_cfg.get("agents")
+    if raw_agents is None:
+        raw_agents = config.get("agents")  # pre-agent_hub legacy key
     if not isinstance(raw_agents, list):
         raw_agents = []
-    hub_cfg["agents"] = raw_agents
-    return hub_cfg, raw_agents
+    seen: set[str] = set()
+    for raw in raw_agents:
+        if not isinstance(raw, dict):
+            continue
+        agent_id = _agent_config_id(raw)
+        if not agent_id or agent_id in seen:
+            continue
+        seen.add(agent_id)
+        agent_cfg = copy.deepcopy(raw)
+        agent_cfg["id"] = agent_id
+        ss.upsert_hub_agent(
+            conn,
+            agent_id,
+            agent_cfg,
+            builtin=_is_builtin_agent_id(agent_id),
+            removed=False,
+        )
+    for removed_id in _removed_default_ids(hub_cfg):
+        if removed_id in seen or not _is_removable_default(removed_id):
+            continue
+        ss.remove_hub_agent(conn, removed_id, tombstone=True)
+    ss.upsert_hub_agent(conn, _HUB_IMPORT_MARKER, {}, builtin=False, removed=True)
+
+
+def _stored_agents() -> list[dict[str, Any]] | None:
+    """Active agent config dicts from the account DB, in stored order.
+
+    Returns ``None`` when the DB is unavailable so readers can degrade to
+    the legacy config.yaml view (tolerant reads, pre-0026 behavior).
+    """
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state as ss
+
+        with connect() as conn:
+            _ensure_hub_agents_imported(conn)
+            rows = ss.list_hub_agents(conn)
+    except Exception:
+        return None
+    agents: list[dict[str, Any]] = []
+    for row in rows:
+        agent_id = str(row.get("agent_id") or "")
+        if not agent_id or agent_id == _HUB_IMPORT_MARKER:
+            continue
+        agent_cfg = row.get("config") if isinstance(row.get("config"), dict) else {}
+        agent_cfg = dict(agent_cfg)
+        agent_cfg.setdefault("id", agent_id)
+        agents.append(agent_cfg)
+    return agents
 
 
 def _agent_value_missing(value: Any) -> bool:
@@ -1257,90 +1329,114 @@ def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any
 
 
 def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: bool = True) -> dict[str, Any]:
-    """Persist the current built-in Agent Hub defaults into saved config.
+    """Repair the persisted Agent Hub roster against current built-in defaults.
 
-    Agent Hub reads are already merged with ``DEFAULT_AGENT_DEFS`` at runtime, but
-    shipped updates also need to repair existing configs so the dashboard, cron
-    worker, and future profile exports all see the same current agent/skill set.
-    This function is intentionally additive for existing built-ins: it preserves
-    disabled state and custom text while adding newly bundled skills, routing,
-    lifecycle, safety, memory, and native Cortext-style agent defaults.
+    Agent Hub reads are already merged with ``DEFAULT_AGENT_DEFS`` at runtime,
+    but shipped updates also need to repair the persisted rows (``hub_agents``
+    in the account DB) so the dashboard, cron worker, and future profile
+    exports all see the same current agent/skill set. This function is
+    intentionally additive for existing built-ins: it preserves disabled state
+    and custom text while adding newly bundled skills, routing, lifecycle,
+    safety, memory, and native Cortext-style agent defaults. A tombstoned
+    (deleted) default is never re-seeded. ``save=False`` is a dry run — the
+    report is computed but no rows or config keys are written.
+
+    Only the ``agent_hub.default_agent`` housekeeping key still lives in
+    config.yaml; the agents list itself is per-account in the database.
     """
     from elevate_cli.config import save_config
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state as ss
 
     if config is None:
         config = load_config()
-    hub_cfg, raw_agents = _persisted_agents(config)
-    before_agents = copy.deepcopy(raw_agents)
+    hub_cfg = config.get("agent_hub")
+    if not isinstance(hub_cfg, dict):
+        hub_cfg = {}
+        config["agent_hub"] = hub_cfg
     created: list[str] = []
     updated: list[dict[str, Any]] = []
     default_agent_before = str(hub_cfg.get("default_agent") or "").strip()
     if not default_agent_before:
         hub_cfg["default_agent"] = "executive-assistant"
 
-    by_id: dict[str, dict[str, Any]] = {
-        _agent_config_id(item): item
-        for item in raw_agents
-        if isinstance(item, dict) and _agent_config_id(item)
-    }
-    for default in DEFAULT_AGENT_DEFS:
-        agent_id = _slug(str(default.get("id") or ""))
-        if not agent_id:
-            continue
-        raw = by_id.get(agent_id)
-        if raw is None:
-            # Only auto-seed the always-on agent (EA). Every other native default
-            # is installable from the Agent Library, not auto-created. Existing
-            # installs keep agents they already have (this branch only fires for
-            # a default that is *missing* from the saved config).
-            if not _is_auto_seed_default(agent_id):
+    with connect() as conn:
+        _ensure_hub_agents_imported(conn, config)
+        rows = ss.list_hub_agents(conn, include_removed=True)
+        tombstoned = {
+            str(row.get("agent_id") or "")
+            for row in rows
+            if row.get("removed") and str(row.get("agent_id") or "") != _HUB_IMPORT_MARKER
+        }
+        by_id: dict[str, dict[str, Any]] = {
+            str(row.get("agent_id") or ""): row
+            for row in rows
+            if not row.get("removed") and str(row.get("agent_id") or "")
+        }
+        for default in DEFAULT_AGENT_DEFS:
+            agent_id = _slug(str(default.get("id") or ""))
+            if not agent_id:
                 continue
-            new_agent = copy.deepcopy(default)
-            new_agent["skills"] = _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"))
-            raw_agents.append(new_agent)
-            by_id[agent_id] = new_agent
-            created.append(agent_id)
-            continue
+            row = by_id.get(agent_id)
+            if row is None:
+                # Only auto-seed the always-on agent (EA). Every other native
+                # default is installable from the Agent Library, not
+                # auto-created. A tombstoned default stays deleted.
+                if not _is_auto_seed_default(agent_id) or agent_id in tombstoned:
+                    continue
+                new_agent = copy.deepcopy(default)
+                new_agent["skills"] = _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"))
+                if save:
+                    ss.upsert_hub_agent(conn, agent_id, new_agent, builtin=True, removed=False)
+                by_id[agent_id] = {"agent_id": agent_id, "config": new_agent, "builtin": True}
+                created.append(agent_id)
+                continue
 
-        before = copy.deepcopy(raw)
-        raw["id"] = agent_id
-        for field in ("name", "role", "description", "prompt"):
-            if _agent_value_missing(raw.get(field)) and not _agent_value_missing(default.get(field)):
-                raw[field] = copy.deepcopy(default.get(field))
-        if "enabled" not in raw:
-            raw["enabled"] = bool(default.get("enabled", True))
-        added_skills = _merge_agent_list_field(raw, "skills", SHARED_AGENT_SKILLS, default.get("skills"))
-        _merge_agent_list_field(raw, "toolsets", default.get("toolsets"))
-        _merge_agent_list_field(raw, "platforms", default.get("platforms"))
-        _merge_agent_list_field(raw, "session_sources", default.get("session_sources"))
-        for section in ("runtime", "routing", "safety", "identity", "soul", "lifecycle", "ecosystem", "memory"):
-            _merge_agent_section_defaults(raw, section, default.get(section))
-        raw["metadata"] = _sanitize_agent_metadata(raw.get("metadata"), base=default.get("metadata"))
-        _validate_agent_config(raw)
-        if raw != before:
-            updated.append({"id": agent_id, "addedSkills": added_skills})
+            raw = row.get("config") if isinstance(row.get("config"), dict) else {}
+            raw = copy.deepcopy(raw)
+            before = copy.deepcopy(raw)
+            raw["id"] = agent_id
+            for field in ("name", "role", "description", "prompt"):
+                if _agent_value_missing(raw.get(field)) and not _agent_value_missing(default.get(field)):
+                    raw[field] = copy.deepcopy(default.get(field))
+            if "enabled" not in raw:
+                raw["enabled"] = bool(default.get("enabled", True))
+            added_skills = _merge_agent_list_field(raw, "skills", SHARED_AGENT_SKILLS, default.get("skills"))
+            _merge_agent_list_field(raw, "toolsets", default.get("toolsets"))
+            _merge_agent_list_field(raw, "platforms", default.get("platforms"))
+            _merge_agent_list_field(raw, "session_sources", default.get("session_sources"))
+            for section in ("runtime", "routing", "safety", "identity", "soul", "lifecycle", "ecosystem", "memory"):
+                _merge_agent_section_defaults(raw, section, default.get(section))
+            raw["metadata"] = _sanitize_agent_metadata(raw.get("metadata"), base=default.get("metadata"))
+            _validate_agent_config(raw)
+            if raw != before:
+                if save:
+                    ss.upsert_hub_agent(conn, agent_id, raw, builtin=True)
+                updated.append({"id": agent_id, "addedSkills": added_skills})
+        count = len(by_id)
 
-    changed = raw_agents != before_agents or hub_cfg.get("default_agent") != default_agent_before
-    hub_cfg["agents"] = raw_agents
-    config["agent_hub"] = hub_cfg
-    if changed and save:
+    changed = bool(created or updated) or hub_cfg.get("default_agent") != default_agent_before
+    if hub_cfg.get("default_agent") != default_agent_before and save:
+        # Housekeeping key only — agent rows themselves never go back to yaml.
         save_config(config)
     return {
         "changed": changed,
         "created": created,
         "updated": updated,
-        "count": len([item for item in raw_agents if isinstance(item, dict)]),
+        "count": count,
         "defaultAgent": hub_cfg.get("default_agent") or "executive-assistant",
     }
 
 
 def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-    """Apply an in-place patch to a single agent in the saved config.
+    """Apply an in-place patch to a single persisted agent (``hub_agents``).
 
     Raises LookupError if the agent_id is not present and not in defaults.
-    Returns the merged agent dict (post-write).
+    Patching a default that isn't installed (or was deleted) installs a fresh
+    copy and clears its tombstone. Returns the merged agent dict (post-write).
     """
-    from elevate_cli.config import save_config
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state as ss
 
     target_id = _slug(str(agent_id or ""))
     if not target_id:
@@ -1349,37 +1445,32 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
     _validate_agent_patch(patch)
 
     config = load_config()
-    hub_cfg, raw_agents = _persisted_agents(config)
-
-    existing_ids = {
-        _agent_config_id(item)
-        for item in raw_agents
-        if isinstance(item, dict)
-    }
-    if target_id not in existing_ids:
-        default = next(
-            (
-                copy.deepcopy(agent)
-                for agent in DEFAULT_AGENT_DEFS
-                if _slug(str(agent.get("id") or "")) == target_id
-            ),
+    with connect() as conn:
+        _ensure_hub_agents_imported(conn, config)
+        rows = ss.list_hub_agents(conn)
+        row = next(
+            (item for item in rows if str(item.get("agent_id") or "") == target_id),
             None,
         )
-        if default is None:
-            raise LookupError(f"Agent '{agent_id}' not found")
-        raw_agents.append(default)
-        # Re-adding a previously removed removable default un-parks it so
-        # reconcile keeps it from now on.
-        if _is_removable_default(target_id):
-            _set_removed_default_ids(hub_cfg, _removed_default_ids(hub_cfg) - {target_id})
+        if row is None:
+            # Not installed (or a tombstoned default): install a fresh default
+            # copy. Re-adding a previously removed removable default un-parks
+            # it (removed=0 below) so reconcile keeps it from now on.
+            default = next(
+                (
+                    copy.deepcopy(agent)
+                    for agent in DEFAULT_AGENT_DEFS
+                    if _slug(str(agent.get("id") or "")) == target_id
+                ),
+                None,
+            )
+            if default is None:
+                raise LookupError(f"Agent '{agent_id}' not found")
+            raw = default
+        else:
+            raw = row.get("config") if isinstance(row.get("config"), dict) else {}
+            raw = copy.deepcopy(raw)
 
-    updated: dict[str, Any] | None = None
-    for index, raw in enumerate(raw_agents):
-        if not isinstance(raw, dict):
-            continue
-        raw_id = _agent_config_id(raw)
-        if raw_id != target_id:
-            continue
         raw.setdefault("id", target_id)
         for field in _AGENT_EDITABLE_FIELDS:
             if field not in patch:
@@ -1411,21 +1502,22 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
                 raw[field] = sorted(
                     {str(item).strip() for item in _as_list(value) if str(item).strip()}
                 )
-        raw_agents[index] = raw
-        updated = raw
-        break
 
-    if updated is not None:
-        _validate_agent_config(updated)
-    hub_cfg["agents"] = raw_agents
-    config["agent_hub"] = hub_cfg
-    save_config(config)
-    return get_agent_def(target_id, config=config) or updated or {}
+        _validate_agent_config(raw)
+        ss.upsert_hub_agent(
+            conn,
+            target_id,
+            raw,
+            builtin=_is_builtin_agent_id(target_id),
+            removed=False,
+        )
+    return get_agent_def(target_id, config=config) or raw or {}
 
 
 def create_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
-    """Create a custom Agent Hub config entry."""
-    from elevate_cli.config import save_config
+    """Create a custom Agent Hub config entry (a ``hub_agents`` row)."""
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state as ss
 
     payload = _coerce_agent_payload_aliases(payload)
     _validate_agent_patch(payload)
@@ -1438,41 +1530,37 @@ def create_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("built-in agents cannot be recreated")
 
     config = load_config()
-    hub_cfg, raw_agents = _persisted_agents(config)
-    existing_ids = {
-        _agent_config_id(item)
-        for item in raw_agents
-        if isinstance(item, dict)
-    } | _builtin_agent_ids()
-    if target_id in existing_ids:
-        raise ValueError(f"agent '{target_id}' already exists")
+    with connect() as conn:
+        _ensure_hub_agents_imported(conn, config)
+        existing_ids = {
+            str(row.get("agent_id") or "") for row in ss.list_hub_agents(conn)
+        } | _builtin_agent_ids()
+        if target_id in existing_ids:
+            raise ValueError(f"agent '{target_id}' already exists")
 
-    raw = {
-        "id": target_id,
-        "name": name or target_id.replace("-", " ").title(),
-        "role": str(payload.get("role") or "support").strip().lower(),
-        "description": str(payload.get("description") or "").strip(),
-        "enabled": bool(payload.get("enabled", True)),
-        "platforms": _as_list(payload.get("platforms")) or ["local"],
-        "session_sources": _as_list(payload.get("session_sources")) or ["cli", "cron"],
-        "skills": _as_list(payload.get("skills")),
-        "toolsets": _as_list(payload.get("toolsets")),
-        "prompt": str(payload.get("prompt") or "").strip(),
-        "runtime": _normalize_runtime(payload.get("runtime")),
-        "routing": _normalize_routing(payload.get("routing")),
-        "safety": _normalize_safety(payload.get("safety")),
-        "identity": _normalize_identity(payload.get("identity")),
-        "soul": _normalize_soul(payload.get("soul")),
-        "lifecycle": _normalize_lifecycle(payload.get("lifecycle")),
-        "ecosystem": _normalize_ecosystem(payload.get("ecosystem")),
-        "memory": _normalize_memory(payload.get("memory")),
-        "metadata": _sanitize_agent_metadata(payload.get("metadata")),
-    }
-    _validate_agent_config(raw)
-    raw_agents.append(raw)
-    hub_cfg["agents"] = raw_agents
-    config["agent_hub"] = hub_cfg
-    save_config(config)
+        raw = {
+            "id": target_id,
+            "name": name or target_id.replace("-", " ").title(),
+            "role": str(payload.get("role") or "support").strip().lower(),
+            "description": str(payload.get("description") or "").strip(),
+            "enabled": bool(payload.get("enabled", True)),
+            "platforms": _as_list(payload.get("platforms")) or ["local"],
+            "session_sources": _as_list(payload.get("session_sources")) or ["cli", "cron"],
+            "skills": _as_list(payload.get("skills")),
+            "toolsets": _as_list(payload.get("toolsets")),
+            "prompt": str(payload.get("prompt") or "").strip(),
+            "runtime": _normalize_runtime(payload.get("runtime")),
+            "routing": _normalize_routing(payload.get("routing")),
+            "safety": _normalize_safety(payload.get("safety")),
+            "identity": _normalize_identity(payload.get("identity")),
+            "soul": _normalize_soul(payload.get("soul")),
+            "lifecycle": _normalize_lifecycle(payload.get("lifecycle")),
+            "ecosystem": _normalize_ecosystem(payload.get("ecosystem")),
+            "memory": _normalize_memory(payload.get("memory")),
+            "metadata": _sanitize_agent_metadata(payload.get("metadata")),
+        }
+        _validate_agent_config(raw)
+        ss.upsert_hub_agent(conn, target_id, raw, builtin=False, removed=False)
     return get_agent_def(target_id, config=config) or raw
 
 
@@ -1480,11 +1568,12 @@ def delete_agent_config(agent_id: str) -> dict[str, Any]:
     """Delete an Agent Hub agent.
 
     The Executive Assistant (the permanent lead) cannot be deleted — disable it
-    instead. Every other built-in is removable: deleting it parks the id in
-    ``removed_default_agents`` so reconcile won't re-seed it. Custom agents are
-    deleted outright.
+    instead. Every other built-in is removable: deleting it tombstones the
+    ``hub_agents`` row (``removed=1``) so reconcile won't re-seed it. Custom
+    agents are deleted outright.
     """
-    from elevate_cli.config import save_config
+    from elevate_cli.data import connect
+    from elevate_cli.data import surface_state as ss
 
     target_id = _slug(str(agent_id or ""))
     if not target_id:
@@ -1493,21 +1582,15 @@ def delete_agent_config(agent_id: str) -> dict[str, Any]:
     if builtin and not _is_removable_default(target_id):
         raise ValueError("the Executive Assistant cannot be deleted; disable it instead")
 
-    config = load_config()
-    hub_cfg, raw_agents = _persisted_agents(config)
-    next_agents = [
-        raw for raw in raw_agents
-        if not (isinstance(raw, dict) and _agent_config_id(raw) == target_id)
-    ]
-    # Custom agent that doesn't exist is an error; a removable built-in already
-    # absent is an idempotent no-op (still ensure it's parked).
-    if len(next_agents) == len(raw_agents) and not builtin:
-        raise LookupError(f"Agent '{agent_id}' not found")
-    hub_cfg["agents"] = next_agents
-    if builtin:
-        _set_removed_default_ids(hub_cfg, _removed_default_ids(hub_cfg) | {target_id})
-    config["agent_hub"] = hub_cfg
-    save_config(config)
+    with connect() as conn:
+        _ensure_hub_agents_imported(conn)
+        if builtin:
+            # A removable built-in already absent is an idempotent no-op
+            # (still ensure it's parked so reconcile won't re-seed it).
+            ss.remove_hub_agent(conn, target_id, tombstone=True)
+        elif not ss.remove_hub_agent(conn, target_id):
+            # Custom agent that doesn't exist is an error.
+            raise LookupError(f"Agent '{agent_id}' not found")
     return {"ok": True, "id": target_id, "removable": builtin}
 
 
@@ -1878,9 +1961,15 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
         for agent in DEFAULT_AGENT_DEFS
     }
 
-    raw_agents = hub_cfg.get("agents")
-    if raw_agents is None:
-        raw_agents = config.get("agents")
+    stored = _stored_agents()
+    if stored is not None:
+        raw_agents: Any = stored
+    else:
+        # Account DB unavailable — degrade to the legacy config.yaml view so
+        # reads stay tolerant (pre-0026 behavior).
+        raw_agents = hub_cfg.get("agents")
+        if raw_agents is None:
+            raw_agents = config.get("agents")
     if not isinstance(raw_agents, list) or not raw_agents:
         raw_agents = [copy.deepcopy(agent) for agent in DEFAULT_AGENT_DEFS]
     else:

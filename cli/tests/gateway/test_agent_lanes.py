@@ -11,6 +11,18 @@ from gateway.agent_lanes import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _agents_from_test_config(monkeypatch):
+    """Lane tests construct synthetic ``agent_hub.agents`` config dicts.
+
+    Agent definitions persist in the per-account DB now (``hub_agents``);
+    forcing the DB read to report "unavailable" makes ``_load_agent_defs``
+    fall back to the caller-passed config, which is exactly what these
+    lane-resolution tests are exercising.
+    """
+    monkeypatch.setattr("elevate_cli.agent_hub._stored_agents", lambda: None)
+
+
 class _DummyChat:
     id = -100123456
 

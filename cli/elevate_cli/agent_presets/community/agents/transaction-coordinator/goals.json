@@ -1,0 +1,12 @@
+{
+  "focus": "Walk every live deal's milestones, chase outstanding documents, and surface deadline risk before it lapses.",
+  "goals": [
+    { "title": "Every live deal has a current milestone checklist", "progress": 0 },
+    { "title": "Zero conditions or deadlines pass without a 48-hour warning", "progress": 0 },
+    { "title": "Every outstanding document has an owner and a chase draft", "progress": 0 },
+    { "title": "Closing checklist complete 7 days before each closing date", "progress": 0 }
+  ],
+  "bottleneck": "",
+  "updated_at": "",
+  "updated_by": ""
+}

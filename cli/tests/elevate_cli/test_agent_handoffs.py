@@ -340,7 +340,9 @@ def test_agent_handoff_dispatch_includes_agent_policy_thread_and_toolsets(monkey
     assert dispatched["status"] == "running"
     assert len(created_jobs) == 1
     assert created_jobs[0]["agent"] == "reviewer"
-    assert set(created_jobs[0]["enabled_toolsets"]) == {"deal", "agent_handoff"}
+    # Shared agent baseline skills ("memory", "tasks") map onto the memory and
+    # todo native toolsets for every agent.
+    assert set(created_jobs[0]["enabled_toolsets"]) == {"deal", "agent_handoff", "memory", "todo"}
     prompt = created_jobs[0]["prompt"]
     assert "Receiving agent policy:" in prompt
     assert "Review listing packets and escalate missing context." in prompt
@@ -386,7 +388,11 @@ def test_admin_handoff_dispatch_adds_native_toolsets_and_filters_tool_skills(mon
         dispatch_agent_handoff_to_cron(conn, handoff["id"], actor="executive-assistant")
 
     assert len(created_jobs) == 1
-    assert created_jobs[0]["skills"] == ["admin-agent"]
+    job_skills = created_jobs[0]["skills"]
+    assert "admin-agent" in job_skills
+    # Toolset-like skill names are filtered out of the cron job's skill
+    # preload (they ride along as native toolsets instead).
+    assert not {"agent_handoff", "agent-handoff", "approvals", "comms", "memory", "tasks"}.intersection(job_skills)
     assert set(created_jobs[0]["enabled_toolsets"]) >= {
         "agent_bus",
         "agent_handoff",
@@ -919,7 +925,10 @@ def test_agent_hub_upgrades_stale_local_only_agent_config(monkeypatch):
     assert admin["telegramLane"]["tokenEnv"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"
     assert admin["telegramLane"]["targetEnv"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL"
     assert admin["status"] == "needs_telegram"
-    assert {"executive-assistant", "admin", "outreach", "ads", "marketing", "social-media"}.issubset(agent_ids)
+    assert {"executive-assistant", "admin"}.issubset(agent_ids)
+    # EA-only base seed: other native agents are installable from the Agent
+    # Library, never auto-seeded into the roster.
+    assert not {"outreach", "ads", "marketing", "social-media"}.intersection(agent_ids)
 
 
 def test_agent_hub_custom_agent_config_lifecycle(monkeypatch):
@@ -1026,7 +1035,7 @@ def test_agent_hub_custom_agent_config_lifecycle(monkeypatch):
     with pytest.raises(ValueError):
         agent_hub.delete_agent_config("executive-assistant")
 
-    assert agent_hub.delete_agent_config("listings") == {"ok": True, "id": "listings"}
+    assert agent_hub.delete_agent_config("listings") == {"ok": True, "id": "listings", "removable": False}
     with pytest.raises(LookupError):
         agent_hub.delete_agent_config("listings")
 
@@ -1414,13 +1423,19 @@ def test_agent_hub_api_create_patch_delete_custom_agent(client):
     assert patched.json()["lifecycle"]["max_crashes_per_day"] == 4
     assert patched.json()["memory"]["scopes"] == ["api-work"]
 
+    # The Executive Assistant is the only permanent agent; every other
+    # built-in is removable (delete tombstones it so it isn't re-seeded).
+    permanent_delete = client.delete("/api/agent-hub/agents/executive-assistant")
+    assert permanent_delete.status_code == 400
+    assert "Executive Assistant cannot be deleted" in permanent_delete.json()["detail"]
+
     builtin_delete = client.delete("/api/agent-hub/agents/admin")
-    assert builtin_delete.status_code == 400
-    assert "built-in agents cannot be deleted" in builtin_delete.json()["detail"]
+    assert builtin_delete.status_code == 200, builtin_delete.text
+    assert builtin_delete.json() == {"ok": True, "id": "admin", "removable": True}
 
     deleted = client.delete("/api/agent-hub/agents/api-agent")
     assert deleted.status_code == 200, deleted.text
-    assert deleted.json() == {"ok": True, "id": "api-agent"}
+    assert deleted.json() == {"ok": True, "id": "api-agent", "removable": False}
 
 
 def test_cron_agent_jobs_inherit_runtime_defaults_when_job_fields_absent(tmp_path):
@@ -1535,10 +1550,14 @@ def test_agent_worker_tick_with_agent_id_drains_only_that_agent(monkeypatch):
         return {"id": f"scoped-worker-cron-{len(created_jobs)}"}
 
     import cron.jobs as cron_jobs
+    import elevate_cli.agent_hub as agent_hub
 
     monkeypatch.setattr(cron_jobs, "create_job", fake_create_job)
     _configure_agent_telegram(monkeypatch, "admin")
     _configure_agent_telegram(monkeypatch, "ads", "ads-chat-123")
+    # Admin is an installable native (not auto-seeded); install it so the
+    # scoped worker treats it as an enabled agent.
+    agent_hub.update_agent_config("admin", {"enabled": True})
 
     with connect() as conn:
         admin_handoff = create_agent_handoff(
