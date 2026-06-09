@@ -1463,6 +1463,12 @@ class GatewayRunner:
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
 
+        # Config hot-reload bookkeeping: remember config.yaml's mtime so
+        # _maybe_reload_config() can refresh derived settings when the
+        # dashboard/TUI writes the file (previously edits required a full
+        # gateway restart / launchctl kickstart to take effect).
+        self._config_yaml_mtime_ns = self._config_yaml_stat()
+
         # Wire process registry into session store for reset protection
         from tools.process_registry import process_registry
         self.session_store = SessionStore(
@@ -2009,6 +2015,45 @@ class GatewayRunner:
             overrides = None
         route["request_overrides"] = overrides
         return route
+
+    @staticmethod
+    def _config_yaml_stat() -> int:
+        """mtime_ns of ~/.elevate/config.yaml (0 when missing/unreadable)."""
+        try:
+            from elevate_cli.config import get_config_path
+
+            return get_config_path().stat().st_mtime_ns
+        except Exception:
+            return 0
+
+    def _maybe_reload_config(self) -> None:
+        """Refresh config-derived runner state when config.yaml changed on disk.
+
+        The dashboard/TUI writes config.yaml directly, but the runner loaded
+        its settings once in __init__ — so edits (model fallbacks, reasoning,
+        tool profile, busy-input mode, …) silently did nothing until the next
+        gateway restart. Cheap: one stat() per inbound message; the full
+        reload only runs on an actual mtime change. Adapters/sessions are NOT
+        rebuilt — platform credentials still need a restart by design.
+        """
+        stamp = self._config_yaml_stat()
+        if stamp == getattr(self, "_config_yaml_mtime_ns", 0):
+            return
+        self._config_yaml_mtime_ns = stamp
+        try:
+            self.config = load_gateway_config()
+            self._prefill_messages = self._load_prefill_messages()
+            self._ephemeral_system_prompt = self._load_ephemeral_system_prompt()
+            self._reasoning_config = self._load_reasoning_config()
+            self._service_tier = self._load_service_tier()
+            self._show_reasoning = self._load_show_reasoning()
+            self._busy_input_mode = self._load_busy_input_mode()
+            self._restart_drain_timeout = self._load_restart_drain_timeout()
+            self._provider_routing = self._load_provider_routing()
+            self._fallback_model = self._load_fallback_model()
+            logger.info("config.yaml changed on disk — gateway settings reloaded")
+        except Exception:
+            logger.exception("config.yaml hot-reload failed; keeping previous settings")
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
@@ -4633,7 +4678,7 @@ class GatewayRunner:
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
-        
+
         This is the core message processing pipeline:
         1. Check user authorization
         2. Check for commands (/new, /reset, etc.)
@@ -4643,6 +4688,11 @@ class GatewayRunner:
         6. Run agent conversation
         7. Return response
         """
+        # Hot-reload config.yaml edits (dashboard/TUI writes) before
+        # processing — the runner otherwise serves startup-time settings
+        # until the next launchd kickstart.
+        self._maybe_reload_config()
+
         source = event.source
 
         # Internal events (e.g. background-process completion notifications)
