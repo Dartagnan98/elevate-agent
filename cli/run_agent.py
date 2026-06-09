@@ -1990,31 +1990,18 @@ class AIAgent:
             if not self.quiet_mode:
                 logger.info("Using context engine: %s", _selected_engine.name)
         else:
-            # Cheap-summarizer default: compaction summaries are structured
-            # extraction, not deep reasoning. When the user hasn't pinned an
-            # auxiliary compression model and the main provider is native
-            # Anthropic, summarize with Haiku on the same credentials (~10x
-            # cheaper per compaction). If Haiku ever errors, the compressor
-            # auto-falls-back to the main model (see
-            # _fallback_to_main_for_compression), so this can only fail soft.
-            _summary_model_default = None
-            _aux_has_explicit_model = isinstance(_aux_cfg, dict) and (
-                _aux_cfg.get("model") or _aux_cfg.get("provider")
-            )
-            if (
-                not _aux_has_explicit_model
-                and self.provider == "anthropic"
-                and (not self.base_url or "api.anthropic.com" in str(self.base_url))
-                and "haiku" not in str(self.model).lower()
-            ):
-                _summary_model_default = "claude-haiku-4-5"
+            # Compaction summaries run on the session's own model unless the
+            # user pins a dedicated one via auxiliary.compression.provider /
+            # model in config.yaml (cheapest correct option when available).
+            # No hardcoded model defaults here — the runtime follows whatever
+            # model/provider the account actually has.
             self.context_compressor = ContextCompressor(
                 model=self.model,
                 threshold_percent=compression_threshold,
                 protect_first_n=3,
                 protect_last_n=compression_protect_last,
                 summary_target_ratio=compression_target_ratio,
-                summary_model_override=_summary_model_default,
+                summary_model_override=None,
                 quiet_mode=self.quiet_mode,
                 base_url=self.base_url,
                 api_key=getattr(self, "api_key", ""),
