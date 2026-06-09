@@ -958,8 +958,13 @@ def ensure_theta_wave() -> Dict[str, Any]:
         job = update_job(existing["id"], updates) if updates else existing
         if not job:
             job = existing
-        if not job.get("enabled", True) or job.get("state") == "paused":
-            job = resume_job(job["id"]) or job
+        # Respect the operator's pause. An existing Theta Wave job is repaired
+        # (agent/workdir/skill/origin) but its enabled/paused state is left
+        # exactly as-is — same contract as ensure_surface() and the system-job
+        # helper. Force-resuming here meant a paused Theta Wave silently came
+        # back on within the hour (the hourly ensure_system_jobs pass), so
+        # "pause all crons" could never keep it down. Fresh installs still seed
+        # it enabled via create_job() in the branch below.
         return job
     ws = _seed_theta_wave_workspace(enabled=True)
     prompt = (
