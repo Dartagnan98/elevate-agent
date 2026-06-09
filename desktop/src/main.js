@@ -310,13 +310,18 @@ async function performLogin({ email, password }) {
 
 function envWithPath(extra = {}) {
   const pythonCacheDir = path.join(HOME, "Library", "Caches", "Elevate", "python-pycache");
-  return {
-    ...process.env,
-    PATH: process.env.PATH ? `${DEFAULT_PATH}:${process.env.PATH}` : DEFAULT_PATH,
-    PYTHONDONTWRITEBYTECODE: process.env.PYTHONDONTWRITEBYTECODE || "1",
-    PYTHONPYCACHEPREFIX: process.env.PYTHONPYCACHEPREFIX || pythonCacheDir,
-    ...extra,
-  };
+  const env = { ...process.env };
+  // Cache compiled bytecode OUTSIDE the signed bundle so 2nd+ launches skip
+  // re-parsing every .py from source (the bundled .pyc are stripped at build
+  // time). Safe since 1.1.28 disabled differential updates: PYTHONPYCACHEPREFIX
+  // points into ~/Library/Caches, so .pyc never land in Contents/Resources and
+  // the codesign seal stays intact. We must UNSET PYTHONDONTWRITEBYTECODE rather
+  // than set it to "0" — CPython treats ANY non-empty value (incl. "0") as
+  // "don't write bytecode", so an inherited value would silently re-disable it.
+  delete env.PYTHONDONTWRITEBYTECODE;
+  env.PATH = process.env.PATH ? `${DEFAULT_PATH}:${process.env.PATH}` : DEFAULT_PATH;
+  env.PYTHONPYCACHEPREFIX = process.env.PYTHONPYCACHEPREFIX || pythonCacheDir;
+  return { ...env, ...extra };
 }
 
 function fileExists(filePath) {

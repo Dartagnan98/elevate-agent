@@ -7016,24 +7016,33 @@ def cmd_dashboard(args):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
 
-    # Seed bundled skills before the server starts. The desktop app launches
-    # via the `dashboard` command (this path), which — unlike `cmd_chat` —
-    # otherwise never runs the seed. Without it a desktop-only install (user
-    # never opens the interactive CLI) has an empty ~/.elevate/skills and the
-    # app shows zero skills.
-    try:
-        from tools.skills_sync import sync_skills
+    # Seed bundled skills + Agent Hub defaults. The desktop app launches via the
+    # `dashboard` command (this path), which — unlike `cmd_chat` — otherwise never
+    # runs the seed; without it a desktop-only install has an empty
+    # ~/.elevate/skills and shows zero skills. These touch the FS and used to run
+    # BEFORE the server bound, delaying the port going live (the desktop renderer
+    # busy-polls readiness at 500ms). Run them in a background daemon thread so the
+    # server binds immediately. Seeding is idempotent and only affects the
+    # skills / agent-hub views, which tolerate a brief first-load gap.
+    def _seed_dashboard_defaults():
+        try:
+            from tools.skills_sync import sync_skills
 
-        sync_skills(quiet=True)
-    except Exception as exc:  # never block dashboard startup on a seed hiccup
-        logger.debug("bundled skill seed (dashboard) failed: %s", exc)
+            sync_skills(quiet=True)
+        except Exception as exc:  # never block dashboard startup on a seed hiccup
+            logger.debug("bundled skill seed (dashboard) failed: %s", exc)
+        try:
+            from elevate_cli.agent_hub import reconcile_agent_hub_defaults
 
-    try:
-        from elevate_cli.agent_hub import reconcile_agent_hub_defaults
+            reconcile_agent_hub_defaults()
+        except Exception as exc:  # never block dashboard startup on a seed hiccup
+            logger.debug("Agent Hub default seed (dashboard) failed: %s", exc)
 
-        reconcile_agent_hub_defaults()
-    except Exception as exc:  # never block dashboard startup on a seed hiccup
-        logger.debug("Agent Hub default seed (dashboard) failed: %s", exc)
+    import threading as _threading
+
+    _threading.Thread(
+        target=_seed_dashboard_defaults, name="dashboard-seed", daemon=True
+    ).start()
 
     from elevate_cli.web_server import start_server
 
