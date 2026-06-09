@@ -2042,6 +2042,7 @@ export interface AgentHubAgent {
   metadata?: Record<string, unknown>;
   compat?: AgentCompatConfig;
   canDelete: boolean;
+  builtin?: boolean;
   queueSummary: AgentQueueSummary;
   automationSummary: AgentAutomationSummary;
   lifecycleSummary?: AgentLifecycleSummary;
@@ -2118,6 +2119,14 @@ export interface AgentHubSessionSummary {
   error: string;
 }
 
+export interface InstallableDefault {
+  id: string;
+  name: string;
+  role: string;
+  description: string;
+  native: boolean;
+}
+
 export interface AgentHubSnapshot {
   generated_at: number;
   config_path: string;
@@ -2144,6 +2153,7 @@ export interface AgentHubSnapshot {
     entitlements: Record<string, { status?: string; owned_snapshot?: boolean }>;
   };
   agents: AgentHubAgent[];
+  installableDefaults?: InstallableDefault[];
   orchestration?: {
     agents: unknown[];
     runs: unknown[];

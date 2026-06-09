@@ -22,6 +22,7 @@ import type {
   EnvVarInfo,
   HarnessSnapshot,
   HeartbeatSurface,
+  InstallableDefault,
   SurfaceApproval,
   SurfaceTask,
 } from "@/lib/api";
@@ -3340,6 +3341,7 @@ type AgentLibraryFilter = "all" | "active" | "inactive";
 function CortextAgentPackCatalog({
   packs,
   agents,
+  installableDefaults,
   loading,
   installingId,
   onInstall,
@@ -3347,6 +3349,7 @@ function CortextAgentPackCatalog({
 }: {
   packs: CortextAgentPack[];
   agents: AgentHubAgent[];
+  installableDefaults: InstallableDefault[];
   loading: boolean;
   installingId: string | null;
   onInstall: (pack: CortextAgentPack) => Promise<void>;
@@ -3360,9 +3363,9 @@ function CortextAgentPackCatalog({
     [agents],
   );
 
-  // Unified library: every installed agent + every installable pack that isn't
-  // installed yet. Active = installed + enabled; Inactive = installed-but-off
-  // OR not installed.
+  // Unified library: every installed agent + every installable native default +
+  // every installable pack that isn't installed yet. Active = installed +
+  // enabled; Inactive = installed-but-off OR not installed.
   type LibraryRow = {
     id: string;
     name: string;
@@ -3370,6 +3373,7 @@ function CortextAgentPackCatalog({
     description: string;
     installed: boolean;
     active: boolean;
+    native: boolean;
     pack?: CortextAgentPack;
   };
   const rows = useMemo<LibraryRow[]>(() => {
@@ -3380,7 +3384,19 @@ function CortextAgentPackCatalog({
       description: String(agent.description ?? ""),
       installed: true,
       active: Boolean(agent.enabled),
+      native: Boolean(agent.builtin),
     }));
+    const defaultRows: LibraryRow[] = installableDefaults
+      .filter((def) => !installedIds.has(def.id.toLowerCase()))
+      .map((def) => ({
+        id: def.id,
+        name: def.name,
+        role: String(def.role ?? ""),
+        description: String(def.description ?? ""),
+        installed: false,
+        active: false,
+        native: true,
+      }));
     const packRows: LibraryRow[] = packs
       .filter((pack) => !installedIds.has(pack.id.toLowerCase()))
       .map((pack) => ({
@@ -3390,10 +3406,13 @@ function CortextAgentPackCatalog({
         description: String(pack.description ?? ""),
         installed: false,
         active: false,
+        native: false,
         pack,
       }));
-    return [...installedRows, ...packRows].sort((a, b) => a.name.localeCompare(b.name));
-  }, [agents, packs, installedIds]);
+    return [...installedRows, ...defaultRows, ...packRows].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  }, [agents, packs, installableDefaults, installedIds]);
 
   const counts = useMemo(
     () => ({
@@ -3491,8 +3510,20 @@ function CortextAgentPackCatalog({
                     <button
                       type="button"
                       className="hub-btn sm primary"
-                      disabled={Boolean(installingId)}
-                      onClick={() => row.pack && void onInstall(row.pack)}
+                      disabled={Boolean(installingId) || Boolean(busyId)}
+                      onClick={async () => {
+                        if (row.native) {
+                          // Native default: re-add + enable it.
+                          setBusyId(row.id);
+                          try {
+                            await onToggle(row.id, true);
+                          } finally {
+                            setBusyId(null);
+                          }
+                        } else if (row.pack) {
+                          void onInstall(row.pack);
+                        }
+                      }}
                     >
                       {working ? (
                         <Ico.refresh width="13" height="13" className="spin" />
@@ -4136,6 +4167,7 @@ export default function AgentHubPage() {
 
           <CortextAgentPackCatalog
             agents={snapshot.agents}
+            installableDefaults={snapshot.installableDefaults ?? []}
             installingId={installingPackId}
             loading={loadingCortextPacks}
             onInstall={installCortextPack}
