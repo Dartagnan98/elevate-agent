@@ -3335,22 +3335,82 @@ function AddAgentModal({
   );
 }
 
+type AgentLibraryFilter = "all" | "active" | "inactive";
+
 function CortextAgentPackCatalog({
   packs,
   agents,
   loading,
   installingId,
   onInstall,
+  onToggle,
 }: {
   packs: CortextAgentPack[];
   agents: AgentHubAgent[];
   loading: boolean;
   installingId: string | null;
   onInstall: (pack: CortextAgentPack) => Promise<void>;
+  onToggle: (agentId: string, enabled: boolean) => Promise<void>;
 }) {
+  const [filter, setFilter] = useState<AgentLibraryFilter>("all");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
   const installedIds = useMemo(
     () => new Set(agents.map((agent) => agent.id.toLowerCase())),
     [agents],
+  );
+
+  // Unified library: every installed agent + every installable pack that isn't
+  // installed yet. Active = installed + enabled; Inactive = installed-but-off
+  // OR not installed.
+  type LibraryRow = {
+    id: string;
+    name: string;
+    role: string;
+    description: string;
+    installed: boolean;
+    active: boolean;
+    pack?: CortextAgentPack;
+  };
+  const rows = useMemo<LibraryRow[]>(() => {
+    const installedRows: LibraryRow[] = agents.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      role: String(agent.role ?? ""),
+      description: String(agent.description ?? ""),
+      installed: true,
+      active: Boolean(agent.enabled),
+    }));
+    const packRows: LibraryRow[] = packs
+      .filter((pack) => !installedIds.has(pack.id.toLowerCase()))
+      .map((pack) => ({
+        id: pack.id,
+        name: pack.name,
+        role: String(pack.role ?? ""),
+        description: String(pack.description ?? ""),
+        installed: false,
+        active: false,
+        pack,
+      }));
+    return [...installedRows, ...packRows].sort((a, b) => a.name.localeCompare(b.name));
+  }, [agents, packs, installedIds]);
+
+  const counts = useMemo(
+    () => ({
+      all: rows.length,
+      active: rows.filter((row) => row.active).length,
+      inactive: rows.filter((row) => !row.active).length,
+    }),
+    [rows],
+  );
+  const filtered = useMemo(
+    () =>
+      rows.filter((row) => {
+        if (filter === "active") return row.active;
+        if (filter === "inactive") return !row.active;
+        return true;
+      }),
+    [rows, filter],
   );
 
   return (
@@ -3358,68 +3418,97 @@ function CortextAgentPackCatalog({
       <div className="hub-block-head">
         <div>
           <div className="hub-block-title">
-            Installable agent packs <span className="hub-block-meta mono">· CortextOS presets</span>
+            Agent library <span className="hub-block-meta mono">· {counts.all} agents</span>
           </div>
           <div className="hub-pack-sub">
-            Installs the preset as native Agent Hub config, heartbeat goals, onboarding task, and scoped memory.
+            Browse every agent — installed and available. Activate, deactivate, or install from here.
           </div>
         </div>
+        <select
+          className="hub-input sm mono"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value as AgentLibraryFilter)}
+          aria-label="Filter agents"
+        >
+          <option value="all">All agents ({counts.all})</option>
+          <option value="active">Active ({counts.active})</option>
+          <option value="inactive">Inactive ({counts.inactive})</option>
+        </select>
       </div>
 
       {loading ? (
         <div className="hub-pack-grid">
           <ListSkeleton rows={3} className="hub-pack-skeleton" />
         </div>
-      ) : packs.length ? (
+      ) : filtered.length ? (
         <div className="hub-pack-grid">
-          {packs.map((pack) => {
-            const installed = installedIds.has(pack.id.toLowerCase());
-            const installing = installingId === pack.id;
+          {filtered.map((row) => {
+            const working = installingId === row.id || busyId === row.id;
+            const stateLabel = row.active ? "active" : row.installed ? "inactive" : "not installed";
             return (
-              <div className="hub-pack-card" key={pack.id}>
+              <div className={"hub-pack-card" + (row.active ? " is-active" : "")} key={row.id}>
                 <div className="hub-pack-top">
                   <div>
-                    <div className="hub-pack-name">{pack.name}</div>
-                    <div className="hub-pack-role mono">{pack.role}</div>
+                    <div className="hub-pack-name">{row.name}</div>
+                    <div className="hub-pack-role mono">{row.role}</div>
                   </div>
-                  <span className={"hub-pack-source " + (pack.sourceExists ? "ok" : "warn")}>
-                    {pack.sourceExists ? "repo" : "fallback"}
-                  </span>
+                  <span className={"hub-pack-source " + (row.active ? "ok" : "warn")}>{stateLabel}</span>
                 </div>
-                <p className="hub-pack-desc">{pack.description}</p>
-                <div className="hub-pack-chips">
-                  {pack.includes.slice(0, 6).map((item) => (
-                    <span key={item}>{item}</span>
-                  ))}
-                </div>
+                <p className="hub-pack-desc">{row.description}</p>
+                {row.pack ? (
+                  <div className="hub-pack-chips">
+                    {row.pack.includes.slice(0, 6).map((item) => (
+                      <span key={item}>{item}</span>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="hub-pack-foot">
                   <span className="mono">
-                    {pack.automationCount} automation rule{pack.automationCount === 1 ? "" : "s"}
+                    {row.installed
+                      ? row.active
+                        ? "running"
+                        : "installed · off"
+                      : `${row.pack?.automationCount ?? 0} automation rule${row.pack?.automationCount === 1 ? "" : "s"}`}
                   </span>
-                  <button
-                    type="button"
-                    className={"hub-btn sm " + (installed ? "ghost" : "primary")}
-                    disabled={installed || Boolean(installingId)}
-                    onClick={() => void onInstall(pack)}
-                  >
-                    {installing ? (
-                      <Ico.refresh width="13" height="13" className="spin" />
-                    ) : installed ? (
-                      <Ico.save width="13" height="13" />
-                    ) : (
-                      <Ico.plus width="13" height="13" />
-                    )}
-                    {installed ? "Installed" : installing ? "Installing" : "Install"}
-                  </button>
+                  {row.installed ? (
+                    <button
+                      type="button"
+                      className={"hub-btn sm " + (row.active ? "ghost" : "primary")}
+                      disabled={Boolean(busyId)}
+                      onClick={async () => {
+                        setBusyId(row.id);
+                        try {
+                          await onToggle(row.id, !row.active);
+                        } finally {
+                          setBusyId(null);
+                        }
+                      }}
+                    >
+                      {working ? <Ico.refresh width="13" height="13" className="spin" /> : null}
+                      {row.active ? "Deactivate" : "Activate"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="hub-btn sm primary"
+                      disabled={Boolean(installingId)}
+                      onClick={() => row.pack && void onInstall(row.pack)}
+                    >
+                      {working ? (
+                        <Ico.refresh width="13" height="13" className="spin" />
+                      ) : (
+                        <Ico.plus width="13" height="13" />
+                      )}
+                      {working ? "Installing" : "Install"}
+                    </button>
+                  )}
                 </div>
               </div>
             );
           })}
         </div>
       ) : (
-        <div className="hub-pack-empty">
-          CortextOS presets were not found on this machine. Set CORTEXTOS_ROOT or use Import Cortext agent.
-        </div>
+        <div className="hub-pack-empty">No agents match this filter.</div>
       )}
     </div>
   );
@@ -4051,6 +4140,15 @@ export default function AgentHubPage() {
             loading={loadingCortextPacks}
             onInstall={installCortextPack}
             packs={cortextPacks}
+            onToggle={async (agentId, enabled) => {
+              try {
+                await api.updateAgent(agentId, { enabled });
+                showToast(`${agentId} ${enabled ? "activated" : "deactivated"}`, "success");
+                await load();
+              } catch (error) {
+                showToast(error instanceof Error ? error.message : "Failed to update agent", "error");
+              }
+            }}
           />
 
           {/* system status (harness) */}
