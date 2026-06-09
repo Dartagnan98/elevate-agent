@@ -80,16 +80,18 @@ Not stood up as its own agent.
 ## Phasing / status (branch `agent-packs-ship-2026-06-09`)
 1. **A — ship fix** — ✅ DONE (`e7bcf947d`). Presets bundled, `_cortext_root` fixed, verified on clean home.
 2. **B — EA merge** — ✅ DONE (`8ec7d0ad7`). Orchestrator folded into EA, duplicate installable retired.
-3. **C — native→installable conversion** — ⏳ NOT STARTED. Needs the seeding-default decision (open
-   confirmation #1). The most structural/risky phase; do it fresh with the decision locked.
+3. **C — native→installable conversion** — ✅ DONE (`d8bbf8a22`). Seeding default = Option 1 (locked):
+   real-estate set seeded-on, opt-out, no regression. Every native agent except EA is removable +
+   re-installable; removals parked in `agent_hub.removed_default_agents`, respected by reconcile AND
+   the read-merge. EA permanent. Verified end-to-end + suites green.
 4. **D/E — enrichment** — ✅ DONE (`25edba535` Admin=TC + `aa70cb32e` Outreach/Ads/Marketing/Social/
    Analyst). All 7 user-facing native agents enriched from staged material, real-estate-framed,
    drafts-only. theta-wave left system-level.
 
-### EXACT NEXT STEP
-Phase C (native→installable). Decide seeding default first (keep real-estate set seeded-on for
-existing `real_estate_*` customers, everything else opt-in — recommended). Nothing is deployed; the
-agent work reaches customers only via a desktop release.
+### STATUS: all four phases (A/B/C/D-E) complete on branch `agent-packs-ship-2026-06-09`.
+Remaining: (1) dashboard UI to surface removed/installable defaults as re-install cards (backend
+exposes `canDelete` + `builtin` + `removed_default_agents`; delete already works). (2) Nothing is
+deployed — agent work ships to customers only via a desktop release. (3) Branch unpushed.
 
 ## Staged source material
 `docs/agent-source-material/` (11 files pulled from agency-agents): real-estate-buyer-seller,
