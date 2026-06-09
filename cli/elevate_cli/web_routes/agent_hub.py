@@ -24,24 +24,10 @@ _CORTEXT_NATIVE_REPLACEMENTS = [
 # Executive Assistant (agent_hub.DEFAULT_AGENT_DEFS) IS the orchestrator — its
 # coordination doctrine was folded into EA's definition. Do not re-add an
 # orchestrator pack; it would duplicate EA.
+# NOTE: "analyst" and "theta-wave" are also native agents (DEFAULT_AGENT_DEFS),
+# so they are NOT installable packs — a pack with the same id collides with the
+# built-in on install ("cannot be recreated").
 _CORTEXT_AGENT_PACKS = [
-    {
-        "id": "analyst",
-        "name": "Analyst",
-        "role": "analyst",
-        "emoji": "A",
-        "source": "community/agents/analyst",
-        "description": "System health, metrics, theta-wave autoresearch, catalog browsing, and upstream sync recommendations.",
-        "owns": ["system-health", "metrics", "theta-wave", "experiments"],
-        "handoff_targets": ["executive-assistant"],
-        "escalation_target": "executive-assistant",
-        "day_start": "09:00",
-        "day_end": "17:00",
-        "day_mode": "Measure system health, explain anomalies, and propose practical improvements with evidence.",
-        "night_mode": "Run deep review cycles, compare experiments, and prepare theta-wave findings for the executive assistant.",
-        "memory_scopes": ["metrics", "experiments", "system-review", "theta-wave"],
-        "includes": ["Identity", "Soul", "Metrics crons", "Theta wave", "Catalog review", "Upstream sync"],
-    },
     {
         "id": "security",
         "name": "Security",
@@ -112,24 +98,6 @@ _CORTEXT_AGENT_PACKS = [
         "memory_scopes": ["tasks", "handoffs", "worklog"],
         "includes": ["Identity", "Soul", "Heartbeat", "Tasks", "Comms", "Memory"],
     },
-    {
-        "id": "theta-wave",
-        "name": "Theta Wave Reviewer",
-        "role": "system-review",
-        "emoji": "T",
-        "source": "community/skills/theta-wave",
-        "description": "System improvement reviewer that runs theta-wave conversations, challenges assumptions, and proposes experiment changes.",
-        "owns": ["theta-wave", "system-review", "experiments", "fleet-improvement"],
-        "handoff_targets": ["analyst", "executive-assistant"],
-        "escalation_target": "analyst",
-        "day_start": "10:00",
-        "day_end": "16:00",
-        "day_mode": "Review analyst findings, challenge assumptions, and turn improvement ideas into safe proposals.",
-        "night_mode": "Run deep system-review cycles and prepare proposed experiment changes for approval.",
-        "memory_scopes": ["theta-wave", "experiments", "system-review"],
-        "includes": ["Theta-wave skill", "Experiment review", "Approval policy", "Native paused cron link"],
-        "skill_source": True,
-    },
 ]
 
 
@@ -143,6 +111,19 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return ""
+
+
+_TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _clean_cortext_time(raw: Any, fallback: Any) -> str:
+    """Return a valid HH:MM time, falling back when the config value is an
+    unfilled ``{{template}}`` placeholder or otherwise malformed."""
+    value = str(raw or "").strip()
+    if value and not value.startswith("{{") and _TIME_RE.match(value):
+        return value
+    fb = str(fallback or "").strip()
+    return fb if _TIME_RE.match(fb) else ""
 
 
 def _cortext_root() -> Optional[Path]:
@@ -655,8 +636,8 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "communication_style": _markdown_section(soul, "Communication Style") or _markdown_section(identity, "Communication Style") or "Concise, evidence-led, and approval-aware.",
             "day_mode": _markdown_section(soul, "Day Mode") or spec.get("day_mode", ""),
             "night_mode": _markdown_section(soul, "Night Mode") or spec.get("night_mode", ""),
-            "day_mode_start": str(config.get("day_mode_start") or spec.get("day_start") or ""),
-            "day_mode_end": str(config.get("day_mode_end") or spec.get("day_end") or ""),
+            "day_mode_start": _clean_cortext_time(config.get("day_mode_start"), spec.get("day_start")),
+            "day_mode_end": _clean_cortext_time(config.get("day_mode_end"), spec.get("day_end")),
             "core_truths": soul or guardrails or spec.get("description", ""),
         },
         "lifecycle": lifecycle_config,
@@ -706,8 +687,8 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
                 "base_url": runtime_config.get("base_url"),
                 "workdir": runtime_config.get("workdir"),
                 "timezone": runtime_config.get("timezone"),
-                "day_mode_start": str(config.get("day_mode_start") or spec.get("day_start") or ""),
-                "day_mode_end": str(config.get("day_mode_end") or spec.get("day_end") or ""),
+                "day_mode_start": _clean_cortext_time(config.get("day_mode_start"), spec.get("day_start")),
+                "day_mode_end": _clean_cortext_time(config.get("day_mode_end"), spec.get("day_end")),
                 "communication_style": str(config.get("communication_style") or ""),
                 "approval_rules": config.get("approval_rules") if isinstance(config.get("approval_rules"), dict) else {},
                 "startup_delay": lifecycle_config.get("startup_delay"),
