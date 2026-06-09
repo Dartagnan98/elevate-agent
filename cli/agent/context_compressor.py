@@ -1239,6 +1239,21 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            # Hard-enforce the token budget. max_tokens above caps generation
+            # at 1.3x the budget, but some providers ignore it or count
+            # differently — an oversized summary can push the conversation
+            # right back over the compression threshold and re-fire
+            # compaction. Clamp at ~1.3x budget (chars/4 heuristic).
+            _summary_char_cap = int(summary_budget * 1.3 * 4)
+            if len(summary) > _summary_char_cap:
+                logger.warning(
+                    "Compaction summary exceeded budget (%d chars > %d cap); truncating",
+                    len(summary), _summary_char_cap,
+                )
+                summary = (
+                    summary[:_summary_char_cap].rstrip()
+                    + "\n\n[Summary truncated to budget — earliest sections preserved]"
+                )
             # Store for iterative updates on next compaction
             self._previous_summary = self._clip_summary_for_rollup(summary)
             self._summary_failure_cooldown_until = 0.0
