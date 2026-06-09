@@ -8387,13 +8387,28 @@ def list_surface_tasks(
     priority: Optional[str] = None,
     project: Optional[str] = None,
     include_archived: bool = False,
+    limit: Optional[int] = None,
 ):
     try:
         from elevate_cli.data import connect
         from elevate_cli.data import surface_tasks as st
 
         with connect() as conn:
-            return {
+            reaped: list = []
+            if status == "pending":
+                # Self-healing on the exact query heartbeats drain with:
+                # crash-orphaned in_progress tasks (untouched >1h) return to
+                # the pending queue instead of being invisible forever.
+                try:
+                    reaped = st.reap_stale_in_progress(conn)
+                    if reaped:
+                        _log.warning(
+                            "surface-tasks: reaped %d stale in_progress task(s) back to pending",
+                            len(reaped),
+                        )
+                except Exception:
+                    _log.exception("surface-tasks reaper failed (non-fatal)")
+            payload = {
                 "tasks": st.list_tasks(
                     conn,
                     status=status,
@@ -8401,8 +8416,12 @@ def list_surface_tasks(
                     priority=priority,
                     project=project,
                     include_archived=include_archived,
+                    limit=limit,
                 )
             }
+            if reaped:
+                payload["reaped"] = [t.get("id") for t in reaped]
+            return payload
     except Exception as exc:
         _log.exception("GET /api/surface-tasks failed")
         raise HTTPException(status_code=500, detail=f"List tasks failed: {exc}")

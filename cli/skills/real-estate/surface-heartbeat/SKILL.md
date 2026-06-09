@@ -25,11 +25,14 @@ playbook), never the realtor's leads, calendar, or data.
 1. **Load context.** Read `config.json` (your `goal`, your `playbook` if present) and the whole
    `learnings.md` (apply it). Count prior runs: `ls "<Workspace>/history" | wc -l`.
 2. **Drain dispatched tasks.** Pull work the realtor (or the analyst) queued to you:
-   `GET ${ELEVATE_DASHBOARD_URL:-http://127.0.0.1:9120}/api/surface-tasks?assignee=<surface>&status=pending`.
-   For each, do the work (drafts only), `PATCH .../api/surface-tasks/<id>` to `in_progress` then
-   `completed` with `outputs:[...]`. If a task has `needsApproval` (or your action would send /
-   change anything), do NOT act — leave a draft and it surfaces for sign-off (see below). Skip
-   tasks assigned to `human`.
+   `GET ${ELEVATE_DASHBOARD_URL:-http://127.0.0.1:9120}/api/surface-tasks?assignee=<surface>&status=pending&limit=10`.
+   At most 10 per run (oldest first) — a backed-up queue drains across runs, never in one
+   context-blowing pass; the rest are picked up next run. For each, do the work (drafts only),
+   `PATCH .../api/surface-tasks/<id>` to `in_progress` then `completed` with `outputs:[...]`.
+   If a task has `needsApproval` (or your action would send / change anything), do NOT act —
+   leave a draft and it surfaces for sign-off (see below). Skip tasks assigned to `human`.
+   If a pulled task's notes say "auto-reset to pending", a previous run crashed mid-task:
+   check for partial work (existing drafts/outputs) before redoing it.
 3. **Do the work** in `config.json.goal`, sharpened by your learnings + playbook, using your
    normal Elevate tools/skills for this surface.
 4. **Surface anything needing sign-off.** When you produce a draft/recommendation that must NOT

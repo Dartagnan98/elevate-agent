@@ -667,6 +667,7 @@ def list_tasks(
     priority: str | None = None,
     project: str | None = None,
     include_archived: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM surface_tasks"
     where: list[str] = []
@@ -687,7 +688,13 @@ def list_tasks(
         params.append(project)
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY created_at DESC"
+    # Oldest-first when a drain limit is set so a backed-up queue is worked
+    # FIFO instead of newest-first starvation; newest-first otherwise (UI).
+    if limit is not None and limit > 0:
+        sql += " ORDER BY created_at ASC LIMIT ?"
+        params.append(int(limit))
+    else:
+        sql += " ORDER BY created_at DESC"
     rows = conn.execute(sql, tuple(params)).fetchall()
     all_rows = _all_task_rows(conn)
     return _enrich_task_dependencies([_row_to_task(r) for r in rows], all_rows)
@@ -698,6 +705,60 @@ def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[dict[str, Any]]
     if not row:
         return None
     return _enrich_task_dependencies([_row_to_task(row)], _all_task_rows(conn))[0]
+
+
+def reap_stale_in_progress(
+    conn: sqlite3.Connection,
+    *,
+    max_age_seconds: int = 3600,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Reset crash-orphaned in_progress tasks back to pending.
+
+    A surface heartbeat drains status=pending, PATCHes a task to
+    in_progress, works it, then PATCHes to completed. If the agent dies
+    in the middle, the task sits in_progress forever — the next run only
+    queries pending, so nothing ever picks it up again. Any in_progress
+    task that hasn't been touched in *max_age_seconds* is assumed
+    orphaned and returned to the pending queue with an audit note.
+
+    Returns the reaped tasks (post-reset). Safe to call on every list
+    query — it's a no-op when nothing is stale.
+    """
+    current = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT * FROM surface_tasks WHERE status = 'in_progress' "
+        "AND (archived IS NULL OR archived = 0)"
+    ).fetchall()
+    reaped: list[dict[str, Any]] = []
+    for row in rows:
+        age = _age_seconds(_row_get(row, "updated_at"), now=current)
+        if age is None or age <= max_age_seconds:
+            continue
+        task_id = _row_get(row, "id")
+        note = _append_note(
+            _row_get(row, "notes"),
+            f"auto-reset to pending: in_progress untouched for {int(age // 60)}m "
+            "(assignee likely crashed mid-task — verify partial work before redoing)",
+        )
+        ts = now_iso()
+        conn.execute(
+            "UPDATE surface_tasks SET status = 'pending', notes = ?, updated_at = ? WHERE id = ?",
+            (note, ts, task_id),
+        )
+        record_task_event(
+            conn,
+            task_id,
+            event="reaped",
+            actor="system",
+            from_status="in_progress",
+            to_status="pending",
+            note=f"stale in_progress ({int(age)}s old) auto-reset",
+        )
+        fresh = get_task(conn, task_id)
+        if fresh:
+            reaped.append(fresh)
+    return reaped
 
 
 def update_task(
