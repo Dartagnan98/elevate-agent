@@ -13,14 +13,17 @@ Read-only audit. Four parallel readers mapped the runtime, data layer, web/gatew
 > - **B2** Moved dashboard seed work (`sync_skills` + agent-hub) to a background thread so the server binds first.
 > - **C3** Reuse the per-iteration message token estimate + cache the tool-schema token count on the agent. Verified bit-exact (`old == new`).
 >
-> Regression: 355 (config/cron/token) + 1237 (run_agent/state) + 138 (web_server) tests pass. Two `tui_gateway` race tests fail **on the base commit too** (pre-existing, unrelated).
+ **Phase C (all five revisited + shipped or resolved):**
+> - **C1 gzip** — added `GZipMiddleware` (minimum_size 1024, compresslevel 5). Starlette 1.0 excludes `text/event-stream` by default, so SSE streaming is safe. Verified live: JSON list compresses with `Accept-Encoding: gzip`; the SSE pairing endpoint stays `text/event-stream`, uncompressed.
+> - **C2 `_prepare_sql`** — wrapped the sqlite→PG dialect translation in `lru_cache(2048)`: it's a pure function and the codebase runs a bounded set of static queries, so the regex now runs once per unique query. Bit-identical translations verified. (The memory-store lock/connection rework is left as a structural item — correctness-critical on its single persistent connection; contention is bounded on a single-user desktop.)
+> - **C4 `get_tool_definitions` memo** — 10s TTL memo keyed on `(enabled, disabled, quiet, config-mtime)`, deep-copied in/out; config edits invalidate immediately, TTL bounds dynamic-schema staleness. Avoids re-resolving toolsets + rebuilding the discord/execute_code schemas (possible network I/O) on bursts of agent construction.
+> - **C5 `SELECT *` projection** — **investigated, non-issue.** The large blob columns (`searches_json`, `matching_listings_json`) live only on `pcs_buyers`; the buyers list query already projects `contact_id` only, and the one query that does fetch the blobs (`db_private_search_buyers`) needs them. The other `SELECT *` sites are single-row lookups on blob-free tables. Nothing to safely fix.
+> - **C6 FS-scan endpoint cache** — added an account-keyed short-TTL cache (`_fs_cache_get/put/invalidate`). `/api/activity` (3s, read-only) and `/api/heartbeats/surfaces` (3s + explicit invalidation on toggle/config mutators, short TTL backstop for the rest). Verified live: activity call-2 ~16× faster than call-1.
 >
-> **Deliberately NOT done (reasoning):**
-> - **C1 gzip** — dashboard binds `127.0.0.1`; compression on loopback trades CPU for free bandwidth and a global `GZipMiddleware` risks buffering SSE token-streaming. Net-negative here.
-> - **C2 `_prepare_sql` regex** — already short-circuits for PG-native SQL; the residual per-statement regex is microseconds, dwarfed by even a local-socket query.
-> - **C4 `get_tool_definitions` memo** — rebuilds dynamic schemas from runtime state (discord intents over the network, sandbox tools from env); a config-mtime memo could serve stale schemas, and it only runs on agent construction (gateway caches agents), not per turn.
-> - **C5 `SELECT *` projection** — highest-value remaining item, but needs a careful per-consumer column analysis to avoid dropping a column a caller reads. Own pass.
-> - **C6 FS-scan endpoint cache** — needs an **account-scoped** short-TTL cache (cross-account leak trap + dir-mtime misses content edits). Own pass.
+> Regression: 355 (config/cron/token) + 1237 (run_agent/state) + 138 (web_server) + 40 (model_tools/toolsets) + 13 (sql_injection/access) pass. Two `tui_gateway` race tests and ~60 data-layer tests fail **on the base commit too** (pre-existing: the local test PG `elevate_op_default` has migration drift — e.g. `templates.version` missing). Live boot validated A/B/C in a running dashboard incl. 20 concurrent requests with no SQLite lock/thread errors.
+>
+> **Still deferred (by reasoning / decision):**
+> - **Memory-store de-serialization** (the deep half of C2) — needs a connection pool / split of compute-vs-DB-write on the persistent connection. Correctness-critical; own pass.
 > - **Phase D structural** — roadmap only, by decision.
 
 ---
