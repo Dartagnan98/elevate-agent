@@ -128,6 +128,29 @@ def _ra():
     return run_agent
 
 
+def _agent_tools_token_estimate(agent) -> int:
+    """Rough token count for the agent's tool schemas, ``(len(str(tools))+3)//4``.
+
+    Tool schemas are immutable for the life of a session, but the main loop
+    re-stringifies all 50+ of them on every iteration via
+    ``estimate_request_tokens_rough``. Cache the result on the agent (keyed on
+    the tools list identity so a reassignment recomputes) so each iteration
+    reuses it. Matches the tools term inside ``estimate_request_tokens_rough``.
+    """
+    tools = getattr(agent, "tools", None)
+    if not tools:
+        return 0
+    cache = getattr(agent, "_tools_token_estimate_cache", None)
+    if cache is not None and cache[0] == id(tools):
+        return cache[1]
+    est = (len(str(tools)) + 3) // 4
+    try:
+        agent._tools_token_estimate_cache = (id(tools), est)
+    except Exception:
+        pass
+    return est
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -937,9 +960,11 @@ def run_conversation(
         # Calculate approximate request size for logging
         total_chars = sum(len(str(msg)) for msg in api_messages)
         approx_tokens = estimate_messages_tokens_rough(api_messages)
-        approx_request_tokens = estimate_request_tokens_rough(
-            api_messages, tools=agent.tools or None
-        )
+        # Equivalent to estimate_request_tokens_rough(api_messages, tools=...) but
+        # reuses the message estimate just computed and a cached tool-schema count
+        # instead of re-walking all messages and re-stringifying every tool schema
+        # on each iteration.
+        approx_request_tokens = approx_tokens + _agent_tools_token_estimate(agent)
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, approx_request_tokens
