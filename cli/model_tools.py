@@ -26,10 +26,32 @@ import copy
 import logging
 import os
 import threading
+import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
+
+# Short-TTL memo for get_tool_definitions(). Building the list resolves
+# toolsets, runs registry.get_definitions (per-tool check_fns) and rebuilds the
+# dynamic execute_code/discord/browser schemas — the discord rebuild can do
+# network I/O. Tool sets are stable within a session, so cache the result
+# briefly. The TTL bounds staleness of the dynamic pieces (discord intents,
+# sandbox availability) that the config-mtime key doesn't capture; a config edit
+# invalidates immediately. Result is deep-copied in and out so callers can't
+# mutate the cached schemas.
+_TOOL_DEFS_CACHE: Dict[Any, Tuple[float, List[Dict[str, Any]]]] = {}
+_TOOL_DEFS_CACHE_LOCK = threading.Lock()
+_TOOL_DEFS_TTL_S = 10.0
+
+
+def _tool_defs_config_mtime_ns() -> int:
+    try:
+        from elevate_cli.config import get_config_path
+
+        return get_config_path().stat().st_mtime_ns
+    except Exception:
+        return 0
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +271,17 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    cache_key = (
+        tuple(sorted(enabled_toolsets)) if enabled_toolsets is not None else None,
+        tuple(sorted(disabled_toolsets)) if disabled_toolsets else None,
+        bool(quiet_mode),
+        _tool_defs_config_mtime_ns(),
+    )
+    with _TOOL_DEFS_CACHE_LOCK:
+        _ent = _TOOL_DEFS_CACHE.get(cache_key)
+        if _ent is not None and _ent[0] > time.monotonic():
+            return copy.deepcopy(_ent[1])
+
     _ensure_mcp_tools_discovered(enabled_toolsets, disabled_toolsets)
 
     # Determine which tool names the caller wants
@@ -559,6 +592,11 @@ def get_tool_definitions(
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
 
+    with _TOOL_DEFS_CACHE_LOCK:
+        _TOOL_DEFS_CACHE[cache_key] = (
+            time.monotonic() + _TOOL_DEFS_TTL_S,
+            copy.deepcopy(filtered_tools),
+        )
     return filtered_tools
 
 

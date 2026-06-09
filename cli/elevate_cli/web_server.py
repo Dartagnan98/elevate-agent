@@ -180,6 +180,51 @@ def _get_session_db():
     return _SharedSessionDB(db)
 
 
+# ── Account-scoped TTL cache for filesystem-scan endpoints ────────────
+# Some read endpoints (activity feed, heartbeat surfaces) walk the account
+# data dir and parse dozens of JSON files on every request. Cache the computed
+# result per account for a short TTL so rapid polling collapses to one scan.
+# Keyed on the account key so one account never serves another's data. The TTL
+# is short (seconds) and acts as a backstop: even a mutation we forget to
+# invalidate self-heals within the TTL.
+import time as _time  # noqa: E402
+
+_FS_SCAN_CACHE: dict = {}
+_FS_SCAN_CACHE_LOCK = threading.Lock()
+
+
+def _account_key_safe() -> str:
+    try:
+        from elevate_constants import get_account_key
+
+        return get_account_key()
+    except Exception:
+        return "_default"
+
+
+def _fs_cache_get(name: str):
+    """Return cached value for (current account, name) if still fresh, else None."""
+    key = (_account_key_safe(), name)
+    with _FS_SCAN_CACHE_LOCK:
+        ent = _FS_SCAN_CACHE.get(key)
+        if ent is not None and ent[0] > _time.monotonic():
+            return ent[1]
+    return None
+
+
+def _fs_cache_put(name: str, value, ttl_seconds: float) -> None:
+    key = (_account_key_safe(), name)
+    with _FS_SCAN_CACHE_LOCK:
+        _FS_SCAN_CACHE[key] = (_time.monotonic() + ttl_seconds, value)
+
+
+def _fs_cache_invalidate(name: str) -> None:
+    """Drop the current account's cached entry for ``name`` (call after a mutation)."""
+    key = (_account_key_safe(), name)
+    with _FS_SCAN_CACHE_LOCK:
+        _FS_SCAN_CACHE.pop(key, None)
+
+
 app = FastAPI(title="Elevate", version=__version__)
 
 
@@ -6837,6 +6882,20 @@ def get_admin_upcoming_events(days: int = 21):
 
 @app.get("/api/heartbeats/surfaces")
 def get_heartbeat_surfaces():
+    """Per-surface heartbeat state, cached per account for a few seconds. The
+    scan walks every surface dir + reads its config/history/learnings, so rapid
+    polling is collapsed to one scan. Surface mutations invalidate the cache
+    (see _fs_cache_invalidate('surfaces')); the short TTL is a backstop for any
+    mutation path that doesn't."""
+    cached = _fs_cache_get("surfaces")
+    if cached is not None:
+        return cached
+    result = _compute_heartbeat_surfaces()
+    _fs_cache_put("surfaces", result, 3.0)
+    return result
+
+
+def _compute_heartbeat_surfaces():
     """Per-surface heartbeat state for the CURRENT account.
 
     Scans ``<account_data_dir>/heartbeats/<surface>/`` (admin, leads, …) and
@@ -7636,16 +7695,15 @@ def _activity_text(value: Any) -> Optional[str]:
     return str(value)
 
 
-@app.get("/api/activity")
-def get_activity(limit: int = 100, agent: Optional[str] = None):
-    """Fleet activity feed — what every agent did, newest first. Aggregates surface
-    heartbeat run history + cron job last-runs (file-based, no DB). Mirrors cortextOS
-    /ai/activity."""
-    try:
-        from elevate_constants import get_account_data_dir
+def _build_activity_items() -> List[Dict[str, Any]]:
+    """Scan the account data dir for the fleet activity feed (the expensive part
+    of GET /api/activity). Returns the unfiltered, unsorted item list so the
+    endpoint can cache it and apply agent-filter/sort/limit per request."""
+    from elevate_constants import get_account_data_dir
 
-        items: List[Dict[str, Any]] = []
-        base = get_account_data_dir() / "heartbeats"
+    items: List[Dict[str, Any]] = []
+    base = get_account_data_dir() / "heartbeats"
+    try:
         if base.is_dir():
             for sdir in base.iterdir():
                 if not sdir.is_dir():
@@ -7729,10 +7787,27 @@ def get_activity(limit: int = 100, agent: Optional[str] = None):
         except Exception:
             _log.warning("activity: context pressure log unavailable", exc_info=True)
 
+    except Exception:
+        _log.exception("activity scan failed; returning partial results")
+    return items
+
+
+@app.get("/api/activity")
+def get_activity(limit: int = 100, agent: Optional[str] = None):
+    """Fleet activity feed — what every agent did, newest first. Aggregates surface
+    heartbeat run history + cron job last-runs (file-based, no DB). The FS scan is
+    cached per account for a few seconds so rapid polling doesn't rescan each call;
+    agent-filter/sort/limit are applied per request on a copy."""
+    try:
+        items = _fs_cache_get("activity")
+        if items is None:
+            items = _build_activity_items()
+            _fs_cache_put("activity", items, 3.0)
+        result = list(items)
         if agent:
-            items = [i for i in items if i.get("agent") == agent]
-        items.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
-        return {"items": items[: max(1, min(limit, 300))]}
+            result = [i for i in result if i.get("agent") == agent]
+        result.sort(key=lambda x: str(x.get("ts") or ""), reverse=True)
+        return {"items": result[: max(1, min(limit, 300))]}
     except Exception as exc:
         _log.exception("GET /api/activity failed")
         raise HTTPException(status_code=500, detail=f"Activity failed: {exc}")
@@ -7925,6 +8000,7 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
             # Job state is authoritative; a config.json write hiccup is non-fatal.
             _log.warning("heartbeat %s: config.json enabled sync failed", surface_key, exc_info=True)
 
+        _fs_cache_invalidate("surfaces")  # reflect the toggle immediately
         return {"surface": surface_key, "enabled": bool(updated.get("enabled", want))}
     except HTTPException:
         raise
@@ -8091,6 +8167,7 @@ def patch_heartbeat_surface_config(surface: str, body: _HeartbeatConfigPatchBody
             job = _surface_heartbeat_job(surface_key)
             if job:
                 update_job(job["id"], job_updates)
+        _fs_cache_invalidate("surfaces")  # reflect edited settings immediately
         return {"surface": surface_key, "config": cfg, "mode": day_night_mode(cfg)}
     except HTTPException:
         raise
