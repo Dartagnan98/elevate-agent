@@ -21,6 +21,7 @@ import re
 import shutil
 import threading
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import Any, Iterator, Optional, Sequence
 
 import psycopg
@@ -299,8 +300,16 @@ def _translate_sqlite_isms(sql: str) -> str:
     return stripped + " ON CONFLICT DO NOTHING"
 
 
+@lru_cache(maxsize=2048)
 def _prepare_sql(sql: str) -> str:
-    """Run both translation passes."""
+    """Run both translation passes.
+
+    Pure function of the SQL string, so the result is memoized: the codebase
+    executes a bounded set of mostly-static query strings, and this otherwise
+    ran two regex passes on every single ``execute``. LRU-bounded so dynamically
+    built SQL (e.g. ``IN (%s,%s,...)`` with a varying placeholder count) can't
+    grow the cache without limit.
+    """
     return _translate_sqlite_isms(_translate_placeholders(sql))
 
 

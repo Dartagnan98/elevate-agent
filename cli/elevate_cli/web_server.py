@@ -105,6 +105,7 @@ from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
@@ -325,6 +326,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Compress large JSON/text responses for clients that send Accept-Encoding: gzip.
+# Starlette's GZipMiddleware excludes text/event-stream by default
+# (DEFAULT_EXCLUDED_CONTENT_TYPES), so SSE token-streaming keeps flushing
+# uncompressed. minimum_size skips tiny payloads; a modest compresslevel keeps
+# CPU low (the dashboard is usually loopback, so this mainly trims large lists).
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 # ---------------------------------------------------------------------------
 # Endpoints that do NOT require the session token.  Everything else under
