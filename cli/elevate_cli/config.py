@@ -72,6 +72,26 @@ def _warn_config_parse_failure(config_path: Path, exc: Exception) -> None:
 _IS_WINDOWS = platform.system() == "Windows"
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _LAST_EXPANDED_CONFIG_BY_PATH: Dict[str, Any] = {}
+# Read-through cache for load_config(): {path -> (stamp, expanded_config)}.
+# Separate from _LAST_EXPANDED_CONFIG_BY_PATH because save_config() overwrites
+# that dict with non-env-expanded data, which would poison reads. The stamp
+# folds in the config file's mtime+size AND a hash of os.environ so that both
+# a file edit and a runtime env-var change invalidate the cache — preserving
+# the original "re-expand ${ENV} on every call" semantics.
+_CONFIG_CACHE_BY_PATH: Dict[str, Any] = {}
+
+
+def _config_cache_stamp(config_path: Path):
+    try:
+        st = config_path.stat()
+        file_part = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        file_part = None  # missing file -> distinct from any present-file stamp
+    try:
+        env_part = hash(frozenset(os.environ.items()))
+    except Exception:
+        env_part = None
+    return (file_part, env_part)
 # Env var names written to .env that aren't in OPTIONAL_ENV_VARS
 # (managed by setup/provider flows directly).
 _EXTRA_ENV_KEYS = frozenset({
@@ -3832,9 +3852,16 @@ def load_config() -> Dict[str, Any]:
     """Load configuration from ~/.elevate/config.yaml."""
     ensure_elevate_home()
     config_path = get_config_path()
-    
+
+    cache_key = str(config_path)
+    stamp = _config_cache_stamp(config_path)
+    cached = _CONFIG_CACHE_BY_PATH.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        # Deep-copy on return so callers mutating the result can't corrupt the cache.
+        return copy.deepcopy(cached[1])
+
     config = copy.deepcopy(DEFAULT_CONFIG)
-    
+
     if config_path.exists():
         try:
             with open(config_path, encoding="utf-8") as f:
@@ -3854,6 +3881,7 @@ def load_config() -> Dict[str, Any]:
     normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
     expanded = _expand_env_vars(normalized)
     _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(expanded)
+    _CONFIG_CACHE_BY_PATH[cache_key] = (stamp, copy.deepcopy(expanded))
     return expanded
 
 

@@ -2410,6 +2410,35 @@ def _run_job_impl(
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
 
 
+# ── System-job ensure throttle ────────────────────────────────────────
+# ensure_system_jobs() seeds idempotent system jobs (heartbeats, maintenance,
+# theta-wave). It used to run on EVERY tick (~60s), doing FS reads/writes each
+# time. The seeded set only changes on startup / on a new account, so we run it
+# on the first tick of the process and then at most once per interval. Override
+# the interval with ELEVATE_SYSTEM_CRON_ENSURE_INTERVAL (seconds); 0 restores
+# every-tick behaviour.
+_last_system_ensure_monotonic: Optional[float] = None
+_DEFAULT_SYSTEM_ENSURE_INTERVAL_S = 3600.0
+
+
+def _should_ensure_system_jobs() -> bool:
+    """True on the first call, then at most once per ensure-interval."""
+    global _last_system_ensure_monotonic
+    try:
+        interval = float(os.getenv("ELEVATE_SYSTEM_CRON_ENSURE_INTERVAL", "").strip()
+                         or _DEFAULT_SYSTEM_ENSURE_INTERVAL_S)
+    except ValueError:
+        interval = _DEFAULT_SYSTEM_ENSURE_INTERVAL_S
+    if interval <= 0:
+        return True  # opt back into every-tick ensure
+    now = time.monotonic()
+    last = _last_system_ensure_monotonic
+    if last is None or (now - last) >= interval:
+        _last_system_ensure_monotonic = now
+        return True
+    return False
+
+
 def tick(verbose: bool = True, adapters=None, loop=None) -> int:
     """
     Check and run all due jobs.
@@ -2443,7 +2472,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return 0
 
     try:
-        if os.getenv("ELEVATE_DISABLE_SYSTEM_CRON_ENSURE") != "1":
+        if os.getenv("ELEVATE_DISABLE_SYSTEM_CRON_ENSURE") != "1" and _should_ensure_system_jobs():
             try:
                 ensure_system_jobs()
             except Exception as exc:

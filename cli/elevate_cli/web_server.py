@@ -117,6 +117,55 @@ except ImportError:
 WEB_DIST = Path(os.environ["ELEVATE_WEB_DIST"]) if "ELEVATE_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
 _log = logging.getLogger(__name__)
 
+# ── Shared SessionDB ──────────────────────────────────────────────────
+# SessionDB was previously constructed per request at ~15 call sites; each
+# construction opens a fresh SQLite connection and runs _init_schema(). The
+# class is safe to share across the uvicorn threadpool (check_same_thread=False
+# + an internal lock serializing every op — see elevate_state.SessionDB.__init__),
+# so we cache one instance process-wide. If the first open fails we leave the
+# singleton unset so the next call retries (matches the old per-request retry).
+_SESSION_DB_SINGLETON = None
+_SESSION_DB_SINGLETON_LOCK = threading.Lock()
+
+
+class _SharedSessionDB:
+    """Per-request handle over the process-wide SessionDB.
+
+    The ~15 call sites construct a SessionDB then ``db.close()`` it in a
+    ``finally`` block. Against a shared instance that close would tear down the
+    connection for every other request, so this proxy makes ``close()`` a no-op
+    and forwards everything else to the real shared instance (which has its own
+    lock + check_same_thread=False, so concurrent use is safe).
+    """
+
+    __slots__ = ("_db",)
+
+    def __init__(self, db):
+        object.__setattr__(self, "_db", db)
+
+    def close(self):  # shared instance lives for the process — do not close
+        return None
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_db"), name)
+
+    def __setattr__(self, name, value):
+        setattr(object.__getattribute__(self, "_db"), name, value)
+
+
+def _get_session_db():
+    """Return a handle over the process-wide shared SessionDB (built once)."""
+    global _SESSION_DB_SINGLETON
+    db = _SESSION_DB_SINGLETON
+    if db is None:
+        from elevate_state import SessionDB
+        with _SESSION_DB_SINGLETON_LOCK:
+            if _SESSION_DB_SINGLETON is None:
+                _SESSION_DB_SINGLETON = SessionDB()
+            db = _SESSION_DB_SINGLETON
+    return _SharedSessionDB(db)
+
+
 app = FastAPI(title="Elevate", version=__version__)
 
 
@@ -998,7 +1047,7 @@ async def get_status():
     except Exception:
         try:
             from elevate_state import SessionDB
-            db = SessionDB()
+            db = _get_session_db()
             try:
                 sessions = db.list_sessions_rich(limit=50)
                 now = time.time()
@@ -1798,7 +1847,10 @@ async def install_whatsapp_bridge(request: Request):
         )
 
     try:
-        proc = subprocess.run(
+        # npm install can take minutes — run it off the event loop so the
+        # single-worker dashboard stays responsive to every other request.
+        proc = await asyncio.to_thread(
+            subprocess.run,
             [npm, "install", "--no-fund", "--no-audit", "--progress=false"],
             cwd=str(bridge_dir),
             capture_output=True,
@@ -3005,7 +3057,7 @@ async def get_sessions(
                 _log.debug("PG slim session list failed, falling back to SessionDB", exc_info=True)
 
         from elevate_state import SessionDB
-        db = SessionDB()
+        db = _get_session_db()
         try:
             sessions = db.list_sessions_rich(limit=limit, offset=offset)
             total = db.session_count() if include_total else offset + len(sessions)
@@ -3033,7 +3085,7 @@ async def search_sessions(q: str = "", limit: int = 20):
         return {"results": []}
     try:
         from elevate_state import SessionDB
-        db = SessionDB()
+        db = _get_session_db()
         try:
             # Auto-add prefix wildcards so partial words match
             # e.g. "nimb" → "nimb*" matches "nimby"
@@ -4592,7 +4644,7 @@ async def cancel_oauth_session(session_id: str, request: Request):
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str):
     from elevate_state import SessionDB
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         session = db.get_session(active_id)
@@ -4608,7 +4660,7 @@ async def get_session_detail(session_id: str):
 @app.get("/api/sessions/{session_id}/messages")
 async def get_session_messages(session_id: str):
     from elevate_state import SessionDB
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         messages = db.get_messages(active_id)
@@ -4636,7 +4688,7 @@ async def get_session_todos(session_id: str):
     """
     from elevate_state import SessionDB
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         checkpoint = _read_session_checkpoint(
@@ -4699,7 +4751,7 @@ async def get_session_plan(session_id: str):
     """
     from elevate_state import SessionDB
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         checkpoint = _read_session_checkpoint(
@@ -4927,7 +4979,7 @@ async def get_session_files(session_id: str):
     """
     from elevate_state import SessionDB
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         checkpoint = _read_session_checkpoint(
@@ -4955,7 +5007,7 @@ async def get_session_artifacts(session_id: str):
     """Artifacts/files surfaced from a session's durable transcript."""
     from elevate_state import SessionDB
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         checkpoint = _read_session_checkpoint(
@@ -5007,7 +5059,7 @@ async def get_session_children(session_id: str):
     """Physical child sessions/runs for a logical session lineage."""
     from elevate_state import SessionDB
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         children = db.list_child_sessions(active_id)
@@ -5025,7 +5077,7 @@ async def get_session_children(session_id: str):
 @app.put("/api/sessions/{session_id}/title")
 async def update_session_title_endpoint(session_id: str, payload: SessionTitleUpdate):
     from elevate_state import SessionDB
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
@@ -5045,7 +5097,7 @@ async def update_session_title_endpoint(session_id: str, payload: SessionTitleUp
 @app.post("/api/sessions/{session_id}/reveal")
 async def reveal_session_endpoint(session_id: str):
     from elevate_state import SessionDB
-    db = SessionDB()
+    db = _get_session_db()
     try:
         sid = db.resolve_session_id(session_id)
         if not sid or not db.get_session(sid):
@@ -5068,7 +5120,7 @@ async def reveal_session_endpoint(session_id: str):
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str):
     from elevate_state import SessionDB
-    db = SessionDB()
+    db = _get_session_db()
     deleted = False
     try:
         resolver = getattr(db, "resolve_session_id", None)
@@ -11111,7 +11163,7 @@ def get_usage_analytics(days: int = 30):
             totals = dict(cur3.fetchone())
 
         try:
-            db = SessionDB()
+            db = _get_session_db()
             try:
                 insights_report = InsightsEngine(db).generate(days=days if days > 0 else 3650)
                 skills = insights_report.get("skills")
@@ -11140,7 +11192,7 @@ def get_usage_analytics(days: int = 30):
     except Exception:
         _log.debug("analytics usage PG read failed, falling back to SQLite", exc_info=True)
 
-    db = SessionDB()
+    db = _get_session_db()
     try:
         cutoff = time.time() - (days * 86400) if days > 0 else 0
         cur = db._conn.execute("""
