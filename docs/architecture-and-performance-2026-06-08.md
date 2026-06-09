@@ -1,6 +1,27 @@
 # Elevate Agent — Architecture & Performance Pass (2026-06-08)
 
-Read-only audit. Four parallel readers mapped the runtime, data layer, web/gateway/cron, and desktop process model. Every claim below cites `file:line`. Nothing was changed.
+Read-only audit. Four parallel readers mapped the runtime, data layer, web/gateway/cron, and desktop process model. Every claim below cites `file:line`.
+
+> **Implementation status (branch `perf-pass-2026-06-08`).** The audit below is the original read-only analysis. What was actually executed:
+>
+> **Shipped (verified, on branch):**
+> - **A1** `config.load_config()` read-through cache (mtime+size+env-hash key). Verified: 3 calls → 1 YAML read, invalidates on touch, no cache poisoning.
+> - **A2** Shared process-wide `SessionDB` (was rebuilt at 15 per-request sites) behind a no-op-`close()` proxy; made **path-aware** so it rebuilds if `DEFAULT_DB_PATH` changes (fixes test isolation). Verified + `test_web_server.py` 138 pass.
+> - **A3** Throttled cron `ensure_system_jobs()` from every ~60s to first-tick + hourly (`ELEVATE_SYSTEM_CRON_ENSURE_INTERVAL`). Verified.
+> - **A4** (corrected) The audit's "`update_elevate` freezes the loop" was **wrong** (it uses `Popen`, non-blocking). The real blocking-in-async hit was `install_whatsapp_bridge` (10-min `npm install`) — wrapped in `asyncio.to_thread`.
+> - **B1** Re-enabled bytecode caching (drop `PYTHONDONTWRITEBYTECODE`, keep the out-of-bundle `PYTHONPYCACHEPREFIX`). Verified all `.pyc` land in the cache prefix, none beside source. Ships in the next desktop build.
+> - **B2** Moved dashboard seed work (`sync_skills` + agent-hub) to a background thread so the server binds first.
+> - **C3** Reuse the per-iteration message token estimate + cache the tool-schema token count on the agent. Verified bit-exact (`old == new`).
+>
+> Regression: 355 (config/cron/token) + 1237 (run_agent/state) + 138 (web_server) tests pass. Two `tui_gateway` race tests fail **on the base commit too** (pre-existing, unrelated).
+>
+> **Deliberately NOT done (reasoning):**
+> - **C1 gzip** — dashboard binds `127.0.0.1`; compression on loopback trades CPU for free bandwidth and a global `GZipMiddleware` risks buffering SSE token-streaming. Net-negative here.
+> - **C2 `_prepare_sql` regex** — already short-circuits for PG-native SQL; the residual per-statement regex is microseconds, dwarfed by even a local-socket query.
+> - **C4 `get_tool_definitions` memo** — rebuilds dynamic schemas from runtime state (discord intents over the network, sandbox tools from env); a config-mtime memo could serve stale schemas, and it only runs on agent construction (gateway caches agents), not per turn.
+> - **C5 `SELECT *` projection** — highest-value remaining item, but needs a careful per-consumer column analysis to avoid dropping a column a caller reads. Own pass.
+> - **C6 FS-scan endpoint cache** — needs an **account-scoped** short-TTL cache (cross-account leak trap + dir-mtime misses content edits). Own pass.
+> - **Phase D structural** — roadmap only, by decision.
 
 ---
 
