@@ -9939,6 +9939,61 @@ class AIAgent:
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
 
+        # ── Repair in-flight tool calls from a crashed prior run ──────────
+        # If the previous process died between persisting an assistant
+        # tool_call and its tool result (daemon kill, crash, power loss),
+        # the restored history ends with unanswered tool_call ids. Left
+        # alone this is (a) an API 400 on strict providers (every tool_use
+        # needs a tool_result) and (b) silent amnesia — the tool may have
+        # actually executed (file written, message sent) before the crash.
+        # Append synthetic results telling the model to VERIFY rather than
+        # blindly redo. Appended at the tail (before this turn's user
+        # message) so the normal DB flush persists them.
+        if messages:
+            _tail_orphans: list = []
+            for _m in reversed(messages):
+                _role = _m.get("role")
+                if _role == "tool":
+                    break  # last tool call group is answered
+                if _role == "assistant" and _m.get("tool_calls"):
+                    _answered = {
+                        t.get("tool_call_id")
+                        for t in messages
+                        if t.get("role") == "tool"
+                    }
+                    for _tc in _m["tool_calls"]:
+                        _tc_id = getattr(_tc, "id", None) or (
+                            _tc.get("id") if isinstance(_tc, dict) else None
+                        )
+                        _tc_fn = getattr(_tc, "function", None) or (
+                            _tc.get("function") if isinstance(_tc, dict) else {}
+                        )
+                        _tc_name = getattr(_tc_fn, "name", None) or (
+                            _tc_fn.get("name") if isinstance(_tc_fn, dict) else "?"
+                        )
+                        if _tc_id and _tc_id not in _answered:
+                            _tail_orphans.append((_tc_name, _tc_id))
+                    break
+                if _role == "user":
+                    break
+            if _tail_orphans:
+                from agent.tool_dispatch_helpers import make_tool_result_message
+                for _name, _cid in _tail_orphans:
+                    messages.append(make_tool_result_message(
+                        _name,
+                        "[Session was interrupted before this tool call returned a "
+                        "result. The tool MAY have partially or fully executed "
+                        "(files written, messages sent). Verify its actual effect "
+                        "before re-running anything with side effects.]",
+                        _cid,
+                    ))
+                logger.warning(
+                    "%sRepaired %d in-flight tool call(s) from interrupted prior "
+                    "run with synthetic results: %s",
+                    self.log_prefix, len(_tail_orphans),
+                    ", ".join(n for n, _ in _tail_orphans),
+                )
+
         # Hydrate todo store from conversation history (gateway creates a fresh
         # AIAgent per message, so the in-memory store is empty -- we need to
         # recover the todo state from the most recent todo tool response in history)
