@@ -862,6 +862,7 @@ class AIAgent:
         persist_session: bool = True,
         openrouter_min_coding_score: Optional[float] = None,
         cache_ttl: str = None,
+        max_session_seconds: float = None,
     ):
         """
         Initialize the AI Agent.
@@ -1170,6 +1171,8 @@ class AIAgent:
         # models to "give up" prematurely on complex tasks (#7915).
         self._budget_exhausted_injected = False
         self._budget_grace_call = False
+        # Resolved below once _agent_cfg is loaded (see "Session wall clock").
+        self._max_session_seconds_arg = max_session_seconds
 
         # Activity tracking — updated on each API call, tool execution, and
         # stream chunk.  Used by the gateway timeout handler to report what the
@@ -1821,6 +1824,23 @@ class AIAgent:
         # info loss. The cheap prune_only stage (below, at 60%) now relieves
         # pressure first, so full compaction can fire later.
         compression_threshold = float(_compression_cfg.get("threshold", 0.72))
+
+        # Session wall clock. max_iterations bounds the number of API calls
+        # but not time — a loop of short calls (or slow tools) can run for
+        # hours headless. When the deadline passes, the tool loop exits and
+        # the model gets ONE toolless summary call (_handle_max_iterations),
+        # so the run ends with a usable checkpoint instead of a hard kill.
+        # Constructor wins; else agent.max_session_seconds config; else
+        # disabled (interactive sessions are user-paced — cron passes its
+        # own bound explicitly).
+        self.max_session_seconds: float = 0.0
+        try:
+            _mss = self._max_session_seconds_arg
+            if _mss is None:
+                _mss = _agent_cfg.get("max_session_seconds")
+            self.max_session_seconds = max(0.0, float(_mss or 0))
+        except (TypeError, ValueError):
+            self.max_session_seconds = 0.0
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
@@ -10346,9 +10366,35 @@ class AIAgent:
             _turn_budget = 0.0
         _turn_deadline_mono0 = time.monotonic() if _turn_budget else None
 
+        _session_deadline_hit = False
+        _turn_loop_started = time.monotonic()
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
+
+            # ── Session wall clock ──────────────────────────────────────
+            # Headless safety net (cron passes max_session_seconds; 0 =
+            # disabled). Checked at iteration boundaries so an in-flight
+            # tool/API call always completes; the post-loop handler then
+            # asks the model for a final summary so progress is captured.
+            if (
+                self.max_session_seconds > 0
+                and time.monotonic() - _turn_loop_started > self.max_session_seconds
+            ):
+                _session_deadline_hit = True
+                _turn_exit_reason = f"max_session_seconds({int(self.max_session_seconds)})"
+                logger.warning(
+                    "%sSession wall clock exceeded (%.0fs > %.0fs) after %d API calls — wrapping up",
+                    self.log_prefix,
+                    time.monotonic() - _turn_loop_started,
+                    self.max_session_seconds,
+                    api_call_count,
+                )
+                if not self.quiet_mode:
+                    self._safe_print(
+                        f"\n⏱️  Session time limit reached ({int(self.max_session_seconds)}s) — wrapping up..."
+                    )
+                break
 
             # Check for interrupt request (e.g., user sent new message)
             if self._interrupt_requested:
@@ -13430,6 +13476,17 @@ class AIAgent:
                     messages.append({"role": "assistant", "content": final_response})
                     break
         
+        if final_response is None and _session_deadline_hit:
+            # Session wall clock expired — same graceful exit as iteration
+            # exhaustion: one toolless call asking the model to summarize
+            # state so the next run (cron re-tick) can resume from the
+            # checkpoint instead of starting blind.
+            self._emit_status(
+                f"⏱️ Session time limit reached ({int(self.max_session_seconds)}s) "
+                "— asking model to summarise"
+            )
+            final_response = self._handle_max_iterations(messages, api_call_count)
+
         if final_response is None and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0

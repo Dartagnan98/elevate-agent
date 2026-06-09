@@ -2150,6 +2150,15 @@ def _run_job_impl(
             # calls; the 5m tier expires mid-run and re-writes the whole
             # prefix. Job config can override with cache_ttl: "5m".
             cache_ttl=str(job.get("cache_ttl") or "1h"),
+            # Wall-clock safety net: headless runs have no user to notice a
+            # spin. At expiry the agent wraps up with one summary call (not
+            # a hard kill). Per-job max_session_seconds wins; else
+            # cron.max_session_seconds config; else 2h.
+            max_session_seconds=float(
+                job.get("max_session_seconds")
+                or (_cfg.get("cron") or {}).get("max_session_seconds")
+                or 7200
+            ),
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
