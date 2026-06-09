@@ -860,6 +860,7 @@ class AIAgent:
         pass_session_id: bool = False,
         persist_session: bool = True,
         openrouter_min_coding_score: Optional[float] = None,
+        cache_ttl: str = None,
     ):
         """
         Initialize the AI Agent.
@@ -1153,6 +1154,12 @@ class AIAgent:
                 self._cache_ttl = _ttl
         except Exception:
             pass
+        # Per-session override (constructor wins over config). Cron passes
+        # "1h": headless runs routinely have >5-minute tool calls (browser
+        # scrapes, long terminal jobs); a 5m TTL expiring mid-run means the
+        # next call re-writes the entire prefix at full price.
+        if cache_ttl in ("5m", "1h"):
+            self._cache_ttl = cache_ttl
 
         # Iteration budget: the LLM is only notified when it actually exhausts
         # the iteration budget (api_call_count >= max_iterations).  At that

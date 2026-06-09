@@ -2146,6 +2146,10 @@ def _run_job_impl(
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
+            # 1h prompt-cache TTL: cron runs routinely have >5-minute tool
+            # calls; the 5m tier expires mid-run and re-writes the whole
+            # prefix. Job config can override with cache_ttl: "5m".
+            cache_ttl=str(job.get("cache_ttl") or "1h"),
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,
