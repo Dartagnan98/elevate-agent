@@ -74,6 +74,7 @@ from model_tools import (
 )
 from tools.terminal_tool import cleanup_vm, get_active_env, is_persistent_env
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
+from tools.budget_config import budget_for_context_length
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -9203,7 +9204,13 @@ class AIAgent:
         num_tools = len(parsed_calls)
         if num_tools > 0:
             turn_tool_msgs = messages[-num_tools:]
-            enforce_turn_budget(turn_tool_msgs, env=get_active_env(effective_task_id))
+            enforce_turn_budget(
+                turn_tool_msgs,
+                env=get_active_env(effective_task_id),
+                config=budget_for_context_length(
+                    getattr(self.context_compressor, "context_length", 0)
+                ),
+            )
 
         # ── /steer injection ──────────────────────────────────────────────
         # Append any pending user steer text to the last tool result so the
@@ -9622,7 +9629,13 @@ class AIAgent:
         # ── Per-turn aggregate budget enforcement ─────────────────────────
         num_tools_seq = len(assistant_message.tool_calls)
         if num_tools_seq > 0:
-            enforce_turn_budget(messages[-num_tools_seq:], env=get_active_env(effective_task_id))
+            enforce_turn_budget(
+                messages[-num_tools_seq:],
+                env=get_active_env(effective_task_id),
+                config=budget_for_context_length(
+                    getattr(self.context_compressor, "context_length", 0)
+                ),
+            )
 
         # ── /steer injection ──────────────────────────────────────────────
         # See _execute_tool_calls_parallel for the rationale. Same hook,

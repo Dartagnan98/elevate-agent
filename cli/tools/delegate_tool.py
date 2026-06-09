@@ -640,6 +640,21 @@ def _build_child_system_prompt(
         f"YOUR TASK:\n{goal}",
     ]
     if context and context.strip():
+        # Cap caller-provided context. Nothing stops a model from pasting an
+        # entire transcript or file dump here, which lands verbatim in the
+        # child's system prompt and is paid on every one of the child's API
+        # calls. 32K chars ≈ 8K tokens is generous for a task briefing.
+        _CONTEXT_CHAR_CAP = 32_000
+        if len(context) > _CONTEXT_CHAR_CAP:
+            logger.warning(
+                "delegate_task context truncated: %d chars > %d cap "
+                "(pass file paths instead of file contents)",
+                len(context), _CONTEXT_CHAR_CAP,
+            )
+            context = (
+                context[:_CONTEXT_CHAR_CAP].rstrip()
+                + "\n[context truncated at 32K chars — pass file paths instead of file contents]"
+            )
         parts.append(f"\nCONTEXT:\n{context}")
     if workspace_path and str(workspace_path).strip():
         parts.append(

@@ -48,3 +48,27 @@ class BudgetConfig:
 
 
 DEFAULT_BUDGET = BudgetConfig()
+
+# Memo for budget_for_context_length — tiny domain, avoid re-allocating.
+_CTX_BUDGET_CACHE: Dict[int, BudgetConfig] = {}
+
+
+def budget_for_context_length(context_length: int | None) -> BudgetConfig:
+    """Scale the per-turn tool-result budget with the model's context window.
+
+    The flat 80K-char default is ~10% of a 200K-token window (chars/4). On
+    1M-context models it spills results to disk long before context pressure
+    is real; on 64K models it lets a single turn eat a third of the window.
+    Scale to ~10% of the window, clamped to [32K, 400K] chars. Per-result
+    thresholds (Layer 2) are unchanged — only the aggregate turn budget moves.
+    """
+    if not context_length or context_length <= 0:
+        return DEFAULT_BUDGET
+    turn = max(32_000, min(400_000, int(context_length * 0.10) * 4))
+    if turn == DEFAULT_TURN_BUDGET_CHARS:
+        return DEFAULT_BUDGET
+    cached = _CTX_BUDGET_CACHE.get(turn)
+    if cached is None:
+        cached = BudgetConfig(turn_budget=turn)
+        _CTX_BUDGET_CACHE[turn] = cached
+    return cached
