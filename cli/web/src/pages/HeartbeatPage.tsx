@@ -264,6 +264,18 @@ function formatRelative(iso?: string | null): string {
   return `${days}d ago`;
 }
 
+function formatUntil(iso?: string | null): string {
+  if (!iso) return "soon";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "soon";
+  const diff = then - Date.now();
+  if (diff <= 0) return "soon";
+  const mins = Math.ceil(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.round(mins / 60);
+  return `in ${hrs}h`;
+}
+
 function prettyInterval(m: number): string {
   if (m === 60) return "Hourly";
   if (m < 60) return `Every ${m} min`;
@@ -846,6 +858,16 @@ export default function HeartbeatPage() {
                               paused
                             </span>
                           )}
+                          {job.enabled &&
+                            job.backoff_until &&
+                            new Date(job.backoff_until) > new Date() && (
+                              <span
+                                className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400"
+                                title={`${job.stall_count || 0} stalled run(s) in a row — next attempt ${formatUntil(job.backoff_until)}`}
+                              >
+                                backing off · retries {formatUntil(job.backoff_until)}
+                              </span>
+                            )}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                           <span className="inline-flex items-center gap-1">

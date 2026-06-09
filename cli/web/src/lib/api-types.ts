@@ -2608,6 +2608,9 @@ export interface CronJob {
   last_status?: string | null;
   last_summary?: string | null;
   last_session_id?: string | null;
+  stall_count?: number | null;
+  backoff_until?: string | null;
+  backoff_minutes?: number | null;
   metadata?: Record<string, unknown>;
   origin?: { type?: string; source?: string; [k: string]: unknown } | null;
 }

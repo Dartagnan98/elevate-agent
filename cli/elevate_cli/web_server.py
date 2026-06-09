@@ -7071,12 +7071,28 @@ def _compute_heartbeat_surfaces():
             decided = kept + discarded
             keep_rate = round((kept / decided) * 100) if decided else 0
 
+            # Job health: stall backoff + last status, so a backed-off
+            # heartbeat is visible on its card instead of silently sleeping
+            # for up to 6h (the stall cap) with no explanation.
+            job_health: Optional[Dict[str, Any]] = None
+            if job:
+                job_health = {
+                    "lastStatus": job.get("last_status"),
+                    "lastRunAt": job.get("last_run_at"),
+                    "nextRunAt": job.get("next_run_at"),
+                    "stallCount": job.get("stall_count") or 0,
+                    "backoffUntil": job.get("backoff_until"),
+                    "backoffMinutes": job.get("backoff_minutes"),
+                    "lastError": job.get("last_error"),
+                }
+
             surfaces.append(
                 {
                     "surface": surface_name,
                     "config": config,
                     "runCount": run_count,
                     "lastRun": last_run,
+                    "jobHealth": job_health,
                     "learnings": learnings,
                     "automations": automations_by_surface.get(surface_name, []),
                     "experiments": {
