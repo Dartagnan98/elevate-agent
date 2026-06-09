@@ -32,17 +32,56 @@ from typing import Dict, Any, List, Optional, Tuple
 from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
-# Short-TTL memo for get_tool_definitions(). Building the list resolves
-# toolsets, runs registry.get_definitions (per-tool check_fns) and rebuilds the
-# dynamic execute_code/discord/browser schemas — the discord rebuild can do
-# network I/O. Tool sets are stable within a session, so cache the result
-# briefly. The TTL bounds staleness of the dynamic pieces (discord intents,
-# sandbox availability) that the config-mtime key doesn't capture; a config edit
-# invalidates immediately. Result is deep-copied in and out so callers can't
-# mutate the cached schemas.
+# Memo for get_tool_definitions(). Building the list resolves toolsets, runs
+# registry.get_definitions (per-tool check_fns) and rebuilds the dynamic
+# execute_code/discord/browser schemas — the discord rebuild can do network
+# I/O. Tool sets are stable within a session, so cache the result. A config
+# edit invalidates immediately (mtime is part of the key). Result is
+# deep-copied in and out so callers can't mutate the cached schemas.
+#
+# PROMPT-CACHE PREFIX STABILITY: in the Anthropic API the cached prefix is
+# tools -> system -> messages. ONE byte of schema drift between turns of the
+# same conversation invalidates the whole cached prefix (tools + system
+# prompt), turning ~0.1x cached reads into full-price re-writes. The gateway
+# constructs a fresh AIAgent per message, so this memo is what keeps the
+# tools array byte-identical across turns. Hence:
+#   - TTL is long (10 min, ELEVATE_TOOL_DEFS_TTL_S to override) — staleness
+#     of dynamic pieces (discord intents, sandbox availability) is bounded
+#     but rebuilds are rare.
+#   - On a TTL-expiry rebuild we compare against the previous entry: if the
+#     content is identical we keep serving the same bytes; if it changed we
+#     log which tools drifted so cache-bust regressions are debuggable.
 _TOOL_DEFS_CACHE: Dict[Any, Tuple[float, List[Dict[str, Any]]]] = {}
 _TOOL_DEFS_CACHE_LOCK = threading.Lock()
-_TOOL_DEFS_TTL_S = 10.0
+# Last discord_server schema that built successfully — reused when the
+# intents probe fails transiently so the tool doesn't flap in and out of
+# the tools array (each flap busts the prompt-cache prefix).
+_LAST_GOOD_DISCORD_SCHEMA: Optional[Dict[str, Any]] = None
+try:
+    _TOOL_DEFS_TTL_S = float(os.getenv("ELEVATE_TOOL_DEFS_TTL_S", "600"))
+except ValueError:
+    _TOOL_DEFS_TTL_S = 600.0
+
+
+def _tool_defs_diff_names(
+    old: List[Dict[str, Any]], new: List[Dict[str, Any]]
+) -> List[str]:
+    """Names of tools whose schema bytes differ between two definition lists."""
+
+    def _by_name(defs: List[Dict[str, Any]]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for td in defs:
+            name = (td.get("function") or {}).get("name") or "?"
+            try:
+                out[name] = json.dumps(td, sort_keys=True)
+            except (TypeError, ValueError):
+                out[name] = repr(td)
+        return out
+
+    old_map, new_map = _by_name(old), _by_name(new)
+    changed = [n for n in new_map if old_map.get(n) != new_map[n]]
+    changed += [n for n in old_map if n not in new_map]
+    return sorted(set(changed))
 
 
 def _tool_defs_config_mtime_ns() -> int:
@@ -281,6 +320,10 @@ def get_tool_definitions(
         _ent = _TOOL_DEFS_CACHE.get(cache_key)
         if _ent is not None and _ent[0] > time.monotonic():
             return copy.deepcopy(_ent[1])
+        # Keep the expired entry around for the drift comparison below —
+        # if the rebuild produces identical content we keep serving the
+        # exact same objects (byte-stable for the prompt-cache prefix).
+        _prev_defs = copy.deepcopy(_ent[1]) if _ent is not None else None
 
     _ensure_mcp_tools_discovered(enabled_toolsets, disabled_toolsets)
 
@@ -364,8 +407,16 @@ def get_tool_definitions(
         try:
             from tools.discord_tool import get_dynamic_schema
             dynamic = get_dynamic_schema()
+            if dynamic is not None:
+                global _LAST_GOOD_DISCORD_SCHEMA
+                _LAST_GOOD_DISCORD_SCHEMA = copy.deepcopy(dynamic)
         except Exception:  # pragma: no cover — defensive, fall back to static
-            dynamic = None
+            # Transient failure (network blip on the intents probe): reuse the
+            # last schema that built successfully instead of dropping the tool.
+            # Dropping it would both lose the tool for a turn AND change the
+            # tools array bytes, invalidating the prompt-cache prefix twice
+            # (once on drop, once on restore).
+            dynamic = copy.deepcopy(_LAST_GOOD_DISCORD_SCHEMA) if _LAST_GOOD_DISCORD_SCHEMA else None
         if dynamic is None:
             # Tool filtered out entirely (empty allowlist or detection disabled
             # the only remaining actions).  Drop it from the schema list.
@@ -591,6 +642,22 @@ def get_tool_definitions(
         filtered_tools = sanitize_tool_schemas(filtered_tools)
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
+
+    # Drift check against the previous (possibly TTL-expired) entry. Identical
+    # content -> reuse the previous list so the serialized request prefix stays
+    # byte-for-byte stable. Changed content -> log which tools drifted, since
+    # every drift invalidates the provider-side prompt cache for all active
+    # conversations using this toolset profile.
+    if _prev_defs is not None:
+        changed = _tool_defs_diff_names(_prev_defs, filtered_tools)
+        if not changed:
+            filtered_tools = _prev_defs
+        else:
+            logger.info(
+                "tool definitions drifted on rebuild (prompt-cache prefix "
+                "invalidated): %s",
+                ", ".join(changed),
+            )
 
     with _TOOL_DEFS_CACHE_LOCK:
         _TOOL_DEFS_CACHE[cache_key] = (
