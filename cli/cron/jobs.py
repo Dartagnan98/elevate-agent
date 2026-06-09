@@ -672,6 +672,112 @@ def delete_surface(
     }
 
 
+# ─── Per-agent heartbeats ─────────────────────────────────────────────────────
+# Every installed WORKER agent gets its own heartbeat surface — its own WORK loop,
+# its own experiment/theta-wave cycle, and its own learnings.md. An agent that
+# owns a built-in surface (outreach→leads, admin→admin) reuses it; everyone else
+# gets a per-agent surface keyed by the agent id. The orchestrator (executive-
+# assistant) and the system reviewer (theta-wave) are not workers and are excluded.
+_HEARTBEAT_EXCLUDED_AGENTS = {"executive-assistant", "theta-wave"}
+
+
+def _slug_agent(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _agent_owns_builtin_surface(agent_id: str) -> Optional[str]:
+    """The built-in surface an agent already owns (so we don't double-seed)."""
+    for surface, spec in SURFACE_HEARTBEAT_DEFAULTS.items():
+        owner = str((spec.get("config") or {}).get("agent") or "").strip().lower()
+        if owner == agent_id:
+            return surface
+    return None
+
+
+def _agent_surface_spec(agent_id: str) -> Dict[str, Any]:
+    """A per-agent surface spec from SURFACE_TEMPLATE, personalized with the agent's
+    name/role and a per-agent experiment metric (its own theta-wave cycle)."""
+    name = agent_id.replace("-", " ").title()
+    role = ""
+    try:
+        from elevate_cli.agent_hub import get_agent_def
+
+        agent = get_agent_def(agent_id) or {}
+        name = str(agent.get("name") or name)
+        role = str(agent.get("role") or "")
+    except Exception:
+        pass
+    spec = copy.deepcopy(SURFACE_TEMPLATE)
+    spec["name"] = f"{name} Heartbeat"
+    spec["goal"] = (
+        f"Each run: do {name}'s recurring work" + (f" ({role})" if role else "") + ", surface what "
+        "changed, and draft (never send) anything that needs the realtor. End with one tight "
+        "summary; say 'all quiet' if nothing changed."
+    )
+    spec["config"] = {"agent": agent_id}
+    exp = dict(spec.get("experiment") or {})
+    exp["metric"] = f"{agent_id.replace('-', '_')}_effectiveness"
+    spec["experiment"] = exp
+    spec["created_by"] = "system"
+    spec["builtin"] = False
+    return spec
+
+
+def _resolve_agent_surface(agent_id: str, reg: Dict[str, Dict[str, Any]]) -> tuple[str, Dict[str, Any]]:
+    """Return (surface, spec) for an agent — its built-in surface if it owns one,
+    a registered surface if present, else a fresh per-agent spec."""
+    surface = _agent_owns_builtin_surface(agent_id) or agent_id
+    if surface in reg:
+        return surface, reg[surface]
+    if surface in SURFACE_HEARTBEAT_DEFAULTS:
+        return surface, {**SURFACE_HEARTBEAT_DEFAULTS[surface], "builtin": True, "created_by": "system"}
+    return surface, _agent_surface_spec(agent_id)
+
+
+def _installed_agent_ids() -> List[str]:
+    try:
+        from elevate_cli.agent_hub import _load_agent_defs
+        from elevate_cli.config import load_config
+
+        return [
+            _slug_agent(str(a.get("id") or ""))
+            for a in _load_agent_defs(load_config())
+            if isinstance(a, dict)
+        ]
+    except Exception:
+        return []
+
+
+def ensure_agent_heartbeat(agent_id: str, *, enabled: bool = False) -> Optional[Dict[str, Any]]:
+    """Ensure ONE worker agent has its own heartbeat surface (own theta-wave cycle +
+    learnings). Idempotent — reuses a built-in/registered surface, else creates one.
+    Returns the seeded job, or None if the agent is excluded. Called on install."""
+    aid = _slug_agent(agent_id)
+    if not aid or aid in _HEARTBEAT_EXCLUDED_AGENTS:
+        return None
+    reg = load_surface_registry()
+    surface, spec = _resolve_agent_surface(aid, reg)
+    if surface not in reg:
+        register_surface(surface, spec)
+    return ensure_surface(surface, spec, enabled=enabled)
+
+
+def register_agent_surfaces() -> None:
+    """Register one heartbeat surface per installed worker agent so the next
+    ensure_surface_heartbeats() seeds them. Register-only (no job seeding here)."""
+    reg = load_surface_registry()
+    changed = False
+    for aid in _installed_agent_ids():
+        if not aid or aid in _HEARTBEAT_EXCLUDED_AGENTS:
+            continue
+        surface, spec = _resolve_agent_surface(aid, reg)
+        if surface not in reg:
+            reg[surface] = spec
+            changed = True
+    if changed:
+        _write_surface_registry(reg)
+
+
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
     """Idempotently seed every REGISTERED surface heartbeat (workspace + cron job) for
     the active account — OFF by default (opt-in). Built-ins (Leads, Admin) come from
@@ -986,6 +1092,9 @@ def ensure_theta_wave() -> Dict[str, Any]:
 
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
+    # Give every installed worker agent its own heartbeat surface before seeding,
+    # so each gets its own theta-wave cycle + learnings.
+    register_agent_surfaces()
     return [
         ensure_admin_calendar_sync_job(),
         ensure_operational_maintenance_job(),

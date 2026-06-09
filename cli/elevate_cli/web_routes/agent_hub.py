@@ -927,7 +927,17 @@ def create_agent_hub_router(
         try:
             from elevate_cli.agent_hub import update_agent_config
 
-            return update_agent_config(agent_id, patch)
+            result = update_agent_config(agent_id, patch)
+            # Installing/activating a worker agent gives it its own heartbeat
+            # surface (own theta-wave cycle + learnings), seeded opt-in/off.
+            if patch.get("enabled") is True:
+                try:
+                    from cron.jobs import ensure_agent_heartbeat
+
+                    ensure_agent_heartbeat(agent_id, enabled=False)
+                except Exception:
+                    _log.exception("ensure_agent_heartbeat failed for %s", agent_id)
+            return result
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
