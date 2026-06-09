@@ -1156,16 +1156,44 @@ def _is_builtin_agent_id(agent_id: str) -> bool:
 
 
 # The Executive Assistant is the one permanent native agent (the lead /
-# orchestrator). Every other built-in ships seeded-on but is removable: the
-# user may delete it (recorded in agent_hub.removed_default_agents so reconcile
-# won't re-seed it) and re-install it later. This is the native->installable
-# downgrade — seeded by default (no regression for existing installs), opt-out.
+# orchestrator) and the ONLY agent auto-seeded on a fresh install. Every other
+# native default is an "installable default": it exists in the catalog and can
+# be installed from the Agent Library, but is not created automatically.
+#   - PERMANENT_AGENT_IDS: cannot be deleted (only EA).
+#   - AUTO_SEED_AGENT_IDS: created automatically on a fresh/missing install.
+# Existing installs keep whatever agents they already have — the merge only adds
+# missing auto-seed agents and never removes — so this is no-regression.
 PERMANENT_AGENT_IDS = frozenset({"executive-assistant"})
+AUTO_SEED_AGENT_IDS = frozenset({"executive-assistant"})
 
 
 def _is_removable_default(agent_id: str) -> bool:
     slug = _slug(agent_id)
     return slug in _builtin_agent_ids() and slug not in PERMANENT_AGENT_IDS
+
+
+def _is_auto_seed_default(agent_id: str) -> bool:
+    return _slug(agent_id) in AUTO_SEED_AGENT_IDS
+
+
+def _installable_default_specs(installed_ids: set[str]) -> list[dict[str, Any]]:
+    """Native defaults that are installable but not currently installed —
+    surfaced to the Agent Library so they show as 'not installed / Install'."""
+    out: list[dict[str, Any]] = []
+    for default in DEFAULT_AGENT_DEFS:
+        agent_id = _slug(str(default.get("id") or ""))
+        if not agent_id or agent_id in installed_ids or _is_auto_seed_default(agent_id):
+            continue
+        out.append(
+            {
+                "id": agent_id,
+                "name": str(default.get("name") or agent_id.replace("-", " ").title()),
+                "role": str(default.get("role") or "support"),
+                "description": str(default.get("description") or ""),
+                "native": True,
+            }
+        )
+    return out
 
 
 def _removed_default_ids(hub_cfg: dict[str, Any]) -> set[str]:
@@ -1255,17 +1283,17 @@ def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: 
         for item in raw_agents
         if isinstance(item, dict) and _agent_config_id(item)
     }
-    removed_default_ids = _removed_default_ids(hub_cfg)
     for default in DEFAULT_AGENT_DEFS:
         agent_id = _slug(str(default.get("id") or ""))
         if not agent_id:
             continue
         raw = by_id.get(agent_id)
         if raw is None:
-            # Respect an explicit removal of a removable default — don't re-seed
-            # it. The Executive Assistant is never removable, so it is always
-            # re-created (no regression for existing installs).
-            if agent_id in removed_default_ids and _is_removable_default(agent_id):
+            # Only auto-seed the always-on agent (EA). Every other native default
+            # is installable from the Agent Library, not auto-created. Existing
+            # installs keep agents they already have (this branch only fires for
+            # a default that is *missing* from the saved config).
+            if not _is_auto_seed_default(agent_id):
                 continue
             new_agent = copy.deepcopy(default)
             new_agent["skills"] = _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"))
@@ -1862,14 +1890,13 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
             for agent in raw_agents
             if isinstance(agent, dict)
         }
-        removed_ids = _removed_default_ids(hub_cfg)
         for default in DEFAULT_AGENT_DEFS:
             default_id = _slug(str(default.get("id") or ""))
             if not default_id or default_id in configured_default_ids:
                 continue
-            # Honor an explicit removal of a removable default (Phase C). The
-            # Executive Assistant is never removable, so it is always present.
-            if default_id in removed_ids and _is_removable_default(default_id):
+            # Only the always-on agent (EA) is auto-added. Every other native
+            # default is installable from the Agent Library, not auto-shown.
+            if not _is_auto_seed_default(default_id):
                 continue
             raw_agents.append(copy.deepcopy(default))
             configured_default_ids.add(default_id)
@@ -3267,6 +3294,9 @@ def build_agent_hub_snapshot(
             model=model,
             handoffs=handoffs,
             agent_worker=agent_worker,
+        ),
+        "installableDefaults": _installable_default_specs(
+            {_slug(str(agent.get("id") or "")) for agent in _load_agent_defs(config)}
         ),
         "orchestration": orchestration,
         "handoffs": handoffs,

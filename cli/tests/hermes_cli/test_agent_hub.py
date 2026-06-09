@@ -87,13 +87,16 @@ def test_agent_hub_defaults_include_starter_agents(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_hub, "read_runtime_status", lambda: None)
 
     snapshot = agent_hub.build_agent_hub_snapshot()
+    # Only the Executive Assistant is auto-seeded on a fresh install; every
+    # other native agent is an installable default.
     names = {agent["name"] for agent in snapshot["agents"]}
+    assert names == {"Executive Assistant"}
 
+    installable = {item["name"] for item in snapshot.get("installableDefaults", [])}
     assert {
-        "Executive Assistant",
         "Admin",
         "Outreach",
         "Ads",
         "Marketing",
         "Social Media",
-    }.issubset(names)
+    }.issubset(installable)

@@ -88,8 +88,11 @@ def test_reconcile_agent_hub_defaults_repairs_saved_config_without_overwriting_u
     report = reconcile_agent_hub_defaults()
 
     assert report["changed"] is True
-    assert "analyst" in report["created"]
-    assert "theta-wave" in report["created"]
+    # Only the always-on agent (EA) is auto-seeded; analyst/theta-wave are now
+    # installable defaults, not auto-created.
+    assert "executive-assistant" in report["created"]
+    assert "analyst" not in report["created"]
+    assert "theta-wave" not in report["created"]
     assert saved["agent_hub"]["default_agent"] == "executive-assistant"
     admin = next(agent for agent in saved["agent_hub"]["agents"] if agent["id"] == "admin")
     assert admin["name"] == "My Admin"
