@@ -1155,6 +1155,35 @@ def _is_builtin_agent_id(agent_id: str) -> bool:
     return _slug(agent_id) in _builtin_agent_ids()
 
 
+# The Executive Assistant is the one permanent native agent (the lead /
+# orchestrator). Every other built-in ships seeded-on but is removable: the
+# user may delete it (recorded in agent_hub.removed_default_agents so reconcile
+# won't re-seed it) and re-install it later. This is the native->installable
+# downgrade — seeded by default (no regression for existing installs), opt-out.
+PERMANENT_AGENT_IDS = frozenset({"executive-assistant"})
+
+
+def _is_removable_default(agent_id: str) -> bool:
+    slug = _slug(agent_id)
+    return slug in _builtin_agent_ids() and slug not in PERMANENT_AGENT_IDS
+
+
+def _removed_default_ids(hub_cfg: dict[str, Any]) -> set[str]:
+    raw = hub_cfg.get("removed_default_agents")
+    if not isinstance(raw, list):
+        return set()
+    return {_slug(str(item)) for item in raw if isinstance(item, str) and _slug(str(item))}
+
+
+def _set_removed_default_ids(hub_cfg: dict[str, Any], ids: set[str]) -> None:
+    # Only removable built-ins can be parked; never the permanent EA.
+    cleaned = sorted(i for i in ids if _is_removable_default(i))
+    if cleaned:
+        hub_cfg["removed_default_agents"] = cleaned
+    else:
+        hub_cfg.pop("removed_default_agents", None)
+
+
 def _agent_config_id(raw: dict[str, Any]) -> str:
     return _slug(str(raw.get("id") or raw.get("slug") or raw.get("name") or ""))
 
@@ -1226,12 +1255,18 @@ def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: 
         for item in raw_agents
         if isinstance(item, dict) and _agent_config_id(item)
     }
+    removed_default_ids = _removed_default_ids(hub_cfg)
     for default in DEFAULT_AGENT_DEFS:
         agent_id = _slug(str(default.get("id") or ""))
         if not agent_id:
             continue
         raw = by_id.get(agent_id)
         if raw is None:
+            # Respect an explicit removal of a removable default — don't re-seed
+            # it. The Executive Assistant is never removable, so it is always
+            # re-created (no regression for existing installs).
+            if agent_id in removed_default_ids and _is_removable_default(agent_id):
+                continue
             new_agent = copy.deepcopy(default)
             new_agent["skills"] = _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"))
             raw_agents.append(new_agent)
@@ -1305,6 +1340,10 @@ def update_agent_config(agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         if default is None:
             raise LookupError(f"Agent '{agent_id}' not found")
         raw_agents.append(default)
+        # Re-adding a previously removed removable default un-parks it so
+        # reconcile keeps it from now on.
+        if _is_removable_default(target_id):
+            _set_removed_default_ids(hub_cfg, _removed_default_ids(hub_cfg) - {target_id})
 
     updated: dict[str, Any] | None = None
     for index, raw in enumerate(raw_agents):
@@ -1410,14 +1449,21 @@ def create_agent_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def delete_agent_config(agent_id: str) -> dict[str, Any]:
-    """Delete a custom Agent Hub agent. Built-ins can only be disabled."""
+    """Delete an Agent Hub agent.
+
+    The Executive Assistant (the permanent lead) cannot be deleted — disable it
+    instead. Every other built-in is removable: deleting it parks the id in
+    ``removed_default_agents`` so reconcile won't re-seed it. Custom agents are
+    deleted outright.
+    """
     from elevate_cli.config import save_config
 
     target_id = _slug(str(agent_id or ""))
     if not target_id:
         raise ValueError("agent id is required")
-    if _is_builtin_agent_id(target_id):
-        raise ValueError("built-in agents cannot be deleted; disable the agent instead")
+    builtin = _is_builtin_agent_id(target_id)
+    if builtin and not _is_removable_default(target_id):
+        raise ValueError("the Executive Assistant cannot be deleted; disable it instead")
 
     config = load_config()
     hub_cfg, raw_agents = _persisted_agents(config)
@@ -1425,12 +1471,16 @@ def delete_agent_config(agent_id: str) -> dict[str, Any]:
         raw for raw in raw_agents
         if not (isinstance(raw, dict) and _agent_config_id(raw) == target_id)
     ]
-    if len(next_agents) == len(raw_agents):
+    # Custom agent that doesn't exist is an error; a removable built-in already
+    # absent is an idempotent no-op (still ensure it's parked).
+    if len(next_agents) == len(raw_agents) and not builtin:
         raise LookupError(f"Agent '{agent_id}' not found")
     hub_cfg["agents"] = next_agents
+    if builtin:
+        _set_removed_default_ids(hub_cfg, _removed_default_ids(hub_cfg) | {target_id})
     config["agent_hub"] = hub_cfg
     save_config(config)
-    return {"ok": True, "id": target_id}
+    return {"ok": True, "id": target_id, "removable": builtin}
 
 
 def agent_runtime_defaults(agent_id: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1812,11 +1862,17 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
             for agent in raw_agents
             if isinstance(agent, dict)
         }
+        removed_ids = _removed_default_ids(hub_cfg)
         for default in DEFAULT_AGENT_DEFS:
             default_id = _slug(str(default.get("id") or ""))
-            if default_id and default_id not in configured_default_ids:
-                raw_agents.append(copy.deepcopy(default))
-                configured_default_ids.add(default_id)
+            if not default_id or default_id in configured_default_ids:
+                continue
+            # Honor an explicit removal of a removable default (Phase C). The
+            # Executive Assistant is never removable, so it is always present.
+            if default_id in removed_ids and _is_removable_default(default_id):
+                continue
+            raw_agents.append(copy.deepcopy(default))
+            configured_default_ids.add(default_id)
 
     agents: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1878,7 +1934,8 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
             "lifecycle": _normalize_lifecycle(raw_lifecycle, base=default_lifecycle),
             "ecosystem": _normalize_ecosystem(raw_ecosystem, base=default_ecosystem),
             "memory": _normalize_memory(raw_memory, base=default_memory),
-            "canDelete": not _is_builtin_agent_id(agent_id),
+            "canDelete": _slug(agent_id) not in PERMANENT_AGENT_IDS,
+            "builtin": _is_builtin_agent_id(agent_id),
             "metadata": {**dict(metadata), **dict(raw_metadata)},
         }
         agent["compat"] = _agent_compat(agent)
