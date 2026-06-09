@@ -6,6 +6,7 @@ import {
   useRef,
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -28,7 +29,6 @@ import type {
   SessionInfo,
   SessionMessage,
   SessionSearchResult,
-  StatusResponse,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
@@ -562,11 +562,8 @@ function SessionRowSkeleton() {
 }
 
 export default function SessionsPage() {
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 20;
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<
@@ -575,8 +572,34 @@ export default function SessionsPage() {
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const logScrollRef = useRef<HTMLPreElement | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [overviewSessions, setOverviewSessions] = useState<SessionInfo[]>([]);
+
+  // Paginated list, cached per page across tab switches.
+  const { data: pageData, loading, mutate: mutatePage } = useCachedResource(
+    `sessions-page-${page}`,
+    () => api.getSessions(PAGE_SIZE, page * PAGE_SIZE),
+    { ttl: 5000 },
+  );
+  const sessions = pageData?.sessions ?? [];
+  const total = pageData?.total ?? 0;
+
+  // Overview (status + recent sessions), cached and polled every 5s.
+  const { data: overviewData, refresh: refreshOverview } = useCachedResource(
+    "sessions-overview",
+    async () => {
+      const [st, recent] = await Promise.all([
+        api.getStatus().catch(() => null),
+        api
+          .getSessions(50, 0, { includeTotal: false })
+          .then((r) => r.sessions)
+          .catch(() => [] as SessionInfo[]),
+      ]);
+      return { status: st, overviewSessions: recent };
+    },
+    { ttl: 4000 },
+  );
+  const status = overviewData?.status ?? null;
+  const overviewSessions = overviewData?.overviewSessions ?? [];
+
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const navigate = useNavigate();
@@ -648,34 +671,10 @@ export default function SessionsPage() {
     total,
   ]);
 
-  const loadSessions = useCallback((p: number) => {
-    setLoading(true);
-    api
-      .getSessions(PAGE_SIZE, p * PAGE_SIZE)
-      .then((resp) => {
-        setSessions(resp.sessions);
-        setTotal(resp.total);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
-
   useEffect(() => {
-    loadSessions(page);
-  }, [loadSessions, page]);
-
-  useEffect(() => {
-    const loadOverview = () => {
-      api.getStatus().then(setStatus).catch(() => {});
-      api
-        .getSessions(50, 0, { includeTotal: false })
-        .then((r) => setOverviewSessions(r.sessions))
-        .catch(() => {});
-    };
-    loadOverview();
-    const id = setInterval(loadOverview, 5000);
+    const id = setInterval(() => void refreshOverview(), 5000);
     return () => clearInterval(id);
-  }, []);
+  }, [refreshOverview]);
 
   useEffect(() => {
     const el = logScrollRef.current;
@@ -711,8 +710,9 @@ export default function SessionsPage() {
       async (id: string) => {
         try {
           await api.deleteSession(id);
-          setSessions((prev) => prev.filter((s) => s.id !== id));
-          setTotal((prev) => prev - 1);
+          if (pageData) {
+            mutatePage({ ...pageData, sessions: sessions.filter((s) => s.id !== id), total: total - 1 });
+          }
           if (expandedId === id) setExpandedId(null);
           showToast(t.sessions.sessionDeleted, "success");
         } catch {
@@ -720,7 +720,7 @@ export default function SessionsPage() {
           throw new Error("delete failed");
         }
       },
-      [expandedId, showToast, t.sessions.sessionDeleted, t.sessions.failedToDelete],
+      [expandedId, showToast, t.sessions.sessionDeleted, t.sessions.failedToDelete, pageData, sessions, total, mutatePage],
     ),
   });
 

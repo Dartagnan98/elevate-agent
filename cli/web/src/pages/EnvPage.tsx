@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   Eye,
   EyeOff,
@@ -364,7 +365,6 @@ function ProviderGroupCard({
 /* ------------------------------------------------------------------ */
 
 export default function EnvPage() {
-  const [vars, setVars] = useState<Record<string, EnvVarInfo> | null>(null);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
@@ -372,9 +372,14 @@ export default function EnvPage() {
   const { toast, showToast } = useToast();
   const { t } = useI18n();
 
-  useEffect(() => {
-    api.getEnvVars().then(setVars).catch(() => {});
-  }, []);
+  // Shares the "agent-hub-envvars" cache with Agent Hub, so switching between
+  // them is instant and they stay in sync.
+  const { data: varsData, mutate: mutateVars } = useCachedResource(
+    "agent-hub-envvars",
+    () => api.getEnvVars(),
+    { ttl: 10000 },
+  );
+  const vars = varsData ?? null;
 
   const handleSave = async (key: string) => {
     const value = edits[key];
@@ -382,14 +387,12 @@ export default function EnvPage() {
     setSaving(key);
     try {
       await api.setEnvVar(key, value);
-      setVars((prev) =>
-        prev
-          ? {
-              ...prev,
-              [key]: { ...prev[key], is_set: true, redacted_value: value.slice(0, 4) + "..." + value.slice(-4) },
-            }
-          : prev,
-      );
+      if (vars) {
+        mutateVars({
+          ...vars,
+          [key]: { ...vars[key], is_set: true, redacted_value: value.slice(0, 4) + "..." + value.slice(-4) },
+        });
+      }
       setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
       setRevealed((prev) => { const n = { ...prev }; delete n[key]; return n; });
       showToast(`${key} ${t.common.save.toLowerCase()}d`, "success");
@@ -406,11 +409,9 @@ export default function EnvPage() {
         setSaving(key);
         try {
           await api.deleteEnvVar(key);
-          setVars((prev) =>
-            prev
-              ? { ...prev, [key]: { ...prev[key], is_set: false, redacted_value: null } }
-              : prev,
-          );
+          if (vars) {
+            mutateVars({ ...vars, [key]: { ...vars[key], is_set: false, redacted_value: null } });
+          }
           setEdits((prev) => { const n = { ...prev }; delete n[key]; return n; });
           setRevealed((prev) => { const n = { ...prev }; delete n[key]; return n; });
           showToast(`${key} ${t.common.removed}`, "success");
@@ -421,7 +422,7 @@ export default function EnvPage() {
           setSaving(null);
         }
       },
-      [showToast, t.common.removed, t.common.failedToRemove],
+      [showToast, t.common.removed, t.common.failedToRemove, vars, mutateVars],
     ),
   });
 

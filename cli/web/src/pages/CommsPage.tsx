@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { useSearchParams } from "react-router-dom";
 import { ArrowDownUp, ArrowRight, CheckCircle, Hash, ListTodo, Loader2, MessageSquare, Play, RefreshCw, Search, Send, Users, XCircle } from "lucide-react";
 import { api } from "@/lib/api";
@@ -749,19 +750,9 @@ function ChannelTranscript({
 }
 
 export default function CommsPage() {
-  const [handoffs, setHandoffs] = useState<AgentHandoff[]>([]);
-  const [agents, setAgents] = useState<AgentOption[]>([]);
-  const [deliveryChannels, setDeliveryChannels] = useState<
-    { platform: string; id: string; name: string; type?: string }[]
-  >([]);
-  const [feedMessages, setFeedMessages] = useState<AgentCommsMessage[]>([]);
-  const [conversationChannels, setConversationChannels] = useState<AgentCommsChannel[]>([]);
   const [conversation, setConversation] = useState<AgentCommsChannelResponse | null>(null);
   const [conversationLoading, setConversationLoading] = useState(false);
-  const [names, setNames] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [meetingSearch, setMeetingSearch] = useState("");
   const [channelSearch, setChannelSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -774,6 +765,53 @@ export default function CommsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedHandoff, setSelectedHandoff] = useState<AgentHandoff | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // Debounce the meeting search so typing doesn't refetch per keystroke.
+  const [debouncedMeetingSearch, setDebouncedMeetingSearch] = useState(meetingSearch);
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebouncedMeetingSearch(meetingSearch), 150);
+    return () => window.clearTimeout(id);
+  }, [meetingSearch]);
+
+  // Cached per filter-tuple across tab switches; revisiting Comms paints instantly.
+  const { data: commsData, loading, error: cacheError, refresh: revalidateComms } = useCachedResource(
+    `comms:${agentFilter}:${debouncedMeetingSearch}:${showArchived ? 1 : 0}`,
+    async () => {
+      const [feed, conv, hs, ch, hub] = await Promise.all([
+        api.getCommsFeed({ limit: 250, search: debouncedMeetingSearch || undefined, agent: agentFilter || undefined }),
+        api.getCommsChannels({ includeArchived: showArchived, limit: 250 }),
+        api.getAgentHandoffs({ limit: 100 }),
+        api.getCommsDeliveryChannels().catch(() => ({ channels: [] as { platform: string; id: string; name: string; type?: string }[] })),
+        api.getAgentHub({ lite: true }).catch(() => ({ agents: [] as { id: string; name: string }[] })),
+      ]);
+      const nextNames: Record<string, string> = { "human-web": "You", human: "You", system: "System" };
+      for (const a of hub.agents || []) nextNames[a.id] = a.name;
+      return {
+        feedMessages: feed || [],
+        conversationChannels: conv || [],
+        handoffs: hs.items || [],
+        deliveryChannels: ch.channels || [],
+        agents: (hub.agents || []).map((agent) => ({ id: agent.id, name: agent.name })),
+        names: nextNames,
+      };
+    },
+    { ttl: 5000 },
+  );
+  const feedMessages = commsData?.feedMessages ?? [];
+  const conversationChannels = commsData?.conversationChannels ?? [];
+  const handoffs = commsData?.handoffs ?? [];
+  const deliveryChannels = commsData?.deliveryChannels ?? [];
+  const agents: AgentOption[] = commsData?.agents ?? [];
+  const names = commsData?.names ?? {};
+  const error = cacheError ? String(cacheError) : null;
+
+  // Auto-select the first conversation pair once channels load.
+  useEffect(() => {
+    if (!selectedPair) {
+      const nextPair = pairParam || conversationChannels[0]?.pair || null;
+      if (nextPair) setSelectedPair(nextPair);
+    }
+  }, [conversationChannels, selectedPair, pairParam]);
 
   useEffect(() => {
     setAgentFilter(agentParam);
@@ -823,44 +861,11 @@ export default function CommsPage() {
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) setRefreshing(true);
     try {
-      const [feed, conv, hs, ch, hub] = await Promise.all([
-        api.getCommsFeed({ limit: 250, search: meetingSearch || undefined, agent: agentFilter || undefined }),
-        api.getCommsChannels({ includeArchived: showArchived, limit: 250 }),
-        api.getAgentHandoffs({ limit: 100 }),
-        api.getCommsDeliveryChannels().catch(() => ({ channels: [] as { platform: string; id: string; name: string; type?: string }[] })),
-        api.getAgentHub({ lite: true }).catch(() => ({ agents: [] as { id: string; name: string }[] })),
-      ]);
-      setFeedMessages(feed || []);
-      setConversationChannels(conv || []);
-      setHandoffs(hs.items || []);
-      setDeliveryChannels(ch.channels || []);
-      setAgents((hub.agents || []).map((agent) => ({ id: agent.id, name: agent.name })));
-      const m: Record<string, string> = {
-        "human-web": "You",
-        human: "You",
-        system: "System",
-      };
-      for (const a of hub.agents || []) m[a.id] = a.name;
-      setNames(m);
-      const nextPair = selectedPair || pairParam || conv?.[0]?.pair || null;
-      if (!selectedPair && nextPair) {
-        setSelectedPair(nextPair);
-      }
-      setError(null);
-    } catch (e) {
-      setError(String(e));
+      await revalidateComms();
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
-  }, [agentFilter, meetingSearch, pairParam, selectedPair, showArchived]);
-
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      void load(false);
-    }, 150);
-    return () => window.clearTimeout(t);
-  }, [load]);
+  }, [revalidateComms]);
 
   useEffect(() => {
     const id = window.setInterval(() => load(true), 20000);

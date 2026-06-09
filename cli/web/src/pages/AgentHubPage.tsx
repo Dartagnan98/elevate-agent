@@ -9,6 +9,7 @@ import {
   type SVGProps,
 } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { Link } from "react-router-dom";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
@@ -3426,9 +3427,6 @@ function CortextAgentPackCatalog({
 
 // ── page ─────────────────────────────────────────────────────────────
 export default function AgentHubPage() {
-  const [snapshot, setSnapshot] = useState<AgentHubSnapshot | null>(null);
-  const [envVars, setEnvVars] = useState<Record<string, EnvVarInfo> | null>(null);
-  const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [savingTelegram, setSavingTelegram] = useState(false);
@@ -3438,80 +3436,68 @@ export default function AgentHubPage() {
   const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
   const [telegramAgentTokens, setTelegramAgentTokens] = useState<Record<string, string>>({});
   const [addAgentOpen, setAddAgentOpen] = useState(false);
-  const [cortextPacks, setCortextPacks] = useState<CortextAgentPack[]>([]);
-  const [loadingCortextPacks, setLoadingCortextPacks] = useState(true);
   const [installingPackId, setInstallingPackId] = useState<string | null>(null);
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
-  const hydrationTimerRef = useRef<number | null>(null);
-  const mountedRef = useRef(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    if (hydrationTimerRef.current) {
-      window.clearTimeout(hydrationTimerRef.current);
-      hydrationTimerRef.current = null;
-    }
-    const envVarsPromise = api
-      .getEnvVars()
-      .then((nextEnvVars) => {
-        if (mountedRef.current) setEnvVars(nextEnvVars);
-      })
-      .catch(() => null);
-    setLoadingCortextPacks(true);
-    const cortextPacksPromise = api
-      .getCortextAgentPacks()
-      .then((catalog) => {
-        if (mountedRef.current) setCortextPacks(catalog.packs as CortextAgentPack[]);
-      })
-      .catch(() => {
-        if (mountedRef.current) setCortextPacks([]);
-      })
-      .finally(() => {
-        if (mountedRef.current) setLoadingCortextPacks(false);
-      });
-    try {
-      const nextSnapshot = await api.getAgentHub({
-        lite: true,
-        includeMemoryGraph: false,
-        includeSkills: false,
-        includeToolsets: false,
-      });
-      if (mountedRef.current) {
-        setSnapshot(nextSnapshot);
-        hydrationTimerRef.current = window.setTimeout(() => {
-          void api
-            .getAgentHub({
-              includeMemoryGraph: true,
-              includeSkills: true,
-              includeToolsets: true,
-            })
-            .then((fullSnapshot) => {
-              if (mountedRef.current) setSnapshot(fullSnapshot);
-            })
-            .catch(() => null);
-        }, 250);
-      }
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "Agent Hub failed", "error");
-    } finally {
-      if (mountedRef.current) setLoading(false);
-    }
-    void envVarsPromise;
-    void cortextPacksPromise;
-  }, [showToast]);
+  // Snapshot cached across tab switches (lite first paint, then enriched to
+  // full in the background). Revisiting Agent Hub paints the last snapshot
+  // instantly instead of re-fetching from scratch.
+  const { data: snapshotData, loading, error: snapshotError, refresh: refreshSnapshot, mutate: mutateSnapshot } =
+    useCachedResource(
+      "agent-hub-snapshot",
+      () => api.getAgentHub({ lite: true, includeMemoryGraph: false, includeSkills: false, includeToolsets: false }),
+      { ttl: 5000 },
+    );
+  const snapshot = snapshotData ?? null;
+
+  const { data: envVarsData, refresh: refreshEnvVars } = useCachedResource(
+    "agent-hub-envvars",
+    () => api.getEnvVars(),
+    { ttl: 10000 },
+  );
+  const envVars = envVarsData ?? null;
+
+  const { data: cortextPacksData, loading: loadingCortextPacks, refresh: refreshCortextPacks } = useCachedResource(
+    "cortext-agent-packs",
+    () => api.getCortextAgentPacks().then((catalog) => catalog.packs as CortextAgentPack[]).catch(() => [] as CortextAgentPack[]),
+    { ttl: 30000 },
+  );
+  const cortextPacks = cortextPacksData ?? [];
+
+  // Progressive hydration: once a lite snapshot lands, enrich it to the full
+  // snapshot in the background. WeakSet guards against re-hydrating a snapshot
+  // we already enriched (prevents a mutate -> effect -> mutate loop).
+  const hydratedSnapshotsRef = useRef<WeakSet<object>>(new WeakSet());
+  useEffect(() => {
+    if (!snapshot || hydratedSnapshotsRef.current.has(snapshot)) return;
+    hydratedSnapshotsRef.current.add(snapshot);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api
+        .getAgentHub({ includeMemoryGraph: true, includeSkills: true, includeToolsets: true })
+        .then((fullSnapshot) => {
+          if (cancelled) return;
+          hydratedSnapshotsRef.current.add(fullSnapshot);
+          mutateSnapshot(fullSnapshot);
+        })
+        .catch(() => null);
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [snapshot, mutateSnapshot]);
 
   useEffect(() => {
-    mountedRef.current = true;
-    load();
-    return () => {
-      mountedRef.current = false;
-      if (hydrationTimerRef.current) {
-        window.clearTimeout(hydrationTimerRef.current);
-        hydrationTimerRef.current = null;
-      }
-    };
-  }, [load]);
+    if (snapshotError) {
+      showToast(snapshotError instanceof Error ? snapshotError.message : "Agent Hub failed", "error");
+    }
+  }, [snapshotError, showToast]);
+
+  const load = useCallback(async () => {
+    await Promise.all([refreshSnapshot(), refreshEnvVars(), refreshCortextPacks()]);
+  }, [refreshSnapshot, refreshEnvVars, refreshCortextPacks]);
   useRefreshOnAgentTurn(() => void load());
 
   useLayoutEffect(() => {
