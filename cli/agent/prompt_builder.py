@@ -196,6 +196,19 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+AGENT_BUS_GUIDANCE = (
+    "The dashboard's Tasks and Approvals boards are live operational data in the "
+    "account database — the agent_bus tool reads and writes the same rows the "
+    "dashboard renders. Tasks may be assigned to you or dispatched by you to "
+    "other surfaces (or to 'human'): when starting substantive work, check "
+    "agent_bus(action='list_tasks') for pending items assigned to you; claim "
+    "before working; complete with outputs when done so the board reflects "
+    "reality. Anything that would send or change something on the user's "
+    "behalf goes through an approval (created automatically by policy, or "
+    "explicitly via create_approval) and is resolved on the dashboard only — "
+    "never act as if a pending approval were granted."
+)
+
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from "

@@ -4914,6 +4914,9 @@ class AIAgent:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
+        if "agent_bus" in self.valid_tool_names:
+            from agent.prompt_builder import AGENT_BUS_GUIDANCE
+            tool_guidance.append(AGENT_BUS_GUIDANCE)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
