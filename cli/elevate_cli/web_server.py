@@ -154,13 +154,27 @@ class _SharedSessionDB:
 
 
 def _get_session_db():
-    """Return a handle over the process-wide shared SessionDB (built once)."""
+    """Return a handle over the process-wide shared SessionDB.
+
+    Built once and reused. The state.db path (elevate_state.DEFAULT_DB_PATH) is
+    fixed at import in production, so the singleton is stable there; but if it
+    ever changes (tests patch it per-case, and a future runtime relocation would
+    too) we rebuild against the new path rather than serve a stale handle.
+    """
     global _SESSION_DB_SINGLETON
+    from elevate_state import SessionDB
+    import elevate_state as _es
+    target_path = _es.DEFAULT_DB_PATH
     db = _SESSION_DB_SINGLETON
-    if db is None:
-        from elevate_state import SessionDB
+    if db is None or getattr(db, "db_path", None) != target_path:
         with _SESSION_DB_SINGLETON_LOCK:
-            if _SESSION_DB_SINGLETON is None:
+            db = _SESSION_DB_SINGLETON
+            if db is None or getattr(db, "db_path", None) != target_path:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
                 _SESSION_DB_SINGLETON = SessionDB()
             db = _SESSION_DB_SINGLETON
     return _SharedSessionDB(db)
