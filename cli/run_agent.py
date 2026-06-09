@@ -1819,11 +1819,13 @@ class AIAgent:
         _compression_cfg = _agent_cfg.get("compression", {})
         if not isinstance(_compression_cfg, dict):
             _compression_cfg = {}
-        # Default raised 0.50 -> 0.72 (2026-06): every compaction costs an LLM
+        # Default raised 0.50 -> 0.85 (2026-06): every compaction costs an LLM
         # summarization call, a full prompt-cache prefix rebuild, and permanent
-        # info loss. The cheap prune_only stage (below, at 60%) now relieves
-        # pressure first, so full compaction can fire later.
-        compression_threshold = float(_compression_cfg.get("threshold", 0.72))
+        # info loss. The cheap prune_only stage (at 72%) relieves pressure
+        # first. 0.85 is the safe ceiling, NOT higher: threshold + worst-case
+        # one-turn growth (~10% window of tool results + model output) must
+        # stay under 100% or late turns hit context-overflow 400s.
+        compression_threshold = float(_compression_cfg.get("threshold", 0.85))
 
         # Session wall clock. max_iterations bounds the number of API calls
         # but not time — a loop of short calls (or slow tools) can run for

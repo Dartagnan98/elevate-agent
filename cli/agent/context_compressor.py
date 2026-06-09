@@ -67,7 +67,7 @@ _SUMMARY_TOKENS_CEILING = 12_000
 
 # Soft bar for the cheap no-LLM prune_only pass: runs in the band between
 # this fraction of the context window and the full compaction threshold.
-_PRUNE_SOFT_PERCENT = 0.60
+_PRUNE_SOFT_PERCENT = 0.72
 
 # Placeholder used when pruning old tool results
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -578,7 +578,14 @@ class ContextCompressor(ContextEngine):
     def __init__(
         self,
         model: str,
-        threshold_percent: float = 0.72,
+        # 0.85 is deliberately the ceiling, not 0.95+: the trigger fires at
+        # iteration boundaries on REAL prompt tokens, and the next turn can
+        # add ~10% of the window in tool results (the scaled turn budget)
+        # plus model output before the next check. Threshold + worst-case
+        # one-turn growth must stay under 100% or every late turn 400s on
+        # context overflow and leans on error-recovery compaction (the
+        # compact-retry loop #14695 guards against).
+        threshold_percent: float = 0.85,
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
