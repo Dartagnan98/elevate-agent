@@ -251,6 +251,13 @@ class TestThetaWaveSeed:
         assert config["approval_required"] is False
 
     def test_ensure_theta_wave_repairs_existing_paused_seed(self, tmp_cron_dir):
+        """Repair fills in agent/workdir but RESPECTS the operator's pause.
+
+        ensure_theta_wave used to force-resume a paused seed on every hourly
+        ensure_system_jobs pass, so "pause all crons" could never keep Theta
+        Wave down. Now the enabled/paused state is left exactly as-is — same
+        contract as ensure_surface().
+        """
         from elevate_constants import get_account_data_dir
 
         old = create_job(
@@ -266,14 +273,14 @@ class TestThetaWaveSeed:
         job = ensure_theta_wave()
 
         assert job["id"] == old["id"]
-        assert job["enabled"] is True
-        assert job["state"] == "scheduled"
+        # Pause respected — no silent resume within the hour.
+        assert job["enabled"] is False
+        assert job["paused_reason"] == "old opt-in seed"
+        # Repair fields still applied.
         assert job["agent"] == "theta-wave"
         assert job["workdir"] == str(get_account_data_dir() / "system-review")
-        assert job["paused_reason"] is None
 
         config = json.loads((get_account_data_dir() / "system-review" / "config.json").read_text())
-        assert config["enabled"] is True
         assert config["auto_create_agent_cycles"] is True
         assert config["auto_modify_agent_cycles"] is True
 
