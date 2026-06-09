@@ -210,6 +210,12 @@ def _ensure_schema(conn: "PgConnection") -> None:
             _pg_kanban_migrate.maybe_migrate_kanban_store(conn)
             from elevate_cli.data import _pg_outreach_migrate
             _pg_outreach_migrate.maybe_migrate_outreach_store(conn)
+        # Surface heartbeat state lived as per-account JSON files until
+        # migration 0024, so unlike the legacy single-DB imports above this
+        # one-shot import applies to EVERY account database (sentinel 9010
+        # keeps it idempotent per account).
+        from elevate_cli.data import _pg_surface_state_migrate
+        _pg_surface_state_migrate.maybe_migrate_surface_state(conn)
         _schema_ready_for = key
 
 
