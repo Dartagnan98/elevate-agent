@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   BriefcaseBusiness,
   CheckCircle2,
@@ -364,8 +365,12 @@ function groupSkillsByPurpose(skills: SkillInfo[]) {
 /* ------------------------------------------------------------------ */
 
 export default function SkillsPage() {
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Cached across tab switches so revisiting Skills paints instantly.
+  const { data: skills = [], loading, error: skillsError, mutate: mutateSkills } = useCachedResource(
+    "skills-list",
+    () => api.getSkills(),
+    { ttl: 10000 },
+  );
   const [search, setSearch] = useState("");
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string>("SKILL.md");
@@ -383,23 +388,20 @@ export default function SkillsPage() {
   const { setAfterTitle, setEnd } = usePageHeader();
 
   /* ---- Initial load ---- */
+  // Auto-select the first skill once the list is available (and nothing picked).
   useEffect(() => {
-    api
-      .getSkills()
-      .then((s) => {
-        setSkills(s);
-        if (s.length > 0 && !selectedSkill) {
-          const first = [...s].sort((a, b) => a.name.localeCompare(b.name))[0];
-          if (first) {
-            setSelectedSkill(first.name);
-            setExpandedSkills(new Set([first.name]));
-          }
-        }
-      })
-      .catch(() => showToast(t.common.loading, "error"))
-      .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (skills.length > 0 && !selectedSkill) {
+      const first = [...skills].sort((a, b) => a.name.localeCompare(b.name))[0];
+      if (first) {
+        setSelectedSkill(first.name);
+        setExpandedSkills(new Set([first.name]));
+      }
+    }
+  }, [skills, selectedSkill]);
+
+  useEffect(() => {
+    if (skillsError) showToast(t.common.loading, "error");
+  }, [skillsError, showToast, t.common.loading]);
 
   /* ---- Lazy-load the tree for a skill ---- */
   const loadTree = useCallback(
@@ -452,8 +454,8 @@ export default function SkillsPage() {
     setTogglingSkills((prev) => new Set(prev).add(skill.name));
     try {
       await api.toggleSkill(skill.name, !skill.enabled);
-      setSkills((prev) =>
-        prev.map((s) =>
+      mutateSkills(
+        skills.map((s) =>
           s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
         ),
       );

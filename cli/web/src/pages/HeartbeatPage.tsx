@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   Activity,
   ChevronDown,
@@ -492,13 +493,10 @@ function HeartbeatForm({
 
 export default function HeartbeatPage() {
   const { toast, showToast } = useToast();
-  const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
-  const [surfaceByKey, setSurfaceByKey] = useState<Record<string, HeartbeatSurface>>({});
   const [searchParams, setSearchParams] = useSearchParams();
   const agentParam = searchParams.get("agent") ?? "";
   const [agentFilter, setAgentFilter] = useState(agentParam);
-  const [loading, setLoading] = useState(true);
   const [createForm, setCreateForm] = useState<FormValues>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -507,28 +505,27 @@ export default function HeartbeatPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const pollRef = useRef<number | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
+  // Cached across tab switches: revisiting Heartbeat paints instantly and
+  // revalidates in the background.
+  const { data: hbData, loading, refresh, mutate: mutateHeartbeat } = useCachedResource(
+    "heartbeat-page",
+    async () => {
       const [all, surfaceResp] = await Promise.all([
         api.getCronJobs({ refresh: true }),
         api.getHeartbeatSurfaces({ refresh: true }).catch(() => ({ surfaces: [] })),
       ]);
-      setJobs(all.filter(isHeartbeat));
       const nextSurfaceByKey: Record<string, HeartbeatSurface> = {};
       for (const surface of surfaceResp.surfaces || []) {
         nextSurfaceByKey[surface.surface] = surface;
       }
-      setSurfaceByKey(nextSurfaceByKey);
-    } catch (e) {
-      // Toast only on direct actions; background polls fail silently.
-      setJobs((prev) => prev);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+      return { jobs: all.filter(isHeartbeat), surfaceByKey: nextSurfaceByKey };
+    },
+    { ttl: 5000 },
+  );
+  const jobs = hbData?.jobs ?? [];
+  const surfaceByKey = hbData?.surfaceByKey ?? {};
 
   useEffect(() => {
-    refresh();
     const id = window.setInterval(refresh, 20000);
     return () => window.clearInterval(id);
   }, [refresh]);
@@ -698,7 +695,7 @@ export default function HeartbeatPage() {
     try {
       await api.deleteCronJob(job.id);
       showToast("Deleted", "success");
-      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      mutateHeartbeat({ jobs: jobs.filter((j) => j.id !== job.id), surfaceByKey });
       if (editingId === job.id) setEditingId(null);
     } catch (e) {
       showToast(`Couldn't delete: ${e}`, "error");

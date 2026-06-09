@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useState } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   BarChart3,
   Brain,
@@ -9,7 +10,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { AnalyticsResponse, AnalyticsDailyEntry, AnalyticsModelEntry, AnalyticsSkillEntry } from "@/lib/api";
+import type { AnalyticsDailyEntry, AnalyticsModelEntry, AnalyticsSkillEntry } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -285,21 +286,20 @@ function SkillTable({ skills }: { skills: AnalyticsSkillEntry[] }) {
 
 export default function AnalyticsPage() {
   const [days, setDays] = useState(30);
-  const [data, setData] = useState<AnalyticsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
 
+  // Cached per period across tab switches; changing the period swaps to that
+  // period's cached entry instantly and revalidates in the background.
+  const { data, loading, error: cacheError, refresh } = useCachedResource(
+    `analytics-${days}`,
+    () => api.getAnalytics(days),
+    { ttl: 5000 },
+  );
+  const error = cacheError ? String(cacheError) : null;
   const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-    api
-      .getAnalytics(days)
-      .then(setData)
-      .catch((err) => setError(String(err)))
-      .finally(() => setLoading(false));
-  }, [days]);
+    void refresh();
+  }, [refresh]);
 
   useLayoutEffect(() => {
     const periodLabel =
@@ -349,9 +349,6 @@ export default function AnalyticsPage() {
     };
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
   useRefreshOnAgentTurn(() => void load());
 
   return (

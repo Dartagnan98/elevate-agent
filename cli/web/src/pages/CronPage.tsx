@@ -3,9 +3,11 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -1207,10 +1209,8 @@ function MetaCell({
 /* ------------------------------------------------------------------ */
 
 export default function CronPage() {
-  const [jobs, setJobs] = useState<CronJob[]>([]);
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
   const [attention, setAttention] = useState<import("../lib/api-types").CronAttention | null>(null);
-  const [loading, setLoading] = useState(true);
   const [searchParams, setSearchParams] = useSearchParams();
   const editParam = searchParams.get("edit");
   const agentParam = searchParams.get("agent") ?? "";
@@ -1257,23 +1257,37 @@ export default function CronPage() {
     }
   }, [editParam, setSearchParams]);
 
-  /* ---- Load jobs ---- */
-  const loadJobs = useCallback((options?: { refresh?: boolean }) => {
-    api
-      .getCronJobs({ refresh: options?.refresh })
-      .then((next) => {
-        setJobs(next);
-        // Auto-select first job if nothing selected
-        if (next.length > 0 && !selectedId) {
-          setSelectedId(next[0].id);
-        }
-      })
-      .catch(() => showToast(t.common.loading, "error"))
-      .finally(() => setLoading(false));
-  }, [selectedId, showToast, t.common.loading]);
+  /* ---- Load jobs (cached across tab switches) ---- */
+  const forceRef = useRef(false);
+  const { data: jobsData, loading, error: jobsError, refresh: revalidateJobs } = useCachedResource(
+    "cron-jobs",
+    async () => {
+      const force = forceRef.current;
+      forceRef.current = false;
+      return await api.getCronJobs({ refresh: force });
+    },
+    { ttl: 5000 },
+  );
+  const jobs = jobsData ?? [];
+
+  const loadJobs = useCallback(
+    (options?: { refresh?: boolean }) => {
+      if (options?.refresh) forceRef.current = true;
+      void revalidateJobs();
+    },
+    [revalidateJobs],
+  );
+
+  // Auto-select first job if nothing selected (runs once data is available).
+  useEffect(() => {
+    if (jobs.length > 0 && !selectedId) setSelectedId(jobs[0].id);
+  }, [jobs, selectedId]);
 
   useEffect(() => {
-    loadJobs();
+    if (jobsError) showToast(t.common.loading, "error");
+  }, [jobsError, showToast, t.common.loading]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
       if (document.visibilityState === "visible") loadJobs();
     }, 15_000);

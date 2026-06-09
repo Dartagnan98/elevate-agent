@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo } from "react";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   Bot,
   Brain,
@@ -12,7 +13,7 @@ import {
   Terminal,
   Wrench,
 } from "lucide-react";
-import { api, type AgentHubSnapshot, type StatusResponse } from "@/lib/api";
+import { api } from "@/lib/api";
 import { cn, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -65,15 +66,13 @@ function PathRow({ icon: Icon, label, value }: { icon: typeof Folder; label: str
 }
 
 export default function ProjectPage() {
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [hub, setHub] = useState<AgentHubSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
   const { toast, showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
+  // Cached across tab switches: revisiting a project paints instantly.
+  const { data, loading, error: cacheError, refresh } = useCachedResource(
+    "project-page",
+    async () => {
       const [nextStatus, nextHub] = await Promise.all([
         api.getStatus(),
         api.getAgentHub({
@@ -83,18 +82,21 @@ export default function ProjectPage() {
           includeHarness: false,
         }),
       ]);
-      setStatus(nextStatus);
-      setHub(nextHub);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "Project failed to load", "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [showToast]);
+      return { status: nextStatus, hub: nextHub };
+    },
+    { ttl: 5000 },
+  );
+  const status = data?.status ?? null;
+  const hub = data?.hub ?? null;
+  const load = useCallback(() => {
+    void refresh();
+  }, [refresh]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (cacheError) {
+      showToast(cacheError instanceof Error ? cacheError.message : "Project failed to load", "error");
+    }
+  }, [cacheError, showToast]);
 
   useLayoutEffect(() => {
     setAfterTitle(

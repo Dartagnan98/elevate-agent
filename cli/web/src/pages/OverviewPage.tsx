@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -546,14 +547,16 @@ function SystemHealth({ agents, crons, surfaces, loading }: { agents: AgentHubAg
 }
 
 export default function OverviewPage() {
-  const [state, setState] = useState<OverviewState>(EMPTY_STATE);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // forceRef bypasses server caches on explicit refresh; background tab-switch
+  // revalidation leaves it false so it stays cheap.
+  const forceRef = useRef(false);
 
-  const load = useCallback(async (refresh: boolean) => {
-    if (refresh) setRefreshing(true);
-    try {
+  const { data, loading, error: cacheError, refresh: revalidate } = useCachedResource(
+    "overview-page",
+    async () => {
+      const force = forceRef.current;
+      forceRef.current = false;
       const [agentHub, heartbeatResp, taskResp, approvalResp, comms, crons, today] = await Promise.all([
         api.getAgentHub({
           lite: true,
@@ -564,14 +567,14 @@ export default function OverviewPage() {
           includeToolsets: false,
           includeHarness: true,
         }),
-        api.getHeartbeatSurfaces({ refresh }),
+        api.getHeartbeatSurfaces({ refresh: force }),
         api.listSurfaceTasks({ include_archived: false }),
         api.listSurfaceApprovals({ status: "pending" }),
         api.getCommsFeed({ limit: 30 }),
-        api.getCronJobs({ compact: true, refresh }),
+        api.getCronJobs({ compact: true, refresh: force }),
         api.getToday(60),
       ]);
-      setState({
+      return {
         agentHub,
         surfaces: (heartbeatResp as HeartbeatSurfacesResponse).surfaces || [],
         tasks: taskResp.tasks || [],
@@ -579,18 +582,29 @@ export default function OverviewPage() {
         comms: comms || [],
         crons: crons || [],
         today,
-      });
-      setError(null);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      } as OverviewState;
+    },
+    { ttl: 5000 },
+  );
+  const state = data ?? EMPTY_STATE;
+  const error = cacheError ? String(cacheError) : null;
+
+  const load = useCallback(
+    async (force: boolean) => {
+      if (force) {
+        forceRef.current = true;
+        setRefreshing(true);
+      }
+      try {
+        await revalidate();
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [revalidate],
+  );
 
   useEffect(() => {
-    void load(false);
     const id = window.setInterval(() => void load(true), 20000);
     return () => window.clearInterval(id);
   }, [load]);

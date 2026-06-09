@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
+import { useCachedResource } from "@/hooks/useCachedResource";
 import { createPortal } from "react-dom";
 import {
   Check,
@@ -23,7 +24,6 @@ import type {
   HeartbeatExperiment,
   HeartbeatExperimentCycle,
   HeartbeatExperimentSurface,
-  HeartbeatExperimentsResponse,
 } from "@/lib/api-types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1222,28 +1222,38 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 export default function ExperimentsPage() {
-  const [data, setData] = useState<HeartbeatExperimentsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("agents");
+  const forceRef = useRef(false);
 
-  const load = useCallback(async (refresh: boolean) => {
-    if (refresh) setRefreshing(true);
-    try {
-      const resp = await api.getHeartbeatExperiments({ refresh });
-      setData(resp);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+  // Cached across tab switches; explicit refresh forces a server-cache bypass.
+  const { data, loading, error: cacheError, refresh: revalidate } = useCachedResource(
+    "experiments-page",
+    async () => {
+      const force = forceRef.current;
+      forceRef.current = false;
+      return await api.getHeartbeatExperiments({ refresh: force });
+    },
+    { ttl: 5000 },
+  );
+  const error = cacheError ? String(cacheError) : null;
+
+  const load = useCallback(
+    async (force: boolean) => {
+      if (force) {
+        forceRef.current = true;
+        setRefreshing(true);
+      }
+      try {
+        await revalidate();
+      } finally {
+        setRefreshing(false);
+      }
+    },
+    [revalidate],
+  );
 
   useEffect(() => {
-    load(false);
     const id = window.setInterval(() => load(true), 30000);
     return () => window.clearInterval(id);
   }, [load]);
