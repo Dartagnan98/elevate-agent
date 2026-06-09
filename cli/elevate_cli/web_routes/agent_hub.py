@@ -20,24 +20,11 @@ _CORTEXT_NATIVE_REPLACEMENTS = [
     "file inbox -> Comms, handoffs, Tasks, Activity",
 ]
 
+# NOTE: "orchestrator" is intentionally NOT an installable pack. The native
+# Executive Assistant (agent_hub.DEFAULT_AGENT_DEFS) IS the orchestrator — its
+# coordination doctrine was folded into EA's definition. Do not re-add an
+# orchestrator pack; it would duplicate EA.
 _CORTEXT_AGENT_PACKS = [
-    {
-        "id": "orchestrator",
-        "name": "Orchestrator",
-        "role": "orchestrator",
-        "emoji": "O",
-        "source": "community/agents/orchestrator",
-        "description": "Coordinates other agents, reviews approvals, manages goals, and runs morning/evening/weekly review loops.",
-        "owns": ["fleet-coordination", "approvals", "goals", "reviews"],
-        "handoff_targets": ["executive-assistant", "analyst", "admin"],
-        "escalation_target": "executive-assistant",
-        "day_start": "08:00",
-        "day_end": "18:00",
-        "day_mode": "Coordinate the fleet, unblock approvals, keep goals aligned, and summarize only what needs operator attention.",
-        "night_mode": "Queue overnight work, review agent health, and prepare concise morning-ready summaries.",
-        "memory_scopes": ["orchestration", "approvals", "goals", "fleet"],
-        "includes": ["Identity", "Soul", "Guardrails", "Heartbeat", "Goals", "Review automations"],
-    },
     {
         "id": "analyst",
         "name": "Analyst",
@@ -46,12 +33,12 @@ _CORTEXT_AGENT_PACKS = [
         "source": "community/agents/analyst",
         "description": "System health, metrics, theta-wave autoresearch, catalog browsing, and upstream sync recommendations.",
         "owns": ["system-health", "metrics", "theta-wave", "experiments"],
-        "handoff_targets": ["orchestrator", "executive-assistant"],
-        "escalation_target": "orchestrator",
+        "handoff_targets": ["executive-assistant"],
+        "escalation_target": "executive-assistant",
         "day_start": "09:00",
         "day_end": "17:00",
         "day_mode": "Measure system health, explain anomalies, and propose practical improvements with evidence.",
-        "night_mode": "Run deep review cycles, compare experiments, and prepare theta-wave findings for the orchestrator.",
+        "night_mode": "Run deep review cycles, compare experiments, and prepare theta-wave findings for the executive assistant.",
         "memory_scopes": ["metrics", "experiments", "system-review", "theta-wave"],
         "includes": ["Identity", "Soul", "Metrics crons", "Theta wave", "Catalog review", "Upstream sync"],
     },
@@ -116,8 +103,8 @@ _CORTEXT_AGENT_PACKS = [
         "template": "agent",
         "description": "General-purpose worker template for specialist agents. Handles assigned tasks, memory, handoffs, and heartbeat checks.",
         "owns": ["assigned-work", "handoffs", "task-execution"],
-        "handoff_targets": ["orchestrator", "executive-assistant"],
-        "escalation_target": "orchestrator",
+        "handoff_targets": ["executive-assistant"],
+        "escalation_target": "executive-assistant",
         "day_start": "09:00",
         "day_end": "18:00",
         "day_mode": "Work the highest-priority assigned task, communicate blockers, and update task state.",
@@ -133,7 +120,7 @@ _CORTEXT_AGENT_PACKS = [
         "source": "community/skills/theta-wave",
         "description": "System improvement reviewer that runs theta-wave conversations, challenges assumptions, and proposes experiment changes.",
         "owns": ["theta-wave", "system-review", "experiments", "fleet-improvement"],
-        "handoff_targets": ["analyst", "orchestrator", "executive-assistant"],
+        "handoff_targets": ["analyst", "executive-assistant"],
         "escalation_target": "analyst",
         "day_start": "10:00",
         "day_end": "16:00",
@@ -474,7 +461,7 @@ def _cortext_lifecycle_from_config(config: dict[str, Any]) -> dict[str, Any]:
 def _cortext_ecosystem_from_config(config: dict[str, Any], spec: dict[str, Any]) -> dict[str, bool]:
     ecosystem = config.get("ecosystem") if isinstance(config.get("ecosystem"), dict) else {}
     return {
-        "local_version_control": _config_enabled(ecosystem.get("local_version_control"), spec.get("id") in {"analyst", "orchestrator"}),
+        "local_version_control": _config_enabled(ecosystem.get("local_version_control"), spec.get("id") in {"analyst"}),
         "upstream_sync": _config_enabled(ecosystem.get("upstream_sync"), spec.get("id") == "analyst"),
         "catalog_browse": _config_enabled(ecosystem.get("catalog_browse"), spec.get("id") == "analyst"),
         "community_publish": _config_enabled(ecosystem.get("community_publish"), False),
