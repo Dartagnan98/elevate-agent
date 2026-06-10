@@ -30,6 +30,14 @@ fixes.
 ## Onboarding & persona
 - **Stronger SOUL.md** — the agent is empowered to take a password/2FA and log
   into the realtor's own accounts to do the work, instead of handing it back.
+  It now also names its **sources of truth** (the ADMIN/LEADS onboarding memory
+  + USER.md/MEMORY.md) and treats them as authoritative — no re-asking for setup
+  details that are already recorded. **This persona upgrade reaches existing
+  installs**, not just fresh ones (an unmodified default is upgraded; a
+  hand-edited SOUL.md is left untouched).
+- **Agent roster in context** — every agent's prompt now carries a dynamic
+  "who does what" list of the account's fleet, so the orchestrator knows which
+  specialist owns a request and delegates to it (`delegate_task(agent=<id>)`).
 - **CRM is whatever you picked** at onboarding (never assumes Lofty), and
   CRM-status-push is now a profile fact surfaced in `ADMIN_ONBOARDING.md`.
 - **LEADS_ONBOARDING.md** — the leads peer of the admin onboarding doc, so the
