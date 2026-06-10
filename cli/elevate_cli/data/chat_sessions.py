@@ -140,7 +140,13 @@ def get_compression_tip(session_id: str) -> Optional[str]:
 
 
 def get_lineage_root(session_id: str) -> Optional[str]:
-    """Walk parent_session_id backward to the logical root."""
+    """Walk parent_session_id backward to the logical root.
+
+    ONLY folds compression/branch continuations into the parent's lineage. A
+    SUBAGENT child is its own conversation — its parent link must NOT chain it
+    up to the orchestrator, or opening the subagent redirects to the parent
+    (and reports the parent's "chat" kind). Stop the walk at a subagent link.
+    """
     if not session_id:
         return session_id
     current = session_id
@@ -148,13 +154,31 @@ def get_lineage_root(session_id: str) -> Optional[str]:
     with connect() as conn:
         for _ in range(100):
             row = conn.execute(
-                "SELECT parent_session_id FROM chat_sessions WHERE id = ?",
+                "SELECT parent_session_id, started_at FROM chat_sessions WHERE id = ?",
                 (current,),
             ).fetchone()
             if row is None:
                 return current
-            parent_id = row["parent_session_id"] if not isinstance(row, (tuple, list)) else row[0]
+            if isinstance(row, (tuple, list)):
+                parent_id, started_at = row[0], row[1]
+            else:
+                parent_id, started_at = row["parent_session_id"], row["started_at"]
             if not parent_id or parent_id in seen:
+                return current
+            parent = conn.execute(
+                "SELECT ended_at, end_reason FROM chat_sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            is_continuation = False
+            if parent is not None:
+                p_ended = parent["ended_at"] if not isinstance(parent, (tuple, list)) else parent[0]
+                p_reason = parent["end_reason"] if not isinstance(parent, (tuple, list)) else parent[1]
+                if p_reason == "compression" and p_ended is not None and started_at is not None and started_at >= p_ended:
+                    is_continuation = True
+                elif p_reason == "branched":
+                    is_continuation = True
+            if not is_continuation:
+                # Subagent (or any non-continuation) link — current IS the root.
                 return current
             seen.add(parent_id)
             current = parent_id

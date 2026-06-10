@@ -1483,6 +1483,10 @@ class SessionDB:
         return current
 
     def _get_lineage_root_sqlite(self, session_id: str) -> str:
+        # Only fold compression/branch continuations into the parent's lineage;
+        # a SUBAGENT child is its own root (mirror of get_lineage_root in
+        # data/chat_sessions.py) — opening a subagent must not redirect up to
+        # the orchestrator.
         if not session_id:
             return session_id
         current = session_id
@@ -1490,13 +1494,30 @@ class SessionDB:
         with self._lock:
             for _ in range(100):
                 row = self._conn.execute(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?",
+                    "SELECT parent_session_id, started_at FROM sessions WHERE id = ?",
                     (current,),
                 ).fetchone()
                 if row is None:
                     return current
-                parent_id = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+                if hasattr(row, "keys"):
+                    parent_id, started_at = row["parent_session_id"], row["started_at"]
+                else:
+                    parent_id, started_at = row[0], row[1]
                 if not parent_id or parent_id in seen:
+                    return current
+                parent = self._conn.execute(
+                    "SELECT ended_at, end_reason FROM sessions WHERE id = ?",
+                    (parent_id,),
+                ).fetchone()
+                is_continuation = False
+                if parent is not None:
+                    p_ended = parent["ended_at"] if hasattr(parent, "keys") else parent[0]
+                    p_reason = parent["end_reason"] if hasattr(parent, "keys") else parent[1]
+                    if p_reason == "compression" and p_ended is not None and started_at is not None and started_at >= p_ended:
+                        is_continuation = True
+                    elif p_reason == "branched":
+                        is_continuation = True
+                if not is_continuation:
                     return current
                 seen.add(parent_id)
                 current = parent_id
