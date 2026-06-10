@@ -14,16 +14,35 @@ export function Markdown({
   content,
   highlightTerms,
   streaming,
+  onOpenPath,
 }: {
   content: string;
   highlightTerms?: string[];
   streaming?: boolean;
+  /** Click handler for local file paths detected in the text (Claude-style). */
+  onOpenPath?: (path: string) => void;
 }) {
   const blocks = useMemo(() => parseBlocks(content), [content]);
   const caret = streaming ? <StreamingCaret /> : null;
 
+  // Delegated click — paths render as <span data-md-path> so we don't thread a
+  // callback through the whole inline render tree.
+  const handleClick = onOpenPath
+    ? (e: React.MouseEvent<HTMLDivElement>) => {
+        const el = (e.target as HTMLElement).closest("[data-md-path]");
+        const path = el?.getAttribute("data-md-path");
+        if (path) {
+          e.preventDefault();
+          onOpenPath(path);
+        }
+      }
+    : undefined;
+
   return (
-    <div className="text-sm text-foreground leading-relaxed space-y-2">
+    <div
+      className="text-sm text-foreground leading-relaxed space-y-2"
+      onClick={handleClick}
+    >
       {blocks.map((block, i) => (
         <Block
           key={i}
@@ -447,7 +466,14 @@ type InlineNode =
   | { type: "bold"; content: string }
   | { type: "italic"; content: string }
   | { type: "link"; text: string; href: string }
+  | { type: "path"; path: string }
   | { type: "br" };
+
+// A token looks like a local file/dir path (not a date/fraction): has a letter
+// and isn't pure digits/slashes/dots.
+function looksLikePath(s: string): boolean {
+  return /[a-zA-Z]/.test(s) && !/^[\d/.]+$/.test(s);
+}
 
 // Language tokens that can prefix a collapsed fenced block (e.g. a
 // ```text\nCODE``` whose newline got eaten becomes "```text CODE```").
@@ -471,7 +497,7 @@ function parseInline(text: string): InlineNode[] {
   // any run of 1+ backticks so collapsed ```fences``` (whose newlines were
   // eaten) still render as a box instead of leaking stray backticks.
   const pattern =
-    /(```+[^`]*?```+|``[^`]+?``|`[^`]+?`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(\n)/g;
+    /(```+[^`]*?```+|``[^`]+?``|`[^`]+?`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|((?:\/|~\/|\.{1,2}\/)[\w.@-]+(?:\/[\w.@-]+)*\/?|[\w@.-]+(?:\/[\w@.-]+){2,}\/?|[\w@.-]+\/[\w@.-]*\.[a-zA-Z0-9]{1,8})|(\n)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -510,6 +536,11 @@ function parseInline(text: string): InlineNode[] {
       // Bare URL
       nodes.push({ type: "link", text: match[9], href: match[9] });
     } else if (match[10]) {
+      // Local file/dir path — clickable when it really looks like a path.
+      const p = match[10];
+      if (looksLikePath(p)) nodes.push({ type: "path", path: p });
+      else nodes.push({ type: "text", content: p });
+    } else if (match[11]) {
       // Line break within paragraph
       nodes.push({ type: "br" });
     }
@@ -579,6 +610,19 @@ function InlineContent({
               >
                 {node.text}
               </a>
+            );
+          case "path":
+            return (
+              <span
+                key={i}
+                data-md-path={node.path}
+                role="button"
+                tabIndex={0}
+                title={`Open ${node.path}`}
+                className="cursor-pointer rounded bg-primary/5 px-1 font-mono-ui text-[0.92em] text-primary underline decoration-primary/30 underline-offset-2 hover:decoration-primary/70"
+              >
+                {node.path}
+              </span>
             );
           case "br":
             return <br key={i} />;

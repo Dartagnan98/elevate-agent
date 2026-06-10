@@ -8090,7 +8090,12 @@ function MessageRow({
           {message.role === "assistant" ? (
             message.content ? (
               <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[color-mix(in_srgb,var(--fg)_5%,transparent)] [&_code]:text-[color-mix(in_srgb,var(--accent)_30%,var(--fg))] [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[color-mix(in_srgb,#000_18%,var(--bg-2))]">
-                <Markdown content={message.content} />
+                <Markdown
+                  content={message.content}
+                  onOpenPath={(p) =>
+                    openFileInPreview(p, p.replace(/\/+$/, "").split("/").pop() || p)
+                  }
+                />
               </div>
             ) : null
           ) : (
