@@ -1022,6 +1022,20 @@ html .font-courier {
   -webkit-app-region: no-drag;
 }
 
+/* Subagent lane: a subtle warm glow + accent line on the header so it's
+   obvious at a glance you're inside a subagent's own chat (not the
+   orchestrator). Pairs with the glowing "In subagent" badge. */
+.chat-top.subagent-lane {
+  border-bottom: 1px solid color-mix(in srgb, var(--status-neon-orange) 45%, transparent);
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--status-neon-orange) 60%, transparent),
+    0 6px 22px -14px var(--status-neon-orange);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--status-neon-orange) 7%, transparent),
+    transparent 70%
+  );
+}
+
 .chat-top .breadcrumb {
   display: flex;
   align-items: center;

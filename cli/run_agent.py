@@ -8825,7 +8825,11 @@ class AIAgent:
             goal=function_args.get("goal"),
             context=function_args.get("context"),
             toolsets=function_args.get("toolsets"),
-            agent_id=function_args.get("agent_id") or function_args.get("agent"),
+            # Spawn-as-specialist (persona + full loadout). Distinct from
+            # ``agent_id`` below, which is advisory handoff metadata — routing
+            # the model's ``agent`` arg there dropped the loadout binding.
+            agent=function_args.get("agent"),
+            agent_id=function_args.get("agent_id"),
             expected_return=function_args.get("expected_return"),
             handoff_reason=function_args.get("handoff_reason"),
             priority=function_args.get("priority"),

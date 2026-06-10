@@ -6655,7 +6655,7 @@ export default function ChatPage() {
           )}
         >
           <div
-            className="chat-top relative"
+            className={cn("chat-top relative", sessionKind === "subagent" && "subagent-lane")}
             style={{ WebkitAppRegion: "drag" } as CSSProperties}
           >
             {sidebarCollapsed && onShowSidebar ? (
@@ -6682,11 +6682,11 @@ export default function ChatPage() {
               ) : null}
               {sessionKind === "subagent" ? (
                 <span
-                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--status-neon-orange)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--status-neon-orange-hot)]"
-                  title="You're viewing a subagent's own session"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--status-neon-orange)_22%,transparent)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--status-neon-orange-hot)] ring-1 ring-[color-mix(in_srgb,var(--status-neon-orange)_55%,transparent)] shadow-[0_0_10px_-1px_var(--status-neon-orange)]"
+                  title="You're inside a subagent's own chat — messages here go to the subagent, not the orchestrator"
                 >
                   <Bot className="h-3 w-3" />
-                  Subagent
+                  In subagent
                 </span>
               ) : null}
               <h1 className="here">
