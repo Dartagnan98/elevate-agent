@@ -428,7 +428,7 @@ def test_agent_routing_policy_blocks_agent_created_wrong_target():
             create_agent_handoff(
                 conn,
                 from_agent_id="router",
-                to_agent_id="ads",
+                to_agent_id="marketing",
                 task="Blocked by router policy.",
                 actor="router",
                 create_cron_job=False,
@@ -436,7 +436,7 @@ def test_agent_routing_policy_blocks_agent_created_wrong_target():
         human_routed = create_agent_handoff(
             conn,
             from_agent_id="router",
-            to_agent_id="ads",
+            to_agent_id="marketing",
             task="Dashboard-created override stays possible.",
             actor="human:web",
             create_cron_job=False,
@@ -928,7 +928,7 @@ def test_agent_hub_upgrades_stale_local_only_agent_config(monkeypatch):
     assert {"executive-assistant", "admin"}.issubset(agent_ids)
     # EA-only base seed: other native agents are installable from the Agent
     # Library, never auto-seeded into the roster.
-    assert not {"outreach", "ads", "marketing", "social-media"}.intersection(agent_ids)
+    assert not {"outreach", "marketing", "social-media"}.intersection(agent_ids)
 
 
 def test_agent_hub_custom_agent_config_lifecycle(monkeypatch):
@@ -1554,7 +1554,7 @@ def test_agent_worker_tick_with_agent_id_drains_only_that_agent(monkeypatch):
 
     monkeypatch.setattr(cron_jobs, "create_job", fake_create_job)
     _configure_agent_telegram(monkeypatch, "admin")
-    _configure_agent_telegram(monkeypatch, "ads", "ads-chat-123")
+    _configure_agent_telegram(monkeypatch, "marketing", "marketing-chat-123")
     # Admin is an installable native (not auto-seeded); install it so the
     # scoped worker treats it as an enabled agent.
     agent_hub.update_agent_config("admin", {"enabled": True})
@@ -1570,8 +1570,8 @@ def test_agent_worker_tick_with_agent_id_drains_only_that_agent(monkeypatch):
         ads_handoff = create_agent_handoff(
             conn,
             from_agent_id="executive-assistant",
-            to_agent_id="ads",
-            task="Ads handoff should stay queued.",
+            to_agent_id="marketing",
+            task="Marketing handoff should stay queued.",
             create_cron_job=False,
         )
 
@@ -1933,9 +1933,9 @@ def test_mark_stale_handoffs_can_filter_to_agent():
         ads = create_agent_handoff(
             conn,
             from_agent_id="executive-assistant",
-            to_agent_id="ads",
-            title="Stale ads handoff",
-            task="Ads worker never wrote back.",
+            to_agent_id="marketing",
+            title="Stale marketing handoff",
+            task="Marketing worker never wrote back.",
             create_cron_job=False,
         )
         conn.execute(

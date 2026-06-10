@@ -109,57 +109,18 @@ _CORTEXT_AGENT_PACKS = [
     # duplicated that exact role, so it was retired. The id
     # "transaction-coordinator" is tombstoned in reconcile_agent_hub_defaults so
     # any early opt-in install is cleaned up on the next reconcile.
-    {
-        "id": "listing-marketing",
-        "name": "Listing Marketing",
-        "role": "listing-launch",
-        "emoji": "L",
-        "source": "community/agents/listing-marketing",
-        "description": "Listing-launch specialist that runs launch checklists, drafts MLS copy, coordinates photo and staging tasks, and prepares open-house promotion drafts.",
-        "owns": ["listing-launch-checklists", "mls-copy-drafts", "photo-staging-coordination", "open-house-promo"],
-        "handoff_targets": ["marketing", "social-media", "executive-assistant"],
-        "escalation_target": "marketing",
-        "day_start": "09:00",
-        "day_end": "18:00",
-        "day_mode": "Advance every active launch checklist, draft and refine listing copy, chase photo/staging coordination, and keep open-house promo on schedule.",
-        "night_mode": "Prepare draft copy variants and promo drafts, and queue next-day coordination tasks; no publishing or sends.",
-        "memory_scopes": ["listings", "launches", "marketing-drafts", "open-houses"],
-        "includes": ["Identity", "Soul", "Guardrails", "Launch checklists", "MLS copy drafts", "Open-house promo"],
-    },
-    {
-        "id": "isa-lead-nurture",
-        "name": "ISA Lead Nurture",
-        "role": "lead-nurture",
-        "emoji": "I",
-        "source": "community/agents/isa-lead-nurture",
-        "description": "Inside sales agent for the leads board: drafts a first response for every new lead fast, runs follow-up cadences, watches hot leads, and re-engages cold ones.",
-        "owns": ["new-lead-response-drafts", "follow-up-cadences", "hot-lead-watch", "re-engagement"],
-        "handoff_targets": ["outreach", "executive-assistant"],
-        "escalation_target": "outreach",
-        "day_start": "07:00",
-        "day_end": "21:00",
-        "day_mode": "Work the leads lanes hard: new-lead drafts, due cadence touches, hot-lead review, and approvals-queue hygiene.",
-        "night_mode": "Prepare next-morning drafts and re-engagement batches and recompute cadence due-dates; no external sends.",
-        "memory_scopes": ["leads", "follow-up", "cadences", "re-engagement"],
-        "includes": ["Identity", "Soul", "Guardrails", "Speed-to-draft", "Cadence engine", "Hot-lead watch"],
-    },
-    {
-        "id": "market-analyst",
-        "name": "Market Analyst",
-        "role": "market-analysis",
-        "emoji": "M",
-        "source": "community/agents/market-analyst",
-        "description": "Market-data specialist that preps CMA support packets, digests neighborhood and market stats, and writes pricing-trend briefs for listing appointments.",
-        "owns": ["cma-prep-support", "market-stat-digests", "pricing-trend-briefs", "neighborhood-profiles"],
-        "handoff_targets": ["analyst", "admin"],
-        "escalation_target": "analyst",
-        "day_start": "08:00",
-        "day_end": "17:00",
-        "day_mode": "Work due CMA requests and appointment briefs first, then refresh neighborhood digests and watch pricing trends.",
-        "night_mode": "Refresh stat digests and pre-build packets for upcoming appointments; no external delivery.",
-        "memory_scopes": ["market-data", "cma", "pricing", "neighborhoods"],
-        "includes": ["Identity", "Soul", "Guardrails", "CMA prep", "Market digests", "Appointment briefs"],
-    },
+    # NOTE: several "RE pack" personas were retired because they duplicated a
+    # built-in core agent — the built-in roster already IS the real-estate team:
+    #   • "Listing Marketing"  → folded into the Marketing & Ads agent (listing
+    #     launch, MLS copy, open-house promo are core marketing work).
+    #   • "ISA Lead Nurture"   → folded into the ISA Agent (outreach) — lane
+    #     mechanics and the relationship are one agent.
+    #   • "Transaction Coordinator" → folded into the Admin agent.
+    #   • "Market Analyst"     → folded into the built-in Analyst (which now owns
+    #     external market intelligence + CMA prep alongside pipeline analytics).
+    # All four ids are tombstoned in reconcile_agent_hub_defaults so any early
+    # opt-in install is cleaned up. Only packs that add a genuinely NEW capability
+    # the core team lacks remain installable below.
     {
         "id": "compliance-reviewer",
         "name": "Compliance Reviewer",
