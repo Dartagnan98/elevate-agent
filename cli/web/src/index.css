@@ -1341,6 +1341,28 @@ html .font-courier {
   word-break: break-word;
 }
 
+/* Active tool call — a left-to-right shimmer sweep across the label while it
+   runs (Claude-style), so the in-progress step reads as alive. */
+.tool-shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--fg-muted) 30%,
+    var(--fg) 50%,
+    var(--fg-muted) 70%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: tool-shimmer-sweep 1.6s linear infinite;
+}
+
+@keyframes tool-shimmer-sweep {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+
 /* Quiet per-turn footer under the answer: duration · model · tokens · cost. */
 .turn-footer {
   margin-top: 8px;

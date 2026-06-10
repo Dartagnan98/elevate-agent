@@ -8626,7 +8626,7 @@ function BreakdownRow({ step }: { step: BreakdownStep }) {
               running && "animate-pulse",
             )}
           />
-          <span className="name">{step.label}</span>
+          <span className={cn("name", running && "tool-shimmer")}>{step.label}</span>
         </button>
         {open && (
           <div className="ml-4 border-l border-[var(--border-faint,rgba(255,255,255,0.08))] pl-2">
@@ -8669,7 +8669,9 @@ function BreakdownRow({ step }: { step: BreakdownStep }) {
             step.status === "running" && "animate-pulse",
           )}
         />
-        <span className="name">{step.name}</span>
+        <span className={cn("name", step.status === "running" && "tool-shimmer")}>
+          {step.name}
+        </span>
         {step.context && (
           <span className="target">
             · {truncatePreview(step.context)}
