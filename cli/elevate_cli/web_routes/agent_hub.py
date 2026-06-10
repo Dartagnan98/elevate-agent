@@ -102,23 +102,13 @@ _CORTEXT_AGENT_PACKS = [
     # cortextOS community). Each ships a complete config.json — no `template`
     # key on purpose: a template merge would flip runtime_type away from
     # native. Authoring/parser notes: agent_presets/REGISTRATION_STAGING.md.
-    {
-        "id": "transaction-coordinator",
-        "name": "Transaction Coordinator",
-        "role": "transactions",
-        "emoji": "T",
-        "source": "community/agents/transaction-coordinator",
-        "description": "Deal-milestone coordinator that chases documents, watches conditions and deadlines, and runs closing checklists so nothing in a live file slips.",
-        "owns": ["deal-milestones", "document-chasing", "condition-deadline-watch", "closing-checklists"],
-        "handoff_targets": ["admin", "executive-assistant"],
-        "escalation_target": "admin",
-        "day_start": "08:00",
-        "day_end": "18:00",
-        "day_mode": "Walk every live deal's milestone list, chase outstanding documents, and surface today's condition and deadline risk.",
-        "night_mode": "Refresh deal timelines and prepare next-day chase drafts and checklist updates; no external sends.",
-        "memory_scopes": ["transactions", "deadlines", "documents", "closings"],
-        "includes": ["Identity", "Soul", "Guardrails", "Milestone checklists", "Document chasing", "Closing playbook"],
-    },
+    # NOTE: there is intentionally NO standalone "Transaction Coordinator" pack.
+    # The built-in Admin agent IS the transaction coordinator (DEFAULT_AGENT_DEFS
+    # "admin" in agent_hub.py — its prompt, routing, and skills already own
+    # deal-file orchestration from contract to close). A separate TC pack
+    # duplicated that exact role, so it was retired. The id
+    # "transaction-coordinator" is tombstoned in reconcile_agent_hub_defaults so
+    # any early opt-in install is cleaned up on the next reconcile.
     {
         "id": "listing-marketing",
         "name": "Listing Marketing",

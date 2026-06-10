@@ -207,9 +207,9 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "admin",
-        "name": "Admin",
+        "name": "Admin · Transaction Coordinator",
         "role": "support",
-        "description": "Transaction coordinator: deal-file orchestration, deadline and contingency tracking, vendor coordination, and closing support.",
+        "description": "The transaction coordinator: deal-file orchestration, deadline and contingency tracking, vendor coordination, and closing support. (The Admin lane and the Transaction Coordinator are one agent.)",
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "cron"],
@@ -1328,6 +1328,13 @@ def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any
     raw[field] = section
 
 
+# Agent ids that were shipped as installable packs and later consolidated into
+# an existing agent. Reconcile tombstones these so a stale install disappears.
+# "transaction-coordinator" merged into the built-in Admin agent (which already
+# owns the full contract-to-close transaction-coordination role).
+_RETIRED_AGENT_IDS: frozenset[str] = frozenset({"transaction-coordinator"})
+
+
 def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: bool = True) -> dict[str, Any]:
     """Repair the persisted Agent Hub roster against current built-in defaults.
 
@@ -1373,6 +1380,16 @@ def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: 
             for row in rows
             if not row.get("removed") and str(row.get("agent_id") or "")
         }
+        # Retire agents that were shipped and then consolidated away. Unlike a
+        # user-deleted default (which tombstones itself), these must be cleaned
+        # up proactively for anyone who installed them before the merge.
+        for retired_id in _RETIRED_AGENT_IDS:
+            if retired_id in by_id:
+                if save:
+                    ss.remove_hub_agent(conn, retired_id, tombstone=True)
+                by_id.pop(retired_id, None)
+                tombstoned.add(retired_id)
+                updated.append({"id": retired_id, "retired": True})
         for default in DEFAULT_AGENT_DEFS:
             agent_id = _slug(str(default.get("id") or ""))
             if not agent_id:

@@ -106,7 +106,7 @@ def test_agent_hub_defaults_include_starter_agents(tmp_path, monkeypatch):
 
     installable = {item["name"] for item in snapshot.get("installableDefaults", [])}
     assert {
-        "Admin",
+        "Admin · Transaction Coordinator",
         "Outreach",
         "Ads",
         "Marketing",

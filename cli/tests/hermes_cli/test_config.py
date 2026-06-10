@@ -73,14 +73,13 @@ class TestLoadConfigDefaults:
 
     def test_default_config_exposes_agent_hub_memory_plugin_and_platforms(self):
         assert DEFAULT_CONFIG["agent_hub"]["default_agent"] == "executive-assistant"
-        assert {
+        # EA-only base seed: the Executive Assistant is the one auto-seeded agent
+        # in the static default config; every other native agent (Admin ·
+        # Transaction Coordinator, Outreach, Ads, Marketing, Social Media, …) is
+        # installable from the Agent Library, not seeded here.
+        assert {agent["name"] for agent in DEFAULT_CONFIG["agent_hub"]["agents"]} == {
             "Executive Assistant",
-            "Admin",
-            "Outreach",
-            "Ads",
-            "Marketing",
-            "Social Media",
-        }.issubset({agent["name"] for agent in DEFAULT_CONFIG["agent_hub"]["agents"]})
+        }
 
         memory_plugin = DEFAULT_CONFIG["plugins"]["elevate-memory-store"]
         assert memory_plugin["turn_journal_enabled"] is True

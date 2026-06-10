@@ -72,16 +72,16 @@ class TestGetConnectedPlatforms:
         assert config.get_connected_platforms() == []
 
     def test_telegram_agent_bots_from_dynamic_env_enable_platform(self, monkeypatch):
-        monkeypatch.setenv("ELEVATE_AGENT_TRANSACTION_COORDINATOR_TELEGRAM_BOT_TOKEN", "agent-token")
+        monkeypatch.setenv("ELEVATE_AGENT_LISTING_MARKETING_TELEGRAM_BOT_TOKEN", "agent-token")
         config = GatewayConfig()
 
         _apply_env_overrides(config)
 
         telegram = config.platforms[Platform.TELEGRAM]
         assert telegram.enabled is True
-        assert telegram.extra["agent_bots"]["transaction-coordinator"]["token"] == "agent-token"
-        assert telegram.extra["agent_bots"]["transaction-coordinator"]["token_env"] == (
-            "ELEVATE_AGENT_TRANSACTION_COORDINATOR_TELEGRAM_BOT_TOKEN"
+        assert telegram.extra["agent_bots"]["listing-marketing"]["token"] == "agent-token"
+        assert telegram.extra["agent_bots"]["listing-marketing"]["token_env"] == (
+            "ELEVATE_AGENT_LISTING_MARKETING_TELEGRAM_BOT_TOKEN"
         )
 
     def test_telegram_agent_bots_from_saved_env_enable_platform(self, monkeypatch):
