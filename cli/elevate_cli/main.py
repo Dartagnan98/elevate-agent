@@ -8880,6 +8880,39 @@ Examples:
         action="store_true",
         help="Print machine-readable JSON",
     )
+    _memory_benchmark_parser = memory_sub.add_parser(
+        "benchmark",
+        help="Run the read-only holographic memory recall benchmark and record the score",
+    )
+    _memory_benchmark_parser.add_argument(
+        "--limit",
+        "-k",
+        type=int,
+        default=5,
+        help="Top-k recall depth (default 5)",
+    )
+    _memory_benchmark_parser.add_argument(
+        "--sample",
+        type=int,
+        default=20,
+        help="Number of facts sampled for the self-recall query set (default 20)",
+    )
+    _memory_benchmark_parser.add_argument(
+        "--seed",
+        type=int,
+        default=1337,
+        help="RNG seed — same seed gives the same query set, so runs are comparable",
+    )
+    _memory_benchmark_parser.add_argument(
+        "--no-record",
+        action="store_true",
+        help="Skip the benchmark_history.jsonl append and activity event",
+    )
+    _memory_benchmark_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON",
+    )
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset",
@@ -8900,7 +8933,29 @@ Examples:
 
     def cmd_memory(args):
         sub = getattr(args, "memory_command", None)
-        if sub == "off":
+        if sub == "benchmark":
+            import json as _json
+
+            from elevate_cli.memory_benchmark import (
+                run_holographic_memory_benchmark,
+                summarize_benchmark,
+            )
+
+            result = run_holographic_memory_benchmark(
+                limit=getattr(args, "limit", 5),
+                sample_n=getattr(args, "sample", 20),
+                seed=getattr(args, "seed", 1337),
+                record=not getattr(args, "no_record", False),
+            )
+            if getattr(args, "json", False):
+                print(_json.dumps(result, indent=2, default=str))
+            else:
+                print(f"\n  {summarize_benchmark(result)}")
+                if result.get("history_path"):
+                    print(f"  ✓ Recorded to {result['history_path']}\n")
+                else:
+                    print()
+        elif sub == "off":
             from elevate_cli.config import load_config, save_config
 
             config = load_config()
