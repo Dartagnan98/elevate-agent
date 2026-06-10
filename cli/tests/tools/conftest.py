@@ -8,9 +8,51 @@ depend on the registry being populated should use it explicitly or via
 ``@pytest.mark.usefixtures("web_registry_populated")``.
 """
 
+import sys
 from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _browser_loop_guard_isolation(monkeypatch):
+    """Keep the browser loop guard hermetic across tests.
+
+    The loop guard in ``tools.browser_tool`` tracks per-task fingerprints and
+    action budgets in module state and emits fire-and-forget telemetry via the
+    operational DB. In tests that hammer the same task_id (SSRF/policy tests
+    navigate repeatedly), that would (a) leak stuck counters between tests and
+    (b) spawn telemetry threads that try to boot the embedded Postgres. Clear
+    the state and no-op the DB writer around every test. Individual tests can
+    re-patch ``_write_stuck_telemetry`` to observe telemetry.
+    """
+    bt = sys.modules.get("tools.browser_tool")
+    if bt is not None:
+        monkeypatch.setattr(bt, "_write_stuck_telemetry", lambda *a, **k: None)
+        with bt._loop_guard_lock:
+            bt._loop_guard_state.clear()
+        # Neutralize anti-false-flag stealth so its (legitimate, default-on)
+        # pacing delays + occasional pre-click scroll-into-view don't slow
+        # tests or perturb exact ``_run_browser_command`` call counts. Stealth
+        # has its own dedicated tests; here we measure the loop guard / command
+        # layer. A test that wants stealth re-enables it explicitly.
+        stealth = sys.modules.get("tools.browser_stealth")
+        if stealth is not None:
+            stealth.reset_cache()
+            stealth._cfg_cache = {"browser": {
+                "human_pacing": False,
+                "fingerprint_hardening": False,
+                "persistent_profiles": False,
+            }}
+            stealth._cfg_cache_loaded = True
+    yield
+    bt = sys.modules.get("tools.browser_tool")
+    if bt is not None:
+        with bt._loop_guard_lock:
+            bt._loop_guard_state.clear()
+    stealth = sys.modules.get("tools.browser_stealth")
+    if stealth is not None:
+        stealth.reset_cache()
 
 
 def register_all_web_providers():

@@ -51,6 +51,8 @@ Usage:
 
 import atexit
 import functools
+import hashlib
+import inspect
 import json
 import logging
 import os
@@ -74,6 +76,17 @@ try:
     from tools.website_policy import check_website_access
 except Exception:
     check_website_access = lambda url: None  # noqa: E731 — fail-open if policy module unavailable
+
+# Anti-false-flag stealth for authorized authenticated sessions (persistent
+# per-site profiles, fingerprint hardening, human-like pacing). Pure helpers —
+# no browser launch. Composes WITH the loop guard: pacing sleeps happen inside
+# a single guarded action and issue no extra browser commands, so they neither
+# consume the action budget nor reset the stuck counter. Import is defensive so
+# browser_tool still imports in a minimal environment.
+try:
+    from tools import browser_stealth as _stealth
+except Exception:  # pragma: no cover - minimal environments
+    _stealth = None  # type: ignore[assignment]
 
 try:
     from tools.url_safety import (
@@ -2129,10 +2142,35 @@ def _run_browser_command(
                             )
                 except OSError:
                     pass
+            # Anti-false-flag stealth flags strip the obvious automation tells
+            # (--enable-automation / AutomationControlled) so authorized,
+            # authenticated sessions are less likely to be bot-flagged. Merged
+            # with any sandbox-bypass flags; only set when the user hasn't
+            # pre-configured AGENT_BROWSER_ARGS / AGENT_BROWSER_CHROME_FLAGS.
+            _extra_flags: list[str] = []
             if _needs_sandbox_bypass:
-                browser_env["AGENT_BROWSER_ARGS"] = (
-                    "--no-sandbox,--disable-dev-shm-usage"
-                )
+                _extra_flags += ["--no-sandbox", "--disable-dev-shm-usage"]
+            if _stealth is not None:
+                try:
+                    _extra_flags += _stealth.stealth_chrome_flags()
+                except Exception:
+                    logger.debug("stealth chrome flags unavailable", exc_info=True)
+            if _extra_flags:
+                browser_env["AGENT_BROWSER_ARGS"] = ",".join(_extra_flags)
+
+        # Persistent per-site authed profile (local/headless path only): point
+        # agent-browser at the durable per-domain profile dir pinned on the
+        # session at navigation time, so login state survives across tasks. The
+        # CDP/managed path already drives the user's warm cloned profile, so we
+        # never override AGENT_BROWSER_PROFILE there. Never clobber a
+        # user-set AGENT_BROWSER_PROFILE.
+        if (
+            "AGENT_BROWSER_PROFILE" not in browser_env
+            and not session_info.get("cdp_url")
+        ):
+            _site_profile = session_info.get("_site_profile_dir")
+            if _site_profile:
+                browser_env["AGENT_BROWSER_PROFILE"] = str(_site_profile)
 
         # Use temp files for stdout/stderr instead of pipes.
         # agent-browser starts a background daemon that inherits file
@@ -2376,9 +2414,511 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 
 
 # ============================================================================
+# Loop guard: stuck detection, blocker classification, action budget
+# ============================================================================
+#
+# The per-command layer above is healthy (timeouts, session reaping, dialog
+# policy), but agents still burn entire iteration budgets on LOOP-level
+# failure: every individual command "succeeds" while the page never
+# meaningfully changes (cookie modal, login wall, CAPTCHA, 2FA prompt,
+# unhydrated SPA). The guard below turns that invisible stuckness into
+# explicit signals inside the tool results the model actually reads:
+#
+#   1. Page-state fingerprinting — after every state-affecting command
+#      (navigate/click/type/snapshot) we hash the accessibility snapshot
+#      text; ``browser.stuck_threshold`` consecutive actions with an
+#      unchanged fingerprint append a loud "you appear stuck" warning.
+#   2. Blocker classification — login walls, CAPTCHAs, 2FA prompts,
+#      cookie/consent overlays, and paywall/anti-bot interstitials get a
+#      one-line "page-blocker: <kind>" notice prefixed to the snapshot
+#      (with a likely dismiss ref for consent overlays).
+#   3. Per-session action budget — ``browser.max_actions_per_session``
+#      caps how many browser commands one task_id may issue; past the cap
+#      every further command returns a wrap-up instruction instead of
+#      running. The count is surfaced in results past 50% of budget.
+#   4. Telemetry — stuck/blocker events append a ``browser_stuck`` row via
+#      ``surface_state.append_activity`` (fire-and-forget, never raises,
+#      never blocks the command) so "where do we get stuck" is queryable.
+#
+# Everything is warnings and instructions — a session is never hard-killed
+# mid-command — and every threshold is config-overridable.
+
+DEFAULT_STUCK_THRESHOLD = 3
+DEFAULT_MAX_ACTIONS_PER_SESSION = 120
+
+_cached_stuck_threshold: Optional[int] = None
+_stuck_threshold_resolved = False
+_cached_max_actions_per_session: Optional[int] = None
+_max_actions_per_session_resolved = False
+
+# Commands whose results participate in stuck detection (the spec set:
+# things that should change the page or observe it).
+_STATE_AFFECTING_COMMANDS: frozenset = frozenset({"navigate", "click", "type", "snapshot"})
+
+# task_id (bare, no ::local suffix) -> guard record. Guarded by _loop_guard_lock.
+_loop_guard_lock = threading.Lock()
+_loop_guard_state: Dict[str, Dict[str, Any]] = {}
+
+_STUCK_WARNING_TEMPLATE = (
+    "⚠ page state unchanged after {count} actions — you appear stuck. "
+    "The page may require login/CAPTCHA/human help, may not have hydrated, "
+    "or your selector strategy isn't working. Options: (1) wait + re-snapshot once, "
+    "(2) try browser_navigate to reload, (3) if a login/CAPTCHA/2FA wall is visible, "
+    "STOP and report needs_operator with what's blocking."
+)
+_STUCK_BLOCKER_SUFFIX = (
+    " Detected page-blocker: {blocker}. Report needs_operator with this blocker"
+    " — do not keep retrying."
+)
+_STUCK_CONSENT_SUFFIX = (
+    " Detected page-blocker: consent_overlay. Click the dismiss button hinted in"
+    " the snapshot notice before anything else."
+)
+_BUDGET_EXHAUSTED_TEMPLATE = (
+    "Browser action budget exhausted ({count}/{cap} actions this session). "
+    "Do not issue further browser commands. Wrap up now: report what you "
+    "accomplished, what remains undone, and what blocked you. If a "
+    "login/CAPTCHA/2FA wall blocked progress, report needs_operator. "
+    "(Limit is configurable via browser.max_actions_per_session.)"
+)
+
+_BLOCKER_NOTICES: Dict[str, str] = {
+    "login_wall": (
+        "a login form appears to be blocking content. If credentials are not "
+        "available to you, report needs_operator."
+    ),
+    "captcha": (
+        "a CAPTCHA / anti-bot challenge is present. Automation cannot solve "
+        "this — report needs_operator."
+    ),
+    "2fa": (
+        "a 2FA / verification-code prompt is present. Report needs_operator "
+        "unless the code is available to you."
+    ),
+    "consent_overlay": "a cookie/consent overlay is present.",
+    "paywall": (
+        "a paywall or registration interstitial appears to be blocking "
+        "content. Report needs_operator if access is required."
+    ),
+    "antibot_interstitial": (
+        "an anti-bot / access-denied interstitial is present. Report "
+        "needs_operator — retrying will not help."
+    ),
+}
+
+
+def _get_stuck_threshold() -> int:
+    """``browser.stuck_threshold`` — consecutive state-affecting actions with an
+    unchanged page fingerprint before the stuck warning fires (default 3).
+    Cached after first read; cleared by ``cleanup_all_browsers()``."""
+    global _cached_stuck_threshold, _stuck_threshold_resolved
+    if _stuck_threshold_resolved:
+        return _cached_stuck_threshold  # type: ignore[return-value]
+    _stuck_threshold_resolved = True
+    result = DEFAULT_STUCK_THRESHOLD
+    try:
+        from elevate_cli.config import read_raw_config
+        cfg = read_raw_config()
+        val = cfg_get(cfg, "browser", "stuck_threshold")
+        if val is not None:
+            result = max(int(val), 1)
+    except Exception as e:
+        logger.debug("Could not read browser.stuck_threshold from config: %s", e)
+    _cached_stuck_threshold = result
+    return result
+
+
+def _get_max_actions_per_session() -> int:
+    """``browser.max_actions_per_session`` — browser commands one task_id may
+    issue before further commands are refused (default 120; <= 0 disables).
+    Cached after first read; cleared by ``cleanup_all_browsers()``."""
+    global _cached_max_actions_per_session, _max_actions_per_session_resolved
+    if _max_actions_per_session_resolved:
+        return _cached_max_actions_per_session  # type: ignore[return-value]
+    _max_actions_per_session_resolved = True
+    result = DEFAULT_MAX_ACTIONS_PER_SESSION
+    try:
+        from elevate_cli.config import read_raw_config
+        cfg = read_raw_config()
+        val = cfg_get(cfg, "browser", "max_actions_per_session")
+        if val is not None:
+            result = int(val)
+    except Exception as e:
+        logger.debug("Could not read browser.max_actions_per_session from config: %s", e)
+    _cached_max_actions_per_session = result
+    return result
+
+
+def _loop_guard_entry(task_key: str) -> Dict[str, Any]:
+    """Get-or-create the loop-guard record for a bare task_id."""
+    with _loop_guard_lock:
+        st = _loop_guard_state.get(task_key)
+        if st is None:
+            st = {
+                "action_count": 0,        # total budgeted commands this session
+                "last_fp": None,          # last observed page fingerprint
+                "last_url": None,         # last observed URL (from navigate)
+                "unchanged_actions": 0,   # state-affecting actions since last change
+                "stuck_telemetry_sent": False,
+                "blockers_reported": set(),  # (blocker, url) pairs already telemetered
+            }
+            _loop_guard_state[task_key] = st
+        return st
+
+
+# Cheap normalization of obviously-dynamic substrings so clocks/timestamps
+# on an otherwise-static page don't mask stuckness: HH:MM[:SS][am/pm] and
+# ISO-8601 datetimes.
+_FP_DYNAMIC_RE = re.compile(
+    r"\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp]\.?[Mm]\.?)?\b"
+    r"|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}[\d:.+Zz-]*\b"
+)
+_FP_WS_RE = re.compile(r"\s+")
+
+
+def _page_fingerprint(snapshot_text: str) -> str:
+    """Cheap, stable hash of an accessibility-snapshot's text content."""
+    normalized = _FP_DYNAMIC_RE.sub("", snapshot_text or "")
+    normalized = _FP_WS_RE.sub(" ", normalized).strip().lower()
+    return hashlib.sha1(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+_BLOCKER_CAPTCHA_MARKERS = (
+    "recaptcha", "hcaptcha", "captcha", "cf-challenge", "cf-turnstile",
+    "turnstile", "verify you are human", "verify that you are human",
+    "checking your browser", "just a moment", "ddos protection",
+    "press & hold", "press and hold",
+)
+_BLOCKER_2FA_MARKERS = (
+    "verification code", "two-factor", "two factor", "2fa",
+    "one-time code", "one-time passcode", "one time code",
+    "authentication code", "security code", "enter the code",
+    "code sent to", "code we sent",
+)
+_BLOCKER_LOGIN_SUBMIT_MARKERS = (
+    "sign in", "sign-in", "log in", "log-in", "login", "submit", "continue",
+)
+_BLOCKER_ANTIBOT_MARKERS = (
+    "access denied", "access to this page has been denied",
+    "attention required", "bot detected", "unusual traffic",
+    "are you a robot", "request blocked",
+)
+_BLOCKER_PAYWALL_MARKERS = (
+    "subscribe to continue", "subscription required", "to continue reading",
+    "paywall", "register to continue", "create a free account to continue",
+    "already a subscriber",
+)
+_BLOCKER_CONSENT_SUBJECT_MARKERS = (
+    "cookie", "cookies", "consent", "we value your privacy",
+    "privacy preferences", "gdpr",
+)
+_BLOCKER_CONSENT_ACTION_MARKERS = (
+    "accept all", "accept cookies", "agree", "allow all", "got it",
+    "manage preferences", "reject all",
+)
+
+
+def _classify_page_blocker(snapshot_text: Optional[str]) -> Optional[str]:
+    """Classify a page-level blocker from accessibility-snapshot text.
+
+    Returns one of ``captcha``, ``2fa``, ``login_wall``,
+    ``antibot_interstitial``, ``paywall``, ``consent_overlay`` — or None.
+    Ordered most- to least-severe so e.g. a CAPTCHA on a login page is
+    reported as a CAPTCHA.
+    """
+    if not snapshot_text:
+        return None
+    text = snapshot_text.lower()
+    if any(m in text for m in _BLOCKER_CAPTCHA_MARKERS):
+        return "captcha"
+    if any(m in text for m in _BLOCKER_2FA_MARKERS):
+        return "2fa"
+    if "password" in text and any(m in text for m in _BLOCKER_LOGIN_SUBMIT_MARKERS):
+        return "login_wall"
+    if any(m in text for m in _BLOCKER_ANTIBOT_MARKERS):
+        return "antibot_interstitial"
+    if any(m in text for m in _BLOCKER_PAYWALL_MARKERS):
+        return "paywall"
+    if (
+        any(m in text for m in _BLOCKER_CONSENT_SUBJECT_MARKERS)
+        and any(m in text for m in _BLOCKER_CONSENT_ACTION_MARKERS)
+    ):
+        return "consent_overlay"
+    return None
+
+
+_CONSENT_DISMISS_TEXT_RE = re.compile(
+    r"\b(accept(?:\s+all)?(?:\s+cookies)?|agree|allow\s+all|got\s+it|"
+    r"i\s+understand|i\s+accept|dismiss)\b",
+    re.IGNORECASE,
+)
+_SNAPSHOT_REF_RE = re.compile(r"\[ref=(e\d+)\]")
+
+
+def _find_consent_dismiss_ref(snapshot_text: str) -> Optional[str]:
+    """Best-effort ref of the accept/agree/dismiss button in a consent overlay."""
+    for line in (snapshot_text or "").splitlines():
+        low = line.lower()
+        if "button" not in low and "link" not in low:
+            continue
+        if not _CONSENT_DISMISS_TEXT_RE.search(line):
+            continue
+        m = _SNAPSHOT_REF_RE.search(line)
+        if m:
+            return f"@{m.group(1)}"
+    return None
+
+
+def _write_stuck_telemetry(agent: str, message: str, metadata: Dict[str, Any]) -> None:
+    """Append one ``browser_stuck`` activity row. Swallows ALL errors —
+    telemetry must never break (or be confused with) a browser command."""
+    try:
+        from elevate_cli.data import connect, surface_state
+        with connect() as conn:
+            surface_state.append_activity(
+                conn, agent, "browser_stuck", message=message, metadata=metadata
+            )
+    except Exception as exc:
+        logger.debug("browser_stuck telemetry skipped: %s", exc)
+
+
+def _emit_browser_stuck_telemetry(
+    task_key: str,
+    message: str,
+    *,
+    blocker: Optional[str] = None,
+    fingerprint_repeats: int = 0,
+) -> None:
+    """Fire-and-forget telemetry for a stuck/blocker event.
+
+    Runs the DB write on a daemon thread because ``connect()`` may boot the
+    embedded Postgres server — that must never stall a browser command.
+    """
+    try:
+        with _loop_guard_lock:
+            st = _loop_guard_state.get(task_key, {})
+            metadata = {
+                "task_id": task_key,
+                "url": st.get("last_url"),
+                "fingerprint_repeats": int(fingerprint_repeats),
+                "blocker": blocker,
+                "action_count": int(st.get("action_count", 0)),
+            }
+        agent = (os.environ.get("ELEVATE_AGENT_ID") or "").strip() or "browser"
+        threading.Thread(
+            target=_write_stuck_telemetry,
+            args=(agent, message, metadata),
+            name="browser-stuck-telemetry",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        logger.debug("browser_stuck telemetry not emitted: %s", exc)
+
+
+def _budget_precheck(task_key: str, command_name: str) -> Optional[str]:
+    """Count this command against the session budget; return a refusal JSON
+    string when the budget is exhausted, else None."""
+    st = _loop_guard_entry(task_key)
+    with _loop_guard_lock:
+        st["action_count"] += 1
+        count = st["action_count"]
+    cap = _get_max_actions_per_session()
+    if cap > 0 and count > cap:
+        logger.info(
+            "browser action budget exhausted for task=%s (%d/%d, command=%s)",
+            task_key, count, cap, command_name,
+        )
+        return json.dumps({
+            "success": False,
+            "error": _BUDGET_EXHAUSTED_TEMPLATE.format(count=count, cap=cap),
+            "action_budget": f"action {count}/{cap}",
+        }, ensure_ascii=False)
+    return None
+
+
+def _loop_guard_postprocess(task_key: str, command_name: str, result_json: str) -> str:
+    """Annotate a tool result with blocker notices, stuck warnings, and
+    budget visibility. Returns the (possibly rewritten) JSON string."""
+    try:
+        payload = json.loads(result_json)
+    except (TypeError, ValueError):
+        return result_json
+    if not isinstance(payload, dict):
+        return result_json
+
+    st = _loop_guard_entry(task_key)
+
+    raw_snapshot = payload.get("snapshot")
+    if not isinstance(raw_snapshot, str) or not raw_snapshot.strip():
+        raw_snapshot = None
+
+    # --- Blocker classification (one-line notice prefixed to the snapshot) ---
+    blocker = _classify_page_blocker(raw_snapshot) if raw_snapshot else None
+    if blocker:
+        notice = f"page-blocker: {blocker} — {_BLOCKER_NOTICES[blocker]}"
+        if blocker == "consent_overlay":
+            dismiss_ref = _find_consent_dismiss_ref(raw_snapshot)
+            if dismiss_ref:
+                notice += f" Likely dismiss: click {dismiss_ref}."
+        payload["page_blocker"] = blocker
+        payload["snapshot"] = f"{notice}\n\n{raw_snapshot}"
+
+    # --- Stuck detection over the page-state fingerprint ---
+    # NOTE: fingerprints are computed over the snapshot text as returned to
+    # the model (post-truncation). LLM-extracted snapshots are nondeterministic
+    # and may reset the streak — conservative by design (false negatives over
+    # false positives).
+    stuck_count = 0
+    newly_stuck = False
+    if command_name in _STATE_AFFECTING_COMMANDS:
+        threshold = _get_stuck_threshold()
+        url = payload.get("url") if isinstance(payload.get("url"), str) else None
+        fp = _page_fingerprint(raw_snapshot) if raw_snapshot else None
+        with _loop_guard_lock:
+            st["unchanged_actions"] += 1
+            if url and st["last_url"] is not None and url != st["last_url"]:
+                # Reached a genuinely new URL — not stuck.
+                st["unchanged_actions"] = 0
+                st["stuck_telemetry_sent"] = False
+            if url:
+                st["last_url"] = url
+            if fp is not None:
+                if fp != st["last_fp"]:
+                    # Page content changed (or first observation) — reset.
+                    st["unchanged_actions"] = 0
+                    st["stuck_telemetry_sent"] = False
+                st["last_fp"] = fp
+            stuck_count = st["unchanged_actions"]
+            if stuck_count >= threshold and not st["stuck_telemetry_sent"]:
+                st["stuck_telemetry_sent"] = True
+                newly_stuck = True
+        if stuck_count >= threshold:
+            warning = _STUCK_WARNING_TEMPLATE.format(count=stuck_count)
+            if blocker == "consent_overlay":
+                warning += _STUCK_CONSENT_SUFFIX
+            elif blocker:
+                warning += _STUCK_BLOCKER_SUFFIX.format(blocker=blocker)
+            payload["stuck_warning"] = warning
+
+    # --- Telemetry (fire-and-forget; deduped per episode / per blocker+url) ---
+    if newly_stuck:
+        _emit_browser_stuck_telemetry(
+            task_key,
+            f"browser stuck: page state unchanged after {stuck_count} actions"
+            + (f" (page-blocker: {blocker})" if blocker else ""),
+            blocker=blocker,
+            fingerprint_repeats=stuck_count,
+        )
+    if blocker:
+        with _loop_guard_lock:
+            blocker_key = (blocker, st.get("last_url"))
+            already_reported = blocker_key in st["blockers_reported"]
+            st["blockers_reported"].add(blocker_key)
+        if not already_reported:
+            _emit_browser_stuck_telemetry(
+                task_key,
+                f"browser page-blocker detected: {blocker}",
+                blocker=blocker,
+                fingerprint_repeats=stuck_count,
+            )
+
+    # --- Action-budget visibility past 50% of budget ---
+    cap = _get_max_actions_per_session()
+    if cap > 0:
+        with _loop_guard_lock:
+            count = st["action_count"]
+        if count * 2 >= cap:
+            payload["action_budget"] = f"action {count}/{cap}"
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _loop_guarded(command_name: str):
+    """Decorator wiring a public browser tool function into the loop guard.
+
+    Pre-checks the per-session action budget (refusing with a wrap-up
+    instruction once exhausted), then annotates the result with blocker
+    notices / stuck warnings / budget counters. Guard failures never break
+    the underlying command — they degrade to the unannotated result.
+    """
+    def decorate(fn):
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            task_id = kwargs.get("task_id")
+            if task_id is None:
+                try:
+                    task_id = sig.bind_partial(*args, **kwargs).arguments.get("task_id")
+                except TypeError:
+                    task_id = None
+            task_key = str(task_id) if task_id else "default"
+
+            try:
+                refusal = _budget_precheck(task_key, command_name)
+            except Exception:
+                logger.debug("browser action budget pre-check failed", exc_info=True)
+                refusal = None
+            if refusal is not None:
+                return refusal
+
+            result = fn(*args, **kwargs)
+
+            try:
+                return _loop_guard_postprocess(task_key, command_name, result)
+            except Exception:
+                logger.debug("browser loop-guard postprocess failed", exc_info=True)
+                return result
+
+        return wrapper
+    return decorate
+
+
+# ============================================================================
 # Browser Tool Functions
 # ============================================================================
 
+def _apply_stealth_init_script(session_key: str) -> None:
+    """Inject the fingerprint-hardening JS into the freshly-navigated page.
+
+    agent-browser exposes no Playwright ``add_init_script``, so we apply the
+    stealth patches via a single ``eval`` right after navigation completes (and
+    before the auto-snapshot). The script is idempotent and self-guarded, so
+    re-applying on every navigation is harmless. Fire-and-forget: any failure
+    is swallowed — stealth must never break a legitimate navigation. This issues
+    one ``eval`` (not a guarded public tool), so it doesn't touch the loop-guard
+    action budget or stuck counter.
+    """
+    if _stealth is None:
+        return
+    try:
+        script = _stealth.build_init_script()
+    except Exception:
+        return
+    if not script:
+        return
+    try:
+        _run_browser_command(session_key, "eval", [script], timeout=10)
+    except Exception:
+        logger.debug("stealth init-script injection skipped", exc_info=True)
+
+
+def _pace(action: str) -> None:
+    """Apply a human-like pre-action delay for a state-affecting action.
+
+    No-op when human pacing is disabled or the action is a pure read. Never
+    raises. The sleep is inside one guarded action and issues no browser
+    command — it does not consume the action budget or reset the stuck counter.
+    """
+    if _stealth is None:
+        return
+    try:
+        _stealth.pace_action(action)
+    except Exception:
+        pass
+
+
+@_loop_guarded("navigate")
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -2467,12 +3007,36 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     session_info = _get_session_info(nav_session_key)
     is_first_nav = session_info.get("_first_nav", True)
 
+    # Persistent per-site authed profile: on first navigation, pin this
+    # session to a durable per-domain Chrome profile dir so cookies/history/
+    # localStorage from prior tasks on this site are reused (a warm, trusted
+    # profile is what keeps login walls/challenges from re-appearing). Only the
+    # headless/local-sidecar path needs this — the managed visible Chrome
+    # already drives the user's warmly-cloned profile. Stored on session_info
+    # and consumed by _run_browser_command via AGENT_BROWSER_PROFILE.
+    if is_first_nav and _stealth is not None and not session_info.get("cdp_url"):
+        try:
+            pdir = _stealth.resolve_profile_dir(url)
+            if pdir is not None:
+                session_info["_site_profile_dir"] = str(pdir)
+                logger.debug("browser: pinned session %s to per-site profile %s",
+                             nav_session_key, pdir)
+        except Exception:
+            logger.debug("per-site profile resolution skipped", exc_info=True)
+
     # Auto-start recording if configured and this is first navigation
     if is_first_nav:
         session_info["_first_nav"] = False
         _maybe_start_recording(nav_session_key)
 
+    _pace("navigate")
     result = _run_browser_command(nav_session_key, "open", [url], timeout=max(_get_command_timeout(), 60))
+
+    # Apply fingerprint-hardening JS to the freshly-loaded page (no-op when
+    # disabled). Done before the auto-snapshot so the patched surface is what
+    # any page scripts see going forward.
+    if result.get("success"):
+        _apply_stealth_init_script(nav_session_key)
 
     # Remember which session served this nav so snapshot/click/fill/...
     # on the same task_id hit it (critical when hybrid routing has both a
@@ -2579,6 +3143,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         }, ensure_ascii=False)
 
 
+@_loop_guarded("snapshot")
 def browser_snapshot(
     full: bool = False,
     task_id: Optional[str] = None,
@@ -2648,6 +3213,7 @@ def browser_snapshot(
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_loop_guarded("click")
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     """
     Click on an element.
@@ -2669,6 +3235,16 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     if not ref.startswith("@"):
         ref = f"@{ref}"
 
+    # Human-like: occasionally scroll the element into view before clicking
+    # (humans don't click off-screen elements). Best-effort; ignore failures.
+    if _stealth is not None:
+        try:
+            if _stealth.should_scroll_before_click():
+                _run_browser_command(effective_task_id, "scrollintoview", [ref], timeout=10)
+        except Exception:
+            logger.debug("pre-click scroll-into-view skipped", exc_info=True)
+
+    _pace("click")
     result = _run_browser_command(effective_task_id, "click", [ref])
 
     if result.get("success"):
@@ -2685,6 +3261,7 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_loop_guarded("type")
 def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     """
     Type text into an input field.
@@ -2707,8 +3284,32 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     if not ref.startswith("@"):
         ref = f"@{ref}"
 
-    # Use fill command (clears then types)
-    result = _run_browser_command(effective_task_id, "fill", [ref, text])
+    _pace("type")
+    # Human-like typing: clear the field, then type via real per-character
+    # keystrokes (agent-browser ``type``) instead of an instant ``fill`` — a
+    # field that fills atomically with zero inter-keystroke time is a classic
+    # bot tell. Falls back to ``fill`` when pacing is disabled or the keystroke
+    # path errors. The clear (``fill`` with "") + ``type`` are unguarded
+    # internal commands, so they don't touch the loop-guard budget.
+    _use_keystrokes = False
+    if _stealth is not None:
+        try:
+            _use_keystrokes = _stealth.human_pacing_enabled() and bool(text)
+        except Exception:
+            _use_keystrokes = False
+    if _use_keystrokes:
+        try:
+            _run_browser_command(effective_task_id, "fill", [ref, ""], timeout=15)
+            result = _run_browser_command(effective_task_id, "type", [ref, text])
+            if not result.get("success"):
+                # Keystroke path failed — fall back to the reliable atomic fill.
+                result = _run_browser_command(effective_task_id, "fill", [ref, text])
+        except Exception:
+            logger.debug("keystroke type failed, falling back to fill", exc_info=True)
+            result = _run_browser_command(effective_task_id, "fill", [ref, text])
+    else:
+        # Use fill command (clears then types)
+        result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
     if result.get("success"):
         response = {
@@ -2725,6 +3326,7 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_loop_guarded("scroll")
 def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     """
     Scroll the page.
@@ -2759,6 +3361,7 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
 
     effective_task_id = _last_session_key(task_id or "default")
 
+    _pace("scroll")
     result = _run_browser_command(effective_task_id, "scroll", [direction, str(_SCROLL_PIXELS)])
     if not result.get("success"):
         response = {
@@ -2774,6 +3377,7 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_loop_guarded("back")
 def browser_back(task_id: Optional[str] = None) -> str:
     """
     Navigate back in browser history.
@@ -2806,6 +3410,7 @@ def browser_back(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
+@_loop_guarded("press")
 def browser_press(key: str, task_id: Optional[str] = None) -> str:
     """
     Press a keyboard key.
@@ -2822,6 +3427,7 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
         return camofox_press(key, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    _pace("press")
     result = _run_browser_command(effective_task_id, "press", [key])
 
     if result.get("success"):
@@ -3465,6 +4071,10 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     # (i.e. not when we're only reaping a sidecar mid-task).
     if not _is_local_sidecar_key(task_id):
         _last_active_session_key.pop(bare_task_id, None)
+        # Reset loop-guard tracking (stuck fingerprints + action budget) so a
+        # fresh session for the same task_id starts with a clean slate.
+        with _loop_guard_lock:
+            _loop_guard_state.pop(bare_task_id, None)
 
 
 def _cleanup_single_browser_session(task_id: str) -> None:
@@ -3566,6 +4176,8 @@ def cleanup_all_browsers() -> None:
     global _cached_command_timeout, _command_timeout_resolved
     global _cached_chromium_installed
     global _cached_browser_engine, _browser_engine_resolved
+    global _cached_stuck_threshold, _stuck_threshold_resolved
+    global _cached_max_actions_per_session, _max_actions_per_session_resolved
     _cached_agent_browser = None
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
@@ -3574,6 +4186,20 @@ def cleanup_all_browsers() -> None:
     _cached_chromium_installed = None
     _cached_browser_engine = None
     _browser_engine_resolved = False
+    _cached_stuck_threshold = None
+    _stuck_threshold_resolved = False
+    _cached_max_actions_per_session = None
+    _max_actions_per_session_resolved = False
+    # Drop all loop-guard tracking (stuck fingerprints + action budgets).
+    with _loop_guard_lock:
+        _loop_guard_state.clear()
+    # Drop the stealth config snapshot so persistent-profile / fingerprint /
+    # pacing knobs are re-read on next use.
+    if _stealth is not None:
+        try:
+            _stealth.reset_cache()
+        except Exception:
+            pass
 
 # ============================================================================
 # Requirements Check
