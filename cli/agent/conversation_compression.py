@@ -38,7 +38,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from agent.model_metadata import estimate_request_tokens_rough
+from agent.model_metadata import (
+    estimate_messages_tokens_rough,
+    estimate_request_tokens_rough,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -844,10 +847,296 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
     return changed_count > 0
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Real-count compression trigger (2026-06)
+#
+# The compaction trigger historically ran off a mix of provider-reported
+# prompt_tokens and chars/4 estimates, with the default threshold parked
+# at 0.85 because a single turn can add ~10-12% of the window before the
+# next iteration-boundary check. These helpers close the gap to Claude
+# Code's ~90-92% ceiling:
+#
+#   1. RealUsageProjector tracks the last server-reported TOTAL prompt
+#      size for the conversation and projects current usage as
+#      real_count + delta-estimate of messages appended since that call.
+#      Projection is only valid while the message list has not been
+#      mutated beyond appends (compaction / prune / prefill-pops
+#      invalidate it).
+#   2. The trigger line becomes
+#          min(threshold_line, window - output_reserve)
+#      where output_reserve is a FIXED headroom (session max output
+#      tokens + summarizer overhead + pad) instead of a percentage
+#      margin, so the next call's output AND the compaction request
+#      itself always fit.
+#   3. When a real count backs the measurement, the default threshold
+#      rises to 0.90; pure-estimate mode keeps 0.85. A user-pinned
+#      compression.threshold always wins over both mode defaults.
+#
+# Anti-thrash guards from #14695 are preserved: should_compress_now()
+# delegates to the compressor's own should_compress() (ineffective-
+# compression backoff), and callers keep the post-compaction -1
+# prompt-token sentinel + projector invalidation so a compaction never
+# immediately re-triggers off a stale or schema-inflated measurement.
+# ──────────────────────────────────────────────────────────────────────
+
+# Default trigger thresholds per measurement mode. The compressor object
+# keeps 0.85 as its construction-time default (estimate mode); the
+# real-count bump is applied at check time so post-compaction /resumed
+# sessions automatically drop back to the conservative line.
+ESTIMATE_MODE_THRESHOLD = 0.85
+REAL_COUNT_MODE_THRESHOLD = 0.90
+
+# Fixed output headroom components. The summarizer overhead covers the
+# compaction request's own generation budget: the summary token ceiling
+# (12K, see context_compressor._SUMMARY_TOKENS_CEILING) times the 1.3x
+# max_tokens factor _generate_summary passes, rounded up. NOTE: this is
+# a size constant, not a model choice — the summarizer follows the
+# session/configured model (house rule: never hardcode a model id).
+SUMMARIZER_OUTPUT_OVERHEAD_TOKENS = 16_000
+OUTPUT_RESERVE_SAFETY_PAD_TOKENS = 2_000
+# When the session has no explicit max_tokens configured (provider
+# default applies), assume a realistic per-call output size for the
+# reserve rather than 0.
+DEFAULT_MAX_OUTPUT_TOKENS_GUESS = 8_192
+
+
+def compute_output_reserve_tokens(session_max_tokens: Any = None) -> int:
+    """Fixed output-headroom reserve for the compression trigger.
+
+    reserve = max(summarizer overhead, session max output tokens) + pad.
+    The max() (rather than a sum) matches the actual constraint: the next
+    main-model call needs ``input + max_tokens <= window`` and the
+    compaction request needs ``input + summary_budget*1.3 <= window`` —
+    whichever is larger bounds the input we can let accumulate.
+    """
+    try:
+        configured = int(session_max_tokens) if session_max_tokens else 0
+    except (TypeError, ValueError):
+        configured = 0
+    if configured <= 0:
+        configured = DEFAULT_MAX_OUTPUT_TOKENS_GUESS
+    return max(SUMMARIZER_OUTPUT_OVERHEAD_TOKENS, configured) + OUTPUT_RESERVE_SAFETY_PAD_TOKENS
+
+
+class RealUsageProjector:
+    """Tracks the last server-reported prompt token count and projects the
+    current conversation size as ``real + delta-estimate``.
+
+    ``record()`` is called when an API response reports usage: the
+    ``prompt_tokens`` of that call is ground truth for "context size as of
+    that call" (system prompt + tools + messages included). ``project()``
+    returns that real count plus a chars/4 estimate of ONLY the messages
+    appended since — never re-estimating the whole conversation.
+
+    Projection invalidates (returns None) when:
+      - no real count has been recorded yet (fresh / resumed session),
+      - the message *list object* was replaced (compress / prune_only
+        both return new lists),
+      - messages were removed (e.g. thinking-prefill pops), or
+      - the last message covered by the real count is no longer the same
+        object (in-place surgery before the snapshot point).
+    """
+
+    def __init__(self) -> None:
+        self._real_tokens = 0
+        self._list_id: Optional[int] = None
+        self._snapshot_len = 0
+        self._last_counted_msg_id: Optional[int] = None
+
+    def invalidate(self) -> None:
+        """Drop the snapshot — next project() falls back to estimate mode."""
+        self._real_tokens = 0
+        self._list_id = None
+        self._snapshot_len = 0
+        self._last_counted_msg_id = None
+
+    @property
+    def has_real_count(self) -> bool:
+        return self._real_tokens > 0
+
+    def record(self, messages: Any, prompt_tokens: Any) -> None:
+        """Snapshot a provider-reported prompt size for ``messages``.
+
+        A non-positive / missing count is ignored (the previous snapshot
+        stays valid — the conversation has only grown by appends, which
+        project() still covers via delta estimation).
+        """
+        try:
+            real = int(prompt_tokens or 0)
+        except (TypeError, ValueError):
+            real = 0
+        if real <= 0 or not isinstance(messages, list):
+            return
+        self._real_tokens = real
+        self._list_id = id(messages)
+        self._snapshot_len = len(messages)
+        self._last_counted_msg_id = id(messages[-1]) if messages else None
+
+    def project(self, messages: Any) -> Optional[int]:
+        """Projected current prompt size, or None when no valid real count."""
+        if self._real_tokens <= 0 or not isinstance(messages, list):
+            return None
+        if id(messages) != self._list_id:
+            return None
+        if len(messages) < self._snapshot_len:
+            return None
+        if self._snapshot_len:
+            if not messages or id(messages[self._snapshot_len - 1]) != self._last_counted_msg_id:
+                return None
+        delta = messages[self._snapshot_len:]
+        delta_tokens = estimate_messages_tokens_rough(delta) if delta else 0
+        return self._real_tokens + delta_tokens
+
+
+def effective_compression_trigger_tokens(
+    compressor: Any,
+    *,
+    real_mode: bool,
+    output_reserve_tokens: int,
+    threshold_pinned: bool,
+) -> int:
+    """The token line at which full compaction should fire.
+
+        trigger = min(threshold_line, window - output_reserve)
+
+    threshold_line is the compressor's existing ``threshold_tokens``
+    (config-pinned value, the 0.85 estimate-mode default, or an
+    aux-feasibility auto-lowered value — all already floored at
+    MINIMUM_CONTEXT_LENGTH), bumped to 0.90×window in real-count mode
+    when, and only when, it is still the un-pinned 0.85 default.
+
+    The reserve line never drops the trigger below 50% of the window —
+    tiny windows with a large configured max_tokens would otherwise
+    compact every turn (#14695 territory).
+    """
+    window = int(getattr(compressor, "context_length", 0) or 0)
+    threshold_line = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    if window <= 0:
+        return threshold_line
+
+    if real_mode and not threshold_pinned:
+        current_percent = float(
+            getattr(compressor, "threshold_percent", ESTIMATE_MODE_THRESHOLD) or 0.0
+        )
+        # Only bump the untouched default — a pinned config value or an
+        # auto-lowered (aux-feasibility) threshold must keep winning.
+        if abs(current_percent - ESTIMATE_MODE_THRESHOLD) < 1e-6:
+            threshold_line = max(
+                threshold_line, int(window * REAL_COUNT_MODE_THRESHOLD)
+            )
+
+    reserve_line = window - max(0, int(output_reserve_tokens or 0))
+    reserve_line = max(reserve_line, window // 2)
+    return min(threshold_line, reserve_line)
+
+
+def resolve_compression_pressure(
+    compressor: Any,
+    projector: Optional[RealUsageProjector],
+    messages: list,
+    *,
+    output_reserve_tokens: int,
+    threshold_pinned: bool,
+) -> Tuple[int, int, bool]:
+    """Measurement + trigger line for the iteration-boundary check.
+
+    Returns ``(measured_tokens, trigger_tokens, real_mode)``.
+
+    Measurement preference order:
+      1. Real-count projection (last provider prompt_tokens + delta
+         estimate of appended messages) — real mode.
+      2. Post-compaction sentinel (last_prompt_tokens == -1): report 0 so
+         nothing re-triggers until the next API call reports real usage
+         for the compacted conversation (#14695 guard).
+      3. Stale-but-real last_prompt_tokens (list shape changed since) —
+         estimate mode, matches the historical behavior.
+      4. Full chars/4 estimate of the message list (#2153 fallback when
+         usage was never reported).
+    """
+    projected = projector.project(messages) if projector is not None else None
+    real_mode = projected is not None
+    if real_mode:
+        measured = int(projected)
+    else:
+        last = int(getattr(compressor, "last_prompt_tokens", 0) or 0)
+        if last == -1:
+            measured = 0
+        elif last > 0:
+            measured = last
+        else:
+            measured = estimate_messages_tokens_rough(messages)
+
+    trigger = effective_compression_trigger_tokens(
+        compressor,
+        real_mode=real_mode,
+        output_reserve_tokens=output_reserve_tokens,
+        threshold_pinned=threshold_pinned,
+    )
+    return measured, trigger, real_mode
+
+
+def should_compress_now(compressor: Any, measured_tokens: int, trigger_tokens: int) -> bool:
+    """True when full compaction should run at this iteration boundary.
+
+    Compares the measurement against the effective trigger line, then
+    delegates to the compressor's own ``should_compress`` so its
+    anti-thrash backoff (two ineffective compressions in a row → skip)
+    keeps applying. The delegated value is raised to ``threshold_tokens``
+    when the output reserve forced a trigger below the percent line —
+    otherwise should_compress's internal threshold compare would veto the
+    earlier trigger.
+    """
+    if measured_tokens <= 0 or trigger_tokens <= 0:
+        return False
+    if measured_tokens < trigger_tokens:
+        return False
+    threshold_tokens = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    return bool(compressor.should_compress(max(measured_tokens, threshold_tokens)))
+
+
+def should_prune_only_now(compressor: Any, measured_tokens: int, trigger_tokens: int) -> bool:
+    """True when the cheap no-LLM prune pass should run.
+
+    The prune stage keeps its existing band: from the soft bar (72% of
+    the window, owned by the compressor) up to the FULL-compaction
+    trigger. When real-count mode raises the trigger above the
+    compressor's threshold_tokens, the gap [threshold_tokens, trigger)
+    stays prune territory — the compressor's own rate limit (regrow 5%
+    of the window between attempts) is re-applied for that band.
+    """
+    if measured_tokens <= 0 or measured_tokens >= trigger_tokens:
+        return False
+    prune_check = getattr(compressor, "should_prune_only", None)
+    if not callable(prune_check):
+        return False
+    threshold_tokens = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    if measured_tokens < threshold_tokens:
+        return bool(prune_check(measured_tokens))
+    # Band between the estimate-mode threshold and the raised real-count
+    # trigger: should_prune_only() itself would return False (it treats
+    # >= threshold_tokens as full-compress territory), so replicate its
+    # rate limit here.
+    window = int(getattr(compressor, "context_length", 0) or 0)
+    regrow = int(window * 0.05) if window > 0 else 0
+    last_attempt = int(getattr(compressor, "_last_prune_attempt_tokens", 0) or 0)
+    return measured_tokens >= last_attempt + regrow
+
+
 __all__ = [
     "check_compression_model_feasibility",
     "replay_compression_warning",
     "compress_context",
     "insert_preserved_context",
     "try_shrink_image_parts_in_messages",
+    "ESTIMATE_MODE_THRESHOLD",
+    "REAL_COUNT_MODE_THRESHOLD",
+    "SUMMARIZER_OUTPUT_OVERHEAD_TOKENS",
+    "OUTPUT_RESERVE_SAFETY_PAD_TOKENS",
+    "DEFAULT_MAX_OUTPUT_TOKENS_GUESS",
+    "compute_output_reserve_tokens",
+    "RealUsageProjector",
+    "effective_compression_trigger_tokens",
+    "resolve_compression_pressure",
+    "should_compress_now",
+    "should_prune_only_now",
 ]

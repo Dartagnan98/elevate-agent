@@ -2616,7 +2616,18 @@ class TestRunConversation:
         agent.compression_enabled = True
 
         tc = _mock_tool_call(name="web_search", arguments="{}", call_id="c1")
-        resp1 = _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc])
+        # Provider-reported usage above any trigger line: the real-count
+        # trigger (2026-06) gates on measured tokens >= trigger BEFORE
+        # delegating to should_compress, so the response must carry real
+        # usage for the compaction branch to be reachable.
+        resp1 = _mock_response(
+            content="", finish_reason="tool_calls", tool_calls=[tc],
+            usage={
+                "prompt_tokens": 10_000_000,
+                "completion_tokens": 10,
+                "total_tokens": 10_000_010,
+            },
+        )
         resp2 = _mock_response(content="All done", finish_reason="stop")
         agent.client.chat.completions.create.side_effect = [resp1, resp2]
 

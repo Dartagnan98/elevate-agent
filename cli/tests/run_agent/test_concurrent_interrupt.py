@@ -37,6 +37,12 @@ def _make_agent(monkeypatch):
         tool_start_callback = None
         tool_complete_callback = None
         _todo_store = MagicMock()
+        # Per-turn tool-result budget enforcement (2026-06 work) reads
+        # `self.context_compressor.context_length` after every concurrent
+        # batch to scale the turn budget to the model's context window.
+        # Pin it to a real int so budget_for_context_length() gets a
+        # primitive, not a MagicMock.
+        context_compressor = MagicMock(context_length=0)
         _session_db = None
         valid_tool_names = set()
         _turns_since_memory = 0

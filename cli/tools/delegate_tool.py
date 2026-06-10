@@ -324,6 +324,125 @@ def _looks_like_error_output(content: str) -> bool:
     )
 
 
+# Partial-result salvage budget.  delegate_task already caps the *context*
+# passed INTO a child at 32K chars (_CONTEXT_CHAR_CAP in
+# _build_child_system_prompt); the salvage payload riding back OUT on a
+# failed child respects the same ceiling, with per-field caps that keep the
+# typical payload far smaller.
+_PARTIAL_TEXT_MAX_CHARS = 4_000
+_PARTIAL_PAYLOAD_MAX_CHARS = 32_000
+
+
+def _build_partial_result_payload(
+    child: Any, result: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """Salvage whatever work product a failed/timed-out child produced.
+
+    Returns ``{last_assistant_text, tool_calls, output_tail}`` or None when
+    there is nothing to salvage.  Sources, in order of preference:
+
+    1. ``result["messages"]`` — present when run_conversation returned a
+       result but the run still counts as failed (empty final response).
+    2. ``child._session_messages`` — the live transcript reference the agent
+       maintains via _persist_session; this is what survives a hard timeout
+       or a worker-thread exception, where no result dict exists.
+
+    Every field is bounded so the payload always fits the 32K delegate
+    context cap (see _PARTIAL_PAYLOAD_MAX_CHARS).
+    """
+    messages: Optional[List[Any]] = None
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        messages = result["messages"]
+    if not messages:
+        _live = getattr(child, "_session_messages", None)
+        if isinstance(_live, list) and _live:
+            # Snapshot — on a timeout the child thread may still be appending.
+            messages = list(_live)
+    if not messages:
+        return None
+
+    last_text = ""
+    tool_calls = 0
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        tool_calls += len(msg.get("tool_calls") or [])
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            last_text = content.strip()
+        elif isinstance(content, list):
+            # Anthropic-style block list — join the text blocks.
+            _texts = [
+                str(b.get("text") or "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            joined = "\n".join(t for t in _texts if t).strip()
+            if joined:
+                last_text = joined
+
+    output_tail = _extract_output_tail(
+        {"messages": messages}, max_entries=8, max_chars=600
+    )
+    if not last_text and not tool_calls and not output_tail:
+        return None
+
+    payload: Dict[str, Any] = {
+        # Tail of the text — the end of a long message is where the child's
+        # latest findings live.
+        "last_assistant_text": last_text[-_PARTIAL_TEXT_MAX_CHARS:],
+        "tool_calls": tool_calls,
+        "output_tail": output_tail,
+    }
+    # Defensive clamp: drop oldest tail entries until the serialized payload
+    # fits the cap (bounded fields make this loop rarely, if ever, run).
+    try:
+        while output_tail and len(
+            json.dumps(payload, ensure_ascii=False)
+        ) > _PARTIAL_PAYLOAD_MAX_CHARS:
+            output_tail.pop(0)
+    except (TypeError, ValueError):
+        payload["output_tail"] = []
+    return payload
+
+
+def _attach_partial_result(
+    entry: Dict[str, Any], child: Any, result: Optional[Dict[str, Any]] = None
+) -> None:
+    """Attach the partial-success contract to a non-completed result entry.
+
+    Adds ``partial: True`` + ``partial_output`` only when there is real
+    salvage, so the parent can distinguish "died with work product" from
+    "produced nothing".  Never raises — salvage must not mask the original
+    failure.
+    """
+    try:
+        payload = _build_partial_result_payload(child, result)
+    except Exception:
+        logger.debug("partial-result salvage failed", exc_info=True)
+        return
+    if payload:
+        entry["partial"] = True
+        entry["partial_output"] = payload
+
+
+def _attach_rate_limit_telemetry(entry: Dict[str, Any], child: Any) -> None:
+    """Copy the child's rate-limit counters onto its result entry.
+
+    Keys are added only when the child actually hit a rate limit, so the
+    success-path return stays byte-identical for the common (no-429) case.
+    isinstance guards keep test doubles (MagicMock attrs) from leaking in.
+    """
+    hits = getattr(child, "session_rate_limit_hits", 0)
+    if not isinstance(hits, (int, float)) or hits <= 0:
+        return
+    entry["rate_limit_hits"] = int(hits)
+    secs = getattr(child, "session_rate_limit_backoff_seconds", 0.0)
+    entry["rate_limit_backoff_seconds"] = (
+        round(float(secs), 1) if isinstance(secs, (int, float)) else 0.0
+    )
+
+
 def _normalize_role(r: Optional[str]) -> str:
     """Normalise a caller-provided role to 'leaf' or 'orchestrator'.
 
@@ -1676,7 +1795,7 @@ def _run_single_child(
             else:
                 _err = str(_timeout_exc)
 
-            return {
+            _timeout_entry: Dict[str, Any] = {
                 "task_index": task_index,
                 "subagent_id": _subagent_id,
                 "child_session_id": getattr(child, "session_id", None),
@@ -1689,6 +1808,13 @@ def _run_single_child(
                 "_child_role": getattr(child, "_delegate_role", None),
                 "diagnostic_path": diagnostic_path,
             }
+            # Partial-success contract: a child that died mid-task usually
+            # produced SOMETHING (assistant text, tool results).  Salvage it
+            # from the live transcript so the parent can recover instead of
+            # blind-retrying from zero.
+            _attach_partial_result(_timeout_entry, child)
+            _attach_rate_limit_telemetry(_timeout_entry, child)
+            return _timeout_entry
         finally:
             # Shut down executor without waiting — if the child thread
             # is stuck on blocking I/O, wait=True would hang forever.
@@ -1807,6 +1933,16 @@ def _run_single_child(
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
 
+        # Partial-success contract: any non-completed outcome (failed run,
+        # interrupt) still carries whatever the child produced so the parent
+        # can salvage.  Completed entries are untouched — the success-path
+        # shape must stay byte-compatible.
+        if status != "completed":
+            _attach_partial_result(entry, child, result)
+        # Rate-limit telemetry rides on success AND failure, but only when
+        # the child actually hit a limit (no new keys in the common case).
+        _attach_rate_limit_telemetry(entry, child)
+
         # Cross-agent file-state reminder.  If this subagent wrote any
         # files the parent had already read, surface it so the parent
         # knows to re-read before editing — the scenario that motivated
@@ -1920,7 +2056,7 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
-        return {
+        _error_entry: Dict[str, Any] = {
             "task_index": task_index,
             "subagent_id": _subagent_id,
             "child_session_id": getattr(child, "session_id", None),
@@ -1931,6 +2067,9 @@ def _run_single_child(
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
         }
+        _attach_partial_result(_error_entry, child)
+        _attach_rate_limit_telemetry(_error_entry, child)
+        return _error_entry
 
     finally:
         # Stop the heartbeat thread so it doesn't keep touching parent activity
@@ -2370,6 +2509,22 @@ def delegate_task(
     for entry in results:
         child_role = entry.pop("_child_role", None)
         child_cost = entry.pop("_child_cost_usd", 0.0)
+        # Rate-limit visibility: without this, a child that sat in 429
+        # backoff just looks slow from the parent's side.
+        _rl_hits = entry.get("rate_limit_hits")
+        if _rl_hits:
+            try:
+                logger.info(
+                    "delegate_task: child %s (task %s, status=%s) spent %.1fs "
+                    "in rate-limit backoff (%d hit(s))",
+                    entry.get("subagent_id") or "?",
+                    entry.get("task_index"),
+                    entry.get("status"),
+                    float(entry.get("rate_limit_backoff_seconds") or 0.0),
+                    int(_rl_hits),
+                )
+            except (TypeError, ValueError):
+                pass
         try:
             if child_cost:
                 _children_cost_total += float(child_cost)

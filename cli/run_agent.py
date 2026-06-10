@@ -1187,6 +1187,13 @@ class AIAgent:
         # after each API call.  Accessed by /usage slash command.
         self._rate_limit_state: Optional["RateLimitState"] = None
 
+        # Cumulative rate-limit telemetry for this agent instance.  Children
+        # spawned via delegate_task report these back to the parent so a
+        # child that spent its run in 429 backoff doesn't just look "slow"
+        # (see tools/delegate_tool.py::_run_single_child).
+        self.session_rate_limit_hits: int = 0
+        self.session_rate_limit_backoff_seconds: float = 0.0
+
         # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
         # both live under ~/.elevate/logs/.  Idempotent, so gateway mode
         # (which creates a new AIAgent per message) won't duplicate handlers.
@@ -1826,6 +1833,15 @@ class AIAgent:
         # one-turn growth (~10% window of tool results + model output) must
         # stay under 100% or late turns hit context-overflow 400s.
         compression_threshold = float(_compression_cfg.get("threshold", 0.85))
+        # Real-count trigger (2026-06): when the provider has reported
+        # prompt_tokens for the CURRENT message-list shape, the trigger runs
+        # off that real count (+ delta estimates for appended messages only)
+        # and the default line rises to 0.90; pure-estimate mode keeps 0.85.
+        # Both lines are capped at window - output_reserve (fixed headroom =
+        # session max output tokens / summarizer overhead + pad) so the next
+        # call's output and the compaction request always fit. A user-pinned
+        # compression.threshold wins over both mode defaults.
+        self._compression_threshold_pinned = _compression_cfg.get("threshold") is not None
 
         # Session wall clock. max_iterations bounds the number of API calls
         # but not time — a loop of short calls (or slow tools) can run for
@@ -2013,6 +2029,17 @@ class AIAgent:
                 abort_on_summary_failure=compression_abort_on_summary_failure,
             )
         self.compression_enabled = compression_enabled
+
+        # Real-count usage projector + fixed output-headroom reserve for the
+        # compression trigger (see agent.conversation_compression).
+        from agent.conversation_compression import (
+            RealUsageProjector as _RealUsageProjector,
+            compute_output_reserve_tokens as _compute_output_reserve_tokens,
+        )
+        self._usage_projector = _RealUsageProjector()
+        self._compression_output_reserve_tokens = _compute_output_reserve_tokens(
+            self.max_tokens
+        )
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -8693,6 +8720,13 @@ class AIAgent:
         self.context_compressor.last_prompt_tokens = -1
         self.context_compressor.last_completion_tokens = 0
         self.context_compressor.awaiting_real_usage_after_compression = True
+        # Drop the real-count snapshot: the trigger stays in estimate mode
+        # (and the -1 sentinel suppresses re-triggering) until the next API
+        # call reports usage for the compacted conversation. Together with
+        # the anti-thrash backoff this is the #14695 compact-retry guard.
+        _usage_projector = getattr(self, "_usage_projector", None)
+        if _usage_projector is not None:
+            _usage_projector.invalidate()
 
         # Clear the file-read dedup cache.  After compression the original
         # read content is summarised away — if the model re-reads the same
@@ -10121,21 +10155,50 @@ class AIAgent:
             and len(messages) > self.context_compressor.protect_first_n
                                 + self.context_compressor.protect_last_n + 1
         ):
-            # Include tool schema tokens — with many tools these can add
-            # 20-30K+ tokens that the old sys+msg estimate missed entirely.
-            _preflight_tokens = estimate_request_tokens_rough(
-                messages,
-                system_prompt=active_system_prompt or "",
-                tools=self.tools or None,
+            from agent.conversation_compression import (
+                effective_compression_trigger_tokens as _effective_trigger_tokens,
+                should_compress_now as _should_compress_now,
             )
             _compressor = self.context_compressor
+            # Prefer the real-count projection (last provider-reported prompt
+            # size + delta estimate of messages appended since). Fall back to
+            # the rough estimate when no valid real count exists — include
+            # tool schema tokens there: with many tools these can add 20-30K+
+            # tokens that the old sys+msg estimate missed entirely.
+            _preflight_projector = getattr(self, "_usage_projector", None)
+            _preflight_projected = (
+                _preflight_projector.project(messages)
+                if _preflight_projector is not None else None
+            )
+            _preflight_real_mode = _preflight_projected is not None
+            if _preflight_real_mode:
+                _preflight_tokens = _preflight_projected
+            else:
+                _preflight_tokens = estimate_request_tokens_rough(
+                    messages,
+                    system_prompt=active_system_prompt or "",
+                    tools=self.tools or None,
+                )
+            _preflight_trigger = _effective_trigger_tokens(
+                _compressor,
+                real_mode=_preflight_real_mode,
+                output_reserve_tokens=getattr(
+                    self, "_compression_output_reserve_tokens", 0
+                ),
+                threshold_pinned=getattr(
+                    self, "_compression_threshold_pinned", False
+                ),
+            )
             _defer_preflight = getattr(
                 _compressor,
                 "should_defer_preflight_to_real_usage",
                 lambda _tokens: False,
             )
 
-            if _defer_preflight(_preflight_tokens):
+            # The defer guard exists to discount schema-inflated ROUGH
+            # estimates — a real-count projection is already trustworthy,
+            # so it never defers.
+            if (not _preflight_real_mode) and _defer_preflight(_preflight_tokens):
                 # Rough estimate is over threshold, but a compressed request
                 # already fit at the provider and the estimate has only grown
                 # a little — trust real usage instead of re-firing compaction
@@ -10147,18 +10210,19 @@ class AIAgent:
                     f"{_compressor.threshold_tokens:,}",
                     f"{_compressor.last_real_prompt_tokens:,}",
                 )
-            elif self.context_compressor.should_compress(_preflight_tokens):
+            elif _should_compress_now(_compressor, _preflight_tokens, _preflight_trigger):
                 logger.info(
-                    "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+                    "Preflight compression: ~%s tokens >= %s trigger (%s mode, model %s, ctx %s)",
                     f"{_preflight_tokens:,}",
-                    f"{self.context_compressor.threshold_tokens:,}",
+                    f"{_preflight_trigger:,}",
+                    "real-count" if _preflight_real_mode else "estimate",
                     self.model,
                     f"{self.context_compressor.context_length:,}",
                 )
                 if not self.quiet_mode:
                     self._safe_print(
                         f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                        f">= {self.context_compressor.threshold_tokens:,} threshold"
+                        f">= {_preflight_trigger:,} trigger"
                     )
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
@@ -10186,14 +10250,27 @@ class AIAgent:
                     self._last_content_with_tools = None
                     self._last_content_tools_all_housekeeping = False
                     self._mute_post_response = False
-                    # Re-estimate after compression
+                    # Re-estimate after compression (the projector was
+                    # invalidated by compaction, so this is estimate mode).
                     _preflight_tokens = estimate_request_tokens_rough(
                         messages,
                         system_prompt=active_system_prompt or "",
                         tools=self.tools or None,
                     )
-                    if not self.context_compressor.should_compress(_preflight_tokens):
-                        break  # Under threshold, or anti-thrash guard stopped it
+                    _preflight_trigger = _effective_trigger_tokens(
+                        _compressor,
+                        real_mode=False,
+                        output_reserve_tokens=getattr(
+                            self, "_compression_output_reserve_tokens", 0
+                        ),
+                        threshold_pinned=getattr(
+                            self, "_compression_threshold_pinned", False
+                        ),
+                    )
+                    if not _should_compress_now(
+                        _compressor, _preflight_tokens, _preflight_trigger
+                    ):
+                        break  # Under trigger, or anti-thrash guard stopped it
 
         # Plugin hook: pre_llm_call
         # Fired once per turn before the tool-calling loop.  Plugins can
@@ -11084,6 +11161,9 @@ class AIAgent:
                             _failure_hint = f"upstream gateway timeout (504, {api_duration:.0f}s)"
                         elif _resp_error_code == 429:
                             _failure_hint = f"rate limited by upstream provider (429)"
+                            # In-body 429 (no exception raised) — count it the
+                            # same as a thrown rate-limit error for telemetry.
+                            self.session_rate_limit_hits += 1
                         elif _resp_error_code in (500, 502):
                             _failure_hint = f"upstream server error ({_resp_error_code}, {api_duration:.0f}s)"
                         elif _resp_error_code in (503, 529):
@@ -11124,6 +11204,8 @@ class AIAgent:
                         
                         # Backoff before retry — jittered exponential: 5s base, 120s cap
                         wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
+                        if _resp_error_code == 429:
+                            self.session_rate_limit_backoff_seconds += float(wait_time)
                         self._vprint(f"{self.log_prefix}⏳ Retrying in {wait_time:.1f}s ({_failure_hint})...", force=True)
                         logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
                         
@@ -11391,6 +11473,13 @@ class AIAgent:
                             "total_tokens": total_tokens,
                         }
                         self.context_compressor.update_from_response(usage_dict)
+                        # Real-count trigger: snapshot this call's provider-
+                        # reported prompt size against the current message-list
+                        # shape so trigger checks can project usage as
+                        # real + delta-estimate of appended messages.
+                        _usage_projector = getattr(self, "_usage_projector", None)
+                        if _usage_projector is not None:
+                            _usage_projector.record(messages, prompt_tokens)
 
                         # Cache discovered context length after successful call.
                         # Only persist limits confirmed by the provider (parsed
@@ -12015,6 +12104,11 @@ class AIAgent:
                         FailoverReason.rate_limit,
                         FailoverReason.billing,
                     )
+                    if is_rate_limited:
+                        # Telemetry only — counted before fallback/rotation so
+                        # delegate_task can surface a child's rate-limit
+                        # pressure to its parent.
+                        self.session_rate_limit_hits += 1
 
                     # ── Generic provider usage-cap breaker (record) ───────
                     # A 429 always classifies as rate_limit (see
@@ -12531,6 +12625,10 @@ class AIAgent:
                                     pass
                     wait_time = _retry_after if _retry_after else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
                     if is_rate_limited:
+                        # Telemetry: total seconds this agent intends to sit in
+                        # rate-limit backoff (interrupts may shorten the sleep,
+                        # but the intended wait is the useful signal).
+                        self.session_rate_limit_backoff_seconds += float(wait_time)
                         self._emit_status(f"⏱️ Rate limited. Waiting {wait_time:.1f}s (attempt {retry_count + 1}/{max_retries})...")
                     else:
                         self._emit_status(f"⏳ Retrying in {wait_time:.1f}s (attempt {retry_count}/{max_retries})...")
@@ -13018,39 +13116,54 @@ class AIAgent:
                     if _tc_names == {"execute_code"}:
                         self.iteration_budget.refund()
                     
-                    # Use real token counts from the API response to decide
-                    # compression.  prompt_tokens + completion_tokens is the
-                    # actual context size the provider reported plus the
-                    # assistant turn — a tight lower bound for the next prompt.
-                    # Tool results appended above aren't counted yet, but the
-                    # threshold (default 50%) leaves ample headroom; if tool
-                    # results push past it, the next API call will report the
-                    # real total and trigger compression then.
+                    # Decide compression off the best available measurement.
+                    # Real-count mode: the last API call's provider-reported
+                    # prompt_tokens is ground truth for "context size as of
+                    # that call"; the assistant turn + tool results appended
+                    # above are estimated as a DELTA on top (never the whole
+                    # conversation). When no valid real count exists (fresh
+                    # session, post-compaction -1 sentinel, list mutated
+                    # beyond appends, usage never reported — #2153), fall
+                    # back to the historical estimate path.
                     #
-                    # If last_prompt_tokens is 0 (stale after API disconnect
-                    # or provider returned no usage data), fall back to rough
-                    # estimate to avoid missing compression.  Without this,
-                    # a session can grow unbounded after disconnects because
-                    # should_compress(0) never fires.  (#2153)
+                    # Trigger line = min(threshold_line, window - reserve):
+                    # real-count mode defaults the threshold_line to 0.90 of
+                    # the window, estimate mode keeps 0.85, a user-pinned
+                    # compression.threshold wins over both, and the fixed
+                    # output reserve guarantees the next call's output plus
+                    # the compaction request itself always fit. Only
+                    # prompt-side tokens are measured — completion/reasoning
+                    # tokens don't consume context window space (#12026).
+                    from agent.conversation_compression import (
+                        resolve_compression_pressure as _resolve_pressure,
+                        should_compress_now as _should_compress_now,
+                        should_prune_only_now as _should_prune_only_now,
+                    )
                     _compressor = self.context_compressor
-                    if _compressor.last_prompt_tokens > 0:
-                        # Only use prompt_tokens — completion/reasoning
-                        # tokens don't consume context window space.
-                        # Thinking models (GLM-5.1, QwQ, DeepSeek R1)
-                        # inflate completion_tokens with reasoning,
-                        # causing premature compression.  (#12026)
-                        _real_tokens = _compressor.last_prompt_tokens
-                    elif _compressor.last_prompt_tokens == -1:
-                        # Compression just ran and no API-reported prompt count
-                        # has arrived yet — don't recompute pressure from the
-                        # schema-heavy rough estimate (it would re-fire
-                        # compaction immediately). (Matches Hermes e38b0b55d.)
-                        _real_tokens = 0
-                    else:
-                        _real_tokens = estimate_messages_tokens_rough(messages)
+                    _real_tokens, _trigger_tokens, _real_mode = _resolve_pressure(
+                        _compressor,
+                        getattr(self, "_usage_projector", None),
+                        messages,
+                        output_reserve_tokens=getattr(
+                            self, "_compression_output_reserve_tokens", 0
+                        ),
+                        threshold_pinned=getattr(
+                            self, "_compression_threshold_pinned", False
+                        ),
+                    )
 
-                    if self.compression_enabled and _compressor.should_compress(_real_tokens):
+                    if self.compression_enabled and _should_compress_now(
+                        _compressor, _real_tokens, _trigger_tokens
+                    ):
                         self._safe_print("  ⟳ compacting context…")
+                        logger.info(
+                            "Compaction trigger: ~%s tokens >= %s line (%s mode, "
+                            "window %s, reserve %s)",
+                            f"{_real_tokens:,}", f"{_trigger_tokens:,}",
+                            "real-count" if _real_mode else "estimate",
+                            f"{_compressor.context_length:,}",
+                            f"{getattr(self, '_compression_output_reserve_tokens', 0):,}",
+                        )
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
                             approx_tokens=self.context_compressor.last_prompt_tokens,
@@ -13062,7 +13175,9 @@ class AIAgent:
                         conversation_history = None
                     elif (
                         self.compression_enabled
-                        and _compressor.should_prune_only(_real_tokens)
+                        and _should_prune_only_now(
+                            _compressor, _real_tokens, _trigger_tokens
+                        )
                     ):
                         # Soft stage: cheap no-LLM hygiene (strip historical
                         # media, compact skill payloads, prune old tool

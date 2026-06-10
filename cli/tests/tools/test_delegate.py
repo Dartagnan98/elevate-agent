@@ -58,6 +58,23 @@ def _make_mock_parent(depth=0):
     return parent
 
 
+def _make_mock_child(**attrs):
+    """Create a mock child AIAgent safe to feed through delegate_task.
+
+    delegate_task serializes fields read straight off the child agent
+    (e.g. ``child_session_id`` from ``child.session_id``) with json.dumps.
+    A bare MagicMock auto-generates MagicMock attributes for those reads,
+    which are not JSON serializable — so pin every serialized attribute
+    to a real primitive here instead of loosening the product code.
+    """
+    child = MagicMock()
+    child.session_id = "child-session-test"
+    child.session_estimated_cost_usd = 0.0
+    for key, value in attrs.items():
+        setattr(child, key, value)
+    return child
+
+
 class TestDelegateRequirements(unittest.TestCase):
     def test_always_available(self):
         self.assertTrue(check_delegate_requirements())
@@ -322,7 +339,7 @@ class TestDelegateTask(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -336,7 +353,7 @@ class TestDelegateTask(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -353,7 +370,7 @@ class TestDelegateTask(unittest.TestCase):
         parent.api_mode = "codex_responses"
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "ok",
                 "completed": True,
@@ -375,7 +392,7 @@ class TestDelegateTask(unittest.TestCase):
         parent._print_fn = sink
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             MockAgent.return_value = mock_child
 
             _build_child_agent(
@@ -396,7 +413,7 @@ class TestDelegateTask(unittest.TestCase):
         parent.tool_progress_callback = MagicMock()
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             MockAgent.return_value = mock_child
 
             _build_child_agent(
@@ -429,7 +446,7 @@ class TestToolNamePreservation(unittest.TestCase):
         model_tools._last_resolved_tool_names = list(original_tools)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1,
             }
@@ -448,7 +465,7 @@ class TestToolNamePreservation(unittest.TestCase):
         model_tools._last_resolved_tool_names = list(original_tools)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.side_effect = RuntimeError("boom")
             MockAgent.return_value = mock_child
 
@@ -497,7 +514,7 @@ class TestToolNamePreservation(unittest.TestCase):
         captured = {}
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
 
             def capture_and_return(user_message, task_id=None):
                 captured["saved"] = list(mock_child._delegate_saved_tool_names)
@@ -519,7 +536,7 @@ class TestDelegateObservability(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 5000
             mock_child.session_completion_tokens = 1200
@@ -560,7 +577,7 @@ class TestDelegateObservability(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 0
             mock_child.session_completion_tokens = 0
@@ -587,7 +604,7 @@ class TestDelegateObservability(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 3000
             mock_child.session_completion_tokens = 800
@@ -636,7 +653,7 @@ class TestDelegateObservability(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 0
             mock_child.session_completion_tokens = 0
@@ -657,7 +674,7 @@ class TestDelegateObservability(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 0
             mock_child.session_completion_tokens = 0
@@ -692,7 +709,7 @@ class TestSubagentCostRollup(unittest.TestCase):
         parent = self._make_parent_with_cost_counters(starting_cost=0.10)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.model = "claude-sonnet-4-6"
             mock_child.session_prompt_tokens = 1000
             mock_child.session_completion_tokens = 200
@@ -1120,7 +1137,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -1157,7 +1174,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent.api_key = "nous-key-abc"
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -1198,7 +1215,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent.provider_sort = "price"
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done",
                 "completed": True,
@@ -1234,7 +1251,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -1264,7 +1281,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -1314,7 +1331,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         # (agents are built in the main thread before being handed to workers)
         with patch("tools.delegate_tool._build_child_agent") as mock_build, \
              patch("tools.delegate_tool._run_single_child") as mock_run:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_build.return_value = mock_child
             mock_run.return_value = {
                 "task_index": 0, "status": "completed",
@@ -1354,7 +1371,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
 
         with patch("tools.delegate_tool._build_child_agent") as mock_build, \
              patch("tools.delegate_tool._run_single_child") as mock_run:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_build.return_value = mock_child
             mock_run.return_value = {
                 "task_index": 0, "status": "completed",
@@ -1390,7 +1407,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
         parent = _make_mock_parent(depth=0)
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True, "api_calls": 1
             }
@@ -1460,7 +1477,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         parent._credential_pool = mock_pool
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             MockAgent.return_value = mock_child
 
             _build_child_agent(
@@ -1482,7 +1499,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         parent.enabled_toolsets = ["web", "browser", "mcp-MiniMax"]
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             MockAgent.return_value = mock_child
 
             _build_child_agent(
@@ -1510,7 +1527,7 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         parent.enabled_toolsets = ["web", "browser", "mcp-MiniMax"]
 
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             MockAgent.return_value = mock_child
 
             _build_child_agent(
@@ -1883,7 +1900,7 @@ class TestDispatchDelegateTask(unittest.TestCase):
         }
         parent = _make_mock_parent(depth=0)
         with patch("tools.delegate_tool._build_child_agent") as mock_build:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True,
                 "api_calls": 1, "messages": [],
@@ -2127,7 +2144,7 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         }
         parent = _make_mock_parent(depth=0)
         with patch("run_agent.AIAgent") as MockAgent:
-            mock_child = MagicMock()
+            mock_child = _make_mock_child()
             mock_child.run_conversation.return_value = {
                 "final_response": "done", "completed": True,
                 "api_calls": 1, "messages": [],
@@ -2210,7 +2227,7 @@ _SENTINEL = object()
 
 def _make_role_mock_child():
     """Helper: mock child with minimal fields for delegate_task to process."""
-    mock_child = MagicMock()
+    mock_child = _make_mock_child()
     mock_child.run_conversation.return_value = {
         "final_response": "done", "completed": True,
         "api_calls": 1, "messages": [],
