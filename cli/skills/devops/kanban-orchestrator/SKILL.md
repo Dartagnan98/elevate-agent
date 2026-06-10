@@ -1,7 +1,7 @@
 ---
 name: kanban-orchestrator
 description: Decomposition playbook + anti-temptation rules for an orchestrator profile routing work through Kanban. The "don't do the work yourself" rule and the basic lifecycle are auto-injected into every kanban worker's system prompt; this skill is the deeper playbook when you're specifically playing the orchestrator role.
-version: 3.0.0
+version: 3.0.1
 platforms: [linux, macos, windows]
 metadata:
   hermes:
@@ -38,7 +38,7 @@ Create Kanban tasks when any of these are true:
 3. **The user might want to interject.** Human-in-the-loop at any step.
 4. **Multiple subtasks can run in parallel.** Fan-out for speed.
 5. **Review / iteration is expected.** A reviewer profile loops on drafter output.
-6. **The audit trail matters.** Board rows persist in SQLite forever.
+6. **The audit trail matters.** Board rows persist durably in the operational store (the per-account embedded Postgres database) forever.
 
 If *none* of those apply — it's a small one-shot reasoning task — use `delegate_task` instead or answer the user directly.
 

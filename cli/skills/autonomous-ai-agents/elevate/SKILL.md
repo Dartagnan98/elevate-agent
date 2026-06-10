@@ -607,7 +607,7 @@ elevate/
 ├── model_tools.py        # Tool discovery and dispatch
 ├── toolsets.py           # Toolset definitions
 ├── cli.py                # Interactive CLI (ElevateCLI)
-├── elevate_state.py       # SQLite session store
+├── elevate_state.py       # Session store (PG-primary via embedded Postgres; legacy SQLite shim)
 ├── agent/                # Prompt builder, context compression, memory, model routing, credential pooling, skill dispatch
 ├── elevate_cli/           # CLI subcommands, config, setup, commands
 │   ├── commands.py       # Slash command registry (CommandDef)

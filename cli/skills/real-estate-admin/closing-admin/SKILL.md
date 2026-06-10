@@ -36,7 +36,7 @@ Do not mark closeout complete unless the required evidence is attached or manual
 
 ## Rules
 
-- Keep important dates visible and write changes back to SQLite.
+- Keep important dates visible and write changes back to the deal record in the operational store.
 - Do not close a deal just because the date passed.
 - Closeout is evidence-driven: attached docs, portal status, or explicit human confirmation.
 

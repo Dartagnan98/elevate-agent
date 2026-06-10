@@ -25,7 +25,7 @@ Do not advance the phase until the extracted terms are reviewed.
 
 ## Extracted Fields
 
-Capture these as SQLite deal facts and human-review fields:
+Capture these as deal facts in the operational store (via `admin_deal` / the result writer) and human-review fields:
 
 - Accepted offer date.
 - Subject removal date and all condition deadlines.

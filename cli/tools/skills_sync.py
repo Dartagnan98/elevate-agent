@@ -172,6 +172,44 @@ def _dir_hash(directory: Path) -> str:
     return hasher.hexdigest()
 
 
+# ── Corrective resync ──────────────────────────────────────────────────
+# Markers of the SQLite-era skill instructions that were rewritten for the
+# per-account Postgres data layer (2026-06). A skill on disk still carrying
+# any of these points an agent at a frozen archive and will misbehave. When
+# the bundled version no longer carries the marker but the on-disk copy does,
+# the on-disk "modification" IS the bug — so we force-replace it even past the
+# normal user-modified guard. Self-clearing: once replaced the marker is gone
+# and this never fires for that skill again. A genuine user customization would
+# not contain these removed-store references, so real edits are never clobbered.
+_STALE_CONTENT_MARKERS: tuple = (
+    "operational.db",
+    "memory_store.db",
+    "orchestration.db",
+    "response_store.db",
+    "usage_ledger.sqlite",
+    "Treat SQLite as source of truth",
+    "so SQLite can update",
+    "SQLite closure",
+    "Deal source: SQLite",
+    "Board rows persist in SQLite",
+)
+
+
+def _skill_has_stale_content(skill_dir: Path) -> bool:
+    """True if any markdown file under ``skill_dir`` contains a stale marker."""
+    try:
+        for md in skill_dir.rglob("*.md"):
+            try:
+                text = md.read_text(encoding="utf-8", errors="ignore")
+            except (OSError, IOError):
+                continue
+            if any(marker in text for marker in _STALE_CONTENT_MARKERS):
+                return True
+    except (OSError, IOError):
+        pass
+    return False
+
+
 def sync_skills(quiet: bool = False) -> dict:
     """
     Sync bundled skills into ~/.elevate/skills/ using the manifest.
@@ -195,7 +233,32 @@ def sync_skills(quiet: bool = False) -> dict:
     copied = []
     updated = []
     user_modified = []
+    corrected = []
     skipped = 0
+
+    # Corrective pass: force-replace on-disk skills still carrying removed-store
+    # markers (SQLite-era instructions). Runs BEFORE the normal loop — it drops
+    # the manifest entry and removes the stale copy so the loop re-copies the
+    # fixed bundled version through the standard (safe) path. Only fires when the
+    # bundled version is clean, so it can't reintroduce a marker, and never
+    # touches a skill whose disk copy is already clean.
+    for skill_name, skill_src in bundled_skills:
+        dest = _compute_relative_dest(skill_src, bundled_dir)
+        if not dest.exists():
+            continue
+        if _skill_has_stale_content(dest) and not _skill_has_stale_content(skill_src):
+            try:
+                backup = dest.with_suffix(".stale-bak")
+                if backup.exists():
+                    shutil.rmtree(backup, ignore_errors=True)
+                shutil.move(str(dest), str(backup))
+                manifest.pop(skill_name, None)
+                corrected.append(skill_name)
+                if not quiet:
+                    print(f"  ⟳ {skill_name} (corrected: removed-store reference replaced)")
+            except (OSError, IOError) as e:
+                if not quiet:
+                    print(f"  ! Failed to correct {skill_name}: {e}")
 
     for skill_name, skill_src in bundled_skills:
         dest = _compute_relative_dest(skill_src, bundled_dir)
@@ -311,6 +374,7 @@ def sync_skills(quiet: bool = False) -> dict:
         "updated": updated,
         "skipped": skipped,
         "user_modified": user_modified,
+        "corrected": corrected,
         "cleaned": cleaned,
         "total_bundled": len(bundled_skills),
     }

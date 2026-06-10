@@ -1,7 +1,7 @@
 ---
 name: outreach-lanes
 description: Run an outreach lane (new outreach, hot leads watcher, follow-ups). Pull leads from connected sources, pick a template, draft an approval-gated message, log the attempt for outcome learning.
-version: 1.1.0
+version: 1.2.0
 metadata:
   elevate:
     tags: [outreach, leads, sales, real-estate]
@@ -91,11 +91,15 @@ At end of run, report progress via `POST /api/cron/jobs/{job_id}/backfill/progre
 {
   "queued_today": 17,
   "eligible_remaining": 312,
-  "total_estimate": 410
+  "total_estimate": 410,
+  "run_id": "<one id you generate at the start of this run>",
+  "checkpoint": false
 }
 ```
 
 The backend bumps `backfill_state.day` and clears `backfill_pending` automatically when `eligible_remaining` reaches 0. Subsequent runs use the incremental window (only new since last run), which is the default behavior when `backfill_pending` is false.
+
+**Crash-safe protocol (optional but preferred):** `run_id` and `checkpoint` make progress reporting safe across crashes. Generate one `run_id` at the start of the run and pass the SAME value on every report from that run — the backend bumps `backfill_state.day` only once per `run_id`, so re-reports don't double-advance. While still working, you may post intermediate snapshots with `"checkpoint": true` (counts persisted, day not finalized); send the final report with `"checkpoint": false`. If a previous run crashed mid-backfill, `GET /api/cron/jobs/{job_id}/backfill` returns the last persisted `backfill_state` — resume from it instead of recounting from scratch.
 
 ### 3. Pick a template
 

@@ -26,7 +26,7 @@ This skill syncs the configured brokerage compliance portal. The portal may be S
 2. Open the configured compliance portal through Browser Use or provider connector.
 3. Pull transaction status, checklist status, required/missing documents, comments, and available files.
 4. Attach downloaded files to the deal when the match is proven.
-5. Write missing-document tasks back to SQLite.
+5. Write missing-document tasks back to the deal record in the operational store.
 6. Close through `admin-result-writer`.
 
 ## Rules

@@ -13,7 +13,7 @@ metadata:
 
 Use for active listings after the listing is live.
 
-Pull showing feedback and listing activity from the configured showing platform/browser workflow. Match each listing to a deal with MLS number first, then address and contact verifiers. Write the digest to SQLite and create a seller-update Gmail/Outlook draft.
+Pull showing feedback and listing activity from the configured showing platform/browser workflow. Match each listing to a deal with MLS number first, then address and contact verifiers. Write the digest to the deal record in the operational store and create a seller-update Gmail/Outlook draft.
 
 Never send directly. If listing identity, MLS number, showing-platform access, or email draft access is missing, close as `waiting_human`.
 

@@ -23,7 +23,7 @@ Read these from onboarding/profile settings, not hardcoded paths:
 
 - Email provider: Gmail, Outlook, or another connected inbox.
 - Storage provider: Drive, Dropbox, local folder, or compliance portal.
-- Deal source: SQLite operational database.
+- Deal source: the operational store (per-account embedded Postgres, via `admin_deal` / the data layer).
 - Document source rules: known senders, allowed file types, signature-image filters, and duplicate policy.
 - Admin approval lane for unmatched or ambiguous docs.
 

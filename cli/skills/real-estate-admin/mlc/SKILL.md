@@ -35,7 +35,7 @@ Convert relative dates to absolute dates before creating forms.
 
 | Phase | Output | Human Checkpoint |
 | --- | --- | --- |
-| intake | Normalized deal/listing facts in SQLite. | Missing seller/property/price/commission fields. |
+| intake | Normalized deal/listing facts in the operational store. | Missing seller/property/price/commission fields. |
 | folder | Listing folder and property lookup artifacts. | Storage/provider connection missing. |
 | title/legal | PID, legal description, ownership facts, title risk notes. | Legal identity uncertainty. |
 | fill | Filled MLC/listing document drafts and validation result. | Required before signing send. |

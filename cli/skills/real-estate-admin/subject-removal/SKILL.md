@@ -12,7 +12,7 @@ metadata:
 
 Use after an accepted offer is active and subject-removal work starts.
 
-Prepare subject-removal document tasks, deposit receipt checks, lawyer info, sold rider/sign needs, and title charge review notes. Keep important dates in SQLite.
+Prepare subject-removal document tasks, deposit receipt checks, lawyer info, sold rider/sign needs, and title charge review notes. Keep important dates on the deal record in the operational store.
 
 Human confirmation is required before the subject-removal phase is marked complete.
 
@@ -37,7 +37,7 @@ Human confirmation is required before the subject-removal phase is marked comple
 
 ## Rules
 
-- Date deadlines are move-forward signals. Keep them in SQLite important dates.
+- Date deadlines are move-forward signals. Keep them in the deal's important dates in the operational store.
 - If a condition is waived/removed manually, record the human confirmation as evidence.
 - Do not mark the deal sold/firm unless the required subject-removal evidence exists or the human explicitly confirms.
 

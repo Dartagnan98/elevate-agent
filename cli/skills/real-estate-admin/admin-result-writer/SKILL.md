@@ -1,9 +1,9 @@
 ---
 name: admin-result-writer
-description: Shared helper contract for writing Admin skill results back to SQLite deal runs with checklist updates, artifacts, next tasks, human prompts, and idempotency keys.
+description: Shared helper contract for writing Admin skill results back to operational-store deal runs with checklist updates, artifacts, next tasks, human prompts, and idempotency keys.
 metadata:
   elevate:
-    tags: [real-estate, admin, sqlite, callback]
+    tags: [real-estate, admin, operational-store, callback]
     runtime:
       writes_deal: true
       requires_idempotency_key: true
@@ -58,7 +58,7 @@ Examples:
 - `seller-update:deal123:2026-05-13:weekly-digest`
 - `mlc:deal123:filled-mlc-v1`
 
-On retry, reuse the same key so SQLite can update or ignore the existing result instead of duplicating artifacts or next tasks.
+On retry, reuse the same key so the operational store can update or ignore the existing result instead of duplicating artifacts or next tasks.
 
 ## Human Prompts
 

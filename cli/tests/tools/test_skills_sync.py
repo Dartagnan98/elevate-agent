@@ -251,6 +251,52 @@ class TestSyncSkills:
         assert "old-skill" not in result.get("updated", [])
         assert not (skills_dir / "old-skill").exists()
 
+    def test_corrective_pass_replaces_stale_user_modified_skill(self, tmp_path):
+        """A user-MODIFIED skill still carrying a removed-store marker is force-
+        replaced (the modification IS the bug), unlike a normal user edit."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        # User's on-disk old-skill carries a stale SQLite marker AND differs
+        # from origin (so the normal path would skip it as user-modified).
+        user_skill = skills_dir / "old-skill"
+        user_skill.mkdir(parents=True)
+        (user_skill / "SKILL.md").write_text(
+            "# Old\nDeal source: SQLite operational.db is the source of truth."
+        )
+        # Manifest origin = some other hash → normally user_modified → skipped.
+        manifest_file.write_text("old-skill:deadbeefdeadbeefdeadbeefdeadbeef\n")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        # Corrected, not skipped as user-modified; bundled content is now on disk.
+        assert "old-skill" in result["corrected"]
+        assert "old-skill" not in result["user_modified"]
+        assert (user_skill / "SKILL.md").read_text() == "# Old"
+        # Stale copy preserved as a backup, not destroyed.
+        assert (skills_dir / "old-skill.stale-bak" / "SKILL.md").exists()
+
+    def test_corrective_pass_ignores_clean_user_modified_skill(self, tmp_path):
+        """A genuine user edit with NO stale marker is left alone (not corrected)."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        user_skill = skills_dir / "old-skill"
+        user_skill.mkdir(parents=True)
+        (user_skill / "SKILL.md").write_text("# Old\nMy own custom workflow notes.")
+        manifest_file.write_text("old-skill:deadbeefdeadbeefdeadbeefdeadbeef\n")
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert "old-skill" not in result["corrected"]
+        assert "old-skill" in result["user_modified"]
+        # Their edit is preserved untouched.
+        assert "custom workflow" in (user_skill / "SKILL.md").read_text()
+
     def test_unmodified_skill_gets_updated(self, tmp_path):
         """Skill in manifest + on disk + user hasn't modified = update from bundled."""
         bundled = self._setup_bundled(tmp_path)
