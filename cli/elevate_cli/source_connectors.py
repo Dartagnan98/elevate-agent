@@ -5244,7 +5244,8 @@ def _resolve_crm_context(
     env_values = _combined_env(config)
     integrations = _as_dict(config.get("integrations"))
     crm = _merge_crm(integrations.get("crm"))
-    provider = str(crm.get("provider") or "lofty").lower()
+    # Honor whatever CRM was picked at onboarding/config — never assume Lofty.
+    provider = _canonical_crm_provider(crm.get("provider"))
     env_key = str(crm.get("api_key_env") or "CRM_API_KEY")
     api_key = str(env_values.get(env_key) or "").strip()
     if not api_key and provider == "lofty":
@@ -6593,9 +6594,12 @@ DEFAULT_CRM = {
 
 _CRM_PROVIDER_ALIASES = {
     "lofty": "lofty",
+    "lofty crm": "lofty",
+    "loftycrm": "lofty",
     "chime": "lofty",  # Chime → Lofty rebrand
     "follow up boss": "followupboss",
     "followupboss": "followupboss",
+    "follow up boss crm": "followupboss",
     "fub": "followupboss",
     "sierra": "sierra",
     "sierra interactive": "sierra",
@@ -6605,6 +6609,23 @@ _CRM_PROVIDER_ALIASES = {
     "kvcore / boldtrail": "boldtrail",
     "brivity": "brivity",
 }
+
+
+def _canonical_crm_provider(raw: Any) -> str:
+    """Normalize whatever provider was picked at onboarding (or in config) to a
+    canonical slug the crm_* write functions branch on. Tolerates display forms
+    like "Lofty CRM" / "Sierra Interactive". Returns "" when nothing is set —
+    we NEVER assume a default provider."""
+    s = str(raw or "").strip().lower()
+    if not s:
+        return ""
+    if s in _CRM_PROVIDER_ALIASES:
+        return _CRM_PROVIDER_ALIASES[s]
+    # Tolerate a trailing "crm" suffix ("lofty crm", "loftycrm") before lookup.
+    trimmed = s[:-3].strip() if s.endswith("crm") else s
+    if trimmed in _CRM_PROVIDER_ALIASES:
+        return _CRM_PROVIDER_ALIASES[trimmed]
+    return trimmed.replace(" ", "")
 
 
 _CRM_PROVIDER_ENV_DEFAULTS = {
@@ -6641,10 +6662,7 @@ def _provider_from_admin_profile() -> str:
         return ""
     # Row may be a tuple or a Row-like depending on cursor settings.
     raw_val = row[0] if not hasattr(row, "keys") else row["crm_provider"]
-    raw = str(raw_val or "").strip().lower()
-    if not raw:
-        return ""
-    return _CRM_PROVIDER_ALIASES.get(raw, raw.replace(" ", ""))
+    return _canonical_crm_provider(raw_val)
 
 
 def _merge_crm(raw: Any) -> JsonRecord:
