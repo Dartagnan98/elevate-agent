@@ -362,6 +362,17 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
                 ),
             },
             {
+                "key": "appointment-confirmation",
+                "name": "Leads · Appointment & Showing Confirmation",
+                "schedule": "0 8,15 * * *",
+                "goal": (
+                    "ONLY booked appointments and showings in the next ~48h. Read the realtor's "
+                    "calendar and each attendee's thread; for any not already confirmed, draft (never "
+                    "send) a confirmation/reminder and flag reschedule requests or conflicts. Skip "
+                    "anything already confirmed. 'all quiet' if every upcoming appointment is locked."
+                ),
+            },
+            {
                 "key": "re-engagement",
                 "name": "Leads · Re-engagement",
                 "schedule": "0 8 * * 1",
@@ -385,22 +396,69 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "schedule": "30 7 * * *",
         "config": {"agent": "admin"},
         "goal": (
-            "Run the admin board CONTEXT-FIRST: read where things actually stand (Gmail, Google "
-            "Calendar, Google Drive, and the dashboard tasks/deals/approvals) before acting, and "
-            "flag only genuine gaps. Split across focused heartbeats: deadline & contingency watch "
-            "and agenda & conflicts."
+            "Run the admin board CONTEXT-FIRST: read where things actually stand (the realtor's "
+            "connected transaction-management board, Gmail, Google Calendar, Google Drive, deal "
+            "message threads, and the dashboard tasks/deals/approvals) before acting, and surface "
+            "only genuine changes and questions. Split across focused heartbeats: morning transaction-"
+            "board review, inbox & message triage, document routing, stage & deadline watch, and "
+            "agenda & conflicts."
         ),
         "heartbeats": [
             {
+                "key": "transaction-board-review",
+                "name": "Admin · Transaction Board Review",
+                "schedule": "0 7 * * *",
+                "goal": (
+                    "Every morning, look over the realtor's connected transaction-management board — "
+                    "their configured compliance/admin platform (e.g. SkySlope, Lone Wolf, dotloop — "
+                    "whichever they set at onboarding; use the sync skill if one exists, otherwise "
+                    "sign in to the portal) — plus each active deal's message threads. Reconcile "
+                    "against the Elevate deal record and what you flagged last run. Surface ONLY what "
+                    "CHANGED since the last review (status moves, new or outstanding broker/compliance "
+                    "items, new documents, party replies) and ONLY questions you genuinely need the "
+                    "realtor to answer — draft, never send. 'all quiet' if nothing changed and nothing "
+                    "needs them."
+                ),
+            },
+            {
+                "key": "inbox-triage",
+                "name": "Admin · Inbox & Message Triage",
+                "schedule": "0 8,11,14,17 * * *",
+                "goal": (
+                    "ONLY unaddressed inbound since the last run. Scan the connected Gmail and deal "
+                    "message threads (sellers, buyers, the other agent, lawyer/notary, lender, "
+                    "vendors) for anything not yet handled. Reconcile against what's already answered, "
+                    "drafted, or filed — SKIP those. For each genuine unaddressed item: classify it, "
+                    "draft (never send) the reply or create the review task on the right deal, and "
+                    "flag anything that needs the realtor. 'all quiet' if the inbox is clear."
+                ),
+            },
+            {
+                "key": "doc-routing",
+                "name": "Admin · Document Routing",
+                "schedule": "0 9,15 * * *",
+                "goal": (
+                    "ONLY inbound documents since the last run (Gmail attachments, Drive drops). For "
+                    "each: match it to the right deal and stage, route/file it where that deal's "
+                    "documents live, attach it to the deal record, and tick or create the matching "
+                    "checklist item — never send anything. Skip documents already filed. 'all quiet' "
+                    "if nothing new arrived."
+                ),
+            },
+            {
                 "key": "deadline-watch",
-                "name": "Admin · Deadline & Contingency Watch",
+                "name": "Admin · Stage, Deadline & Condition Watch",
                 "schedule": "30 7,13 * * *",
                 "experiment_owner": True,
                 "goal": (
-                    "ONLY deal deadlines, contingencies, and conditions. Read Gmail, Calendar, Drive, "
-                    "and the dashboard (tasks, deals, approvals) to see exactly where each deal "
-                    "stands. Flag ONLY genuine risk not already handled, on the calendar, or already "
-                    "flagged. 'all quiet' if nothing is at risk."
+                    "ONLY active deals' stage progress and deadline risk. For each active deal: "
+                    "reconcile its CURRENT board stage and read that stage's province-guide checklist "
+                    "(province_checklists / admin_deal show) alongside Gmail, Calendar, and Drive to "
+                    "see exactly what is done. Flag ONLY genuine gaps not already handled, on the "
+                    "calendar, or flagged — an unchecked item that's now due, a condition/deadline at "
+                    "risk, or a deal whose stage checklist is clear and ready to advance. Draft (never "
+                    "send) what's needed and note advance-ready deals for the realtor. 'all quiet' if "
+                    "every deal is on track."
                 ),
             },
             {
@@ -418,6 +476,126 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "every_n_runs": 7, "metric": "tasks_slipped", "metric_type": "qualitative",
             "direction": "lower", "window": "7d",
             "measurement": "Self-score 1-10 how well the agenda/flagging kept anything from slipping vs the prior cycle, with justification, until a real slipped-task metric is wired.",
+            "approval_required": False,
+        },
+    },
+    # Orchestrator (Executive Assistant) heartbeat — ported from the cortextOS
+    # orchestrator HEARTBEAT cadence (fleet health 4h, approval/human-task escalation
+    # 2h, morning + evening review), translated to Elevate-native (agent_bus, native
+    # Tasks/Comms/Approvals; approvals escalate on the DASHBOARD, never Telegram).
+    "executive-assistant": {
+        "name": "Executive Assistant Heartbeat",
+        "title": "Executive Assistant",
+        "schedule": "0 8 * * *",
+        "config": {"agent": "executive-assistant"},
+        "goal": (
+            "Coordinate the fleet Elevate-native: keep every agent alive and unblocked, escalate "
+            "aging approvals and [HUMAN] tasks to the realtor on the dashboard, and run the daily "
+            "goal cascade. Split across focused heartbeats: fleet health, approval escalation, and "
+            "morning/evening rhythm."
+        ),
+        "heartbeats": [
+            {
+                "key": "fleet-health",
+                "name": "EA · Fleet Health",
+                "schedule": "0 */4 * * *",
+                "goal": (
+                    "ONLY fleet health. Read every agent's heartbeat via agent_bus; flag any agent "
+                    "silent > 5h, nudge it, and note it in memory. Clear any of your own stale "
+                    "in-progress tasks and keep every agent unblocked. 'all quiet' if the fleet is "
+                    "healthy."
+                ),
+            },
+            {
+                "key": "approval-escalation",
+                "name": "EA · Approval & Human-Task Escalation",
+                "schedule": "0 */2 * * *",
+                "goal": (
+                    "ONLY approvals and [HUMAN] tasks. Surface every pending approval older than ~1h "
+                    "and every [HUMAN] task older than ~4h to the realtor ON THE DASHBOARD (never "
+                    "Telegram), and ACK related inbox messages. 'all quiet' if nothing is waiting."
+                ),
+            },
+            {
+                "key": "morning-rhythm",
+                "name": "EA · Morning Review & Goal Cascade",
+                "schedule": "0 8 * * *",
+                "experiment_owner": True,
+                "goal": (
+                    "Morning rhythm: run the morning review, cascade the day's goals to each agent, "
+                    "and prepare a tight briefing of the day's priorities plus the realtor's short "
+                    "decision list. Draft only."
+                ),
+            },
+            {
+                "key": "evening-rhythm",
+                "name": "EA · Evening Summary",
+                "schedule": "0 18 * * *",
+                "goal": (
+                    "Evening rhythm: summarize what shipped today and what's pending, queue safe "
+                    "overnight work, and surface anything aging. Draft only. 'all quiet' if the day "
+                    "closed clean."
+                ),
+            },
+        ],
+        "experiment": {
+            "every_n_runs": 7, "metric": "fleet_unblocked", "metric_type": "qualitative",
+            "direction": "higher", "window": "7d",
+            "measurement": "Self-score 1-10 how well the fleet stayed alive, unblocked, and on-goal vs the prior cycle, with justification, until a real fleet-health metric is wired.",
+            "approval_required": False,
+        },
+    },
+    # Analyst heartbeat — ported from the cortextOS analyst HEARTBEAT cadence (system
+    # health + agent-liveness 4h, usage/liveness pulse 2h, nightly metrics), Elevate-
+    # native (agent_bus + native signals).
+    "analyst": {
+        "name": "Analyst Heartbeat",
+        "title": "Analyst",
+        "schedule": "0 1 * * *",
+        "config": {"agent": "analyst"},
+        "goal": (
+            "Keep the system honest: monitor agent liveness, watch native signals for anomalies, and "
+            "collect pipeline metrics — reporting deltas to the Executive Assistant. Split across "
+            "focused heartbeats: system health, a liveness/usage pulse, and nightly metrics."
+        ),
+        "heartbeats": [
+            {
+                "key": "system-health",
+                "name": "Analyst · System Health & Liveness",
+                "schedule": "0 */4 * * *",
+                "experiment_owner": True,
+                "goal": (
+                    "ONLY system health. Read every agent's heartbeat via agent_bus; flag any silent "
+                    "> 5h (nudge) or > 8h (notify the Executive Assistant + log). Scan native signals "
+                    "— stalled deals, aging leads, leaking stages, failed runs — and surface genuine "
+                    "anomalies. 'all quiet' if the system is healthy."
+                ),
+            },
+            {
+                "key": "liveness-pulse",
+                "name": "Analyst · Liveness & Usage Pulse",
+                "schedule": "0 */2 * * *",
+                "goal": (
+                    "ONLY a fast liveness + usage pulse. Confirm agents are alive and check "
+                    "session-cost / usage signals; if anything is regressing or crosses a threshold, "
+                    "report it to the Executive Assistant and log it. 'all quiet' if steady."
+                ),
+            },
+            {
+                "key": "nightly-metrics",
+                "name": "Analyst · Nightly Metrics",
+                "schedule": "0 1 * * *",
+                "goal": (
+                    "Nightly metrics: collect pipeline / velocity / lead-source attribution metrics, "
+                    "log them to memory, and report anomalies or notable deltas to the Executive "
+                    "Assistant. Draft only."
+                ),
+            },
+        ],
+        "experiment": {
+            "every_n_runs": 7, "metric": "anomalies_caught", "metric_type": "qualitative",
+            "direction": "higher", "window": "7d",
+            "measurement": "Self-score 1-10 how well real issues were caught early and reported vs the prior cycle, with justification, until a real anomaly metric is wired.",
             "approval_required": False,
         },
     },
@@ -1317,8 +1495,60 @@ def ensure_memory_benchmark_job() -> Dict[str, Any]:
     )
 
 
+# ─── One-time fleet-rebuild hard replace (beta) ───────────────────────────────
+# The agent-rebuild release ships a completely new fleet (7 super-agents) and a
+# new focused-heartbeat layout. Existing installs carry the OLD stored agents and
+# OLD heartbeat/automation crons, which would shadow the rebuild and fire next to
+# the new units. This reset runs ONCE per account: purge the stored agents, every
+# surface heartbeat/automation/system-review cron, and the surface registry, then
+# let ensure_system_jobs() reseed the new fleet clean. Sentinel-gated so it never
+# wipes a customization made AFTER the upgrade.
+_FLEET_REBUILD_SENTINEL = ".fleet_rebuild_v1_applied"
+
+
+def _reset_fleet_for_rebuild() -> bool:
+    """Hard-replace the fleet + its heartbeats once per account. Returns True if
+    it ran this call, False if already applied (sentinel present)."""
+    sentinel = get_account_data_dir() / _FLEET_REBUILD_SENTINEL
+    if sentinel.exists():
+        return False
+
+    # 1) Remove every old fleet cron (heartbeats, automations, theta-wave).
+    fleet_origin_types = {"surface-heartbeat", "surface-automation", "system-review"}
+    for job in load_jobs():
+        if ((job.get("origin") or {}).get("type")) in fleet_origin_types:
+            try:
+                remove_job(job.get("id"))
+            except Exception:
+                pass
+
+    # 2) Clear the surface registry so built-ins reseed from the new defaults.
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state as ss
+        with connect() as conn:
+            for surface in list(ss.list_registry(conn).keys()):
+                ss.remove_registry(conn, surface)
+    except Exception:
+        pass
+
+    # 3) Hard-replace the stored agent roster with the new DEFAULT_AGENT_DEFS.
+    try:
+        from elevate_cli.agent_hub import reset_hub_agents_to_defaults
+        reset_hub_agents_to_defaults()
+    except Exception:
+        pass
+
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("applied\n", encoding="utf-8")
+    return True
+
+
 def ensure_system_jobs() -> List[Dict[str, Any]]:
     """Ensure repo-backed system cron jobs exist for the active Elevate home."""
+    # One-time hard replace of the pre-rebuild fleet + heartbeats (beta). Runs
+    # before any seeding so the reseed below starts from a clean slate.
+    _reset_fleet_for_rebuild()
     # Give every installed worker agent its own heartbeat surface before seeding,
     # so each gets its own theta-wave cycle + learnings.
     register_agent_surfaces()
