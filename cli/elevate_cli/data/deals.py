@@ -22,7 +22,7 @@ from elevate_cli.data._util import new_id, now_iso
 
 _VALID_SIDES = {"listing", "buyer"}
 _VALID_STATUSES = {"active", "closed", "archived"}
-_VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change", "run_result", "attachment_added", "contact_linked"}
+_VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change", "run_result", "attachment_added", "contact_linked", "agent_activity"}
 
 _ENUM_FIELDS = {
     "signing_authority",
@@ -1040,6 +1040,43 @@ def promote_profile_to_admin_deal(
             created_at=now,
         )
     return {"action": "updated", "matchReason": match_reason, "deal": get_deal(conn, existing["id"])}
+
+
+def record_deal_activity(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    actor: str,
+    summary: str,
+    tools: Sequence[str] | None = None,
+    session_id: str | None = None,
+    confidence: float | None = None,
+) -> dict[str, Any] | None:
+    """Mark that the agent worked AROUND a deal this turn without a formal
+    stage/checklist change (drafted a counter, read a contract, prepped docs).
+
+    Appends an ``agent_activity`` event and bumps ``deals.updated_at`` so the
+    board's freshness/ordering reflects the work. Returns the event, or None if
+    the deal no longer exists (best-effort: never raises for a stale id).
+    """
+    if get_deal(conn, deal_id) is None:
+        return None
+    now = now_iso()
+    event = _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="agent_activity",
+        actor=actor,
+        payload={
+            "summary": summary[:500],
+            "tools": list(tools or [])[:20],
+            "sessionId": session_id,
+            "confidence": confidence,
+        },
+        created_at=now,
+    )
+    conn.execute("UPDATE deals SET updated_at=? WHERE id=?", (now, deal_id))
+    return event
 
 
 def move_deal_stage(

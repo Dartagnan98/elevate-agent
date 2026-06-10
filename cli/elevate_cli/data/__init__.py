@@ -57,6 +57,7 @@ from elevate_cli.data.conversations import (
 from elevate_cli.data.events import (
     record_attribution_ambiguous,
     record_classification,
+    record_agent_activity,
     record_draft,
     record_inbound,
     record_ingest_marker,
@@ -145,6 +146,7 @@ from elevate_cli.data.deals import (
     list_deals,
     move_deal_stage,
     promote_profile_to_admin_deal,
+    record_deal_activity,
     record_run_result,
     set_deal_dates,
     set_deal_fields,
@@ -288,6 +290,7 @@ __all__ = [
     "get_conversations_for_contact", "get_or_create_conversation",
     "set_heat", "update_conversation_status",
     # events
+    "record_agent_activity",
     "record_attribution_ambiguous", "record_classification", "record_draft",
     "record_inbound", "record_ingest_marker", "record_lifecycle",
     "record_outbound", "record_pcs_activity", "record_reply_attributed",
@@ -321,6 +324,7 @@ __all__ = [
     "get_deal", "get_deal_context", "list_deal_action_runs",
     "list_deal_attachments", "list_deal_contacts", "list_deal_events",
     "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
+    "record_deal_activity",
     "promote_profile_to_admin_deal", "set_deal_dates",
     "set_deal_fields", "set_deal_money", "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)

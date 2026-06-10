@@ -234,6 +234,41 @@ def record_classification(
     )
 
 
+def record_agent_activity(
+    conn: sqlite3.Connection,
+    *,
+    contact_id: str,
+    actor: str,
+    summary: str,
+    tools: Any = None,
+    session_id: str | None = None,
+    confidence: float | None = None,
+    ts: str | None = None,
+) -> dict[str, Any]:
+    """Mark that the agent worked a contact this turn (drafted a reply,
+    enriched, researched) without a formal inbound/outbound/lifecycle event.
+
+    Bumps ``last_activity_at`` (via the shared insert path) without writing to
+    the human-owned ``owner_notes`` field. Best-effort: callers wrap in
+    try/except so an attribution write never breaks a turn."""
+    return _insert_event(
+        conn,
+        contact_id=contact_id,
+        conversation_id=None,
+        kind="agent_activity",
+        channel=None,
+        source_id="agent:activity",
+        actor=actor,
+        payload={
+            "summary": str(summary)[:500],
+            "tools": list(tools or [])[:20],
+            "sessionId": session_id,
+            "confidence": confidence,
+        },
+        ts=ts,
+    )
+
+
 def record_lifecycle(
     conn: sqlite3.Connection,
     *,

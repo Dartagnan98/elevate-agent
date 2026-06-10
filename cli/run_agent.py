@@ -13689,6 +13689,21 @@ class AIAgent:
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)
 
+        # Post-turn entity attribution: if this turn worked a deal/contact
+        # (drafted, read docs, researched) without a formal admin_deal update,
+        # record an activity marker so the board's freshness reflects the work.
+        # Self-gated to real-estate accounts; never raises.
+        if not interrupted:
+            try:
+                from agent.turn_attribution import attribute_turn_safely
+                attribute_turn_safely(
+                    messages,
+                    agent_id=getattr(self, "_agent_id", "") or "",
+                    session_id=self.session_id,
+                )
+            except Exception as exc:
+                logger.debug("turn attribution hook failed: %s", exc)
+
         # Extract reasoning from the last assistant message (if any)
         last_reasoning = None
         for msg in reversed(messages):
