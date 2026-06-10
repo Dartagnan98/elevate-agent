@@ -8739,6 +8739,29 @@ function SubagentSummaryRow({
   );
 }
 
+// An agent handoff shown inline in the turn — "Handed off to Admin" — so work
+// crossing agents is visible in the thread, not just the background panel.
+function HandoffRow({ tool }: { tool: ToolEntry }) {
+  const target = useMemo(() => {
+    try {
+      const obj = JSON.parse(tool.context || "") as Record<string, unknown>;
+      const v = obj.to_agent_id ?? obj.to_agent ?? obj.agent ?? obj.target;
+      return typeof v === "string" ? v.trim() : "";
+    } catch {
+      return "";
+    }
+  }, [tool.context]);
+  const label = target
+    ? target.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : "another agent";
+  return (
+    <div className="flex items-center gap-2 rounded-[6px] px-1 py-0.5 text-[12.5px] leading-5 text-[var(--chat-muted-strong)]">
+      <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)] opacity-90" />
+      <span className="min-w-0 flex-1 truncate">Handed off to {label}</span>
+    </div>
+  );
+}
+
 // A quiet per-turn footer below the answer: duration · model · tokens · cost.
 // Shows whatever is known — duration/out-tokens come from the turn itself;
 // model/in-tokens/cost arrive from the turn_usage join on resume.
@@ -8847,6 +8870,10 @@ function ChatActivityDigest({
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
     [tools],
   );
+  const handoffTools = useMemo(
+    () => tools.filter((tool) => tool.name.toLowerCase() === "agent_handoff"),
+    [tools],
+  );
 
   // Live "effort" descriptor, derived honestly from how much reasoning the turn
   // is actually producing — no faked level. Mirrors Claude Code's
@@ -8906,6 +8933,14 @@ function ChatActivityDigest({
               subagent={s}
               onOpen={onOpenSubagent}
             />
+          ))}
+        </div>
+      )}
+
+      {handoffTools.length > 0 && (
+        <div className="mb-2.5 space-y-1">
+          {handoffTools.map((tool) => (
+            <HandoffRow key={tool.id} tool={tool} />
           ))}
         </div>
       )}
