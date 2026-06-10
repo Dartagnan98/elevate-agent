@@ -702,25 +702,58 @@ export function ArtifactsPanel<T extends ArtifactListItem>({
   onOpen: (item: T) => void;
   onClose: () => void;
 }) {
-  // Newest first.
-  const items = useMemo(() => artifacts.slice().reverse(), [artifacts]);
+  // Newest first, then bucketed by kind so the panel is a structured library
+  // (Changes / Images / Documents / Outputs) instead of one flat pile.
+  const groups = useMemo(() => {
+    const newest = artifacts.slice().reverse();
+    const isImage = (k: string, p?: string) =>
+      k === "image" || (!!p && /\.(png|jpe?g|gif|webp|svg|avif)$/i.test(p));
+    const defs: { key: string; label: string; match: (k: string, p?: string) => boolean }[] = [
+      { key: "changes", label: "Changes", match: (k) => k === "diff" },
+      { key: "images", label: "Images", match: isImage },
+      {
+        key: "documents",
+        label: "Documents",
+        match: (k, p) =>
+          !isImage(k, p) && (k === "pdf" || k === "text" || k === "html" || k === "file"),
+      },
+      { key: "outputs", label: "Outputs", match: (k) => k === "output" },
+    ];
+    const buckets = defs.map((d) => ({ ...d, items: [] as T[] }));
+    const other: T[] = [];
+    for (const item of newest) {
+      const hit = buckets.find((b) => b.match(item.kind, item.path));
+      (hit ? hit.items : other).push(item);
+    }
+    const out = buckets.filter((b) => b.items.length);
+    if (other.length) out.push({ key: "other", label: "Other", match: () => false, items: other });
+    return out;
+  }, [artifacts]);
+  const total = artifacts.length;
   return (
     <PanelShell
       icon={<FileStack className="h-4.5 w-4.5" />}
       title="Artifacts"
-      subtitle={items.length ? `${items.length} this session` : "Generated files & previews"}
+      subtitle={total ? `${total} this session` : "Generated files & previews"}
       onClose={onClose}
     >
-      {items.length === 0 ? (
+      {total === 0 ? (
         <PanelEmpty
           icon={<FileStack className="h-5 w-5" />}
           title="No artifacts yet"
           body="PDFs, documents, images, and files the agent generates this session show up here. Tap one to preview it."
         />
       ) : (
-        <div className="flex flex-col gap-2 p-3">
-          {items.map((item) => (
-            <ArtifactCard key={item.id} item={item} onOpen={onOpen} />
+        <div className="flex flex-col gap-3 p-3">
+          {groups.map((group) => (
+            <div key={group.key} className="flex flex-col gap-2">
+              <PanelSectionLabel>
+                {group.label} · {group.items.length}
+              </PanelSectionLabel>
+              {group.items.map((item) => (
+                <ArtifactCard key={item.id} item={item} onOpen={onOpen} />
+              ))}
+            </div>
           ))}
         </div>
       )}
