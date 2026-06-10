@@ -4003,18 +4003,17 @@ export default function ChatPage() {
               renderedChatKeyRef.current =
                 canonicalSessionId ?? resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
             }
-            if (isSubagentView || (!latestActiveSnapshot && !hasPendingTurn(merged))) {
-              // A drilled-into subagent is a read-only SNAPSHOT — its live tool
-              // events stream to the PARENT session, never here, so a busy
-              // spinner would just spin forever. Always render it as settled
-              // (its transcript already holds the work-so-far / final result).
-              // Other sessions: the cache heuristic may have flagged pending;
-              // the merged transcript confirms no live turn remains, so clear.
+            if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
+              // The merged transcript shows no live turn remaining — clear busy.
+              // For a subagent this means it's DONE (its last message is the
+              // result), so it renders settled. A still-running subagent's
+              // server transcript ends at the goal (last msg = user), so
+              // hasPendingTurn stays true and it keeps the working indicator.
               setBusy(false);
               setStatusText("Ready");
             } else {
               setBusy(true);
-              setStatusText("Resuming work...");
+              setStatusText(isSubagentView ? "Subagent working…" : "Resuming work...");
             }
             return merged;
           });
