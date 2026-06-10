@@ -6763,6 +6763,12 @@ export default function ChatPage() {
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
+                      onOpenPath={(p) =>
+                        openFileInPreview(
+                          p,
+                          p.replace(/\/+$/, "").split("/").pop() || p,
+                        )
+                      }
                       onOpenSubagent={handleOpenSubagent}
                       subagents={turnSubagents}
                       tools={turnTools}
@@ -7941,6 +7947,7 @@ function MessageRow({
   message,
   onEditMessage,
   onOpenArtifact,
+  onOpenPath,
   onOpenSubagent,
   subagents,
   tools,
@@ -7952,6 +7959,7 @@ function MessageRow({
   busy?: boolean;
   compacting?: boolean;
   liveInput?: number;
+  onOpenPath?(path: string): void;
   message: ChatMessage;
   onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
@@ -8090,12 +8098,7 @@ function MessageRow({
           {message.role === "assistant" ? (
             message.content ? (
               <div className="chat-message-prose [&>div]:text-[var(--chat-text)] [&_a]:text-[var(--chat-accent)] [&_code]:bg-[color-mix(in_srgb,var(--fg)_5%,transparent)] [&_code]:text-[color-mix(in_srgb,var(--accent)_30%,var(--fg))] [&_pre]:border-[var(--border-soft)] [&_pre]:bg-[color-mix(in_srgb,#000_18%,var(--bg-2))]">
-                <Markdown
-                  content={message.content}
-                  onOpenPath={(p) =>
-                    openFileInPreview(p, p.replace(/\/+$/, "").split("/").pop() || p)
-                  }
-                />
+                <Markdown content={message.content} onOpenPath={onOpenPath} />
               </div>
             ) : null
           ) : (
