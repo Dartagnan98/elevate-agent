@@ -747,8 +747,20 @@ def _load_tool_progress_mode() -> str:
 
 
 _TUI_TOOL_PROFILES = {
-    "gateway-followup": ("memory", "session_search", "todo", "messaging"),
-    "skill-runner": ("skills", "terminal", "file", "todo", "memory", "session_search"),
+    # Real-estate READ tools (leads_overview / deals_overview / lead_status) ride
+    # in the default conversational profile so the EA can answer "show me my
+    # pipeline / hot leads" directly. They're entitlement-gated + read-only;
+    # absent the packs they no-op. Without this the profile filter strips them
+    # back out even though _get_platform_tools marks them allowed, and the EA
+    # reports it "can't query the database."
+    "gateway-followup": (
+        "memory", "session_search", "todo", "messaging",
+        "leads_overview", "deals_overview", "lead_status",
+    ),
+    "skill-runner": (
+        "skills", "terminal", "file", "todo", "memory", "session_search",
+        "leads_overview", "deals_overview", "lead_status",
+    ),
     "coding-edit": ("terminal", "file", "todo", "delegation", "code_execution", "web", "memory", "session_search"),
     "research-browser": ("web", "browser", "file", "todo", "memory", "session_search"),
     "creative-vision": ("vision", "image_gen", "file", "todo", "memory"),
