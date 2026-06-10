@@ -1141,6 +1141,29 @@ class AIAgent:
         self.provider_data_collection = provider_data_collection
         self.openrouter_min_coding_score = openrouter_min_coding_score
 
+        # Per-agent loadout authority: when a specific agent is selected, ITS
+        # hub toolsets are part of what it can use — ALWAYS. Without this, the
+        # caller/gateway's tool-profile (often a generic coder set) was the only
+        # thing bound, so picking "Executive Assistant" left it without
+        # deals_overview / lead_status and it fell back to terminal SQL +
+        # reading the product's own source to answer "work on B11 deal".
+        # Union (never strip): the agent keeps whatever base the caller passed
+        # AND gains its own loadout. If enabled_toolsets is None (caller wanted
+        # all tools) we leave it None so nothing is narrowed. NOTE: must mutate
+        # the LOCAL ``enabled_toolsets`` — that's what get_tool_definitions()
+        # below actually reads, not self.enabled_toolsets.
+        if self._agent_id and enabled_toolsets:
+            try:
+                from elevate_cli.agent_hub import get_agent_def as _get_def
+                _sel = _get_def(self._agent_id)
+                _sel_ts = _sel.get("toolsets") if isinstance(_sel, dict) else None
+                if _sel_ts:
+                    enabled_toolsets = list(
+                        dict.fromkeys([*enabled_toolsets, *_sel_ts])
+                    )
+            except Exception:
+                pass
+
         # Store toolset filtering options
         self.enabled_toolsets = enabled_toolsets
         self.disabled_toolsets = disabled_toolsets
