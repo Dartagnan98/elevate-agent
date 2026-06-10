@@ -753,13 +753,19 @@ _TUI_TOOL_PROFILES = {
     # absent the packs they no-op. Without this the profile filter strips them
     # back out even though _get_platform_tools marks them allowed, and the EA
     # reports it "can't query the database."
+    # "delegation" + "agent_handoff" must also survive the filter: the EA's
+    # contract is "see everything, delegate scoped work to the specialist" —
+    # without delegate_task/agent_handoff in the conversational profiles it can
+    # neither query NOR hand off, and just apologizes.
     "gateway-followup": (
         "memory", "session_search", "todo", "messaging",
         "leads_overview", "deals_overview", "lead_status",
+        "delegation", "agent_handoff",
     ),
     "skill-runner": (
         "skills", "terminal", "file", "todo", "memory", "session_search",
         "leads_overview", "deals_overview", "lead_status",
+        "delegation", "agent_handoff",
     ),
     "coding-edit": ("terminal", "file", "todo", "delegation", "code_execution", "web", "memory", "session_search"),
     "research-browser": ("web", "browser", "file", "todo", "memory", "session_search"),
