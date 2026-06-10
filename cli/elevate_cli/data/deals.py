@@ -21,6 +21,33 @@ from elevate_cli.data._util import new_id, now_iso
 
 
 _VALID_SIDES = {"listing", "buyer"}
+
+# Static columns the create_deal INSERT always writes. Kept module-level (not a
+# local literal) so the schema-vs-code guard in data.migrations can assert every
+# one of them exists in the `deals` table — the same drift that silently broke
+# Lofty contact ingestion (a column in code with no migration) would otherwise
+# be invisible on the admin/deals board until an insert failed live.
+_DEAL_INSERT_BASE_COLUMNS: tuple[str, ...] = (
+    "id",
+    "title",
+    "side",
+    "current_stage",
+    "status",
+    "province",
+    "board",
+    "market",
+    "source_key",
+    "source_row_id",
+    "source_label",
+    "source_synced_at",
+    "primary_contact_id",
+    "lofty_contact_id",
+    "listing_address",
+    "extra_toggles_json",
+    "created_at",
+    "updated_at",
+    "stage_entered_at",
+)
 _VALID_STATUSES = {"active", "closed", "archived"}
 _VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change", "run_result", "attachment_added", "contact_linked", "agent_activity"}
 
@@ -625,27 +652,7 @@ def create_deal(
     named_fields, extra_fields = _split_fields(fields)
     now = now_iso()
     did = new_id()
-    columns = [
-        "id",
-        "title",
-        "side",
-        "current_stage",
-        "status",
-        "province",
-        "board",
-        "market",
-        "source_key",
-        "source_row_id",
-        "source_label",
-        "source_synced_at",
-        "primary_contact_id",
-        "lofty_contact_id",
-        "listing_address",
-        "extra_toggles_json",
-        "created_at",
-        "updated_at",
-        "stage_entered_at",
-    ]
+    columns = list(_DEAL_INSERT_BASE_COLUMNS)
     values: list[Any] = [
         did,
         title.strip(),

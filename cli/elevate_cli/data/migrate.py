@@ -34,6 +34,7 @@ module just doesn't see them yet.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
@@ -41,7 +42,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import psycopg
 
@@ -656,6 +657,37 @@ def _build_contact_enrichment(row: dict[str, Any]) -> dict[str, Any]:
     return enrich
 
 
+@contextlib.contextmanager
+def _savepoint(conn: Any, name: str) -> Iterator[None]:
+    """Per-record SAVEPOINT so a single failing row rolls back only itself.
+
+    On Postgres one statement error aborts the WHOLE transaction, so without a
+    savepoint a single bad row makes every later row in the shared backfill
+    connection fail with ``InFailedSqlTransaction`` — one bad row silently
+    wipes the rest of the sync (exactly the ``lofty_lead_user_id`` incident:
+    a missing column on the first contact dropped ~1,500 contacts + all
+    lead/lifecycle events). ``ROLLBACK TO SAVEPOINT`` scopes the failure and
+    keeps the transaction usable for the remaining rows. SQLite supports
+    SAVEPOINT too, so this is correct on both backends. If no transaction is
+    open (e.g. autocommit) opening the savepoint fails harmlessly and the body
+    runs unguarded.
+    """
+    try:
+        conn.execute(f"SAVEPOINT {name}")
+    except Exception:
+        yield
+        return
+    try:
+        yield
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(f"RELEASE SAVEPOINT {name}")
+
+
 def walk_jsonl_source(
     source_dir: Path,
     *,
@@ -776,15 +808,16 @@ def walk_jsonl_source(
             primary_phone = _first_str(
                 row.get("primary_phone"), row.get("phone"), row.get("phones")
             )
-            contact = upsert_contact(
-                conn,
-                contact_id=resolved_id,
-                source_key=None if resolved_id else source_key,
-                display_name=name_to_write,
-                primary_email=primary_email,
-                primary_phone=primary_phone,
-                enrichment=enrichment,
-            )
+            with _savepoint(conn, "sp_contact"):
+                contact = upsert_contact(
+                    conn,
+                    contact_id=resolved_id,
+                    source_key=None if resolved_id else source_key,
+                    display_name=name_to_write,
+                    primary_email=primary_email,
+                    primary_phone=primary_phone,
+                    enrichment=enrichment,
+                )
             contact_by_native[native] = contact["id"]
             if existing_id:
                 stats.contacts_skipped += 1
@@ -796,24 +829,29 @@ def walk_jsonl_source(
             # when the same (kind, value) maps to a different contact.
             for kind, raw in candidates:
                 try:
-                    out = add_identity(
-                        conn,
-                        contact_id=contact["id"],
-                        kind=kind,
-                        value=raw,
-                        source_id=source_id,
-                        # CRM-native ids are the workspace's source of
-                        # truth; everything else stays unverified until a
-                        # human confirms.
-                        verified=(kind == crm_identity_kind),
-                    )
+                    with _savepoint(conn, "sp_identity"):
+                        out = add_identity(
+                            conn,
+                            contact_id=contact["id"],
+                            kind=kind,
+                            value=raw,
+                            source_id=source_id,
+                            # CRM-native ids are the workspace's source of
+                            # truth; everything else stays unverified until a
+                            # human confirms.
+                            verified=(kind == crm_identity_kind),
+                        )
                     if out is not None:
                         stats.identities += 1
                     else:
                         stats.identities_skipped += 1
                 except Exception as exc:
                     stats.identities_skipped += 1
-                    _LOG.debug("identity skip (%s %s): %s", kind, raw, exc)
+                    # Surface real DB errors (not just benign dup skips). A
+                    # silent debug log here is how the lofty_lead_user_id
+                    # schema gap stayed invisible until the whole sync broke.
+                    stats.errors.append(f"{source_id}/identity:{kind}={raw}: {exc}")
+                    _LOG.warning("identity write failed (%s %s): %s", kind, raw, exc)
 
             # If resolution saw multiple existing contacts via different
             # identities, log the straddle so an operator can merge.
@@ -822,13 +860,14 @@ def walk_jsonl_source(
             # case that's invisible to the per-row insert.
             if len(matched_ids) > 1:
                 from elevate_cli.data.identities import record_identity_conflict
-                record_identity_conflict(
-                    conn,
-                    kind="contact",
-                    value=contact["id"],
-                    candidate_contact_ids=matched_ids,
-                    reason="cross_kind_mismatch",
-                )
+                with _savepoint(conn, "sp_conflict"):
+                    record_identity_conflict(
+                        conn,
+                        kind="contact",
+                        value=contact["id"],
+                        candidate_contact_ids=matched_ids,
+                        reason="cross_kind_mismatch",
+                    )
         except Exception as exc:
             stats.errors.append(f"{source_id}/contacts:{native}: {exc}")
             _LOG.exception("contact replay failed: %s", native)
@@ -865,13 +904,14 @@ def walk_jsonl_source(
                 stats.conversations_skipped += 1
                 continue
 
-            conv = get_or_create_conversation(
-                conn,
-                contact_id=contact_id,
-                source_id=source_id,
-                channel=channel,
-                thread_key=thread_key,
-            )
+            with _savepoint(conn, "sp_conv"):
+                conv = get_or_create_conversation(
+                    conn,
+                    contact_id=contact_id,
+                    source_id=source_id,
+                    channel=channel,
+                    thread_key=thread_key,
+                )
             conv_by_thread[thread_key] = conv["id"]
             stats.conversations += 1
         except Exception as exc:
@@ -912,13 +952,14 @@ def walk_jsonl_source(
                     "WHERE source_id=? AND thread_key=?",
                     (source_id, thread_key),
                 ).fetchone()
-                conv = get_or_create_conversation(
-                    conn,
-                    contact_id=contact_id,
-                    source_id=source_id,
-                    channel=channel,
-                    thread_key=thread_key,
-                )
+                with _savepoint(conn, "sp_conv2"):
+                    conv = get_or_create_conversation(
+                        conn,
+                        contact_id=contact_id,
+                        source_id=source_id,
+                        channel=channel,
+                        thread_key=thread_key,
+                    )
                 conv_id = conv["id"]
                 conv_by_thread[thread_key] = conv_id
                 if not already:
@@ -926,26 +967,28 @@ def walk_jsonl_source(
 
             recorder = record_outbound if kind == "outbound" else record_inbound
             try:
-                recorder(
-                    conn,
-                    contact_id=contact_id,
-                    conversation_id=conv_id,
-                    channel=channel,
-                    body=body,
-                    source_id=source_id,
-                    thread_key=thread_key,
-                    ts=ts,
-                    actor=row.get("actor") or "legacy_backfill",
-                )
+                with _savepoint(conn, "sp_msg"):
+                    recorder(
+                        conn,
+                        contact_id=contact_id,
+                        conversation_id=conv_id,
+                        channel=channel,
+                        body=body,
+                        source_id=source_id,
+                        thread_key=thread_key,
+                        ts=ts,
+                        actor=row.get("actor") or "legacy_backfill",
+                    )
                 stats.messages += 1
                 # Bump the conversation counter the way the live path
                 # would. The events_unique_event_hash UNIQUE keeps
                 # replay safe; this counter is a best-effort estimate
                 # that recomputes on Sprint 2 cutover.
                 try:
-                    bump_conversation_counters(
-                        conn, conv_id, direction=kind, ts=ts,
-                    )
+                    with _savepoint(conn, "sp_bump"):
+                        bump_conversation_counters(
+                            conn, conv_id, direction=kind, ts=ts,
+                        )
                 except Exception:
                     pass
             except _DB_INTEGRITY_ERRORS:
@@ -997,20 +1040,21 @@ def walk_jsonl_source(
         if already:
             continue
         try:
-            record_lifecycle(
-                conn,
-                contact_id=contact_id,
-                kind=record_kind,
-                actor=row.get("actor") or "legacy_backfill",
-                ts=ts,
-                payload={
-                    "legacyType": legacy_type,
-                    "title": row.get("title"),
-                    "summary": row.get("summary"),
-                    "body": row.get("body") or row.get("note") or row.get("text"),
-                },
-                source_id=source_id,
-            )
+            with _savepoint(conn, "sp_event"):
+                record_lifecycle(
+                    conn,
+                    contact_id=contact_id,
+                    kind=record_kind,
+                    actor=row.get("actor") or "legacy_backfill",
+                    ts=ts,
+                    payload={
+                        "legacyType": legacy_type,
+                        "title": row.get("title"),
+                        "summary": row.get("summary"),
+                        "body": row.get("body") or row.get("note") or row.get("text"),
+                    },
+                    source_id=source_id,
+                )
             stats.lifecycle_events += 1
         except _DB_INTEGRITY_ERRORS:
             pass  # event_hash already present

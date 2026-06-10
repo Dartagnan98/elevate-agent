@@ -32,10 +32,13 @@ migrate-data``. This module is purely for DDL.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
+
+_LOG = logging.getLogger(__name__)
 
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations_pg"
@@ -187,7 +190,75 @@ def run_pending(conn) -> list[str]:
         conn.commit()
         new_versions.append(f.version)
 
+    # After the schema is at head, assert the code's INSERT column whitelists
+    # are satisfied. A column referenced in code with no migration to create it
+    # (the lofty_lead_user_id incident) is otherwise invisible until an INSERT
+    # fails live and — under a shared transaction — silently drops the batch.
+    gaps = check_write_schema(conn)
+    if gaps:
+        _LOG.critical(
+            "SCHEMA/CODE DRIFT: write columns referenced in code are missing "
+            "from the database (add a numbered migration to create them; "
+            "INSERTs into these tables will fail until then): %s",
+            gaps,
+        )
+
     return new_versions
+
+
+# ─── Schema-vs-code guard ──────────────────────────────────────────────
+#
+# Tables whose INSERT is built from a code-side column list. Adding a column to
+# one of these lists without a matching migration makes every INSERT fail — and
+# under the shared-transaction backfill that silently drops the whole sync. This
+# guard catches the gap: loudly at startup (run_pending logs it) and as a hard
+# failure in CI (tests/test_write_schema.py), so it can never ship again.
+
+
+def _write_column_registry() -> dict[str, tuple[str, ...]]:
+    from elevate_cli.data.contacts import _ENRICHMENT_COLUMNS
+    from elevate_cli.data.deals import _DEAL_INSERT_BASE_COLUMNS
+
+    return {
+        "contacts": tuple(_ENRICHMENT_COLUMNS),
+        "deals": tuple(_DEAL_INSERT_BASE_COLUMNS),
+    }
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    """Column names for ``table``, or empty set if it can't be introspected
+    (table absent, or backend without information_schema)."""
+    try:
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = ?",
+            (table,),
+        ).fetchall()
+        cols = {r[0] for r in rows}
+        if cols:
+            return cols
+    except Exception:
+        pass
+    try:  # SQLite fallback
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {r[1] for r in rows}
+    except Exception:
+        return set()
+
+
+def check_write_schema(conn) -> dict[str, list[str]]:
+    """Return ``{table: [missing columns]}`` for the code write-whitelists that
+    the DB does not satisfy. Empty dict means code and schema agree. Tables that
+    don't exist yet (older/partial installs) are skipped, not reported."""
+    missing: dict[str, list[str]] = {}
+    for table, columns in _write_column_registry().items():
+        present = _table_columns(conn, table)
+        if not present:
+            continue
+        gap = [c for c in columns if c not in present]
+        if gap:
+            missing[table] = gap
+    return missing
 
 
 def head_version() -> str | None:
