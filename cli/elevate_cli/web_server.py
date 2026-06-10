@@ -4869,6 +4869,37 @@ _ABSOLUTE_PATH_RE = re.compile(
 )
 
 
+def _subagent_meta(db: Any, session_id: str) -> Dict[str, Any]:
+    """For a subagent session, surface its parent (for a 'back to chat' button)
+    and the agent it ran as (so the UI names it dynamically, no hardcode)."""
+    out: Dict[str, Any] = {}
+    try:
+        row = db.get_session(session_id) or {}
+        parent = row.get("parent_session_id") or row.get("parentSessionId")
+        if parent:
+            out["parent_session_id"] = parent
+        mc = row.get("model_config") or row.get("modelConfig")
+        if isinstance(mc, str):
+            import json as _json
+            try:
+                mc = _json.loads(mc)
+            except Exception:
+                mc = {}
+        agent_id = (mc or {}).get("agent_id") if isinstance(mc, dict) else None
+        if agent_id:
+            out["agent_id"] = agent_id
+            try:
+                from elevate_cli.agent_hub import get_agent_def
+                d = get_agent_def(str(agent_id))
+                if isinstance(d, dict) and d.get("name"):
+                    out["agent_name"] = d.get("name")
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
 def _session_identity_payload(identity: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "requested_session_id": identity.get("requested_session_id"),
@@ -4876,6 +4907,9 @@ def _session_identity_payload(identity: Dict[str, Any]) -> Dict[str, Any]:
         "active_session_id": identity.get("active_session_id"),
         "session_kind": identity.get("session_kind"),
         "is_compression_tip": identity.get("is_compression_tip"),
+        "parent_session_id": identity.get("parent_session_id"),
+        "agent_id": identity.get("agent_id"),
+        "agent_name": identity.get("agent_name"),
     }
 
 
@@ -4903,6 +4937,10 @@ def _resolve_active_session_or_404(db: Any, session_id: str) -> tuple[str, str, 
         identity["active_session_id"] = sid
         identity["lineage_root_id"] = identity.get("lineage_root_id") or sid
         identity["session_kind"] = identity.get("session_kind") or "chat"
+    # Subagent: attach its parent (for a back-to-chat button) + the agent it ran
+    # as (so the badge names it dynamically).
+    if identity.get("session_kind") == "subagent":
+        identity.update(_subagent_meta(db, active_id))
     return sid, active_id, identity
 
 

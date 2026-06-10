@@ -42,6 +42,7 @@ import {
   Brain,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronUp,
   Clipboard,
   Clock,
@@ -2938,6 +2939,10 @@ export default function ChatPage() {
   const [childSessions, setChildSessions] = useState<SessionChildItem[]>([]);
   // Kind of the session being viewed ("subagent" → show a header banner).
   const [sessionKind, setSessionKind] = useState<string | null>(null);
+  // When viewing a subagent: its parent chat (for a back button) + the agent
+  // it ran as (so the badge names it dynamically, not a hardcoded label).
+  const [subagentParentId, setSubagentParentId] = useState<string | null>(null);
+  const [subagentAgentName, setSubagentAgentName] = useState<string | null>(null);
   useEffect(() => {
     // New chat (no resume target) → clear resume-scoped state so a subagent
     // banner / past child sessions / usage don't bleed across chats.
@@ -3871,6 +3876,8 @@ export default function ChatPage() {
     }
     setTools(activeTurnSnapshot?.tools ?? []);
     setSubagents([]);
+    setSubagentParentId(null);
+    setSubagentAgentName(null);
     setActivityTrace(activeTurnSnapshot?.traces ?? []);
     lastToolActivityAtRef.current = 0;
     setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
@@ -3914,6 +3921,12 @@ export default function ChatPage() {
         .then((response) => {
           if (cancelled) return;
           setSessionKind(response.session_kind ?? null);
+          setSubagentParentId(
+            (response as { parent_session_id?: string }).parent_session_id ?? null,
+          );
+          setSubagentAgentName(
+            (response as { agent_name?: string }).agent_name ?? null,
+          );
           const canonicalSessionId =
             response.active_session_id || response.session_id || resumeId;
           if (canonicalSessionId) {
@@ -6681,13 +6694,27 @@ export default function ChatPage() {
                 </span>
               ) : null}
               {sessionKind === "subagent" ? (
-                <span
-                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--status-neon-orange)_22%,transparent)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--status-neon-orange-hot)] ring-1 ring-[color-mix(in_srgb,var(--status-neon-orange)_55%,transparent)] shadow-[0_0_10px_-1px_var(--status-neon-orange)]"
-                  title="You're inside a subagent's own chat — messages here go to the subagent, not the orchestrator"
-                >
-                  <Bot className="h-3 w-3" />
-                  In subagent
-                </span>
+                <>
+                  {subagentParentId ? (
+                    <button
+                      type="button"
+                      onClick={() => handleOpenSubagent(subagentParentId)}
+                      style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--chat-border-strong)] px-2 py-0.5 text-[10px] font-medium text-[var(--chat-muted-strong)] hover:bg-[var(--chat-surface-strong)]"
+                      title="Back to the orchestrator chat"
+                    >
+                      <ChevronLeft className="h-3 w-3" />
+                      Back to chat
+                    </button>
+                  ) : null}
+                  <span
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--status-neon-orange)_22%,transparent)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--status-neon-orange-hot)] ring-1 ring-[color-mix(in_srgb,var(--status-neon-orange)_55%,transparent)] shadow-[0_0_10px_-1px_var(--status-neon-orange)]"
+                    title="You're inside a subagent's own chat — messages here go to the subagent, not the orchestrator"
+                  >
+                    <Bot className="h-3 w-3" />
+                    {subagentAgentName ? `In subagent · ${subagentAgentName}` : "In subagent"}
+                  </span>
+                </>
               ) : null}
               <h1 className="here">
                 {chatTitle}

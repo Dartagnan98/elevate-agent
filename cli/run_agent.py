@@ -1613,6 +1613,10 @@ class AIAgent:
                         "max_iterations": self.max_iterations,
                         "reasoning_config": reasoning_config,
                         "max_tokens": max_tokens,
+                        # Persist which agent this session ran as so the UI can
+                        # name a subagent ("In subagent · Admin") instead of a
+                        # generic badge. Dynamic — whatever agent was selected.
+                        "agent_id": self._agent_id or None,
                     },
                     user_id=None,
                     parent_session_id=self._parent_session_id,
