@@ -966,6 +966,27 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     if (m.role === "assistant" && typeof m.token_count === "number") {
       chat.tokenCount = m.token_count;
     }
+    // Rebuild the thinking trace from the persisted reasoning column so a
+    // reloaded turn shows the same muted reasoning the live turn did (the live
+    // state is cleared at turn end; the cache may be gone on a fresh device).
+    if (m.role === "assistant") {
+      const reasoningText = (
+        (typeof m.reasoning === "string" && m.reasoning) ||
+        (typeof m.reasoning_content === "string" && m.reasoning_content) ||
+        ""
+      ).trim();
+      if (reasoningText) {
+        chat.traces = [
+          {
+            createdAt,
+            id: `${messageId}-reasoning`,
+            kind: "reasoning",
+            text: reasoningText,
+            messageId,
+          },
+        ];
+      }
+    }
     if (m.role === "assistant" && pendingTools.length) {
       chat.tools = pendingTools.map((t) => ({ ...t, messageId }));
       pendingTools = [];
@@ -1063,25 +1084,49 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
 }
 
 // Slim a turn's tool snapshot before it goes into localStorage. The
-// activity digest only needs name/context/summary/status to render —
-// drop the heavy streaming preview + inline diff, truncate long args,
-// and cap the count so a tool-heavy turn can't blow the cache budget.
+// Persist enough that a reloaded turn renders as richly as the live one:
+// keep the tool RESULT (summary), the inline DIFF (capped), and args — only the
+// heavy streaming preview is dropped. Caps keep a tool-heavy turn within the
+// cache budget; the 60-tool cap stays.
 function slimToolsForStorage(tools?: ToolEntry[]): ToolEntry[] | undefined {
   if (!tools?.length) return undefined;
-  const cut = (value?: string) =>
-    value && value.length > 300 ? `${value.slice(0, 300)}…` : value;
+  const cap = (value: string | undefined, max: number) =>
+    value && value.length > max ? `${value.slice(0, max)}…` : value;
   return tools.slice(-60).map((tool) => ({
     kind: "tool",
     id: tool.id,
     tool_id: tool.tool_id,
     name: tool.name,
-    context: cut(tool.context),
-    summary: cut(tool.summary),
+    context: cap(tool.context, 500),
+    summary: cap(tool.summary, 2000),
+    inline_diff: cap(tool.inline_diff, 8000),
     status: tool.status,
     startedAt: tool.startedAt,
     completedAt: tool.completedAt,
     messageId: tool.messageId,
   }));
+}
+
+// On reload, a stored ToolEntry has no inline_diff (the live event field isn't
+// persisted on the tool). But the diff IS persisted as a kind:"diff" artifact
+// for the same message — reattach it to edit-category tools that are missing
+// one, in order. Returns the same array ref when there's nothing to add (keeps
+// MemoMessageRow stable for diff-less turns).
+function reattachDiffsToTools(
+  tools: ToolEntry[] | undefined,
+  diffArtifacts: ArtifactEntry[] | undefined,
+): ToolEntry[] | undefined {
+  if (!tools?.length || !diffArtifacts?.length) return tools;
+  const queue = diffArtifacts
+    .map((a) => (typeof a.content === "string" ? a.content : ""))
+    .filter(Boolean);
+  if (!queue.length || tools.every((t) => t.inline_diff)) return tools;
+  let qi = 0;
+  return tools.map((t) => {
+    if (t.inline_diff || qi >= queue.length) return t;
+    if (!/write|edit|patch/i.test(t.name)) return t;
+    return { ...t, inline_diff: queue[qi++] };
+  });
 }
 
 function slimTracesForStorage(
@@ -6068,6 +6113,19 @@ export default function ChatPage() {
     () => artifacts.filter((artifact) => !artifact.messageId),
     [artifacts],
   );
+  // Diff artifacts grouped by message — used to reattach inline_diff to stored
+  // tools on reload (the diff isn't persisted on the tool itself).
+  const diffsByMessage = useMemo(() => {
+    const grouped = new Map<string, ArtifactEntry[]>();
+    for (const artifact of artifacts) {
+      if (artifact.kind !== "diff" || !artifact.messageId || !artifact.content)
+        continue;
+      const next = grouped.get(artifact.messageId) ?? [];
+      next.push(artifact);
+      grouped.set(artifact.messageId, next);
+    }
+    return grouped;
+  }, [artifacts]);
   const toolsByMessage = useMemo(() => {
     const grouped = new Map<string, ToolEntry[]>();
     for (const tool of tools) {
@@ -6530,7 +6588,10 @@ export default function ChatPage() {
                   // Live state first; fall back to the snapshot stored on
                   // the message so resumed turns still show their digest.
                   const turnTools = isAssistant
-                    ? toolsByMessage.get(message.id) ?? message.tools
+                    ? reattachDiffsToTools(
+                        toolsByMessage.get(message.id) ?? message.tools,
+                        diffsByMessage.get(message.id),
+                      )
                     : undefined;
                   const turnTraces = isAssistant
                     ? tracesByMessage.get(message.id) ?? message.traces
