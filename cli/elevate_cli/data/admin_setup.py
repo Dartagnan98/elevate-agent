@@ -525,6 +525,8 @@ def _row_to_profile(row: sqlite3.Row) -> dict[str, Any]:
         "calendarProvider": row["calendar_provider"],
         "driveProvider": row["drive_provider"],
         "crmProvider": row["crm_provider"],
+        "crmPushStatus": row["crm_push_status"],
+        "crmStatusMap": _decode_json(row["crm_status_map"]) or {},
         "mlsProvider": row["mls_provider"],
         "formsProvider": row["forms_provider"],
         "signingProvider": row["signing_provider"],
@@ -905,6 +907,19 @@ def sync_admin_province_playbook(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _crm_push_summary(profile: Mapping[str, Any]) -> str:
+    """One-line CRM status-sync state for the onboarding memory doc, so the
+    agent knows whether lead_status pushes to the CRM and how statuses map."""
+    on = str(profile.get("crmPushStatus") or "").strip().lower() in ("on", "true", "1", "yes")
+    if not on:
+        return "off (lead status stays in Elevate; not written to the CRM)"
+    smap = profile.get("crmStatusMap") if isinstance(profile.get("crmStatusMap"), Mapping) else {}
+    if smap:
+        pairs = ", ".join(f"{k}→{v}" for k, v in list(smap.items())[:8])
+        return f"on — maps {pairs}"
+    return "on — no status map set yet (writes a note instead of a CRM stage; set crmStatusMap)"
+
+
 def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
     """Return the sanitized Admin onboarding memory injected into future agents."""
     profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), Mapping) else {}
@@ -944,6 +959,7 @@ def admin_setup_memory_summary(snapshot: Mapping[str, Any]) -> str:
         f"- Calendar: {provider('calendar', profile.get('calendarProvider') or '') or 'not recorded'}",
         f"- Cloud storage: {provider('drive', profile.get('driveProvider') or '') or 'not recorded'}",
         f"- CRM: {provider('crm', profile.get('crmProvider') or '') or 'not recorded'}",
+        f"- CRM status sync: {_crm_push_summary(profile)}",
         f"- Forms: {provider('forms_provider', profile.get('formsProvider') or '') or 'not recorded'}",
         f"- Signing: {provider('signing_provider', profile.get('signingProvider') or '') or 'not recorded'}",
         f"- FINTRAC: {provider('fintrac_workflow', profile.get('fintracProvider') or '') or 'not recorded'}",
@@ -1042,6 +1058,7 @@ _PROFILE_FIELD_MAP = {
     "calendarProvider": "calendar_provider",
     "driveProvider": "drive_provider",
     "crmProvider": "crm_provider",
+    "crmPushStatus": "crm_push_status",
     "mlsProvider": "mls_provider",
     "formsProvider": "forms_provider",
     "signingProvider": "signing_provider",
@@ -1058,6 +1075,7 @@ _JSON_PROFILE_FIELD_MAP = {
     "boardMemberships": "board_memberships_json",
     "regionalMemory": "regional_memory_json",
     "approvalPolicy": "approval_policy_json",
+    "crmStatusMap": "crm_status_map",
 }
 
 

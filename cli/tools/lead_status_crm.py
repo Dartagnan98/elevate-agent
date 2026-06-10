@@ -25,12 +25,36 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _push_enabled(config: dict[str, Any]) -> bool:
+def _onboarding_crm(conn) -> dict[str, Any]:
+    """The CRM push settings as captured at ONBOARDING (admin_setup_profile) —
+    the source of truth the agent also reads via ADMIN_ONBOARDING.md. Empty on
+    any failure so the config fallback still applies."""
+    try:
+        from elevate_cli.data.admin_setup import get_admin_setup
+        prof = (get_admin_setup(conn) or {}).get("profile") or {}
+        return {
+            "push": str(prof.get("crmPushStatus") or "").strip().lower(),
+            "map": prof.get("crmStatusMap") if isinstance(prof.get("crmStatusMap"), dict) else {},
+        }
+    except Exception:
+        return {}
+
+
+def _push_enabled(config: dict[str, Any], onboarding: dict[str, Any]) -> bool:
+    # Onboarding profile wins; config.yaml is the fallback.
+    ob = (onboarding or {}).get("push")
+    if ob in ("on", "true", "1", "yes"):
+        return True
+    if ob in ("off", "false", "0", "no"):
+        return False
     node = config.get("crm") if isinstance(config, dict) else None
     return bool(isinstance(node, dict) and node.get("push_status"))
 
 
-def _status_map(config: dict[str, Any]) -> dict[str, str]:
+def _status_map(config: dict[str, Any], onboarding: dict[str, Any]) -> dict[str, str]:
+    ob_map = (onboarding or {}).get("map")
+    if isinstance(ob_map, dict) and ob_map:
+        return {str(k): str(v) for k, v in ob_map.items()}
     node = config.get("crm") if isinstance(config, dict) else None
     raw = node.get("status_map") if isinstance(node, dict) else None
     return {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
@@ -47,7 +71,8 @@ def push_lead_status_to_crm(conn, contact: dict[str, Any], status: str) -> dict[
     try:
         from elevate_cli.config import load_config
         config = load_config() or {}
-        if not _push_enabled(config):
+        onboarding = _onboarding_crm(conn)
+        if not _push_enabled(config, onboarding):
             return {"pushed": False, "reason": "disabled"}
 
         email = (contact.get("primaryEmail") or "").strip()
@@ -67,7 +92,7 @@ def push_lead_status_to_crm(conn, contact: dict[str, Any], status: str) -> dict[
             return {"pushed": False, "reason": "lead_not_in_crm"}
 
         name = contact.get("displayName") or "lead"
-        smap = _status_map(config)
+        smap = _status_map(config, onboarding)
         mapped = smap.get(status)
 
         if _dry_run(config):
