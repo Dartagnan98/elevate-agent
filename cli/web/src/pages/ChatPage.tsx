@@ -8075,41 +8075,10 @@ function MessageRow({
               {message.warning}
             </div>
           )}
-          {(() => {
-            // Tool/subagent execution outputs (browser_navigate, terminal, …)
-            // belong in the Background tasks panel, not inline under the
-            // message. Only surface durable file/document artifacts here.
-            const inlineArtifacts = artifacts.filter(
-              (a) => a.kind !== "output",
-            );
-            if (!inlineArtifacts.length) return null;
-            const shown = inlineArtifacts.slice(-4);
-            const hidden = inlineArtifacts.length - shown.length;
-            return (
-              <div className="mt-3.5 space-y-1.5">
-                <div className="flex items-center gap-1.5 px-0.5 text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--chat-muted)]">
-                  <FileText className="h-3 w-3 shrink-0" />
-                  <span>
-                    {inlineArtifacts.length === 1
-                      ? "1 file changed"
-                      : `${inlineArtifacts.length} files changed`}
-                  </span>
-                  {hidden > 0 && (
-                    <span className="text-[var(--chat-muted-strong)]">
-                      · showing last {shown.length}
-                    </span>
-                  )}
-                </div>
-                {shown.map((artifact) => (
-                  <InlineArtifactCard
-                    key={`message-artifact-${artifact.id}`}
-                    artifact={artifact}
-                    onOpenArtifact={onOpenArtifact}
-                  />
-                ))}
-              </div>
-            );
-          })()}
+          {/* Artifacts are NOT pinned to the bottom of the message anymore.
+              A diff lives in the tool call that produced it (the expandable
+              diff section); generated documents/files live in the grouped
+              Artifacts panel. Nothing persists here once the turn is done. */}
         </div>
         {isAssistant && message.content ? (
           <TurnFooter
