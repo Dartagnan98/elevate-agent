@@ -364,25 +364,50 @@ def build_turn_nudge(
 
         from elevate_cli.access import (
             ENTITLEMENT_REAL_ESTATE_ADMIN,
+            ENTITLEMENT_REAL_ESTATE_SALES,
             is_entitlement_active,
         )
-        if not is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, None):
+        if not (
+            is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, None)
+            or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, None)
+        ):
             return None
 
-        from elevate_cli.data import connect
+        from elevate_cli.data import connect, get_contact
         sticky = session_sticky_ids(messages[:prev])
         with connect() as conn:
             attributions = resolve_attributions(conn, last_turn, sticky_ids=sticky)
+            # A worked lead with NO pipeline status yet — ask the agent to label
+            # it (so the next heartbeat sees it handled, not untouched).
+            unlabeled: list[str] = []
+            for a in attributions:
+                if a.entity_kind != "contact":
+                    continue
+                c = get_contact(conn, a.entity_id)
+                if c is not None and not (c.get("pipelineStatus") or "").strip():
+                    unlabeled.append(a.label)
+
         deals = [a for a in attributions if a.entity_kind == "deal"]
-        if not deals:
+        lines: list[str] = []
+        if deals:
+            labels = ", ".join(sorted({a.label for a in deals})[:3])
+            lines.append(
+                f"Last turn you worked on {labels} but recorded no board change. "
+                "If a stage advanced, a checklist item completed, or a key "
+                "date/price changed, update it with admin_deal. If it was only "
+                "research or drafting, ignore this."
+            )
+        if unlabeled:
+            names = ", ".join(sorted(set(unlabeled))[:3])
+            lines.append(
+                f"You worked {names} but left no lead status. Set one with "
+                "lead_status (new_lead / follow_up / ghosting / dead, plus heat) "
+                "so the next run sees it handled — or, if you can't tell what fits, "
+                "ask rather than guess."
+            )
+        if not lines:
             return None
-        labels = ", ".join(sorted({a.label for a in deals})[:3])
-        return (
-            "[board-sync reminder] Last turn you worked on "
-            f"{labels} but recorded no board change. If a stage advanced, a "
-            "checklist item completed, or a key date/price changed, update it now "
-            "with admin_deal. If it was only research or drafting, ignore this."
-        )
+        return "[board-sync reminder] " + " ".join(lines)
     except Exception as exc:
         logger.debug("build_turn_nudge skipped: %s", exc)
         return None
@@ -505,9 +530,13 @@ def attribute_turn_safely(
 
         from elevate_cli.access import (
             ENTITLEMENT_REAL_ESTATE_ADMIN,
+            ENTITLEMENT_REAL_ESTATE_SALES,
             is_entitlement_active,
         )
-        if not is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, None):
+        if not (
+            is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, None)
+            or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, None)
+        ):
             return
 
         actor = f"agent:{(agent_id or '').strip() or 'session'}"

@@ -130,8 +130,9 @@ def test_full_name_match(monkeypatch):
 
 # ── nudge layer ────────────────────────────────────────────────────────────
 
-def _patch_nudge_env(monkeypatch):
-    """Make build_turn_nudge hermetic: roster + entitlement + connection."""
+def _patch_nudge_env(monkeypatch, contacts_by_id=None):
+    """Make build_turn_nudge hermetic: roster + entitlement + connection +
+    get_contact (for the unlabeled-lead check)."""
     _patch_roster(monkeypatch)
     import elevate_cli.access as access
     monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
@@ -141,6 +142,8 @@ def _patch_nudge_env(monkeypatch):
         def __exit__(self, *a): return False
     import elevate_cli.data as d
     monkeypatch.setattr(d, "connect", lambda *a, **k: _Ctx())
+    cmap = contacts_by_id or {c["id"]: c for c in _CONTACTS}
+    monkeypatch.setattr(d, "get_contact", lambda conn, cid: cmap.get(cid))
 
 
 def test_nudge_fires_when_deal_worked_unrecorded(monkeypatch):
@@ -182,6 +185,36 @@ def test_nudge_silent_on_first_turn(monkeypatch):
     _patch_nudge_env(monkeypatch)
     msgs = [{"role": "user", "content": "draft the counter for 412 Maple Ridge Rd"}]
     assert ta.build_turn_nudge(msgs, current_user_idx=0) is None
+
+
+def test_nudge_asks_to_label_unlabeled_lead(monkeypatch):
+    # Shawn has no pipelineStatus → worked-but-unlabeled → nudge to set status.
+    contacts = {
+        "c-shawn": {"id": "c-shawn", "displayName": "Shawn Calhoon",
+                    "primaryEmail": "shawn@example.com", "pipelineStatus": None},
+    }
+    _patch_nudge_env(monkeypatch, contacts_by_id=contacts)
+    msgs = [
+        {"role": "user", "content": "reply to Shawn Calhoon"},
+        _asst("Drafted a reply to Shawn Calhoon.", [_tc("draft_message", {})]),
+        {"role": "user", "content": "thanks"},
+    ]
+    nudge = ta.build_turn_nudge(msgs, current_user_idx=2)
+    assert nudge and "lead_status" in nudge and "Shawn" in nudge
+
+
+def test_nudge_silent_when_lead_already_labeled(monkeypatch):
+    contacts = {
+        "c-shawn": {"id": "c-shawn", "displayName": "Shawn Calhoon",
+                    "primaryEmail": "shawn@example.com", "pipelineStatus": "follow_up"},
+    }
+    _patch_nudge_env(monkeypatch, contacts_by_id=contacts)
+    msgs = [
+        {"role": "user", "content": "reply to Shawn Calhoon"},
+        _asst("Drafted a reply to Shawn Calhoon.", [_tc("draft_message", {})]),
+        {"role": "user", "content": "thanks"},
+    ]
+    assert ta.build_turn_nudge(msgs, current_user_idx=2) is None
 
 
 def test_session_sticky_ids_collects_explicit_ids():

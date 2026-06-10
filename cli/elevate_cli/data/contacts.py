@@ -467,6 +467,52 @@ def add_contact_note(
     )
 
 
+def leads_worked_recently(
+    conn: sqlite3.Connection, *, since_hours: int = 18, limit: int = 100
+) -> list[dict[str, Any]]:
+    """Leads the agent already worked in the last ``since_hours`` (an
+    ``agent_activity`` event), with the status it left them in.
+
+    The Leads heartbeat reads this to avoid re-processing a lead it already
+    handled today — and to see what status was assigned — instead of acting
+    blind. Newest-worked first.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=max(1, since_hours))).isoformat()
+    rows = conn.execute(
+        """
+        SELECT e.contact_id            AS contact_id,
+               MAX(e.ts)               AS last_worked_at,
+               c.display_name          AS display_name,
+               c.pipeline_status       AS pipeline_status,
+               c.pipeline_status_set_by AS set_by,
+               c.heat_label            AS heat_label,
+               c.needs_follow_up       AS needs_follow_up
+        FROM events e
+        JOIN contacts c ON c.id = e.contact_id
+        WHERE e.kind = 'agent_activity' AND e.ts >= ?
+        GROUP BY e.contact_id, c.display_name, c.pipeline_status,
+                 c.pipeline_status_set_by, c.heat_label, c.needs_follow_up
+        ORDER BY last_worked_at DESC
+        LIMIT ?
+        """,
+        (since, int(limit)),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "contactId": r["contact_id"],
+            "name": r["display_name"],
+            "lastWorkedAt": r["last_worked_at"],
+            "pipelineStatus": r["pipeline_status"],
+            "pipelineStatusSetBy": r["set_by"],
+            "heatLabel": r["heat_label"],
+            "needsFollowUp": bool(r["needs_follow_up"]),
+        })
+    return out
+
+
 def touch_last_activity(
     conn: sqlite3.Connection, contact_id: str, ts: str
 ) -> None:

@@ -30,6 +30,7 @@ from elevate_cli.data.contacts import (
     close_to_admin,
     find_contacts,
     get_contact,
+    leads_worked_recently,
     park_contact,
     set_lead_profile_favorite,
     set_pipeline_status,
@@ -278,6 +279,7 @@ __all__ = [
     "backups_root", "parity_root",
     # contacts
     "add_contact_note", "classify_contact", "close_to_admin", "find_contacts",
+    "leads_worked_recently",
     "get_contact", "park_contact", "set_lead_profile_favorite",
     "set_pipeline_status", "unpark_contact",
     "update_contact_stage", "update_flags", "upsert_contact",

@@ -61,12 +61,18 @@ entirely. A prompt with no Focus = run the whole surface (legacy single-heartbea
    create anything, read the ACTUAL current state from the real sources this surface touches and
    build a picture of what is ALREADY handled. The dashboard DB and the live source of truth are
    authoritative — reconcile against them, never assume from memory or a stale list.
-   - **Leads / outreach:** for every candidate lead, check the latest message in the real thread
-     (CRM, SMS/iMessage, email — your messaging tools) AND whether a draft or pending approval
-     already exists for it. If the lead already got a reply, already has a pending draft, or the
-     inbound was already answered — SKIP it. Draft ONLY for a genuine unanswered inbound or a
-     cadence touch that is actually due and not yet drafted. A duplicate reply to an
+   - **Leads / outreach:** START by reading `leads_overview` → `recentlyWorked` — the leads you
+     already handled in the last ~18h and the status each was left in. SKIP anything there; it was
+     just worked. Then for every remaining candidate lead, check the latest message in the real
+     thread (CRM, SMS/iMessage, email — your messaging tools) AND whether a draft or pending
+     approval already exists for it. If the lead already got a reply, already has a pending draft,
+     or the inbound was already answered — SKIP it. Draft ONLY for a genuine unanswered inbound or
+     a cadence touch that is actually due and not yet drafted. A duplicate reply to an
      already-answered lead is a failure, not a follow-up.
+   - **Label leads as you work them.** After you respond to or assess a lead, set its status with
+     `lead_status` (pipeline status, heat, follow-up) so the board reflects where it's at and the
+     NEXT run sees it in `recentlyWorked`. If you genuinely can't tell what status fits, ASK rather
+     than guess — leaving it unlabeled means the next run treats it as untouched.
    - **Admin / transactions:** read Gmail, Google Calendar, Google Drive, and the dashboard
      (tasks, deals, approvals) to see exactly where each deal and deadline stands before you act.
      Before flagging a deadline or creating a task, confirm it isn't already handled, already on

@@ -68,6 +68,17 @@ def _leads_overview_handler(args: dict[str, Any], **_: Any) -> str:
     except Exception:  # noqa: BLE001
         pass
 
+    # Leads the agent already worked recently (with the status it left them in)
+    # so a heartbeat skips re-processing them and sees what was decided.
+    recently_worked: list[dict[str, Any]] = []
+    try:
+        from elevate_cli.data import connect, leads_worked_recently
+        since_hours = max(1, min(_int("worked_since_hours", 18), 168))
+        with connect() as conn:
+            recently_worked = leads_worked_recently(conn, since_hours=since_hours, limit=50)
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
     overview = {
         "pendingApproval": status_counts.get("pending_approval", 0),
         "queued": status_counts.get("queued", 0),
@@ -79,6 +90,7 @@ def _leads_overview_handler(args: dict[str, Any], **_: Any) -> str:
         "pendingByChannel": pending_by_channel,
         "pendingBySource": pending_by_source,
         "recentSends": recent_sends,
+        "recentlyWorked": recently_worked,
     }
     return tool_result(success=True, overview=overview)
 
@@ -96,9 +108,11 @@ LEADS_OVERVIEW_SCHEMA = {
             "Returns: pendingApproval/queued/sending/sent/failed/retrying counts, "
             "byStatus (raw send_queue status map), pendingByChannel "
             "(sms/email/social → count), pendingBySource (apple-messages/crm/"
-            "composio-gmail → count), and recentSends (last N delivered, with "
-            "recipient + channel + time). Backed by the send_queue that powers "
-            "the /leads Approve queue."
+            "composio-gmail → count), recentSends (last N delivered, with "
+            "recipient + channel + time), and recentlyWorked (leads YOU already "
+            "handled in the last ~18h with the status you left them in — check "
+            "this before working a lead so you don't redo it). Backed by the "
+            "send_queue that powers the /leads Approve queue."
         ),
         "parameters": {
             "type": "object",
