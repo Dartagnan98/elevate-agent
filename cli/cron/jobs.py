@@ -589,6 +589,22 @@ def load_surface_registry() -> Dict[str, Dict[str, Any]]:
                         {**SURFACE_HEARTBEAT_DEFAULTS[surface], "created_by": "system"},
                         builtin=True, created_by="system",
                     )
+        # Refresh stale built-ins: a row registered BEFORE the focused-heartbeat
+        # split stored a spec without ``heartbeats[]``, so ensure_surface() kept
+        # seeding the legacy monolithic cron forever on existing installs. Adopt
+        # the split onto those rows (custom surfaces and any other realtor edits
+        # to the spec are untouched — only the missing key is added).
+        for surface, default_spec in SURFACE_HEARTBEAT_DEFAULTS.items():
+            current = reg.get(surface)
+            if not isinstance(current, dict) or current.get("heartbeats"):
+                continue
+            split = default_spec.get("heartbeats")
+            if not split:
+                continue
+            reg[surface] = surface_state.upsert_registry(
+                conn, surface, {**current, "heartbeats": split},
+                builtin=True, created_by="system",
+            )
     return reg
 
 
@@ -681,11 +697,15 @@ def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False)
     # Retire any superseded heartbeat cron for this surface — e.g. the legacy
     # monolithic "Leads Heartbeat" once the focused units replace it — so a prior
     # install doesn't keep firing the old one-huge-run job alongside the new ones.
+    # If the realtor had a retired legacy job ON, the replacement units inherit
+    # that, so an upgrade never silently turns a running surface off.
     for j in jobs:
         origin = j.get("origin") or {}
         if origin.get("type") != "surface-heartbeat" or origin.get("surface") != surface:
             continue
         if (j.get("name") or "").strip().lower() not in unit_names:
+            if j.get("enabled", True) and j.get("state") != "paused":
+                enabled = True
             remove_job(j["id"])
 
     seeded: List[Dict[str, Any]] = []
