@@ -897,8 +897,17 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     if (m.role === "tool" && m.tool_call_id) toolResults.set(m.tool_call_id, m);
   });
 
-  const cut = (v?: string | null): string | undefined =>
-    typeof v === "string" ? (v.length > 300 ? `${v.slice(0, 300)}…` : v) : undefined;
+  // Args stay tight (label/preview only); tool RESULTS get a generous cap so the
+  // real output (command stdout, search matches) is legible on reload, without
+  // dumping a megabyte file-read into the row.
+  const cutArgs = (v?: string | null): string | undefined =>
+    typeof v === "string" ? (v.length > 500 ? `${v.slice(0, 500)}…` : v) : undefined;
+  const cutResult = (v?: string | null): string | undefined =>
+    typeof v === "string"
+      ? v.length > 4000
+        ? `${v.slice(0, 4000)}\n…(truncated)`
+        : v
+      : undefined;
 
   const out: ChatMessage[] = [];
   // Buffer tool calls (incl. those on empty-content assistant turns that the
@@ -921,8 +930,8 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
           id: call.id || `stored-${index}-${ci}`,
           tool_id: call.id || "",
           name: call.function?.name || result?.tool_name || "tool",
-          context: cut(call.function?.arguments),
-          summary: cut(typeof result?.content === "string" ? result.content : null),
+          context: cutArgs(call.function?.arguments),
+          summary: cutResult(typeof result?.content === "string" ? result.content : null),
           status: "done",
           startedAt: createdAt,
           completedAt: result ? timestampMillis(result.timestamp, createdAt) : createdAt,
@@ -8080,12 +8089,31 @@ function toolCategory(name: string): ToolCategory {
 
 // Pull the most label-worthy bit of a tool — a filename/skill/query — for the
 // "Read App.tsx" style single-item summary.
-function toolTarget(tool: ToolStep): string {
-  const ctx = (tool.context || "").replace(/\s+/g, " ").trim();
-  if (!ctx) return "";
-  const firstToken = ctx.split(/\s+/)[0] ?? ctx;
-  const base = firstToken.split("/").pop() || firstToken;
-  return base.length > 36 ? `${base.slice(0, 36)}…` : base;
+function toolTarget(tool: ToolStep, max = 44): string {
+  const raw = (tool.context || "").trim();
+  if (!raw) return "";
+  let subject = "";
+  // Tool args usually arrive as JSON ({"command":…}, {"path":…}, {"query":…}).
+  // Pull the canonical field so the label reads "ran npm run build" / "edited
+  // App.tsx" / "searched psycopg" instead of a mangled JSON first-token.
+  if (raw.startsWith("{")) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const v =
+        obj.command ?? obj.cmd ?? obj.query ?? obj.pattern ?? obj.path ??
+        obj.file ?? obj.file_path ?? obj.filename ?? obj.url ?? obj.skill;
+      if (typeof v === "string") subject = v;
+    } catch {
+      /* not JSON args — fall through to the raw context */
+    }
+  }
+  if (!subject) subject = raw;
+  subject = subject.replace(/\s+/g, " ").trim();
+  // Path-like single token → show the basename ("/a/b/App.tsx" → "App.tsx").
+  if (!subject.includes(" ") && /[/\\]/.test(subject)) {
+    subject = subject.split(/[/\\]/).pop() || subject;
+  }
+  return subject.length > max ? `${subject.slice(0, max)}…` : subject;
 }
 
 // Turn a raw tool identifier into a readable phrase, e.g.
@@ -8123,8 +8151,8 @@ function describeToolGroup(tools: ToolStep[]): string {
     const one = n === 1;
     const target = one ? toolTarget(items[0]) : "";
     switch (cat) {
-      case "command": return one ? "ran a command" : `ran ${n} commands`;
-      case "search": return one ? "ran a search" : `ran ${n} searches`;
+      case "command": return one ? (target ? `ran ${target}` : "ran a command") : `ran ${n} commands`;
+      case "search": return one ? (target ? `searched ${target}` : "ran a search") : `ran ${n} searches`;
       case "edit": return one ? (target ? `edited ${target}` : "edited a file") : `edited ${n} files`;
       case "read": return one ? (target ? `read ${target}` : "read a file") : `read ${n} files`;
       case "skill": return one ? (target ? `loaded ${target}` : "loaded a skill") : `loaded ${n} skills`;
@@ -8335,20 +8363,23 @@ function BreakdownRow({ step }: { step: BreakdownStep }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
 
   if (step.type === "trace") {
-    // Render reasoning as full, always-visible messages — no "Thinking"
-    // label, no collapse. Each "**Header**" section becomes its own message
-    // (markers stripped) rather than one long run-on blob.
+    // Render reasoning as muted, always-visible thinking prose — no bold
+    // section titles (the model's "**Header**" markers are dropped), no
+    // "Thinking" label, no collapse. Reads as quiet secondary thought, distinct
+    // from the answer.
     const sections = splitReasoningSections(step.text);
     if (!sections.length) return null;
     return (
       <>
-        {sections.map((s, i) => (
-          <div key={`${step.id}-${i}`} className="reasoning-message">
-            {s.header && <strong>{s.header}</strong>}
-            {s.header && s.body ? "\n" : ""}
-            {s.body}
-          </div>
-        ))}
+        {sections.map((s, i) => {
+          const text = (s.body || s.header || "").trim();
+          if (!text) return null;
+          return (
+            <div key={`${step.id}-${i}`} className="reasoning-message">
+              {text}
+            </div>
+          );
+        })}
       </>
     );
   }
