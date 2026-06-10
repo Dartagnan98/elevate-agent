@@ -71,6 +71,15 @@ CONFIGURABLE_TOOLSETS = [
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("messaging",       "📨 Cross-Platform Messaging",  "send_message"),
+    # Real-estate READ visibility for the orchestrator chat. The EA can see the
+    # pipeline (leads/deals/status) to answer directly; execution that falls in a
+    # specialist's scope (raw elevate_db queries, admin_deal writes) stays with
+    # that agent and is reached via delegation, never exposed in the base chat.
+    # Entitlement-gated at the tool layer, so non-real-estate accounts get a
+    # clean requires_entitlement instead of a usable tool.
+    ("leads_overview",  "📇 Leads Overview",            "read the leads pipeline (read-only)"),
+    ("deals_overview",  "🏠 Deals Overview",            "read the deals / transaction board (read-only)"),
+    ("lead_status",     "🔁 Lead Status",               "read a lead's status + lifecycle (read-only)"),
     ("rl",              "🧪 RL Training",               "Tinker-Atropos training tools"),
     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
     ("spotify",          "🎵 Spotify",                  "playback, search, playlists, library"),

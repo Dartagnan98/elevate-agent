@@ -63,7 +63,7 @@ _ELEVATE_CORE_TOOLS = [
     # pending" from the store instead of falling back to terminal SQL.
     # deals_overview/leads_overview are read-only; admin_deal writes a single
     # deal's kanban card so an in-session skill finalize syncs to the board.
-    "deals_overview", "leads_overview", "elevate_db", "admin_deal",
+    "deals_overview", "leads_overview", "lead_status", "elevate_db", "admin_deal",
     # Composio integration hub introspection (gated on COMPOSIO_API_KEY via check_fn)
     "composio",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -150,6 +150,33 @@ TOOLSETS = {
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
+        "includes": []
+    },
+
+    # Real-estate READ visibility for the orchestrator chat. These map the
+    # toolset key -> its tool so subset-inference in _get_platform_tools can
+    # actually enable them on the base CLI/chat session (the tools are already
+    # in _ELEVATE_CORE_TOOLS, but without a TOOLSETS entry resolve_toolset()
+    # returned [] and the toolset was never enabled — so the model never saw
+    # them and reported it "couldn't query the leads database"). Read-only +
+    # entitlement-gated; execution that's a specialist's job (elevate_db raw
+    # SQL, admin_deal writes) is intentionally NOT mapped here and stays
+    # reachable only by delegating to that agent.
+    "leads_overview": {
+        "description": "Read the leads pipeline (read-only snapshot of the realtor's leads)",
+        "tools": ["leads_overview"],
+        "includes": []
+    },
+
+    "deals_overview": {
+        "description": "Read the deals / transaction board (read-only snapshot)",
+        "tools": ["deals_overview"],
+        "includes": []
+    },
+
+    "lead_status": {
+        "description": "Read a lead's status + lifecycle (read-only)",
+        "tools": ["lead_status"],
         "includes": []
     },
 
