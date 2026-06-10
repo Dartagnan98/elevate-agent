@@ -1107,7 +1107,9 @@ function writeArchivedSessionIds(ids: string[]): void {
 function sessionTitle(session: SessionInfo): string {
   const title = session.title?.trim();
   if (title && title !== "Untitled") return title;
-  return session.preview?.trim() || "Untitled chat";
+  // No real title yet — show the first message as a stand-in, else a neutral
+  // "General session" placeholder (never "Untitled") until a title is generated.
+  return session.preview?.trim() || "General session";
 }
 
 const SIDEBAR_ACTIVE_STALE_SECONDS = 120;
@@ -1164,8 +1166,12 @@ function isSidebarRelevantSession(session: SessionInfo, nowSec: number): boolean
   if (isDetachedAutomationSession(session)) return false;
   if (isCronSession(session)) return shouldShowCronSession(session, nowSec);
   if ((session.message_count ?? 0) > 0) return true;
-  const startedAt = session.started_at ?? 0;
-  return isFreshActiveSession(session, nowSec) && nowSec - startedAt < 10;
+  // A new session that's actively working stays put through its first turn —
+  // even a long one — instead of vanishing after 10s and popping back when the
+  // first message persists. An idle 0-message session falls off after the
+  // active-stale window.
+  if (session.is_active) return true;
+  return isFreshActiveSession(session, nowSec);
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {

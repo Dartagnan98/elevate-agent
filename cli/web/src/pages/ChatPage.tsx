@@ -6687,6 +6687,11 @@ export default function ChatPage() {
                       artifacts={turnArtifacts ?? []}
                       busy={isStreaming && busy}
                       compacting={isStreaming && compacting}
+                      liveInput={
+                        isStreaming
+                          ? usage?.context_used ?? usage?.input ?? undefined
+                          : undefined
+                      }
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
@@ -7864,6 +7869,7 @@ function MessageRow({
   artifacts,
   busy,
   compacting,
+  liveInput,
   message,
   onEditMessage,
   onOpenArtifact,
@@ -7877,6 +7883,7 @@ function MessageRow({
   artifacts: ArtifactEntry[];
   busy?: boolean;
   compacting?: boolean;
+  liveInput?: number;
   message: ChatMessage;
   onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
@@ -7992,6 +7999,7 @@ function MessageRow({
             busy={!!busy}
             compacting={!!compacting}
             completedAt={message.completedAt}
+            liveInput={liveInput}
             liveTokens={liveTokens}
             onOpenSubagent={onOpenSubagent}
             startedAt={message.createdAt}
@@ -8750,6 +8758,7 @@ function ChatActivityDigest({
   busy,
   compacting,
   completedAt,
+  liveInput,
   liveTokens,
   onOpenSubagent,
   startedAt,
@@ -8762,6 +8771,7 @@ function ChatActivityDigest({
   busy: boolean;
   compacting?: boolean;
   completedAt?: number;
+  liveInput?: number;
   liveTokens?: number;
   onOpenSubagent?(childSessionId: string): void;
   startedAt?: number;
@@ -8895,15 +8905,23 @@ function ChatActivityDigest({
               <span className="num">{plural(steps.length, "step")}</span>
             </>
           )}
+          {busy && typeof liveInput === "number" && liveInput > 0 && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="num" title="Input tokens (context sent this turn).">
+                ↑ {liveInput.toLocaleString()} in
+              </span>
+            </>
+          )}
           {(busy || tokens > 0) && (
             <>
               <span className="dot-sep">·</span>
               <span
                 className="num"
-                title="Tokens this turn generated (output). Not the same as context fill — that's the % ring."
+                title="Output tokens generated this turn. Not the same as context fill — that's the % ring."
               >
                 {busy
-                  ? `↓ ${tokens.toLocaleString()} tokens`
+                  ? `↓ ${tokens.toLocaleString()} out`
                   : `${tokens.toLocaleString()} out`}
               </span>
             </>

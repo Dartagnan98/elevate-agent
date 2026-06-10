@@ -160,7 +160,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "oauth-rotation",
             "onboarding",
         ],
-        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "skills"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "skills", "deals_overview", "leads_overview"],
         "prompt": (
             "You are the Executive Assistant — the orchestrator and default agent for this Elevate "
             "workspace. You coordinate the fleet; you do not do specialist work yourself. Route every "
@@ -275,7 +275,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "webhook"],
         "skills": ["lead-scorer", "outreach-lanes", "relationship-review"],
-        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "messaging"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "messaging", "leads_overview"],
         "prompt": (
             "You are the ISA Agent — the inside sales agent for this Elevate workspace. You own the "
             "leads board end to end: speed-to-lead, follow-up cadence, hot-lead watch, cold "
