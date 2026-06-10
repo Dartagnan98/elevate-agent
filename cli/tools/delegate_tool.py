@@ -1073,6 +1073,12 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # When set to a known hub agent id (e.g. "admin", "outreach"), the child
+    # runs AS that specialist: its persona + FULL hub loadout + skills, even if
+    # the parent doesn't hold those tools. The explicit, recognized exception to
+    # the "child ⊆ parent toolsets" rule — orchestrator + specialist-fleet
+    # model (complements cortextOS). Unknown id → generic subagent.
+    agent: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1127,7 +1133,26 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
-    if toolsets:
+    # Named-specialist spawn: resolve the hub agent so the child can run AS it
+    # with its full loadout (bypassing the parent-subset rule below) + persona.
+    _spec_def: Optional[Dict[str, Any]] = None
+    _spec_id: Optional[str] = None
+    if agent and str(agent).strip():
+        try:
+            from elevate_cli.agent_hub import get_agent_def
+            _cand = get_agent_def(str(agent).strip())
+            if isinstance(_cand, dict) and _cand.get("enabled") is not False:
+                _spec_def = _cand
+                _spec_id = str(_cand.get("id") or agent).strip()
+        except Exception as _spec_exc:
+            logger.debug("delegate: unknown specialist agent %r (%s)", agent, _spec_exc)
+
+    if _spec_def and _spec_def.get("toolsets"):
+        # The specialist's loadout is authoritative — its full hub toolsets,
+        # NOT intersected with the parent. This is the recognized exception to
+        # child ⊆ parent. Still strip globally-blocked tools.
+        child_toolsets = _strip_blocked_tools(list(_spec_def.get("toolsets") or []))
+    elif toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
@@ -1161,6 +1186,16 @@ def _build_child_agent(
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
     )
+    # Named-specialist: prepend the agent's lane persona so the child speaks and
+    # acts as that specialist, not a generic subagent.
+    if _spec_def:
+        try:
+            from gateway.agent_lanes import agent_lane_prompt
+            _persona = agent_lane_prompt(_spec_def)
+            if _persona:
+                child_prompt = f"{_persona}\n\n{child_prompt}"
+        except Exception as _persona_exc:
+            logger.debug("delegate: persona inject failed for %r (%s)", _spec_id, _persona_exc)
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
     if (not parent_api_key) and hasattr(parent_agent, "_client_kwargs"):
@@ -1302,6 +1337,9 @@ def _build_child_agent(
         prefill_messages=getattr(parent_agent, "prefill_messages", None),
         fallback_model=parent_fallback,
         enabled_toolsets=child_toolsets,
+        # Run the child AS the named specialist (loads its identity/memory
+        # policy; the toolset-bind in AIAgent.__init__ also unions its loadout).
+        agent_id=_spec_id,
         quiet_mode=True,
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
@@ -2170,6 +2208,10 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    # Spawn the subagent AS a known hub specialist (e.g. "admin", "outreach"):
+    # its persona + full loadout + skills. Top-level default; per-task `agent`
+    # overrides. None = generic subagent.
+    agent: Optional[str] = None,
     parent_agent=None,
     # Agent-handoff / orchestration metadata: these are forwarded unconditionally
     # by AIAgent._dispatch_delegate_task (run_agent.py). They are accepted here so
@@ -2276,7 +2318,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role, "agent": agent}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2322,6 +2364,7 @@ def delegate_task(
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
+                agent=t.get("agent") or agent,
                 model=creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
@@ -2978,6 +3021,19 @@ DELEGATE_TASK_SCHEMA = {
                     "['terminal', 'file', 'web'] for full-stack tasks."
                 ),
             },
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Run the subagent AS a specialist from your fleet — it gets "
+                    "that agent's persona, full tool loadout, and skills "
+                    "(overrides 'toolsets'). Use this to hand real work to the "
+                    "right specialist instead of a generic helper. Examples: "
+                    "'admin' (deal / transaction coordination — has admin_deal), "
+                    "'outreach' (lead response + status — has lead_status), "
+                    "'analyst', 'marketing', 'social-media'. Omit for a generic "
+                    "subagent scoped by 'toolsets'."
+                ),
+            },
             "tasks": {
                 "type": "array",
                 "items": {
@@ -3010,6 +3066,10 @@ DELEGATE_TASK_SCHEMA = {
                             "type": "string",
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Run THIS task as a fleet specialist (persona + full loadout + skills). See top-level 'agent'. e.g. 'admin', 'outreach', 'analyst'.",
                         },
                     },
                     "required": ["goal"],
@@ -3068,6 +3128,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        agent=args.get("agent"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
