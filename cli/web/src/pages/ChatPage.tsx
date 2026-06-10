@@ -23,6 +23,7 @@ import {
   type AgentHubAgent,
   type AnalyticsResponse,
   type SessionArtifactItem,
+  type SessionChildItem,
   type SessionMessage as StoredSessionMessage,
   type TurnUsageEntry,
   type WorkspaceGitStatus,
@@ -569,14 +570,16 @@ function clampPreviewPanelWidth(width: number): number {
 }
 
 function defaultPreviewPanelWidth(): number {
-  if (typeof window === "undefined") return 720;
+  if (typeof window === "undefined") return 480;
   try {
     const stored = localStorage.getItem("elevate-preview-width");
     if (stored) { const n = parseInt(stored, 10); if (Number.isFinite(n) && n > 0) return clampPreviewPanelWidth(n); }
   } catch {
     // Ignore malformed local storage.
   }
-  return clampPreviewPanelWidth(window.innerWidth * 0.5);
+  // Default to ~1/3 of the window (was 1/2 — too wide). Still drag-resizable
+  // bigger via the handle; a dragged width persists in localStorage.
+  return clampPreviewPanelWidth(window.innerWidth * 0.34);
 }
 
 // User-resizable chat column width. Returns null when the user hasn't dragged it
@@ -2930,6 +2933,20 @@ export default function ChatPage() {
   // Subagent lifecycle (start/complete) — surfaced in the Background tasks panel
   // with goal/model/status/tool-count detail.
   const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
+  // Subagent child sessions for this chat (durable — fetched from the API so
+  // ANY past subagent is openable, not just ones from live events this load).
+  const [childSessions, setChildSessions] = useState<SessionChildItem[]>([]);
+  // Kind of the session being viewed ("subagent" → show a header banner).
+  const [sessionKind, setSessionKind] = useState<string | null>(null);
+  useEffect(() => {
+    // New chat (no resume target) → clear resume-scoped state so a subagent
+    // banner / past child sessions / usage don't bleed across chats.
+    if (!resumeId) {
+      setSessionKind(null);
+      setChildSessions([]);
+      setTurnUsage([]);
+    }
+  }, [resumeId]);
   // Per-turn usage (model/tokens/cost/latency) for the footer, fetched on resume.
   const [turnUsage, setTurnUsage] = useState<TurnUsageEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
@@ -3896,6 +3913,7 @@ export default function ChatPage() {
       } else void api.getSessionMessages(resumeId)
         .then((response) => {
           if (cancelled) return;
+          setSessionKind(response.session_kind ?? null);
           const canonicalSessionId =
             response.active_session_id || response.session_id || resumeId;
           if (canonicalSessionId) {
@@ -3918,6 +3936,18 @@ export default function ChatPage() {
               })
               .catch(() => {
                 // Per-turn footer is additive; absence just hides model/cost.
+              });
+            void api.getSessionChildren(canonicalSessionId)
+              .then((childResponse) => {
+                if (cancelled) return;
+                setChildSessions(
+                  (childResponse.children ?? []).filter(
+                    (c) => c.session_kind === "subagent",
+                  ),
+                );
+              })
+              .catch(() => {
+                // Subagent drill-in is additive; absence just hides Open links.
               });
           }
           const hydrated = normalizeStoredTranscript(response.messages);
@@ -6252,8 +6282,37 @@ export default function ChatPage() {
         });
       }
     }
+    // Durable subagent sessions from the API — so EVERY past subagent is
+    // openable, not only ones captured from live events this load. Dedup against
+    // live entries that already carry the same child_session_id.
+    const liveChildIds = new Set(
+      items.map((i) => i.child_session_id).filter(Boolean) as string[],
+    );
+    const tsMs = (v: number | string | null | undefined): number | undefined => {
+      if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v;
+      if (typeof v === "string") {
+        const t = Date.parse(v);
+        return Number.isFinite(t) ? t : undefined;
+      }
+      return undefined;
+    };
+    for (const child of childSessions) {
+      if (!child.id || liveChildIds.has(child.id)) continue;
+      const startedAt = tsMs(child.started_at);
+      items.push({
+        id: `child-${child.id}`,
+        kind: "subagent",
+        label: child.title?.trim() || "Subagent",
+        status: "done",
+        detail: child.model ?? undefined,
+        toolCount: child.tool_call_count ?? undefined,
+        startedAt,
+        completedAt: tsMs(child.ended_at) ?? startedAt,
+        child_session_id: child.id,
+      });
+    }
     return items.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-  }, [subagents, tools]);
+  }, [subagents, tools, childSessions]);
   const runningBackgroundTasks = useMemo(
     () => backgroundTasks.filter((task) => task.status === "running").length,
     [backgroundTasks],
@@ -6619,6 +6678,15 @@ export default function ChatPage() {
                 <span className="contents">
                   <span className="crumb">{folderLabel}</span>
                   <span className="sep">/</span>
+                </span>
+              ) : null}
+              {sessionKind === "subagent" ? (
+                <span
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--status-neon-orange)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--status-neon-orange-hot)]"
+                  title="You're viewing a subagent's own session"
+                >
+                  <Bot className="h-3 w-3" />
+                  Subagent
                 </span>
               ) : null}
               <h1 className="here">

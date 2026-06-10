@@ -1166,12 +1166,12 @@ function isSidebarRelevantSession(session: SessionInfo, nowSec: number): boolean
   if (isDetachedAutomationSession(session)) return false;
   if (isCronSession(session)) return shouldShowCronSession(session, nowSec);
   if ((session.message_count ?? 0) > 0) return true;
-  // A new session that's actively working stays put through its first turn —
-  // even a long one — instead of vanishing after 10s and popping back when the
-  // first message persists. An idle 0-message session falls off after the
-  // active-stale window.
-  if (session.is_active) return true;
-  return isFreshActiveSession(session, nowSec);
+  // A 0-message session shows ONLY briefly right after it starts (a draft the
+  // user hasn't touched should NOT linger as "General session"). A session the
+  // user actually sends to gets an optimistic message_count bump elsewhere, so
+  // it passes the check above and stays put through its first turn.
+  const startedAt = session.started_at ?? 0;
+  return isFreshActiveSession(session, nowSec) && nowSec - startedAt < 10;
 }
 
 function sessionRoute(session: SessionInfo, embeddedChat: boolean): string {
