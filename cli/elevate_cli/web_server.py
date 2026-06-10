@@ -5073,6 +5073,33 @@ async def get_session_files(session_id: str):
     }
 
 
+@app.get("/api/sessions/{session_id}/turn_usage")
+async def get_session_turn_usage(session_id: str):
+    """Per-turn usage (model, tokens, cost, latency) for a session's footer.
+
+    turn_usage rows are keyed by a gateway message_id that won't match the
+    frontend's message ids, so we return them ordered by timestamp and let the
+    UI join by nearest-timestamp to each displayed assistant turn.
+    """
+    db = _get_session_db()
+    try:
+        sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        rows = db.turn_usage_for_session(active_id)
+    finally:
+        db.close()
+
+    fields = (
+        "message_id", "model", "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+        "total_tokens", "estimated_cost_usd", "latency_ms", "timestamp",
+    )
+    return {
+        "session_id": active_id,
+        "requested_session_id": sid,
+        "turn_usage": [{k: r.get(k) for k in fields} for r in rows],
+    }
+
+
 @app.get("/api/sessions/{session_id}/artifacts")
 async def get_session_artifacts(session_id: str):
     """Artifacts/files surfaced from a session's durable transcript."""

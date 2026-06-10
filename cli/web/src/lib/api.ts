@@ -95,6 +95,7 @@ import type {
   SessionFilesResponse,
   SessionArtifactsResponse,
   SessionChildrenResponse,
+  SessionTurnUsageResponse,
   FilesTreeResponse,
   LogsResponse,
   AnalyticsResponse,
@@ -406,6 +407,10 @@ export const api = {
     fetchJSON<SessionArtifactsResponse>(`/api/sessions/${encodeURIComponent(id)}/artifacts`),
   getSessionChildren: (id: string) =>
     fetchJSON<SessionChildrenResponse>(`/api/sessions/${encodeURIComponent(id)}/children`),
+  getSessionTurnUsage: (id: string) =>
+    fetchJSON<SessionTurnUsageResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/turn_usage`,
+    ),
   getFilesTree: (root?: string, depth?: number) => {
     const qs = new URLSearchParams();
     if (root) qs.set("root", root);

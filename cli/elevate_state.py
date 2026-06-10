@@ -2102,6 +2102,20 @@ class SessionDB:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def turn_usage_for_session(self, session_key: str) -> List[Dict[str, Any]]:
+        """All turn_usage rows for one session (matched by session_id OR
+        session_key), oldest first — so the UI can join them to displayed turns
+        by position/timestamp for the per-turn footer."""
+        if not session_key:
+            return []
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM turn_usage WHERE session_id = ? OR session_key = ? "
+                "ORDER BY timestamp ASC, id ASC LIMIT 1000",
+                (session_key, session_key),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Atomically replace every message for a session.
 

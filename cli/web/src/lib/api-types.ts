@@ -2401,6 +2401,27 @@ export interface SessionMessage {
   reasoning_content?: string | null;
 }
 
+/** One turn's usage — joined to a displayed assistant turn for the footer. */
+export interface TurnUsageEntry {
+  message_id?: string | null;
+  model?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  total_tokens?: number | null;
+  estimated_cost_usd?: number | null;
+  latency_ms?: number | null;
+  timestamp?: number | null;
+}
+
+export interface SessionTurnUsageResponse {
+  session_id: string;
+  requested_session_id: string;
+  turn_usage: TurnUsageEntry[];
+}
+
 export interface SessionMessagesResponse {
   session_id: string;
   requested_session_id?: string | null;

@@ -24,6 +24,7 @@ import {
   type AnalyticsResponse,
   type SessionArtifactItem,
   type SessionMessage as StoredSessionMessage,
+  type TurnUsageEntry,
   type WorkspaceGitStatus,
 } from "@/lib/api";
 import {
@@ -2929,6 +2930,8 @@ export default function ChatPage() {
   // Subagent lifecycle (start/complete) — surfaced in the Background tasks panel
   // with goal/model/status/tool-count detail.
   const [subagents, setSubagents] = useState<SubagentEntry[]>([]);
+  // Per-turn usage (model/tokens/cost/latency) for the footer, fetched on resume.
+  const [turnUsage, setTurnUsage] = useState<TurnUsageEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
@@ -3907,6 +3910,14 @@ export default function ChatPage() {
               .catch(() => {
                 // Artifact hydration is additive; transcript hydration already
                 // carries the user-visible failure state for this resume.
+              });
+            void api.getSessionTurnUsage(canonicalSessionId)
+              .then((usageResponse) => {
+                if (cancelled) return;
+                setTurnUsage(usageResponse.turn_usage ?? []);
+              })
+              .catch(() => {
+                // Per-turn footer is additive; absence just hides model/cost.
               });
           }
           const hydrated = normalizeStoredTranscript(response.messages);
@@ -6158,6 +6169,24 @@ export default function ChatPage() {
     }
     return grouped;
   }, [subagents]);
+  // Join per-turn usage to assistant turns for the footer. turn_usage.message_id
+  // is a gateway id that won't match our ids, so pair chronologically from the
+  // most-recent end (the turns the user is actually looking at).
+  const turnUsageByMessage = useMemo(() => {
+    const map = new Map<string, TurnUsageEntry>();
+    if (!turnUsage.length) return map;
+    const assistantIds = messages
+      .filter((m) => m.role === "assistant")
+      .map((m) => m.id);
+    const n = Math.min(assistantIds.length, turnUsage.length);
+    for (let i = 0; i < n; i += 1) {
+      map.set(
+        assistantIds[assistantIds.length - 1 - i],
+        turnUsage[turnUsage.length - 1 - i],
+      );
+    }
+    return map;
+  }, [turnUsage, messages]);
   // Diff artifacts grouped by message — used to reattach inline_diff to stored
   // tools on reload (the diff isn't persisted on the tool itself).
   const diffsByMessage = useMemo(() => {
@@ -6665,6 +6694,9 @@ export default function ChatPage() {
                       subagents={turnSubagents}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
+                      turnUsage={
+                        isAssistant ? turnUsageByMessage.get(message.id) : undefined
+                      }
                     />
                   );
                 })}
@@ -7839,6 +7871,7 @@ function MessageRow({
   subagents,
   tools,
   turnArtifacts,
+  turnUsage,
 }: {
   activityTrace?: ActivityTrace[];
   artifacts: ArtifactEntry[];
@@ -7851,6 +7884,7 @@ function MessageRow({
   subagents?: SubagentEntry[];
   tools?: ToolEntry[];
   turnArtifacts?: ArtifactEntry[];
+  turnUsage?: TurnUsageEntry;
 }) {
   const { copied, copy } = useCopyToClipboard();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -8069,6 +8103,17 @@ function MessageRow({
             );
           })()}
         </div>
+        {isAssistant && message.content ? (
+          <TurnFooter
+            usage={turnUsage}
+            durationMs={
+              message.completedAt && message.createdAt
+                ? message.completedAt - message.createdAt
+                : undefined
+            }
+            tokenCount={message.tokenCount}
+          />
+        ) : null}
         {isUser ? (
           <div className="user-actions">
             <button
@@ -8637,6 +8682,36 @@ function SubagentSummaryRow({
       ) : null}
     </div>
   );
+}
+
+// A quiet per-turn footer below the answer: duration · model · tokens · cost.
+// Shows whatever is known — duration/out-tokens come from the turn itself;
+// model/in-tokens/cost arrive from the turn_usage join on resume.
+function TurnFooter({
+  usage,
+  durationMs,
+  tokenCount,
+}: {
+  usage?: TurnUsageEntry;
+  durationMs?: number;
+  tokenCount?: number;
+}) {
+  const parts: string[] = [];
+  if (typeof durationMs === "number" && durationMs > 500)
+    parts.push(formatDuration(durationMs));
+  if (usage?.model) parts.push(String(usage.model));
+  const inTok = usage?.input_tokens;
+  if (typeof inTok === "number" && inTok > 0)
+    parts.push(`${inTok.toLocaleString()} in`);
+  const outTok =
+    typeof usage?.output_tokens === "number" ? usage.output_tokens : tokenCount;
+  if (typeof outTok === "number" && outTok > 0)
+    parts.push(`${outTok.toLocaleString()} out`);
+  const cost = usage?.estimated_cost_usd;
+  if (typeof cost === "number" && cost > 0)
+    parts.push(`~$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`);
+  if (!parts.length) return null;
+  return <div className="turn-footer">{parts.join(" · ")}</div>;
 }
 
 // Rotating "thinking verb" for the live digest header. Cycles through the

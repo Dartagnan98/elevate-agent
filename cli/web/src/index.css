@@ -1341,6 +1341,14 @@ html .font-courier {
   word-break: break-word;
 }
 
+/* Quiet per-turn footer under the answer: duration · model · tokens · cost. */
+.turn-footer {
+  margin-top: 8px;
+  font: 500 11px/1.4 "Geist Mono", monospace;
+  color: var(--fg-faint);
+  letter-spacing: 0.01em;
+}
+
 /* One neutral selection highlight everywhere — grey background, white text.
    Overrides any accent-tinted ::selection so highlighting doesn't flash
    different colors across the app. */
