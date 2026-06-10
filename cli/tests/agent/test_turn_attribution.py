@@ -126,3 +126,71 @@ def test_full_name_match(monkeypatch):
     ]
     out = ta.resolve_attributions(_FakeConn(), msgs)
     assert any(a.entity_id == "c-shawn" for a in out)
+
+
+# ── nudge layer ────────────────────────────────────────────────────────────
+
+def _patch_nudge_env(monkeypatch):
+    """Make build_turn_nudge hermetic: roster + entitlement + connection."""
+    _patch_roster(monkeypatch)
+    import elevate_cli.access as access
+    monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
+
+    class _Ctx:
+        def __enter__(self): return _FakeConn()
+        def __exit__(self, *a): return False
+    import elevate_cli.data as d
+    monkeypatch.setattr(d, "connect", lambda *a, **k: _Ctx())
+
+
+def test_nudge_fires_when_deal_worked_unrecorded(monkeypatch):
+    _patch_nudge_env(monkeypatch)
+    # Turn N-1 drafted a counter for 412 Maple Ridge Rd via a generic tool —
+    # no admin_deal mutation. Turn N is the new user message.
+    msgs = [
+        {"role": "user", "content": "draft the counter for 412 Maple Ridge Rd"},
+        _asst("Drafted a counter for 412 Maple Ridge Rd.", [_tc("draft_message", {})]),
+        {"role": "user", "content": "thanks"},
+    ]
+    nudge = ta.build_turn_nudge(msgs, current_user_idx=2)
+    assert nudge and "412 Maple Ridge" in nudge and "admin_deal" in nudge
+
+
+def test_nudge_silent_when_deal_formally_updated(monkeypatch):
+    _patch_nudge_env(monkeypatch)
+    # Turn N-1 formally advanced the deal — it logged itself, no nudge needed.
+    msgs = [
+        {"role": "user", "content": "advance 412 Maple Ridge Rd"},
+        _asst("Advanced it.", [_tc("admin_deal", {"action": "move_stage",
+                                                   "deal_id": "deal-maple", "to_stage": 3})]),
+        {"role": "user", "content": "thanks"},
+    ]
+    assert ta.build_turn_nudge(msgs, current_user_idx=2) is None
+
+
+def test_nudge_silent_on_no_tool_turn(monkeypatch):
+    _patch_nudge_env(monkeypatch)
+    msgs = [
+        {"role": "user", "content": "what's a good price range"},
+        _asst("Around 480-520k for that area."),
+        {"role": "user", "content": "ok"},
+    ]
+    assert ta.build_turn_nudge(msgs, current_user_idx=2) is None
+
+
+def test_nudge_silent_on_first_turn(monkeypatch):
+    _patch_nudge_env(monkeypatch)
+    msgs = [{"role": "user", "content": "draft the counter for 412 Maple Ridge Rd"}]
+    assert ta.build_turn_nudge(msgs, current_user_idx=0) is None
+
+
+def test_session_sticky_ids_collects_explicit_ids():
+    import json
+    msgs = [
+        {"role": "user", "content": "x"},
+        _asst("ok", [_tc("admin_deal", {"action": "show", "deal_id": "deal-lewis"})]),
+        {"role": "user", "content": "y"},
+        _asst("ok", [_tc("note", {"contact_id": "c-rod"})]),
+    ]
+    ids = ta.session_sticky_ids(msgs)
+    assert ids == {"deal-lewis", "c-rod"}

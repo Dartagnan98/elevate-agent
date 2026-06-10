@@ -10415,6 +10415,17 @@ class AIAgent:
                 _inj_parts.append(_fenced_mem)
         if _plugin_user_context:
             _inj_parts.append(_plugin_user_context)
+        # Board-sync nudge: if the previous turn worked a deal without recording
+        # a formal change, remind the agent to update the board (it decides
+        # whether a real milestone was hit). Ephemeral like the rest — not
+        # persisted. Self-gated to real-estate accounts; never raises.
+        try:
+            from agent.turn_attribution import build_turn_nudge
+            _nudge = build_turn_nudge(messages, current_turn_user_idx)
+            if _nudge:
+                _inj_parts.append(_nudge)
+        except Exception as _nudge_exc:
+            logger.debug("board-sync nudge skipped: %s", _nudge_exc)
         if _inj_parts:
             _ephemeral_injection = "\n\n".join(_inj_parts)
             if 0 <= current_turn_user_idx < len(messages):
@@ -13700,6 +13711,7 @@ class AIAgent:
                     messages,
                     agent_id=getattr(self, "_agent_id", "") or "",
                     session_id=self.session_id,
+                    main_runtime=self._current_main_runtime(),
                 )
             except Exception as exc:
                 logger.debug("turn attribution hook failed: %s", exc)

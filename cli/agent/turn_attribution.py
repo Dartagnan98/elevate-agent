@@ -333,11 +333,163 @@ def record_turn_activity(
     return logged
 
 
+def _prev_user_index(messages: Sequence[Mapping[str, Any]], current_user_idx: int) -> int:
+    """Index of the user message that opened the turn BEFORE the current one."""
+    for i in range(current_user_idx - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return i
+    return -1
+
+
+def build_turn_nudge(
+    messages: Sequence[Mapping[str, Any]],
+    current_user_idx: int,
+) -> str | None:
+    """If the LAST completed turn worked a deal but recorded no formal board
+    change, return a one-line reminder to inject into this turn. Stateless: it
+    re-derives from history each turn, so a fresh AIAgent (gateway/cron rebuilds
+    one per message) still produces it. The "last completed turn" window
+    advances each turn, so a nudge is not repeated once the agent acts or moves
+    on. Deal-focused — that's where stage/checklist drift actually hurts.
+
+    Best-effort and self-gated (real-estate accounts only); never raises.
+    """
+    try:
+        prev = _prev_user_index(messages, current_user_idx)
+        if prev < 0:
+            return None
+        last_turn = list(messages[prev:current_user_idx])
+        if not any(name for name, _ in _iter_tool_calls(last_turn)):
+            return None
+
+        from elevate_cli.access import (
+            ENTITLEMENT_REAL_ESTATE_ADMIN,
+            is_entitlement_active,
+        )
+        if not is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, None):
+            return None
+
+        from elevate_cli.data import connect
+        sticky = session_sticky_ids(messages[:prev])
+        with connect() as conn:
+            attributions = resolve_attributions(conn, last_turn, sticky_ids=sticky)
+        deals = [a for a in attributions if a.entity_kind == "deal"]
+        if not deals:
+            return None
+        labels = ", ".join(sorted({a.label for a in deals})[:3])
+        return (
+            "[board-sync reminder] Last turn you worked on "
+            f"{labels} but recorded no board change. If a stage advanced, a "
+            "checklist item completed, or a key date/price changed, update it now "
+            "with admin_deal. If it was only research or drafting, ignore this."
+        )
+    except Exception as exc:
+        logger.debug("build_turn_nudge skipped: %s", exc)
+        return None
+
+
+def _resolver_enabled() -> bool:
+    """The micro-resolver (LLM backstop) is OFF by default — it adds an aux
+    model call per ambiguous turn. Opt in with ``attribution.resolver: true`` in
+    ~/.elevate/config.yaml."""
+    try:
+        from elevate_cli.config import load_config
+        cfg = load_config() or {}
+        node = cfg.get("attribution")
+        return bool(isinstance(node, dict) and node.get("resolver"))
+    except Exception:
+        return False
+
+
+def _run_micro_resolver(
+    turn_text: str,
+    summary: str,
+    tools: list[str],
+    *,
+    actor: str,
+    session_id: str | None,
+    main_runtime: Mapping[str, Any] | None,
+) -> None:
+    """LLM backstop (step 3): for a turn the deterministic layers couldn't
+    place, ask a cheap model which deal/contact it concerned. Runs in its own
+    thread with its own connection; never raises. Logs at confidence 0.6."""
+    try:
+        from elevate_cli.data import connect, record_agent_activity, record_deal_activity
+        from agent.auxiliary_client import call_llm
+
+        with connect() as conn:
+            from elevate_cli.data import find_contacts, list_deals
+            deals = list_deals(conn, status="active", limit=200)
+            contacts = find_contacts(conn, limit=200)
+        if not deals and not contacts:
+            return
+
+        roster_deals = "\n".join(
+            f"  deal {d.get('id')}: {d.get('address') or d.get('title') or '?'}"
+            for d in deals
+        )[:4000]
+        roster_contacts = "\n".join(
+            f"  contact {c.get('id')}: {c.get('displayName') or '?'}"
+            for c in contacts
+        )[:4000]
+        prompt = (
+            "You attribute realtor agent work to the deal/contact it concerned.\n"
+            "A turn just ran. Decide which known deals/contacts (if any) it was "
+            "about. Be conservative — answer none unless clearly about one.\n\n"
+            f"Turn did: {summary}\n"
+            f"Turn text (truncated):\n{turn_text[:2000]}\n\n"
+            f"Known deals:\n{roster_deals or '  (none)'}\n"
+            f"Known contacts:\n{roster_contacts or '  (none)'}\n\n"
+            'Reply ONLY compact JSON: {"deal_ids":[...],"contact_ids":[...]} '
+            "(empty arrays if none)."
+        )
+        resp = call_llm(
+            task="session_search",
+            main_runtime=dict(main_runtime or {}),
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            timeout=20,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        if not m:
+            return
+        parsed = json.loads(m.group(0))
+        deal_ids = [str(x) for x in (parsed.get("deal_ids") or [])][:5]
+        contact_ids = [str(x) for x in (parsed.get("contact_ids") or [])][:5]
+        if not deal_ids and not contact_ids:
+            return
+
+        valid_deals = {str(d.get("id")) for d in deals}
+        valid_contacts = {str(c.get("id")) for c in contacts}
+        with connect() as conn:
+            for did in deal_ids:
+                if did in valid_deals:
+                    record_deal_activity(
+                        conn, did, actor=actor, summary=summary, tools=tools,
+                        session_id=session_id, confidence=0.6,
+                    )
+            for cid in contact_ids:
+                if cid in valid_contacts:
+                    record_agent_activity(
+                        conn, contact_id=cid, actor=actor, summary=summary,
+                        tools=tools, session_id=session_id, confidence=0.6,
+                    )
+        logger.info(
+            "micro-resolver attributed %d deal(s) + %d contact(s)",
+            len([d for d in deal_ids if d in valid_deals]),
+            len([c for c in contact_ids if c in valid_contacts]),
+        )
+    except Exception as exc:
+        logger.debug("micro-resolver skipped: %s", exc)
+
+
 def attribute_turn_safely(
     messages: Sequence[Mapping[str, Any]],
     *,
     agent_id: str | None = None,
     session_id: str | None = None,
+    main_runtime: Mapping[str, Any] | None = None,
 ) -> None:
     """Fire-and-forget post-turn attribution for the live agent loop.
 
@@ -363,8 +515,25 @@ def attribute_turn_safely(
 
         from elevate_cli.data import connect
         with connect() as conn:
-            record_turn_activity(
+            logged = record_turn_activity(
                 conn, messages, actor=actor, session_id=session_id, sticky_ids=sticky,
             )
+
+        # Step 3 — micro-resolver backstop. Only when the deterministic layers
+        # placed NOTHING and the operator opted in (it costs an aux call). Runs
+        # off-thread so it never delays the response.
+        if not logged and _resolver_enabled():
+            tools_used = [name for name, _ in _iter_tool_calls(turn) if name]
+            text = _turn_text(turn)
+            if text.strip():
+                import threading
+                threading.Thread(
+                    target=_run_micro_resolver,
+                    args=(text, _summarize(tools_used), tools_used),
+                    kwargs=dict(
+                        actor=actor, session_id=session_id, main_runtime=main_runtime,
+                    ),
+                    daemon=True,
+                ).start()
     except Exception as exc:  # never let attribution break a turn
         logger.debug("attribute_turn_safely skipped: %s", exc)
