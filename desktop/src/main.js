@@ -440,11 +440,54 @@ function runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs = 90000 } = {}
   });
 }
 
+// Records which app version the gateway last (re)started on. Lets us restart it
+// exactly once after an update instead of on every launch.
+function gatewayVersionMarkerPath() {
+  return path.join(os.homedir(), ".elevate", ".gateway_version");
+}
+
+function readGatewayVersionMarker() {
+  try {
+    return fs.readFileSync(gatewayVersionMarkerPath(), "utf8").trim();
+  } catch (e) {
+    return "";
+  }
+}
+
+function writeGatewayVersionMarker(version) {
+  try {
+    fs.mkdirSync(path.join(os.homedir(), ".elevate"), { recursive: true });
+    fs.writeFileSync(gatewayVersionMarkerPath(), `${version}\n`, "utf8");
+  } catch (e) {
+    appendBackendLog(`[gateway] version marker write failed: ${e}\n`);
+  }
+}
+
+// Restart the loaded gateway so it re-execs the freshly-bundled CLI code. A
+// desktop auto-update swaps the .app bundle, but the long-lived launchd gateway
+// keeps running the OLD code in memory — so the seed/migration path
+// (ensure_system_jobs: preinstalled fleet defaults + the sentinel-gated
+// fleet-rebuild + heartbeat/automation seeding) never re-applies on update.
+// Without this, every updated customer is stuck on their old roster until
+// someone restarts the gateway by hand. macOS only.
+function kickstartGateway(uid) {
+  const res = spawnSync(
+    "launchctl",
+    ["kickstart", "-k", `gui/${uid}/ai.elevate.gateway`],
+    { encoding: "utf8", timeout: 15000 },
+  );
+  const out = String(res.stdout || res.stderr || "").trim().slice(-300);
+  appendBackendLog(`[gateway] kickstart rc=${res.status}\n${out}\n`);
+  return res.status === 0;
+}
+
 // Self-heal the gateway launchd service. The gateway runs the cron ticker that
 // SEEDS + runs each account's lead/admin automations + heartbeats. If onboarding
 // never installed it (the silent "no automations, no heartbeats" failure mode),
-// install it now. Only installs when missing/unloaded so a healthy gateway is
-// never restarted. Best-effort, non-blocking, logged. macOS only.
+// install it now. A healthy gateway on the SAME version is never restarted; a
+// healthy gateway on a DIFFERENT version (i.e. just after an update) is
+// restarted ONCE so the new bundled code seeds the current fleet + migrations.
+// Best-effort, non-blocking, logged. macOS only.
 function ensureGatewayInstalled(launcher, baseEnv) {
   if (process.platform !== "darwin") return;
   try {
@@ -454,9 +497,9 @@ function ensureGatewayInstalled(launcher, baseEnv) {
       "LaunchAgents",
       "ai.elevate.gateway.plist",
     );
+    const uid = typeof process.getuid === "function" ? process.getuid() : "";
     let loaded = false;
     try {
-      const uid = typeof process.getuid === "function" ? process.getuid() : "";
       const probe = spawnSync(
         "launchctl",
         ["print", `gui/${uid}/ai.elevate.gateway`],
@@ -466,8 +509,19 @@ function ensureGatewayInstalled(launcher, baseEnv) {
     } catch (e) {
       loaded = false;
     }
+    const appVersion = app.getVersion();
     if (fileExists(plist) && loaded) {
-      appendBackendLog("[gateway] self-heal: healthy (plist present + loaded)\n");
+      const lastVersion = readGatewayVersionMarker();
+      if (lastVersion !== appVersion) {
+        appendBackendLog(
+          `[gateway] version change ${lastVersion || "(none)"} -> ${appVersion}; restarting to load new code\n`,
+        );
+        if (kickstartGateway(uid)) writeGatewayVersionMarker(appVersion);
+      } else {
+        appendBackendLog(
+          "[gateway] self-heal: healthy (plist present + loaded, version current)\n",
+        );
+      }
       return;
     }
     appendBackendLog(
@@ -476,6 +530,7 @@ function ensureGatewayInstalled(launcher, baseEnv) {
     const res = runGatewayCommand(launcher, baseEnv, ["install"]);
     const out = String(res.stdout || res.stderr || "").trim().slice(-400);
     appendBackendLog(`[gateway] self-heal install rc=${res.status}\n${out}\n`);
+    if (res.status === 0) writeGatewayVersionMarker(appVersion);
   } catch (e) {
     appendBackendLog(`[gateway] self-heal error: ${e}\n`);
   }

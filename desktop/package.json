@@ -72,7 +72,12 @@
           "!.git/**",
           "!.pytest_cache/**",
           "!**/.DS_Store",
-          "!*.egg-info/**"
+          "!*.egg-info/**",
+          "!**/*.db",
+          "!**/*.db-shm",
+          "!**/*.db-wal",
+          "!**/*.sqlite",
+          "!**/*.sqlite3"
         ]
       }
     ],
