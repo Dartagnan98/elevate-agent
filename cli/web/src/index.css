@@ -1331,10 +1331,12 @@ html .font-courier {
 /* Reasoning shown as a full, always-visible message (no "Thinking" label,
    no collapse) — reads like the agent narrating its work. */
 .reasoning-message {
-  margin: 8px 0;
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--fg);
+  margin: 5px 0;
+  font-size: 13px;
+  line-height: 1.65;
+  /* Muted, like Claude's thinking — quiet secondary thought, not as loud as the
+     answer. No bold section titles (stripped in the renderer). */
+  color: var(--fg-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
