@@ -3973,11 +3973,16 @@ export default function ChatPage() {
           const hydrated = normalizeStoredTranscript(response.messages);
           const latestActiveSnapshot = readActiveTurnSnapshot(resumeId);
           historyHydratedRef.current = true;
+          // A subagent thread is short-lived and server-authoritative. NEVER
+          // merge it with prev/cache — the parent chat's messages (your raw
+          // prompt) bleed in through the merge base, and an early polluted
+          // cache write would persist it. Render straight from the server.
+          const isSubagentView = response.session_kind === "subagent";
           setMessages((prev) => {
             // Merge against the current UI state, not only the cache captured
             // before gateway replay. Otherwise a slow DB hydrate can erase the
             // in-flight assistant turn that session.resume just replayed.
-            const base = prev.length ? prev : restoredCached;
+            const base = isSubagentView ? [] : (prev.length ? prev : restoredCached);
             const merged = mergeActiveTurnSnapshot(
               mergeServerWithCache(hydrated, base, compactionGuardRef.current),
               latestActiveSnapshot,
