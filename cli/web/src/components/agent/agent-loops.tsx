@@ -244,6 +244,41 @@ export function AgentLoops({
                         }}
                       />
                     </div>
+                    {(surface!.heartbeats?.length ?? 0) > 0 && (
+                      <div className="space-y-1">
+                        <p className="px-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                          Focused heartbeats
+                        </p>
+                        {surface!.heartbeats.map((h) => (
+                          <div
+                            key={h.id}
+                            className="flex items-center justify-between gap-3 rounded-md bg-secondary/30 p-2"
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate text-[11px] font-medium text-foreground/90">
+                                {h.name.replace(/^.*·\s*/, "")}
+                                {h.experiment_owner && (
+                                  <span className="ml-1.5 rounded bg-primary/15 px-1 py-px text-[9px] font-medium uppercase tracking-wide text-primary/80">
+                                    experiments
+                                  </span>
+                                )}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground">
+                                {h.schedule || "—"} · last {timeAgo(h.last_run_at ?? undefined)}
+                              </p>
+                            </div>
+                            <span
+                              className={
+                                "shrink-0 text-[9px] font-medium uppercase tracking-wide " +
+                                (h.enabled ? "text-primary/80" : "text-muted-foreground/60")
+                              }
+                            >
+                              {h.enabled ? "on" : "off"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {surface!.lastRun?.summary && (
                       <div className="rounded-md border border-border bg-card/40 p-2.5">
                         <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">

@@ -313,18 +313,65 @@ SURFACE_HEARTBEAT_SKILL = "real-estate/surface-heartbeat"
 SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "leads": {
         "name": "Leads Heartbeat",
-        "schedule": "0 8,15 * * *",
+        "title": "Leads",
+        # Primary cadence/goal = the general surface config (used by the workspace
+        # seeder + surface settings). The actual runs are the FOCUSED heartbeats
+        # below — each a small, context-first cron on its own cadence instead of
+        # one huge run that does every lane at once.
+        "schedule": "0 9 * * *",
         "config": {"agent": "outreach"},
         "goal": (
-            "Each run, CONTEXT-FIRST — reconcile before acting: for every new/changed lead, "
-            "check the latest message in the real thread (CRM, SMS/iMessage, email) AND whether a "
-            "draft or pending approval already exists. SKIP anyone already answered or already "
-            "drafted — a duplicate reply is a failure. THEN, on the genuine gap only: surface the "
-            "hot ones with a one-line why, list overdue follow-ups and today's showings, and draft "
-            "(never send) the next-touch for leads with a real unanswered inbound or a due, "
-            "undrafted cadence touch. End with one tight summary; 'all quiet' if nothing is "
-            "genuinely outstanding."
+            "Work the leads board CONTEXT-FIRST: reconcile each lead's real state (latest thread "
+            "message + any existing draft/approval) before acting, and never touch anyone already "
+            "answered or already drafted. Split across focused heartbeats: new-lead response, "
+            "follow-up cadence, hot-lead watch, and cold re-engagement."
         ),
+        "heartbeats": [
+            {
+                "key": "new-lead-response",
+                "name": "Leads · New-Lead Response",
+                "schedule": "0 8,11,14,17 * * *",
+                "goal": (
+                    "ONLY new leads since the last run. For each, check the real thread (CRM/SMS/"
+                    "email) and whether a draft/approval already exists; SKIP any already answered "
+                    "or already drafted. Draft (never send) a personalized first response that "
+                    "answers what they actually asked — speed-to-lead. 'all quiet' if no new leads."
+                ),
+            },
+            {
+                "key": "follow-up-sweep",
+                "name": "Leads · Follow-up Sweep",
+                "schedule": "0 9 * * *",
+                "experiment_owner": True,
+                "goal": (
+                    "ONLY follow-up cadence. Reconcile each active lead's last touch + next-touch "
+                    "date; list overdue follow-ups and today's showings. Draft (never send) the next "
+                    "touch ONLY for cadence touches actually due and not yet drafted. Skip anyone "
+                    "already answered or with a pending draft. 'all quiet' if nothing is due."
+                ),
+            },
+            {
+                "key": "hot-lead-watch",
+                "name": "Leads · Hot-Lead Watch",
+                "schedule": "0 12,16 * * *",
+                "goal": (
+                    "ONLY hot signals since the last run (inbound replies, viewing requests, repeat "
+                    "opens, stage moves). Surface the hottest with a one-line why. For any with a new "
+                    "inbound not already answered or drafted, draft the advancing touch. Skip "
+                    "already-handled. 'all quiet' if no hot movement."
+                ),
+            },
+            {
+                "key": "re-engagement",
+                "name": "Leads · Re-engagement",
+                "schedule": "0 8 * * 1",
+                "goal": (
+                    "ONLY leads gone quiet 30+ days with no pending draft. Batch-draft (never send) a "
+                    "revival touch anchored to something current (new listing, market shift). Skip "
+                    "anyone recently re-touched or with a pending draft. 'all quiet' if none."
+                ),
+            },
+        ],
         "experiment": {
             "every_n_runs": 7, "metric": "next_touch_reply_rate", "metric_type": "qualitative",
             "direction": "higher", "window": "7d",
@@ -334,15 +381,39 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
     },
     "admin": {
         "name": "Admin Heartbeat",
+        "title": "Admin",
         "schedule": "30 7 * * *",
         "config": {"agent": "admin"},
         "goal": (
-            "Each run, CONTEXT-FIRST — read where things actually stand before acting: Gmail, "
-            "Google Calendar, Google Drive, and the dashboard (tasks, deals, approvals). THEN flag "
-            "only GENUINE gaps — deadlines, conflicts, and decisions the realtor owes that are not "
-            "already handled, already on the calendar, or already flagged. Reconcile today's "
-            "agenda. End with one tight summary; 'all quiet' if nothing needs attention."
+            "Run the admin board CONTEXT-FIRST: read where things actually stand (Gmail, Google "
+            "Calendar, Google Drive, and the dashboard tasks/deals/approvals) before acting, and "
+            "flag only genuine gaps. Split across focused heartbeats: deadline & contingency watch "
+            "and agenda & conflicts."
         ),
+        "heartbeats": [
+            {
+                "key": "deadline-watch",
+                "name": "Admin · Deadline & Contingency Watch",
+                "schedule": "30 7,13 * * *",
+                "experiment_owner": True,
+                "goal": (
+                    "ONLY deal deadlines, contingencies, and conditions. Read Gmail, Calendar, Drive, "
+                    "and the dashboard (tasks, deals, approvals) to see exactly where each deal "
+                    "stands. Flag ONLY genuine risk not already handled, on the calendar, or already "
+                    "flagged. 'all quiet' if nothing is at risk."
+                ),
+            },
+            {
+                "key": "agenda-conflicts",
+                "name": "Admin · Agenda & Conflicts",
+                "schedule": "30 7 * * *",
+                "goal": (
+                    "ONLY today's agenda. Read Gmail, Calendar, and dashboard tasks; reconcile the "
+                    "day, flag calendar conflicts and decisions the realtor owes that aren't already "
+                    "resolved. 'all quiet' if the day is clear."
+                ),
+            },
+        ],
         "experiment": {
             "every_n_runs": 7, "metric": "tasks_slipped", "metric_type": "qualitative",
             "direction": "lower", "window": "7d",
@@ -531,64 +602,133 @@ def register_surface(surface: str, spec: Dict[str, Any]) -> Dict[str, Any]:
     return spec
 
 
-def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False) -> Dict[str, Any]:
-    """Seed ONE surface (built-in or custom): workspace scaffold + opt-in cron job.
+def _heartbeat_units(surface: str, spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The focused heartbeat units to seed for a surface.
 
-    Idempotent — a job already present (matched by name) is left EXACTLY as-is (its
-    enabled/paused state, schedule, history untouched); only the workspace dirs are
-    repaired. Brand-new seeds default OFF (opt-in) unless ``enabled`` is set. Returns
-    the job dict.
+    A surface with a ``heartbeats`` list (built-in Leads/Admin) becomes several
+    small, focused crons — each its own concern on its own cadence — instead of
+    one huge run. Surfaces without one (custom + per-agent) stay a single cron.
+    Exactly one unit owns the experiment/cycle loop (default: the first).
     """
-    name = spec.get("name") or f"{surface.capitalize()} Heartbeat"
-    existing = next(
-        (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
-        None,
-    )
-    if existing:
-        _seed_surface_heartbeat_workspace(
-            surface, spec, enabled=bool(existing.get("enabled", False))
+    title = spec.get("title") or (spec.get("name") or surface.capitalize()).replace(" Heartbeat", "")
+    hbs = spec.get("heartbeats")
+    if isinstance(hbs, list) and hbs:
+        units: List[Dict[str, Any]] = []
+        for i, hb in enumerate(hbs):
+            if not isinstance(hb, dict):
+                continue
+            uname = str(hb.get("name") or f"{title} · Heartbeat {i + 1}").strip()
+            units.append({
+                "key": str(hb.get("key") or _slug_agent(uname) or f"hb{i}"),
+                "name": uname,
+                "schedule": hb.get("schedule") or spec.get("schedule"),
+                "goal": hb.get("goal") or spec.get("goal"),
+                "experiment_owner": bool(hb.get("experiment_owner", False)),
+            })
+        if units and not any(u["experiment_owner"] for u in units):
+            units[0]["experiment_owner"] = True
+        return units
+    # Legacy / custom / per-agent: one cron that does the whole surface.
+    return [{
+        "key": "main",
+        "name": spec.get("name") or f"{title} Heartbeat",
+        "schedule": spec.get("schedule"),
+        "goal": spec.get("goal"),
+        "experiment_owner": True,
+    }]
+
+
+def _focused_heartbeat_prompt(surface: str, ws: Any, unit: Dict[str, Any]) -> str:
+    scope = str(unit.get("goal") or "").strip()
+    if unit.get("experiment_owner"):
+        exp_clause = (
+            "You OWN this surface's experiment/cycle loop — run it when due (per the skill's "
+            "autoresearch section)."
         )
-        patch: Dict[str, Any] = {}
-        if not str(existing.get("agent") or "").strip():
-            resolved_agent = resolve_surface_agent(surface, spec)
-            if resolved_agent:
-                patch["agent"] = resolved_agent
-        # Pre-0024 jobs instruct "read config.json" — that file is a frozen
-        # archive after the PG import, so an agent following it would read
-        # stale config. Repair the prompt once to the agent_bus contract.
-        old_prompt = str(existing.get("prompt") or "")
-        if "read config.json" in old_prompt:
-            patch["prompt"] = old_prompt.replace(
-                "read config.json",
-                "read your surface config via the agent_bus tool (action get_surface_config)",
-                1,
-            )
-        if patch:
-            repaired = update_job(existing["id"], patch)
-            return repaired or existing
-        return existing
+    else:
+        exp_clause = (
+            "You do NOT run experiments — another focused heartbeat owns this surface's experiment "
+            "loop, so skip the autoresearch loop entirely."
+        )
+    return (
+        f"You are the {surface.upper()} surface-heartbeat — a FOCUSED heartbeat. Focus: "
+        f"{unit.get('name')}. Surface: {surface}. Workspace: {ws}. Run the surface-heartbeat skill "
+        f"scoped to THIS focus ONLY (the surface's other focused heartbeats cover the rest): "
+        f"read your surface config via the agent_bus tool (action get_surface_config) + the "
+        f"workspace learnings.md, RECONCILE current state FIRST (context-first — skip anything "
+        f"already handled or already drafted), then do only this focus — {scope} — log to history/, "
+        f"and distill learnings. {exp_clause} Drafts only — never act on the realtor's behalf."
+    )
+
+
+def ensure_surface(surface: str, spec: Dict[str, Any], *, enabled: bool = False) -> Dict[str, Any]:
+    """Seed ONE surface (built-in or custom): workspace scaffold + opt-in cron jobs.
+
+    A built-in surface (Leads/Admin) seeds SEVERAL focused heartbeat crons — each a
+    small, context-first concern on its own cadence — sharing the surface workspace.
+    Custom/per-agent surfaces seed a single cron. Idempotent: a job already present
+    (matched by name) keeps its enabled/paused state, schedule, and history; only the
+    workspace + agent/prompt are repaired. New seeds default OFF (opt-in) unless
+    ``enabled``. Returns the PRIMARY (experiment-owner) job.
+    """
     ws = _seed_surface_heartbeat_workspace(surface, spec, enabled=enabled)
-    prompt = (
-        f"You are the {surface.upper()} surface-heartbeat. Surface: {surface}. "
-        f"Workspace: {ws}. Run your loop per the surface-heartbeat skill: read your surface "
-        f"config via the agent_bus tool (action get_surface_config) + the workspace "
-        f"learnings.md, do the {surface} work, log to history/, distill learnings, and run "
-        f"the experiment loop when due. Drafts only — never act on the realtor's behalf."
-    )
+    units = _heartbeat_units(surface, spec)
+    unit_names = {u["name"].strip().lower() for u in units}
     source = "system" if spec.get("created_by", "system") == "system" else "user"
-    job = create_job(
-        prompt=prompt, schedule=spec["schedule"], name=name,
-        skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
-        origin={"type": "surface-heartbeat", "surface": surface, "source": source},
-        workdir=str(ws),
-        agent=resolve_surface_agent(surface, spec),
-    )
-    if not enabled:
-        # create_job() returns an enabled+scheduled job; flip it off through the
-        # canonical disable path (enabled=False / state="paused" / cleared next_run).
-        paused = pause_job(job["id"], reason="surface heartbeat is opt-in (seeded off)")
-        return paused or job
-    return job
+    resolved_agent = resolve_surface_agent(surface, spec)
+    jobs = load_jobs()
+
+    # Retire any superseded heartbeat cron for this surface — e.g. the legacy
+    # monolithic "Leads Heartbeat" once the focused units replace it — so a prior
+    # install doesn't keep firing the old one-huge-run job alongside the new ones.
+    for j in jobs:
+        origin = j.get("origin") or {}
+        if origin.get("type") != "surface-heartbeat" or origin.get("surface") != surface:
+            continue
+        if (j.get("name") or "").strip().lower() not in unit_names:
+            remove_job(j["id"])
+
+    seeded: List[Dict[str, Any]] = []
+    for unit in units:
+        name = unit["name"]
+        existing = next(
+            (j for j in load_jobs() if (j.get("name") or "").strip().lower() == name.lower()),
+            None,
+        )
+        if existing:
+            patch: Dict[str, Any] = {}
+            if not str(existing.get("agent") or "").strip() and resolved_agent:
+                patch["agent"] = resolved_agent
+            old_prompt = str(existing.get("prompt") or "")
+            if "read config.json" in old_prompt:
+                patch["prompt"] = old_prompt.replace(
+                    "read config.json",
+                    "read your surface config via the agent_bus tool (action get_surface_config)",
+                    1,
+                )
+            if patch:
+                existing = update_job(existing["id"], patch) or existing
+            seeded.append((unit, existing))
+            continue
+        job = create_job(
+            prompt=_focused_heartbeat_prompt(surface, ws, unit),
+            schedule=unit["schedule"], name=name,
+            skill=SURFACE_HEARTBEAT_SKILL, deliver="local",
+            origin={"type": "surface-heartbeat", "surface": surface,
+                    "focus": unit["key"], "experiment_owner": bool(unit.get("experiment_owner")),
+                    "source": source},
+            workdir=str(ws),
+            agent=resolved_agent,
+        )
+        if not enabled:
+            job = pause_job(job["id"], reason="surface heartbeat is opt-in (seeded off)") or job
+        seeded.append((unit, job))
+
+    # Primary = the experiment owner (for callers that want one representative job).
+    primary = next((j for u, j in seeded if u.get("experiment_owner")), None)
+    if primary is None and seeded:
+        primary = seeded[0][1]
+    return primary or {}
 
 
 def create_surface(

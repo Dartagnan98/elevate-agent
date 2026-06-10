@@ -6932,6 +6932,10 @@ def _compute_heartbeat_surfaces():
         # stale config copy disagrees.
         job_by_surface: Dict[str, Dict[str, Any]] = {}
         job_enabled_by_surface: Dict[str, bool] = {}
+        # A surface's heartbeat is split into several FOCUSED crons (origin.focus) —
+        # collect them per surface like automations so each card lists them; the
+        # surface counts as enabled if ANY focused heartbeat is enabled.
+        heartbeats_by_surface: Dict[str, List[Dict[str, Any]]] = {}
         # Surface automations are the per-surface "kit" cron jobs that pair with
         # each heartbeat (origin.type=="surface-automation"). Group them by
         # surface here from the SAME job scan so each card can list its own.
@@ -6946,8 +6950,32 @@ def _compute_heartbeat_surfaces():
                 if not (isinstance(_surf, str) and _surf):
                     continue
                 if _otype == "surface-heartbeat":
-                    job_by_surface[_surf] = _job
-                    job_enabled_by_surface[_surf] = bool(_job.get("enabled", True))
+                    _is_owner = bool(_origin.get("experiment_owner"))
+                    # Representative job for the surface = the experiment owner when
+                    # present (it carries the surface-level cadence/settings).
+                    if _surf not in job_by_surface or _is_owner:
+                        job_by_surface[_surf] = _job
+                    _hb_enabled = bool(_job.get("enabled", True))
+                    job_enabled_by_surface[_surf] = (
+                        job_enabled_by_surface.get(_surf, False) or _hb_enabled
+                    )
+                    _hb_sched_obj = _job.get("schedule") or {}
+                    _hb_sched = (
+                        str(_job.get("schedule_display") or "").strip()
+                        or str(_hb_sched_obj.get("display") or "").strip()
+                        or str(_hb_sched_obj.get("expr") or "").strip()
+                    )
+                    heartbeats_by_surface.setdefault(_surf, []).append(
+                        {
+                            "id": _job.get("id"),
+                            "name": _job.get("name") or _job.get("id") or "heartbeat",
+                            "focus": str(_origin.get("focus") or ""),
+                            "schedule": _hb_sched,
+                            "enabled": _hb_enabled,
+                            "experiment_owner": _is_owner,
+                            "last_run_at": _job.get("last_run_at"),
+                        }
+                    )
                 elif _otype == "surface-automation":
                     _sched_obj = _job.get("schedule") or {}
                     _sched = (
@@ -6972,6 +7000,11 @@ def _compute_heartbeat_surfaces():
         # Stable order: sort each surface's automations by name (case-insensitive).
         for _list in automations_by_surface.values():
             _list.sort(key=lambda a: str(a.get("name") or "").lower())
+        # Stable order: experiment owner first, then by name.
+        for _list in heartbeats_by_surface.values():
+            _list.sort(
+                key=lambda h: (not h.get("experiment_owner"), str(h.get("name") or "").lower())
+            )
 
         def _read_json(path: Path) -> Optional[Any]:
             try:
@@ -7118,6 +7151,7 @@ def _compute_heartbeat_surfaces():
                         "lastRun": last_run,
                         "jobHealth": job_health,
                         "learnings": learnings,
+                        "heartbeats": heartbeats_by_surface.get(surface_name, []),
                         "automations": automations_by_surface.get(surface_name, []),
                         "experiments": {
                             "active": active_exp,
@@ -7654,16 +7688,28 @@ def remove_heartbeat_cycle(surface: str, name: str):
 
 
 # ─── Surface delivery routing (each agent routes to its own channel/bot) ───────
-def _surface_heartbeat_job(surface_key: str) -> Optional[Dict[str, Any]]:
-    """The account-scoped heartbeat cron job for a surface (enabled or not)."""
+def _surface_heartbeat_jobs(surface_key: str) -> List[Dict[str, Any]]:
+    """ALL account-scoped focused heartbeat crons for a surface (enabled or not)."""
     from cron.jobs import list_jobs
 
-    match: Optional[Dict[str, Any]] = None
-    for job in list_jobs(include_disabled=True):
-        origin = job.get("origin") or {}
-        if origin.get("type") == "surface-heartbeat" and origin.get("surface") == surface_key:
-            match = job
-    return match
+    return [
+        job
+        for job in list_jobs(include_disabled=True)
+        if (job.get("origin") or {}).get("type") == "surface-heartbeat"
+        and (job.get("origin") or {}).get("surface") == surface_key
+    ]
+
+
+def _surface_heartbeat_job(surface_key: str) -> Optional[Dict[str, Any]]:
+    """The representative heartbeat cron for a surface — the experiment owner when
+    present (it carries the surface-level cadence/settings), else any."""
+    jobs = _surface_heartbeat_jobs(surface_key)
+    if not jobs:
+        return None
+    for job in jobs:
+        if (job.get("origin") or {}).get("experiment_owner"):
+            return job
+    return jobs[-1]
 
 
 def _delivery_routes() -> List[Dict[str, str]]:
@@ -7734,12 +7780,15 @@ def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
 
             if not _is_known_delivery_platform(platform0):
                 raise HTTPException(status_code=400, detail=f"unknown delivery route: {deliver}")
-        job = _surface_heartbeat_job(surface_key)
-        if not job:
+        # Route ALL of the surface's focused heartbeats to the same channel.
+        surface_jobs = _surface_heartbeat_jobs(surface_key)
+        if not surface_jobs:
             raise HTTPException(
                 status_code=404, detail=f"No heartbeat job for surface '{surface_key}'"
             )
-        updated = update_job(job["id"], {"deliver": deliver})
+        updated = None
+        for job in surface_jobs:
+            updated = update_job(job["id"], {"deliver": deliver}) or updated
         try:
             from elevate_cli.data import connect
             from elevate_cli.data import surface_state
@@ -8094,27 +8143,30 @@ def set_heartbeat_surface_enabled(surface: str, body: _HeartbeatSurfaceEnabledBo
         if not surface_key:
             raise HTTPException(status_code=400, detail="surface is required")
 
-        # Find this surface's heartbeat cron job (account-scoped).
-        job = next(
-            (
-                j
-                for j in list_jobs(include_disabled=True)
-                if (j.get("origin") or {}).get("type") == "surface-heartbeat"
-                and (j.get("origin") or {}).get("surface") == surface_key
-            ),
-            None,
-        )
-        if not job:
+        # A surface's heartbeat is split into several FOCUSED crons — flip ALL of
+        # them so the card toggle controls the whole surface (account-scoped).
+        surface_jobs = [
+            j
+            for j in list_jobs(include_disabled=True)
+            if (j.get("origin") or {}).get("type") == "surface-heartbeat"
+            and (j.get("origin") or {}).get("surface") == surface_key
+        ]
+        if not surface_jobs:
             raise HTTPException(
                 status_code=404,
                 detail=f"No heartbeat job for surface '{surface_key}'",
             )
 
-        # Flip via the canonical cron paths (resume recomputes next_run_at).
-        if want:
-            updated = resume_job(job["id"])
-        else:
-            updated = pause_job(job["id"], reason="surface heartbeat disabled by realtor")
+        # Flip each via the canonical cron paths (resume recomputes next_run_at).
+        updated = None
+        for job in surface_jobs:
+            if want:
+                updated = resume_job(job["id"]) or updated
+            else:
+                updated = (
+                    pause_job(job["id"], reason="surface heartbeat disabled by realtor")
+                    or updated
+                )
         if not updated:
             raise HTTPException(status_code=404, detail="Job not found")
 

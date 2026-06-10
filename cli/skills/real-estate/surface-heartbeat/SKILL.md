@@ -1,7 +1,7 @@
 ---
 name: surface-heartbeat
 description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. A faithful port of the cortextOS theta-wave autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
-version: 0.4.0
+version: 0.5.0
 platforms:
   - macos
   - linux
@@ -33,6 +33,14 @@ Markdown artifacts stay in the Workspace on disk (they are documents, not state)
 **Drafts and recommendations only** — the realtor acts; you never send messages, move money,
 or commit changes on their behalf unless your config `goal` explicitly says to. An experiment
 only ever changes HOW YOU WORK (your playbook), never the realtor's leads, calendar, or data.
+
+**Focused heartbeats.** A surface is usually split into several FOCUSED heartbeats — each a
+small cron on its own cadence (e.g. Leads → New-Lead Response, Follow-up Sweep, Hot-Lead Watch,
+Re-engagement). If your prompt names a **Focus**, do ONLY that focus this run — the surface's
+other focused heartbeats cover the rest, so do not redo their work. The shared surface config,
+`learnings.md`, and `history/` still apply to all of them. Run the EXPERIMENT loop below ONLY if
+your prompt says you OWN this surface's experiment loop; if it says you do not, skip experiments
+entirely. A prompt with no Focus = run the whole surface (legacy single-heartbeat behavior).
 
 ## Every run — WORK loop
 1. **Load context.** `agent_bus {action:"get_surface_config", surface:"<surface>"}` for your

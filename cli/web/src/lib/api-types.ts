@@ -2943,12 +2943,26 @@ export interface HeartbeatSurfaceAutomation {
   last_run_at: string | null;
 }
 
+/** One FOCUSED heartbeat — a surface is split into several, each its own small
+ *  context-first cron on its own cadence (e.g. Leads → New-Lead Response,
+ *  Follow-up Sweep, Hot-Lead Watch, Re-engagement). */
+export interface HeartbeatSurfaceHeartbeat {
+  id: string;
+  name: string;
+  focus: string;
+  schedule: string;
+  enabled: boolean;
+  experiment_owner: boolean;
+  last_run_at: string | null;
+}
+
 export interface HeartbeatSurface {
   surface: string;
   config: HeartbeatSurfaceConfig | null;
   runCount: number;
   lastRun: HeartbeatSurfaceRun | null;
   learnings: string;
+  heartbeats: HeartbeatSurfaceHeartbeat[];
   automations: HeartbeatSurfaceAutomation[];
   experiments: {
     active: HeartbeatSurfaceActiveExperiment | null;
