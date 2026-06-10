@@ -3910,6 +3910,13 @@ export default function ChatPage() {
         } else {
           setStatusText("Ready");
         }
+      } else {
+        // No cache for THIS session (e.g. drilling into a subagent that was
+        // never opened before). Clear whatever messages belonged to the
+        // PREVIOUS session — the server-load merge below uses the on-screen
+        // `prev` as its base, so without this the parent chat's messages
+        // (your original prompt) leak into the subagent's thread.
+        setMessages([]);
       }
 
       // A freshly minted + pinned session (mintedSessionIdRef) has no saved
