@@ -1672,7 +1672,11 @@ def _run_single_child(
         _heartbeat_thread.start()
         if child_progress_cb:
             try:
-                child_progress_cb("subagent.start", preview=goal)
+                child_progress_cb(
+                    "subagent.start",
+                    preview=goal,
+                    child_session_id=getattr(child, "session_id", None),
+                )
             except Exception as e:
                 logger.debug("Progress callback start failed: %s", e)
 
@@ -1772,6 +1776,7 @@ def _run_single_child(
                         status="timeout" if is_timeout else "error",
                         duration_seconds=duration,
                         summary="",
+                        child_session_id=getattr(child, "session_id", None),
                     )
                 except Exception:
                     pass
@@ -2027,6 +2032,7 @@ def _run_single_child(
             "files_read": _files_read,
             "files_written": _files_written,
             "output_tail": _output_tail,
+            "child_session_id": getattr(child, "session_id", None),
         }
         if _cost_usd is not None:
             try:
@@ -2053,6 +2059,7 @@ def _run_single_child(
                     status="failed",
                     duration_seconds=duration,
                     summary=str(exc),
+                    child_session_id=getattr(child, "session_id", None),
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)

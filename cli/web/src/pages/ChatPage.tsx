@@ -302,6 +302,12 @@ interface SubagentEntry {
   status: "running" | "done" | "error";
   subagent_id: string;
   toolCount?: number;
+  /** The subagent's own session id — open + message it via ?resume=. */
+  child_session_id?: string;
+  /** The parent assistant turn this subagent ran under. */
+  messageId?: string;
+  /** Final summary from subagent.complete (the child's answer). */
+  finalSummary?: string;
 }
 
 interface UsageInfo {
@@ -4174,6 +4180,15 @@ export default function ChatPage() {
             : "done"
           : "running";
       const now = eventMillis(ev);
+      const childSessionId =
+        typeof payload.child_session_id === "string" && payload.child_session_id
+          ? payload.child_session_id
+          : undefined;
+      const parentMessageId = currentAssistantRef.current ?? undefined;
+      const finalSummary =
+        ev.type === "subagent.complete"
+          ? compactLine(String(payload.summary || "")) || undefined
+          : undefined;
 
       setSubagents((prev) => {
         const existing = prev.find((subagent) => subagent.subagent_id === subagentId);
@@ -4192,6 +4207,9 @@ export default function ChatPage() {
                       typeof payload.tool_count === "number"
                         ? payload.tool_count
                         : subagent.toolCount,
+                    child_session_id: childSessionId ?? subagent.child_session_id,
+                    messageId: subagent.messageId ?? parentMessageId,
+                    finalSummary: finalSummary ?? subagent.finalSummary,
                   }
                 : subagent,
             )
@@ -4211,6 +4229,9 @@ export default function ChatPage() {
             subagent_id: subagentId,
             toolCount:
               typeof payload.tool_count === "number" ? payload.tool_count : undefined,
+            child_session_id: childSessionId,
+            messageId: parentMessageId,
+            finalSummary,
           },
         ].slice(-12);
       });
@@ -6147,11 +6168,12 @@ export default function ChatPage() {
         kind: "subagent",
         label: s.goal || "Subagent",
         status: s.status,
-        detail: s.preview,
+        detail: s.finalSummary || s.preview,
         model: s.model,
         toolCount: s.toolCount,
         startedAt: s.startedAt,
         completedAt: s.completedAt,
+        child_session_id: s.child_session_id,
       });
     }
     const haveSubagents = subagents.length > 0;

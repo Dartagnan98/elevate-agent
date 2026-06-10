@@ -456,6 +456,8 @@ export interface BackgroundTaskItem {
   toolCount?: number;
   startedAt?: number;
   completedAt?: number;
+  /** The subagent's own session id — when present the card opens its thread. */
+  child_session_id?: string;
 }
 
 function relativeTime(ts?: number): string {
