@@ -3,14 +3,35 @@
 from __future__ import annotations
 
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+
+import pytest
 
 from elevate_cli.memory_maintenance import (
     organize_holographic_journal,
     run_due_daily_memory_maintenance,
 )
 from plugins.memory.holographic import HolographicMemoryProvider
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    """Scope the embedded-Postgres memory store to each test.
+
+    The holographic store is Postgres-backed and draws from the shared
+    connection pool, cached process-wide keyed ONLY by account key — always
+    "default" in the hermetic test env. Without isolation, facts/journal rows
+    from one test leak into the next (the ``db_path`` config arg is only a
+    namespace sentinel on PG, not a real separate DB), breaking dedupe/promote/
+    backfill assertions by xdist ordering. A unique account key per test gives
+    each its own PG database.
+    """
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr(
+        "elevate_cli.data.connection.get_account_key", lambda: key
+    )
 
 
 def _provider(tmp_path, **overrides):

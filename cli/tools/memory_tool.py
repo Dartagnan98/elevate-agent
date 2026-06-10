@@ -89,6 +89,32 @@ _INVISIBLE_CHARS = {
 }
 
 
+def _durability_warning(content: str) -> Optional[str]:
+    """Non-blocking durability check for explicit memory saves.
+
+    The memory tool is an explicit, user/agent-initiated save path, so the
+    holographic durability gate is downgraded to a warning here — the entry
+    is always saved (user intent wins), but task-shaped/ephemeral content
+    gets flagged so the agent can reconsider. Never raises; returns None when
+    the classifier is unavailable or the content looks durable.
+    """
+    try:
+        from plugins.memory.holographic.quality import classify_fact_durability
+    except Exception:
+        return None
+    try:
+        result = classify_fact_durability(content)
+    except Exception:
+        return None
+    if result.get("durability") == "ephemeral":
+        return (
+            "This entry looks ephemeral (one-off task chatter, confidence "
+            f"{result.get('confidence')}). Saved anyway because this was an explicit save, "
+            "but consider removing it when the task is done — memory is for durable facts."
+        )
+    return None
+
+
 def _scan_memory_content(content: str) -> Optional[str]:
     """Scan memory content for injection/exfil patterns. Returns error string if blocked."""
     # Check invisible unicode
@@ -264,7 +290,11 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+        response = self._success_response(target, "Entry added.")
+        warning = _durability_warning(content)
+        if warning:
+            response["durability_warning"] = warning
+        return response
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""

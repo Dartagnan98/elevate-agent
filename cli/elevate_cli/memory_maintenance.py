@@ -260,6 +260,52 @@ def _prune_relation_graph(runtime_config: dict, plugin_config: dict) -> dict | N
             pass
 
 
+def _archive_ephemeral_facts(runtime_config: dict, plugin_config: dict) -> dict | None:
+    """Run the bounded TTL-decay pass for task-shaped/ephemeral facts.
+
+    Daily path only, same token gate as the relation prune. Archives
+    (status='archived' — never deletes) only clear-cut task-chatter; explicit
+    saves and durable facts are never touched (see
+    ``MemoryStore.archive_ephemeral_facts``). Returns the store result dict,
+    or None if setup failed (never raises into the daily loop).
+    """
+    enabled = is_truthy_value(plugin_config.get("ephemeral_decay_enabled"), default=True)
+    if not enabled:
+        return {"ran": False, "reason": "ephemeral decay disabled"}
+    min_age_days = _parse_int(plugin_config.get("ephemeral_decay_min_age_days"), 30, minimum=0)
+    max_archive = _parse_int(plugin_config.get("ephemeral_decay_max_archive"), 200, minimum=0)
+    dry_run = is_truthy_value(plugin_config.get("ephemeral_decay_dry_run"), default=False)
+    if max_archive <= 0:
+        return {"ran": False, "reason": "ephemeral decay disabled (max_archive<=0)"}
+    try:
+        from plugins.memory.holographic import HolographicMemoryProvider
+        from plugins.memory.holographic.store import DAILY_MAINTENANCE_TOKEN
+
+        provider = HolographicMemoryProvider(config=plugin_config)
+        provider.initialize(MAINTENANCE_SESSION_ID)
+    except Exception as exc:
+        logger.debug("Ephemeral decay setup failed: %s", exc)
+        return None
+    try:
+        store = getattr(provider, "_store", None)
+        if store is None:
+            return None
+        return store.archive_ephemeral_facts(
+            daily_maintenance_token=DAILY_MAINTENANCE_TOKEN,
+            min_age_days=min_age_days,
+            max_archive=max_archive,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        logger.debug("Ephemeral decay failed: %s", exc)
+        return {"ran": False, "reason": f"error: {exc}"}
+    finally:
+        try:
+            provider.shutdown()
+        except Exception:
+            pass
+
+
 def run_due_daily_memory_maintenance(
     *,
     config: dict | None = None,
@@ -304,6 +350,13 @@ def run_due_daily_memory_maintenance(
     relations_result = _prune_relation_graph(runtime_config, plugin_config)
     if relations_result is not None:
         result["relations_maintenance"] = relations_result
+
+    # Bounded TTL decay for task-shaped facts (archive-only, token-gated,
+    # daily-gated like the relation prune above; default ON but conservative —
+    # only clear-cut task-chatter is archived, explicit/durable never).
+    decay_result = _archive_ephemeral_facts(runtime_config, plugin_config)
+    if decay_result is not None:
+        result["ephemeral_decay"] = decay_result
 
     state.update(
         {

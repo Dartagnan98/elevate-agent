@@ -35,6 +35,7 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from . import activity as memory_activity
 from .embeddings import EmbeddingError, build_embedding_client, parse_bool
+from .quality import EphemeralFactSkipped
 from .store import MemoryStore
 from .retrieval import FactRetriever
 
@@ -313,6 +314,23 @@ class HolographicMemoryProvider(MemoryProvider):
         self._topic_change_threshold = float(self._config.get("topic_change_threshold", 0.28))
         self._topic_extract_min_turns = _parse_int(self._config.get("topic_extract_min_turns"), 4, minimum=1)
         self._periodic_extract_interval = _parse_int(self._config.get("periodic_extract_interval"), 12, minimum=0)
+        # Write-time quality gate / dedup / extraction-throttle knobs.
+        self._durability_gate_enabled = parse_bool(
+            self._config.get("durability_gate_enabled"), default=True
+        )
+        self._dedup_enabled = parse_bool(self._config.get("dedup_enabled"), default=True)
+        self._dedup_similarity_threshold = float(
+            self._config.get("dedup_similarity_threshold", 0.92)
+        )
+        self._dedup_jaccard_threshold = float(
+            self._config.get("dedup_jaccard_threshold", 0.88)
+        )
+        self._relation_pass_cap = _parse_int(
+            self._config.get("relation_pass_cap"), 40, minimum=0
+        )
+        self._entity_minting_throttle = parse_bool(
+            self._config.get("entity_minting_throttle"), default=True
+        )
 
     @property
     def name(self) -> str:
@@ -364,6 +382,15 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "topic_change_threshold", "description": "Token/Jaccard threshold for incremental topic-change extraction", "default": "0.28"},
             {"key": "topic_extract_min_turns", "description": "Minimum turns before topic-change journal organization", "default": "4"},
             {"key": "periodic_extract_interval", "description": "Organize journal every N turns during long sessions (0 disables)", "default": "12"},
+            {"key": "durability_gate_enabled", "description": "Refuse non-explicit ephemeral (task-chatter) fact writes at the choke point", "default": "true", "choices": ["true", "false"]},
+            {"key": "dedup_enabled", "description": "Merge near-duplicate facts at write time instead of inserting", "default": "true", "choices": ["true", "false"]},
+            {"key": "dedup_similarity_threshold", "description": "Embedding cosine threshold for fact dedup-at-write", "default": "0.92"},
+            {"key": "dedup_jaccard_threshold", "description": "Token-Jaccard threshold for fact dedup when embeddings are off", "default": "0.88"},
+            {"key": "relation_pass_cap", "description": "Max NEW memory_relations rows per organize/extract pass", "default": "40"},
+            {"key": "entity_minting_throttle", "description": "Only mint new entities that are proper-noun-like or corroborated by 2+ facts during extraction", "default": "true", "choices": ["true", "false"]},
+            {"key": "ephemeral_decay_enabled", "description": "Daily maintenance archives clear-cut task-chatter facts (never explicit/durable)", "default": "true", "choices": ["true", "false"]},
+            {"key": "ephemeral_decay_min_age_days", "description": "Age (days) before unrecalled task-framed facts are archived", "default": "30"},
+            {"key": "ephemeral_decay_max_archive", "description": "Max facts archived per daily decay run", "default": "200"},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
             {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
@@ -406,6 +433,10 @@ class HolographicMemoryProvider(MemoryProvider):
             default_trust=default_trust,
             hrr_dim=hrr_dim,
             embedding_client=embedding_client,
+            durability_gate_enabled=self._durability_gate_enabled,
+            dedup_enabled=self._dedup_enabled,
+            dedup_similarity_threshold=self._dedup_similarity_threshold,
+            dedup_jaccard_threshold=self._dedup_jaccard_threshold,
         )
         self._retriever = FactRetriever(
             store=self._store,
@@ -636,11 +667,15 @@ class HolographicMemoryProvider(MemoryProvider):
             )
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        """Mirror built-in memory writes as facts."""
+        """Mirror built-in memory writes as facts.
+
+        Memory-tool writes are explicit, curated saves — the durability gate
+        warns instead of refusing (user intent wins).
+        """
         if action == "add" and self._store and content:
             try:
                 category = "user_pref" if target == "user" else "general"
-                self._store.add_fact(content, category=category)
+                self._store.add_fact(content, category=category, explicit=True)
             except Exception as e:
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
@@ -665,7 +700,9 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps(payload, default=str)
 
             if action == "add":
-                fact_id = store.add_fact(
+                # Tool adds are explicit saves: the durability gate downgrades
+                # to a warning (user/agent intent wins), dedup still applies.
+                result = store.add_fact_detailed(
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
@@ -674,16 +711,32 @@ class HolographicMemoryProvider(MemoryProvider):
                     source_excerpt=args.get("source_excerpt", ""),
                     observed_at=args.get("observed_at"),
                     memory_space=args.get("memory_space", ""),
+                    explicit=True,
                 )
+                fact_id = result["fact_id"]
                 memory_activity.record_event(
                     "memory.tool.remembered",
-                    message="fact stored",
+                    message=f"fact {result['outcome']}",
                     state="idle",
                     step="maintain",
                     status="done",
-                    data={"fact_id": fact_id, "category": args.get("category", "general")},
+                    data={
+                        "fact_id": fact_id,
+                        "category": args.get("category", "general"),
+                        "outcome": result["outcome"],
+                        "durability": result.get("durability"),
+                    },
                 )
-                return json.dumps({"fact_id": fact_id, "status": "added"})
+                payload = {
+                    "fact_id": fact_id,
+                    "status": result["outcome"],
+                    "durability": result.get("durability"),
+                }
+                if result.get("warning"):
+                    payload["warning"] = result["warning"]
+                if result.get("merged_with_similarity") is not None:
+                    payload["merged_with_similarity"] = result["merged_with_similarity"]
+                return json.dumps(payload)
 
             elif action == "search":
                 results = retriever.search(
@@ -1891,25 +1944,39 @@ class HolographicMemoryProvider(MemoryProvider):
         )
         processed = 0
         promoted = 0
+        gated = 0
 
-        for row in rows:
-            row_promoted = 0
-            for fact in self._extract_fact_candidates(row.get("user_content", "")):
+        # Noise throttle for the whole organize pass: cap NEW relation rows
+        # and gate NEW entity minting to proper-noun-like names (existing
+        # entities/relations keep their normal upsert behavior).
+        self._store.begin_extraction_pass(
+            relation_cap=self._relation_pass_cap,
+            minting_throttle=self._entity_minting_throttle,
+        )
+        try:
+            for row in rows:
+                row_promoted = 0
+                for fact in self._extract_fact_candidates(row.get("user_content", "")):
+                    try:
+                        self._store.add_fact(
+                            fact["content"],
+                            category=fact["category"],
+                            tags=fact["tags"],
+                            explicit="explicit" in str(fact.get("tags") or ""),
+                        )
+                        row_promoted += 1
+                    except EphemeralFactSkipped:
+                        gated += 1
+                    except Exception as exc:
+                        logger.debug("Journal fact promotion failed: %s", exc)
                 try:
-                    self._store.add_fact(
-                        fact["content"],
-                        category=fact["category"],
-                        tags=fact["tags"],
-                    )
-                    row_promoted += 1
+                    self._store.mark_turn_processed(row["turn_id"], row_promoted)
                 except Exception as exc:
-                    logger.debug("Journal fact promotion failed: %s", exc)
-            try:
-                self._store.mark_turn_processed(row["turn_id"], row_promoted)
-            except Exception as exc:
-                logger.debug("Journal mark-processed failed: %s", exc)
-            processed += 1
-            promoted += row_promoted
+                    logger.debug("Journal mark-processed failed: %s", exc)
+                processed += 1
+                promoted += row_promoted
+        finally:
+            throttle_report = self._store.end_extraction_pass()
 
         status = self._store.journal_status(
             session_id=scoped_session,
@@ -1917,35 +1984,53 @@ class HolographicMemoryProvider(MemoryProvider):
         )
         memory_activity.record_event(
             "memory.organize.complete",
-            message=f"processed {processed}, promoted {promoted}",
+            message=f"processed {processed}, promoted {promoted}, gated {gated}",
             state="idle",
             step="maintain",
             status="done",
-            data={"processed": processed, "promoted": promoted, "pending": status.get("pending", 0)},
+            data={
+                "processed": processed,
+                "promoted": promoted,
+                "gated_ephemeral": gated,
+                "pending": status.get("pending", 0),
+                "throttle": throttle_report,
+            },
         )
         return {
             "processed": processed,
             "promoted": promoted,
+            "gated_ephemeral": gated,
             "pending": status.get("pending", 0),
             "total": status.get("total", 0),
+            "throttle": throttle_report,
         }
 
     def _auto_extract_facts(self, messages: list) -> None:
         extracted = 0
-        for msg in messages:
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            for fact in self._extract_fact_candidates(content):
-                try:
-                    self._store.add_fact(
-                        fact["content"],
-                        category=fact["category"],
-                        tags=fact["tags"],
-                    )
-                    extracted += 1
-                except Exception:
-                    pass
+        self._store.begin_extraction_pass(
+            relation_cap=self._relation_pass_cap,
+            minting_throttle=self._entity_minting_throttle,
+        )
+        try:
+            for msg in messages:
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content", "")
+                for fact in self._extract_fact_candidates(content):
+                    try:
+                        self._store.add_fact(
+                            fact["content"],
+                            category=fact["category"],
+                            tags=fact["tags"],
+                            explicit="explicit" in str(fact.get("tags") or ""),
+                        )
+                        extracted += 1
+                    except EphemeralFactSkipped:
+                        pass
+                    except Exception:
+                        pass
+        finally:
+            self._store.end_extraction_pass()
 
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)

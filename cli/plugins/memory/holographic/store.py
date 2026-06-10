@@ -48,6 +48,13 @@ try:
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
 
+try:
+    from . import quality as fact_quality
+    from .quality import EphemeralFactSkipped
+except ImportError:  # pragma: no cover - direct-module import fallback
+    import quality as fact_quality  # type: ignore[no-redef]
+    from quality import EphemeralFactSkipped  # type: ignore[no-redef]
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
     fact_id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,6 +448,12 @@ class MemoryStore:
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
         embedding_client: BaseEmbeddingClient | None = None,
+        *,
+        durability_gate_enabled: bool = True,
+        dedup_enabled: bool = True,
+        dedup_similarity_threshold: float = 0.92,
+        dedup_jaccard_threshold: float = 0.88,
+        dedup_candidate_limit: int = 1000,
     ) -> None:
         # ``db_path`` is preserved as an attribute for callers that probe
         # it (tests, doctor, backup tooling), but the holographic store no
@@ -457,6 +470,16 @@ class MemoryStore:
         self.hrr_dim = hrr_dim
         self.embedding_client = embedding_client
         self._hrr_available = hrr._HAS_NUMPY
+        # Write-time quality gate / dedup knobs (config-overridable upstream).
+        self.durability_gate_enabled = bool(durability_gate_enabled)
+        self.dedup_enabled = bool(dedup_enabled)
+        self.dedup_similarity_threshold = float(dedup_similarity_threshold)
+        self.dedup_jaccard_threshold = float(dedup_jaccard_threshold)
+        self.dedup_candidate_limit = max(1, int(dedup_candidate_limit))
+        # Extraction-pass throttle state (None = no pass active; see
+        # begin_extraction_pass/end_extraction_pass). Only the automated
+        # extraction/organize paths set this; explicit adds are unthrottled.
+        self._extraction_ctx: dict | None = None
         self._conn = _open_persistent_pg()
         self._lock = threading.RLock()
         self._init_db()
@@ -466,22 +489,80 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """No-op on Postgres.
+        """Plugin-owned guarded schema evolution on Postgres.
 
-        Schema, indexes, triggers, FTS (now tsvector + GIN), and column
-        additions all live in the central PG migration set under
-        ``elevate_cli/data/migrations_pg/0007_memory_store.sql`` and
-        ``0008_memory_store_compat_views.sql``. The migration runner
-        is invoked during ``_open_persistent_pg`` via ``_ensure_schema``,
-        so by the time this method is called the schema is guaranteed
-        to be at head. Kept as a method (rather than deleted) so any
-        subclasses or future per-instance setup has a hook.
+        The base schema, indexes, triggers, and FTS (tsvector + GIN) live in
+        the central PG migration set (``0007_memory_store.sql`` +
+        ``0008_memory_store_compat_views.sql``), run by ``_ensure_schema``
+        during ``_open_persistent_pg``. The plugin additionally owns a small
+        set of quality-gate metadata columns added here with idempotent
+        ``ADD COLUMN IF NOT EXISTS`` guards (the plugin's equivalent of a
+        migration — the compat ``facts`` view exposes a fixed column list, so
+        these columns are read/written against ``memory_facts`` directly and
+        never break the view).
         """
-        return
+        columns = {
+            "durability": "TEXT DEFAULT ''",
+            "durability_confidence": "DOUBLE PRECISION DEFAULT 0",
+            "reinforced_count": "INTEGER DEFAULT 0",
+            "last_seen_at": "TIMESTAMP",
+            "last_recalled_at": "TIMESTAMP",
+        }
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'memory_facts'
+                    """
+                ).fetchall()
+                existing = {r["column_name"] for r in rows}
+                self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                return
+            missing = [name for name in columns if name not in existing]
+            if not missing:
+                return
+            for name in missing:
+                try:
+                    # ALTER TABLE takes an ACCESS EXCLUSIVE lock; another
+                    # long-lived idle-in-transaction connection (common in
+                    # multi-provider processes) would block it indefinitely.
+                    # Bound the wait — a skipped ALTER retries on the next
+                    # store init, and every quality path that touches these
+                    # columns is exception-guarded.
+                    self._conn.execute("SET lock_timeout = '2000ms'")
+                    self._conn.execute(
+                        f"ALTER TABLE memory_facts ADD COLUMN IF NOT EXISTS {name} {columns[name]}"
+                    )
+                    self._conn.commit()
+                except Exception:
+                    # Never block store startup on the optional metadata
+                    # columns — quality paths that use them are guarded.
+                    try:
+                        self._conn.rollback()
+                    except Exception:
+                        pass
+            try:
+                self._conn.execute("SET lock_timeout = DEFAULT")
+                self._conn.commit()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    # Source types that mark a user/agent-initiated explicit save. Explicit
+    # saves are never refused by the durability gate (user intent wins).
+    _EXPLICIT_SOURCE_TYPES = frozenset({"manual", "explicit", "user"})
 
     def add_fact(
         self,
@@ -493,17 +574,119 @@ class MemoryStore:
         source_excerpt: str = "",
         observed_at: str | None = None,
         memory_space: str = "",
+        explicit: bool | None = None,
     ) -> int:
         """Insert a fact and return its fact_id.
 
-        Deduplicates by content (UNIQUE constraint). On duplicate, returns
-        the existing fact_id without modifying the row. Extracts entities from
-        the content and links them to the fact.
+        This is THE choke point for all fact writes. Before inserting it:
+
+        1. Runs the durability gate (``quality.classify_fact_durability``).
+           Non-explicit ephemeral candidates raise ``EphemeralFactSkipped``
+           and stay in the turn journal only. Explicit saves downgrade the
+           gate to a warning event and save anyway (flagged
+           ``source_type='explicit'``).
+        2. Runs dedup-at-write: a near-duplicate above the similarity
+           threshold MERGES into the existing (older) fact instead of
+           inserting (see ``_merge_duplicate_fact``).
+
+        Deduplicates by exact content too (UNIQUE constraint). On duplicate,
+        returns the existing fact_id without modifying the row. Extracts
+        entities from the content and links them to the fact.
+        """
+        result = self.add_fact_detailed(
+            content,
+            category=category,
+            tags=tags,
+            source_type=source_type,
+            source_uri=source_uri,
+            source_excerpt=source_excerpt,
+            observed_at=observed_at,
+            memory_space=memory_space,
+            explicit=explicit,
+        )
+        return int(result["fact_id"])
+
+    def add_fact_detailed(
+        self,
+        content: str,
+        category: str = "general",
+        tags: str = "",
+        source_type: str = "",
+        source_uri: str = "",
+        source_excerpt: str = "",
+        observed_at: str | None = None,
+        memory_space: str = "",
+        explicit: bool | None = None,
+    ) -> dict:
+        """``add_fact`` with a structured outcome report.
+
+        Returns ``{"fact_id", "outcome", "durability", "durability_confidence",
+        "warning"?, "merged_with_similarity"?}`` where outcome is one of
+        ``added`` | ``merged`` | ``duplicate``. Raises ``EphemeralFactSkipped``
+        when the durability gate refuses a non-explicit ephemeral candidate.
         """
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
+
+            if explicit is None:
+                explicit = (
+                    str(source_type or "").strip().lower() in self._EXPLICIT_SOURCE_TYPES
+                    or "explicit" in str(tags or "").lower()
+                )
+
+            classification = fact_quality.classify_fact_durability(content)
+            warning = ""
+            if (
+                self.durability_gate_enabled
+                and classification["durability"] == "ephemeral"
+            ):
+                if not explicit:
+                    self.record_memory_event(
+                        "memory.fact.gated_ephemeral",
+                        detail={
+                            "content": self._clip_text(content, 200),
+                            "category": category,
+                            "confidence": classification["confidence"],
+                            "signals": classification["signals"],
+                        },
+                    )
+                    raise EphemeralFactSkipped(
+                        "candidate classified ephemeral by the durability gate "
+                        f"(confidence={classification['confidence']}); left in turn journal"
+                    )
+                # Explicit save: user intent wins — warn, flag, save anyway.
+                warning = (
+                    "content classified ephemeral "
+                    f"(confidence={classification['confidence']}); saved because the "
+                    "save was explicit"
+                )
+                if not source_type or str(source_type).strip().lower() == "manual":
+                    source_type = "explicit"
+                self.record_memory_event(
+                    "memory.fact.ephemeral_explicit_kept",
+                    detail={
+                        "content": self._clip_text(content, 200),
+                        "confidence": classification["confidence"],
+                        "signals": classification["signals"],
+                    },
+                )
+
+            if self.dedup_enabled:
+                duplicate = self._find_near_duplicate(content)
+                if duplicate is not None:
+                    merged_id = self._merge_duplicate_fact(
+                        duplicate, content, tags=tags
+                    )
+                    return {
+                        "fact_id": merged_id,
+                        "outcome": "merged",
+                        "durability": classification["durability"],
+                        "durability_confidence": classification["confidence"],
+                        "merged_with_similarity": duplicate.get("similarity"),
+                        "warning": warning,
+                    }
 
             try:
                 # PG has no cursor.lastrowid; use RETURNING. The facts view
@@ -541,7 +724,14 @@ class MemoryStore:
                 ).fetchone()
                 fact_id = int(row["fact_id"])
                 self._embed_fact(fact_id, content)
-                return fact_id
+                self._bump_fact_reinforcement(fact_id)
+                return {
+                    "fact_id": fact_id,
+                    "outcome": "duplicate",
+                    "durability": classification["durability"],
+                    "durability_confidence": classification["confidence"],
+                    "warning": warning,
+                }
 
             # Entity extraction, linking, and lightweight relation upsert
             self._link_fact_entities(fact_id, content)
@@ -551,7 +741,222 @@ class MemoryStore:
             self._embed_fact(fact_id, content)
             self._rebuild_bank(category)
 
-            return fact_id
+            self._set_fact_quality(
+                fact_id,
+                durability=classification["durability"],
+                confidence=classification["confidence"],
+            )
+
+            return {
+                "fact_id": fact_id,
+                "outcome": "added",
+                "durability": classification["durability"],
+                "durability_confidence": classification["confidence"],
+                "warning": warning,
+            }
+
+    # ------------------------------------------------------------------
+    # Write-time quality helpers (dedup / metadata)
+    # ------------------------------------------------------------------
+
+    def _set_fact_quality(self, fact_id: int, *, durability: str, confidence: float) -> None:
+        """Persist durability metadata on memory_facts (guarded: the columns
+        are plugin-owned and may be missing on a partially-migrated DB)."""
+        try:
+            self._conn.execute(
+                """
+                UPDATE memory_facts
+                SET durability = ?, durability_confidence = ?, last_seen_at = CURRENT_TIMESTAMP
+                WHERE fact_id = ?
+                """,
+                (str(durability or ""), float(confidence or 0.0), int(fact_id)),
+            )
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+
+    def _bump_fact_reinforcement(self, fact_id: int) -> None:
+        """Bump reinforced_count/last_seen_at when a write re-asserts a fact."""
+        try:
+            self._conn.execute(
+                """
+                UPDATE memory_facts
+                SET reinforced_count = COALESCE(reinforced_count, 0) + 1,
+                    last_seen_at = CURRENT_TIMESTAMP
+                WHERE fact_id = ?
+                """,
+                (int(fact_id),),
+            )
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+
+    def _find_near_duplicate(self, content: str) -> dict | None:
+        """Find an existing active fact that is a near-duplicate of ``content``.
+
+        Strategy (cheapest first):
+        1. Normalized exact match (case/punctuation-insensitive).
+        2. Embedding cosine similarity >= ``dedup_similarity_threshold``
+           (reuses the store's embedding path when a client is configured).
+        3. Salient-token Jaccard >= ``dedup_jaccard_threshold`` as the
+           no-embedding fallback.
+
+        Returns the matched fact row dict (+ ``similarity``/``method``) or None.
+        """
+        normalized = fact_quality.normalize_for_dedup(content)
+        if not normalized:
+            return None
+
+        # 1. Embedding path — score against existing fact embeddings.
+        if self.embedding_client:
+            try:
+                query_vec = self.embedding_client.embed(content).vector
+                rows = self._conn.execute(
+                    """
+                    SELECT f.fact_id, f.content, f.tags, f.category, f.created_at,
+                           e.dimensions, e.vector
+                    FROM memory_embeddings e
+                    JOIN facts f ON f.fact_id = e.target_id
+                    WHERE e.target_type = 'fact'
+                      AND e.provider = ?
+                      AND e.model = ?
+                      AND COALESCE(f.status, 'active') = 'active'
+                    ORDER BY f.fact_id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        self.embedding_client.provider,
+                        self.embedding_client.model,
+                        self.dedup_candidate_limit,
+                    ),
+                ).fetchall()
+                best: dict | None = None
+                best_sim = 0.0
+                for row in rows:
+                    fact = self._row_to_dict(row)
+                    try:
+                        vec = blob_to_vector(fact.pop("vector"), int(fact.pop("dimensions")))
+                    except Exception:
+                        continue
+                    sim = cosine_similarity(query_vec, vec)
+                    if sim > best_sim:
+                        best_sim = sim
+                        best = fact
+                if best is not None and best_sim >= self.dedup_similarity_threshold:
+                    best["similarity"] = round(float(best_sim), 4)
+                    best["method"] = "embedding"
+                    return best
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+
+        # 2/3. Token-based fallback over recent active facts (also catches
+        # normalized-exact matches that dodge the UNIQUE constraint).
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT fact_id, content, tags, category, created_at
+                FROM facts
+                WHERE COALESCE(status, 'active') = 'active'
+                ORDER BY fact_id DESC
+                LIMIT ?
+                """,
+                (self.dedup_candidate_limit,),
+            ).fetchall()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            return None
+
+        best = None
+        best_sim = 0.0
+        for row in rows:
+            fact = self._row_to_dict(row)
+            existing = str(fact.get("content") or "")
+            if fact_quality.normalize_for_dedup(existing) == normalized:
+                fact["similarity"] = 1.0
+                fact["method"] = "normalized_exact"
+                return fact
+            sim = fact_quality.token_jaccard(content, existing)
+            if sim > best_sim:
+                best_sim = sim
+                best = fact
+        if best is not None and best_sim >= self.dedup_jaccard_threshold:
+            best["similarity"] = round(float(best_sim), 4)
+            best["method"] = "jaccard"
+            return best
+        return None
+
+    def _merge_duplicate_fact(self, existing: dict, new_content: str, *, tags: str = "") -> int:
+        """Merge a near-duplicate write into the existing (older) fact.
+
+        Keeps the older fact. Updates its content ONLY when the new content
+        is strictly more specific (longer AND contains the old content's key
+        tokens). Tags are unioned. ``reinforced_count``/``last_seen_at`` are
+        bumped, and the merge is logged to memory_events.
+
+        NOTE: this is fact-level dedup only. Existing memory_relations rows
+        are NEVER collapsed or deleted here — multi-source relation rows are
+        corroboration signal (recall ranks SUM(weight)/COUNT(*) over all rows
+        for a pair). Content updates only ADD entity links/relations.
+        """
+        fact_id = int(existing["fact_id"])
+        old_content = str(existing.get("content") or "")
+
+        more_specific = (
+            len(new_content) > len(old_content)
+            and fact_quality.key_tokens(old_content) <= fact_quality.key_tokens(new_content)
+        )
+
+        merged_tags = ""
+        old_tags = [t.strip() for t in str(existing.get("tags") or "").split(",") if t.strip()]
+        new_tags = [t.strip() for t in str(tags or "").split(",") if t.strip()]
+        if old_tags or new_tags:
+            merged_tags = ",".join(dict.fromkeys(old_tags + new_tags))
+
+        content_updated = False
+        if more_specific:
+            self._conn.execute(
+                "UPDATE facts SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                (new_content, merged_tags, fact_id),
+            )
+            self._conn.commit()
+            # Additive enrichment only: link any new entities/relations from
+            # the more specific content; never delete the old fact's rows.
+            self._link_fact_entities(fact_id, new_content)
+            self._compute_hrr_vector(fact_id, new_content)
+            self._embed_fact(fact_id, new_content)
+            content_updated = True
+        elif merged_tags and merged_tags != str(existing.get("tags") or ""):
+            self._conn.execute(
+                "UPDATE facts SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                (merged_tags, fact_id),
+            )
+            self._conn.commit()
+
+        self._bump_fact_reinforcement(fact_id)
+        self.record_memory_event(
+            "memory.fact.merged",
+            detail={
+                "kept_fact_id": fact_id,
+                "method": existing.get("method", ""),
+                "similarity": existing.get("similarity"),
+                "content_updated": content_updated,
+                "incoming": self._clip_text(new_content, 200),
+                "kept": self._clip_text(old_content, 200),
+            },
+        )
+        return fact_id
 
     def search_facts(
         self,
@@ -611,6 +1016,7 @@ class MemoryStore:
                     ids,
                 )
                 self._conn.commit()
+                self._touch_last_recalled(ids)
 
             return results
 
@@ -1772,7 +2178,34 @@ class MemoryStore:
                 )
                 updated = int(cur.rowcount or 0)
             self._conn.commit()
+            self._touch_last_recalled(ids)
             return {"updated": updated}
+
+    def _touch_last_recalled(self, fact_ids: list[int]) -> None:
+        """Stamp last_recalled_at on memory_facts for surfaced facts.
+
+        The column is plugin-owned (added in ``_init_db``) and lives on the
+        base table, not the compat view — guarded so a partially-migrated DB
+        never breaks recall.
+        """
+        if not fact_ids:
+            return
+        try:
+            placeholders = ",".join("?" * len(fact_ids))
+            self._conn.execute(
+                f"""
+                UPDATE memory_facts
+                SET last_recalled_at = CURRENT_TIMESTAMP
+                WHERE fact_id IN ({placeholders})
+                """,
+                [int(f) for f in fact_ids],
+            )
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
 
     def record_turn(
         self,
@@ -3202,6 +3635,148 @@ class MemoryStore:
             pass
         return result
 
+    def archive_ephemeral_facts(
+        self,
+        *,
+        daily_maintenance_token: object,
+        min_age_days: int = 30,
+        max_archive: int = 200,
+        min_confidence: float = 0.75,
+        max_retrieval_count: int = 25,
+        dry_run: bool = False,
+    ) -> dict:
+        """TTL decay for task-shaped facts that slipped past the write gate
+        historically. DAILY MAINTENANCE ONLY (same opaque-token guard as
+        ``prune_and_compact_relations`` — unreachable from recall paths).
+
+        Archives (sets ``status='archived'`` — never deletes) two narrow,
+        clear-cut classes of ACTIVE facts:
+
+        (a) Facts the durability classifier marks ephemeral with high
+            confidence (>= ``min_confidence``) — pure task chatter.
+        (b) Task-framed facts older than ``min_age_days`` that have NEVER
+            been recalled (``retrieval_count == 0``).
+
+        Never touched: explicit saves (``source_type`` in the explicit set or
+        an ``explicit`` tag), facts with positive helpful feedback, anything
+        the classifier calls durable, and heavily-recalled facts
+        (``retrieval_count >= max_retrieval_count`` — a fact recalled that
+        often is earning its keep regardless of how it's phrased). Bounded by
+        ``max_archive`` per run. Each run logs an audit event to memory_events. ``dry_run``
+        returns the would-archive list without writing.
+        """
+        if daily_maintenance_token is not DAILY_MAINTENANCE_TOKEN:
+            raise PermissionError(
+                "archive_ephemeral_facts is daily-maintenance only and cannot "
+                "be invoked without the daily-maintenance token "
+                "(this code path is unreachable from recall/search/probe)"
+            )
+
+        min_age_days = max(0, int(min_age_days))
+        max_archive = max(0, int(max_archive))
+        min_confidence = max(0.0, min(1.0, float(min_confidence)))
+        max_retrieval_count = max(1, int(max_retrieval_count))
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, source_type,
+                       retrieval_count, helpful_count, created_at
+                FROM facts
+                WHERE COALESCE(status, 'active') = 'active'
+                ORDER BY fact_id ASC
+                """
+            ).fetchall()
+
+        now = datetime.now(timezone.utc)
+        candidates: list[dict] = []
+        scanned = 0
+        for row in rows:
+            fact = self._row_to_dict(row)
+            scanned += 1
+            source_type = str(fact.get("source_type") or "").strip().lower()
+            tags = str(fact.get("tags") or "").lower()
+            if source_type in self._EXPLICIT_SOURCE_TYPES or "explicit" in tags:
+                continue
+            if int(fact.get("helpful_count") or 0) > 0:
+                continue
+
+            content = str(fact.get("content") or "")
+            cls = fact_quality.classify_fact_durability(content)
+            reason = ""
+            recalls = int(fact.get("retrieval_count") or 0)
+            if (
+                cls["durability"] == "ephemeral"
+                and cls["confidence"] >= min_confidence
+                and recalls < max_retrieval_count
+            ):
+                reason = "ephemeral_classified"
+            elif cls["task_framed"] and int(fact.get("retrieval_count") or 0) == 0:
+                age_days = None
+                created = fact.get("created_at")
+                try:
+                    if isinstance(created, str):
+                        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if created is not None:
+                        if created.tzinfo is None:
+                            created = created.replace(tzinfo=timezone.utc)
+                        age_days = (now - created).total_seconds() / 86400
+                except (TypeError, ValueError):
+                    age_days = None
+                if age_days is not None and age_days > min_age_days:
+                    reason = "task_framed_unrecalled"
+            if not reason:
+                continue
+            candidates.append(
+                {
+                    "fact_id": int(fact["fact_id"]),
+                    "content": self._clip_text(content, 200),
+                    "category": fact.get("category"),
+                    "reason": reason,
+                    "confidence": cls["confidence"],
+                }
+            )
+            if len(candidates) >= max_archive:
+                break
+
+        if dry_run or not candidates:
+            return {
+                "ran": True,
+                "dry_run": dry_run,
+                "scanned": scanned,
+                "archived": 0,
+                "candidates": candidates,
+            }
+
+        ids = [c["fact_id"] for c in candidates]
+        with self._lock:
+            placeholders = ",".join("?" * len(ids))
+            self._conn.execute(
+                f"""
+                UPDATE facts
+                SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+                WHERE fact_id IN ({placeholders})
+                """,
+                ids,
+            )
+            self._conn.commit()
+
+        self.record_memory_event(
+            "memory.fact.ephemeral_archived",
+            detail={
+                "archived": len(ids),
+                "min_age_days": min_age_days,
+                "facts": candidates,
+            },
+        )
+        return {
+            "ran": True,
+            "dry_run": False,
+            "scanned": scanned,
+            "archived": len(ids),
+            "candidates": candidates,
+        }
+
     def memory_hygiene_report(self, limit: int = 20) -> dict:
         """Return memory maintenance candidates: duplicates, stale, popular, source gaps, contradictions."""
         limit = max(1, int(limit))
@@ -3442,10 +4017,11 @@ class MemoryStore:
 
         return candidates
 
-    def _resolve_entity(self, name: str) -> int:
+    def _resolve_entity(self, name: str, allow_create: bool = True) -> int | None:
         """Find an existing entity by name or alias (case-insensitive) or create one.
 
-        Returns the entity_id.
+        Returns the entity_id, or None when the entity does not exist and
+        ``allow_create`` is False (extraction-pass minting throttle).
         """
         # Exact name match
         row = self._conn.execute(
@@ -3465,6 +4041,9 @@ class MemoryStore:
         if alias_row is not None:
             return int(alias_row["entity_id"])
 
+        if not allow_create:
+            return None
+
         # Create new entity (PG uses RETURNING; entities view auto-routes
         # to memory_entities and the identity sequence handles the PK).
         cur = self._conn.execute(
@@ -3473,6 +4052,64 @@ class MemoryStore:
         returned = cur.fetchone()
         self._conn.commit()
         return int(returned["entity_id"])
+
+    # ------------------------------------------------------------------
+    # Extraction-pass throttle (entity minting + relation cap)
+    # ------------------------------------------------------------------
+
+    def begin_extraction_pass(self, *, relation_cap: int = 40, minting_throttle: bool = True) -> None:
+        """Activate the noise throttle for an automated extraction/organize
+        pass. While active:
+
+        - NEW entities are only minted when proper-noun-like (or already
+          mentioned in >=2 distinct facts); bare lowercase prose tokens
+          resolve to existing entities but never create new rows.
+        - At most ``relation_cap`` NEW memory_relations rows are inserted in
+          the whole pass. Existing rows still get their normal weight bump
+          (multi-source corroboration is signal and is never collapsed).
+
+        Explicit tool adds and document ingestion never run inside a pass.
+        """
+        self._extraction_ctx = {
+            "relations_remaining": max(0, int(relation_cap)),
+            "minting_throttle": bool(minting_throttle),
+            "relations_created": 0,
+            "relations_skipped": 0,
+            "entities_skipped": 0,
+        }
+
+    def end_extraction_pass(self) -> dict:
+        """Deactivate the extraction throttle; returns the pass report."""
+        ctx = self._extraction_ctx or {}
+        self._extraction_ctx = None
+        return {
+            "relations_created": int(ctx.get("relations_created", 0)),
+            "relations_skipped": int(ctx.get("relations_skipped", 0)),
+            "entities_skipped": int(ctx.get("entities_skipped", 0)),
+        }
+
+    def _appears_in_multiple_facts(self, name: str) -> bool:
+        """True when ``name`` is mentioned in >=2 distinct existing facts."""
+        needle = str(name or "").strip()
+        if not needle:
+            return False
+        escaped = needle.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+        try:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM (
+                    SELECT fact_id FROM facts WHERE content ILIKE ? LIMIT 2
+                ) t
+                """,
+                (f"%{escaped}%",),
+            ).fetchone()
+            return int(row["n"] or 0) >= 2
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            return False
 
     def _link_fact_entity(self, fact_id: int, entity_id: int) -> None:
         """Insert into fact_entities, silently ignore if the link already exists."""
@@ -3487,9 +4124,21 @@ class MemoryStore:
 
     def _link_fact_entities(self, fact_id: int, content: str) -> list[int]:
         """Link extracted entities to a fact and upsert co-occurrence relations."""
+        ctx = self._extraction_ctx
         entity_ids: list[int] = []
         for name in self._extract_entities(content):
-            entity_id = self._resolve_entity(name)
+            # Universal guard: never mint/link stopword or single-char names.
+            if fact_quality.is_entity_skippable(name, _ENTITY_STOPWORDS):
+                continue
+            allow_create = True
+            if ctx is not None and ctx.get("minting_throttle"):
+                if not fact_quality.entity_mint_allowed(name):
+                    allow_create = self._appears_in_multiple_facts(name)
+            entity_id = self._resolve_entity(name, allow_create=allow_create)
+            if entity_id is None:
+                if ctx is not None:
+                    ctx["entities_skipped"] = ctx.get("entities_skipped", 0) + 1
+                continue
             self._link_fact_entity(fact_id, entity_id)
             if entity_id not in entity_ids:
                 entity_ids.append(entity_id)
@@ -3505,6 +4154,8 @@ class MemoryStore:
             (int(chunk_id),),
         )
         for name in self._extract_entities(content):
+            if fact_quality.is_entity_skippable(name, _ENTITY_STOPWORDS):
+                continue
             entity_id = self._resolve_entity(name)
             self._conn.execute(
                 """
@@ -3524,8 +4175,29 @@ class MemoryStore:
         if len(unique_ids) < 2:
             return
         excerpt = " ".join(str(evidence or "").split())[:500]
+        ctx = self._extraction_ctx
         for idx, source_entity_id in enumerate(unique_ids):
             for target_entity_id in unique_ids[idx + 1:]:
+                if ctx is not None:
+                    # Cap NEW relation rows per extraction pass. Existing rows
+                    # always still receive their weight bump below — existing
+                    # multi-source rows are corroboration signal, never capped
+                    # or collapsed.
+                    exists = self._conn.execute(
+                        """
+                        SELECT 1 FROM memory_relations
+                        WHERE source_entity_id = ? AND target_entity_id = ?
+                          AND relation_type = 'co_occurs_with'
+                          AND source_type = ? AND source_id = ?
+                        """,
+                        (source_entity_id, target_entity_id, str(source_type or ""), int(source_id)),
+                    ).fetchone()
+                    if exists is None:
+                        if ctx.get("relations_remaining", 0) <= 0:
+                            ctx["relations_skipped"] = ctx.get("relations_skipped", 0) + 1
+                            continue
+                        ctx["relations_remaining"] -= 1
+                        ctx["relations_created"] = ctx.get("relations_created", 0) + 1
                 self._conn.execute(
                     """
                     INSERT INTO memory_relations (
