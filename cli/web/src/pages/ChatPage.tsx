@@ -3246,6 +3246,18 @@ export default function ChatPage() {
     });
   }, []);
 
+  // Open a subagent's own session as a full chat — reuses the resume flow
+  // (resumeId re-keys the page). Reopens a completed child session so the user
+  // can read its transcript and message it.
+  const handleOpenSubagent = useCallback(
+    (childSessionId: string) => {
+      if (!childSessionId) return;
+      closeSidePanel();
+      setSearchParams({ resume: childSessionId });
+    },
+    [closeSidePanel, setSearchParams],
+  );
+
   const handleSelectPanel = useCallback(
     (mode: SidePanelMode) => {
       // Selecting the active panel toggles it closed.
@@ -6134,6 +6146,18 @@ export default function ChatPage() {
     () => artifacts.filter((artifact) => !artifact.messageId),
     [artifacts],
   );
+  // Subagents grouped by the parent turn they ran under — surfaced inline in
+  // that turn's digest (live/recent turns; resumed turns use the panel).
+  const subagentsByMessage = useMemo(() => {
+    const grouped = new Map<string, SubagentEntry[]>();
+    for (const s of subagents) {
+      if (!s.messageId) continue;
+      const next = grouped.get(s.messageId) ?? [];
+      next.push(s);
+      grouped.set(s.messageId, next);
+    }
+    return grouped;
+  }, [subagents]);
   // Diff artifacts grouped by message — used to reattach inline_diff to stored
   // tools on reload (the diff isn't persisted on the tool itself).
   const diffsByMessage = useMemo(() => {
@@ -6439,7 +6463,13 @@ export default function ChatPage() {
           />
         );
       case "tasks":
-        return <BackgroundTasksPanel tasks={backgroundTasks} onClose={closeSidePanel} />;
+        return (
+          <BackgroundTasksPanel
+            tasks={backgroundTasks}
+            onClose={closeSidePanel}
+            onDrillIn={handleOpenSubagent}
+          />
+        );
       case "files":
         return (
           <FilesPanel
@@ -6619,6 +6649,7 @@ export default function ChatPage() {
                     ? tracesByMessage.get(message.id) ?? message.traces
                     : undefined;
                   const turnArtifacts = isAssistant ? artifactsByMessage.get(message.id) : undefined;
+                  const turnSubagents = isAssistant ? subagentsByMessage.get(message.id) : undefined;
                   const isStreaming = isAssistant && message.status === "streaming" && isLatest;
                   return (
                     <MemoMessageRow
@@ -6630,6 +6661,8 @@ export default function ChatPage() {
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
+                      onOpenSubagent={handleOpenSubagent}
+                      subagents={turnSubagents}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
                     />
@@ -7802,6 +7835,8 @@ function MessageRow({
   message,
   onEditMessage,
   onOpenArtifact,
+  onOpenSubagent,
+  subagents,
   tools,
   turnArtifacts,
 }: {
@@ -7812,6 +7847,8 @@ function MessageRow({
   message: ChatMessage;
   onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
+  onOpenSubagent?(childSessionId: string): void;
+  subagents?: SubagentEntry[];
   tools?: ToolEntry[];
   turnArtifacts?: ArtifactEntry[];
 }) {
@@ -7882,6 +7919,7 @@ function MessageRow({
     (!!busy ||
       !!tools?.length ||
       !!activityTrace?.length ||
+      !!subagents?.length ||
       typeof message.tokenCount === "number");
   const copyText = [
     message.content,
@@ -7921,7 +7959,9 @@ function MessageRow({
             compacting={!!compacting}
             completedAt={message.completedAt}
             liveTokens={liveTokens}
+            onOpenSubagent={onOpenSubagent}
             startedAt={message.createdAt}
+            subagents={subagents}
             tokenCount={message.tokenCount}
             tools={tools ?? []}
           />
@@ -8561,6 +8601,44 @@ function MemorySaveRow({ tool }: { tool: ToolEntry }) {
   );
 }
 
+// A subagent that ran under this turn — shown inline with its goal/status and,
+// when it has its own session, an "Open" affordance to read + message it.
+function SubagentSummaryRow({
+  subagent,
+  onOpen,
+}: {
+  subagent: SubagentEntry;
+  onOpen?(childSessionId: string): void;
+}) {
+  const running = subagent.status === "running";
+  const canOpen = !!subagent.child_session_id && !!onOpen;
+  const open = () =>
+    subagent.child_session_id && onOpen?.(subagent.child_session_id);
+  return (
+    <div className="flex items-center gap-2 rounded-[6px] px-1 py-0.5 text-[12.5px] leading-5 text-[var(--chat-muted-strong)]">
+      {running ? (
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--status-neon-orange-hot)]" />
+      ) : (
+        <Bot className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)] opacity-90" />
+      )}
+      <span className="min-w-0 flex-1 truncate">
+        {running ? "Delegated" : "Subagent"}: {subagent.goal}
+      </span>
+      {canOpen ? (
+        <button
+          type="button"
+          onClick={open}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10.5px] font-medium text-[var(--fg-faint)] transition-colors hover:bg-[var(--fg)]/5 hover:text-[var(--fg-muted)]"
+          title="Open this subagent's session"
+        >
+          <ExternalLink className="h-3 w-3" />
+          Open
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 // Rotating "thinking verb" for the live digest header. Cycles through the
 // same 15 verbs the agent loop emits as heartbeats, capitalised, every
 // ~2.4s while the turn is busy. Picks a fresh random index each tick so it
@@ -8598,7 +8676,9 @@ function ChatActivityDigest({
   compacting,
   completedAt,
   liveTokens,
+  onOpenSubagent,
   startedAt,
+  subagents,
   tokenCount,
   tools,
 }: {
@@ -8608,7 +8688,9 @@ function ChatActivityDigest({
   compacting?: boolean;
   completedAt?: number;
   liveTokens?: number;
+  onOpenSubagent?(childSessionId: string): void;
   startedAt?: number;
+  subagents?: SubagentEntry[];
   tokenCount?: number;
   tools: ToolEntry[];
 }) {
@@ -8680,6 +8762,18 @@ function ChatActivityDigest({
         <div className="mb-2.5 space-y-1">
           {memoryTools.map((tool) => (
             <MemorySaveRow key={tool.id} tool={tool} />
+          ))}
+        </div>
+      )}
+
+      {subagents && subagents.length > 0 && (
+        <div className="mb-2.5 space-y-1">
+          {subagents.map((s) => (
+            <SubagentSummaryRow
+              key={s.id}
+              subagent={s}
+              onOpen={onOpenSubagent}
+            />
           ))}
         </div>
       )}

@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Circle,
   CircleDot,
+  ExternalLink,
   File as FileIcon,
   FileCode,
   FileStack,
@@ -503,14 +504,47 @@ const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
   task: "Task",
 };
 
-function TaskCard({ task }: { task: BackgroundTaskItem }) {
+function TaskCard({
+  task,
+  onOpen,
+}: {
+  task: BackgroundTaskItem;
+  onOpen?: (childSessionId: string) => void;
+}) {
+  const canOpen = !!task.child_session_id && !!onOpen;
+  const open = () => task.child_session_id && onOpen?.(task.child_session_id);
   return (
-    <div className="rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2.5">
+    <div
+      className={cn(
+        "rounded-[9px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2.5",
+        canOpen &&
+          "cursor-pointer transition-colors hover:bg-[var(--chat-surface-strong)]",
+      )}
+      onClick={canOpen ? open : undefined}
+      role={canOpen ? "button" : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      onKeyDown={
+        canOpen
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                open();
+              }
+            }
+          : undefined
+      }
+    >
       <div className="flex items-center gap-2">
         <TaskStatusBadge status={task.status} />
         <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">
           {task.label}
         </span>
+        {canOpen ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)]">
+            <ExternalLink className="h-3 w-3" />
+            Open
+          </span>
+        ) : null}
         <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
           {relativeTime(task.completedAt ?? task.startedAt)}
         </span>
@@ -536,9 +570,11 @@ function TaskCard({ task }: { task: BackgroundTaskItem }) {
 export function BackgroundTasksPanel({
   tasks,
   onClose,
+  onDrillIn,
 }: {
   tasks: BackgroundTaskItem[];
   onClose: () => void;
+  onDrillIn?: (childSessionId: string) => void;
 }) {
   const running = tasks.filter((task) => task.status === "running");
   const finished = tasks.filter((task) => task.status !== "running");
@@ -563,7 +599,7 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Running</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {running.map((task) => (
-                  <TaskCard key={task.id} task={task} />
+                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} />
                 ))}
               </div>
             </div>
@@ -573,7 +609,7 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Finished</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {finished.map((task) => (
-                  <TaskCard key={task.id} task={task} />
+                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} />
                 ))}
               </div>
             </div>
