@@ -39,7 +39,7 @@
   --color-warning:    #E7B25E;
   --color-destructive:#EB6F77;
   --page-border:      #262626;
-  --theme-font-sans:  "Geist", sans-serif;
+  --theme-font-sans:  "Anthropic Sans Display", "Geist", sans-serif;
   --theme-font-mono:  "Geist Mono", monospace;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -47,7 +47,7 @@
   /* folded-in body styles (scoped so they don't touch the app's <body>) */
   color: var(--fg);
   background: var(--bg);
-  font: 13.5px/1.55 "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font: 13.5px/1.55 "Anthropic Sans Display", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   min-height: 100%;
 }
@@ -62,13 +62,13 @@
 /* top bar */
 .mem-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .mem-topbar-l { display: flex; align-items: baseline; gap: 12px; }
-.mem-brand { font: 700 16px/1 "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
+.mem-brand { font: 700 16px/1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
 .mem-gw { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--fg-dim); }
 .mem-gw-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
 .mem-btn {
   appearance: none; cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
   padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border);
-  background: var(--bg-1); color: var(--fg-muted); font: 500 12.5px/1 "Geist", sans-serif;
+  background: var(--bg-1); color: var(--fg-muted); font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
 .mem-btn:hover { background: var(--bg-2); color: var(--fg); border-color: var(--border-strong); }
@@ -82,7 +82,7 @@
   background: var(--bg-2); border: 1px solid var(--border-soft);
 }
 .mem-hero-eyebrow { font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.14em; text-transform: uppercase; color: var(--fg-faint); margin-bottom: 7px; }
-.mem-hero-title { margin: 0; font: 600 32px/1 "Geist", sans-serif; letter-spacing: -0.02em; color: var(--fg); }
+.mem-hero-title { margin: 0; font: 600 32px/1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.02em; color: var(--fg); }
 .mem-hero-r { display: inline-flex; align-items: center; gap: 9px; font: 500 13px/1 "Geist Mono", monospace; }
 .mem-hero-r .ok { color: var(--color-success); display: inline-flex; align-items: center; gap: 7px; }
 .mem-hero-r .err { color: var(--color-destructive); display: inline-flex; align-items: center; gap: 7px; }
@@ -96,7 +96,7 @@
 .mem-tile { border: 1px solid var(--border); background: var(--bg-1); border-radius: 12px; padding: 16px 18px; }
 .mem-tile-label { display: inline-flex; align-items: center; gap: 8px; font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.1em; text-transform: uppercase; color: var(--fg-faint); }
 .mem-tile-label svg { opacity: 0.8; }
-.mem-tile-value { margin-top: 10px; font: 600 20px/1.1 "Geist", sans-serif; letter-spacing: -0.01em; }
+.mem-tile-value { margin-top: 10px; font: 600 20px/1.1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; }
 .mem-tile-value.neutral { color: var(--fg); }
 .mem-tile-value.ok { color: var(--fg); }
 .mem-tile-value.active { color: var(--color-primary); }
@@ -109,7 +109,7 @@
 .mem-grid { margin-top: 16px; display: grid; gap: 16px; grid-template-columns: 1fr; align-items: start; }
 .mem-card { border: 1px solid var(--border); background: var(--bg-1); border-radius: 14px; overflow: hidden; }
 .mem-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--border-soft); }
-.mem-card-title { display: inline-flex; align-items: center; gap: 9px; font: 600 14px/1 "Geist", sans-serif; color: var(--fg); }
+.mem-card-title { display: inline-flex; align-items: center; gap: 9px; font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-card-title svg { color: var(--color-primary); }
 .mem-card-body { padding: 0; }
 .mem-badge { font: 500 11px/1 "Geist Mono", monospace; letter-spacing: 0.04em; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border); color: var(--fg-faint); text-transform: uppercase; }
@@ -137,14 +137,14 @@
 .mem-ingest-active .dim { color: var(--fg-faint); }
 .mem-ingest-count { font: 500 13px/1 "Geist Mono", monospace; color: var(--fg); }
 .mem-provider { border: 1px solid var(--border); background: var(--bg-2); border-radius: 10px; padding: 12px 14px; }
-.mem-provider-name { font: 500 12.5px/1.3 "Geist", sans-serif; color: var(--fg); }
+.mem-provider-name { font: 500 12.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-provider-path { margin-top: 5px; font-size: 11px; color: var(--fg-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mem-sessions-label { font-size: 12px; color: var(--fg-faint); padding-left: 2px; }
 .mem-sessions { display: flex; flex-direction: column; gap: 6px; }
 .mem-sessions-empty { font-size: 12px; color: var(--fg-dim); padding-left: 2px; }
 .mem-session { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border: 1px solid var(--border-soft); background: color-mix(in srgb, var(--fg) 2%, transparent); border-radius: 9px; }
 .mem-session-l { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
-.mem-session-day { font: 500 12.5px/1 "Geist", sans-serif; color: var(--fg); }
+.mem-session-day { font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .mem-session-ago { font-size: 11.5px; color: var(--fg-dim); }
 .mem-session-total { font: 500 11px/1 "Geist Mono", monospace; color: var(--fg-faint); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
 
@@ -152,7 +152,7 @@
 .mem-graph-empty {
   display: flex; align-items: center; justify-content: center; text-align: center;
   height: 100%; min-height: 24rem; padding: 0 24px;
-  font: 400 13px/1.5 "Geist", sans-serif; color: var(--fg-faint);
+  font: 400 13px/1.5 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint);
 }
 
 /* ─────────── constellation ─────────── */
@@ -220,7 +220,7 @@
 /* overlays */
 .memory-overlay-top { position: absolute; inset-inline: 0; top: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 16px; pointer-events: none; }
 .memory-count-box { border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 10px; padding: 9px 13px; box-shadow: 0 8px 24px -16px rgba(0,0,0,0.7); }
-.memory-count-title { font: 600 12.5px/1 "Geist", sans-serif; color: var(--fg); }
+.memory-count-title { font: 600 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .memory-count-sub { margin-top: 5px; font-size: 11px; color: var(--fg-faint); }
 .memory-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 56%; }
 .memory-legend-chip { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(6px); border-radius: 7px; padding: 4px 9px; font: 500 10.5px/1 "Geist Mono", monospace; letter-spacing: 0.02em; color: var(--fg-muted); text-transform: uppercase; }
@@ -231,9 +231,9 @@
 .memory-signal-card { border: 1px solid color-mix(in srgb, var(--border) 90%, transparent); background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); border-radius: 12px; padding: 13px 15px; box-shadow: 0 16px 40px -22px rgba(0,0,0,0.8); }
 .memory-signal-head { display: flex; align-items: center; gap: 9px; }
 .memory-signal-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-.memory-signal-kind { font: 600 12px/1 "Geist", sans-serif; color: var(--fg); }
+.memory-signal-kind { font: 600 12px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .memory-signal-links { font-size: 11px; color: var(--fg-faint); }
-.memory-signal-label { margin-top: 6px; font: 400 14px/1.4 "Geist", sans-serif; color: var(--fg); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.memory-signal-label { margin-top: 6px; font: 400 14px/1.4 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .memory-signal-edges { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
 .memory-signal-edge { border: 1px solid color-mix(in srgb, var(--border) 80%, transparent); background: color-mix(in srgb, var(--fg) 3%, transparent); border-radius: 999px; padding: 3px 9px; font-size: 10.5px; color: var(--fg-muted); }
 

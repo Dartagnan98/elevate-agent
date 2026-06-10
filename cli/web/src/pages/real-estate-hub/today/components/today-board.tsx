@@ -928,7 +928,7 @@ function LeadSourceBreakdown({ data }: { data: TodaySourceBreakdown }) {
             {segs.map((s, i) => (
               <path key={s.id} d={s.d} fill={`var(--${s.tone})`} opacity={i === 0 ? 1 : 0.78 - i * 0.14} />
             ))}
-            <text x="64" y="62" textAnchor="middle" fontFamily="Geist" fontSize="22" fontWeight="600" fill="var(--fg)">{data.total}</text>
+            <text x="64" y="62" textAnchor="middle" fontFamily="Anthropic Sans Display, Geist" fontSize="22" fontWeight="600" fill="var(--fg)">{data.total}</text>
             <text x="64" y="78" textAnchor="middle" fontFamily="Geist Mono, monospace" fontSize="9" fill="var(--fg-faint)" letterSpacing="0.1em">LEADS</text>
           </svg>
         </div>

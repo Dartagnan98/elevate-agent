@@ -66,7 +66,7 @@
   /* Typography tokens — rewritten by ThemeProvider. Geist Sans is the primary
      UI font (Claude Code dashboard aesthetic); Geist Mono is used for all
      structural labels via the .font-mono-ui utility class. */
-  --theme-font-sans: "Geist", "Inter", -apple-system, BlinkMacSystemFont,
+  --theme-font-sans: "Anthropic Sans Display", "Geist", "Inter", -apple-system, BlinkMacSystemFont,
     "Segoe UI Variable", "Segoe UI", system-ui, "Helvetica Neue", Arial,
     sans-serif;
   --theme-font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono",
@@ -422,7 +422,7 @@ html .font-courier {
   background: transparent;
   border-radius: 6px;
   cursor: pointer;
-  font: 400 13px/1 "Geist", sans-serif;
+  font: 400 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   text-align: left;
   transition: background 100ms var(--ease-out);
@@ -485,7 +485,7 @@ html .font-courier {
   background: transparent;
   border-radius: 7px;
   cursor: pointer;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
@@ -886,7 +886,7 @@ html .font-courier {
 
 .auto-row .auto-trail.paused {
   color: var(--fg-faint);
-  font-family: "Geist", sans-serif;
+  font-family: "Anthropic Sans Display", "Geist", sans-serif;
   font-size: 12px;
 }
 
@@ -1210,7 +1210,7 @@ html .font-courier {
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   text-align: left;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
@@ -1295,7 +1295,7 @@ html .font-courier {
 
 .reasoning-head {
   color: var(--fg-faint);
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   white-space: nowrap;
   margin: 0;
 }
@@ -1357,7 +1357,7 @@ html .font-courier {
   gap: 8px;
   margin: 6px 0;
   color: var(--fg-faint);
-  font: 500 12.5px/1.4 "Geist", sans-serif;
+  font: 500 12.5px/1.4 "Anthropic Sans Display", "Geist", sans-serif;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1373,7 +1373,7 @@ html .font-courier {
   cursor: pointer;
   text-align: left;
   color: var(--fg);
-  font: 500 13.5px/1 "Geist", sans-serif;
+  font: 500 13.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: color 120ms var(--ease-out);
 }
 
@@ -1534,7 +1534,7 @@ html .font-courier {
 .chat-start-title h2 {
   margin: 0;
   color: var(--fg);
-  font: 500 22px/1.25 "Geist", sans-serif;
+  font: 500 22px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
 }
 
@@ -1572,7 +1572,7 @@ html .font-courier {
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   padding: 5px 8px;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
@@ -1614,7 +1614,7 @@ html .font-courier {
   display: block;
   overflow: hidden;
   color: var(--fg-muted);
-  font: 500 12px/1.05 "Geist", sans-serif;
+  font: 500 12px/1.05 "Anthropic Sans Display", "Geist", sans-serif;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1624,7 +1624,7 @@ html .font-courier {
   margin-top: 3px;
   overflow: hidden;
   color: var(--fg);
-  font: 600 16px/1.1 "Geist", sans-serif;
+  font: 600 16px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1662,7 +1662,7 @@ html .font-courier {
   background: var(--bg-2);
   box-shadow: 0 14px 36px -18px rgba(0, 0, 0, 0.85);
   color: var(--fg);
-  font: 500 11px/1.35 "Geist", sans-serif;
+  font: 500 11px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
   text-align: left;
   transform: translateX(-50%);
   white-space: pre-line;
@@ -1693,7 +1693,7 @@ html .font-courier {
 .chat-start-note {
   margin: 8px 0 1px;
   color: var(--fg-muted);
-  font: 500 12px/1.35 "Geist", sans-serif;
+  font: 500 12px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
 }
 
 .chat-start-models {
@@ -1711,7 +1711,7 @@ html .font-courier {
   border-radius: 5px;
   background: color-mix(in srgb, var(--fg) 7%, transparent);
   color: var(--fg-muted);
-  font: 500 12px/1.2 "Geist", sans-serif;
+  font: 500 12px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
 }
 
 .chat-start-model .model-name {
@@ -1727,7 +1727,7 @@ html .font-courier {
   min-height: 72px;
   place-items: center;
   color: var(--fg-muted);
-  font: 500 12.5px/1.35 "Geist", sans-serif;
+  font: 500 12.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
 }
 
 .composer-wrap {
@@ -1915,7 +1915,7 @@ html .font-courier {
   position: absolute;
   inset: 0;
   padding: 11px 0;
-  font: 400 14px/1.5 "Geist", system-ui, sans-serif;
+  font: 400 14px/1.5 "Anthropic Sans Display", "Geist", system-ui, sans-serif;
   white-space: pre-wrap;
   overflow-wrap: break-word;
   word-break: normal;
@@ -1943,7 +1943,7 @@ html .font-courier {
   color: transparent;
   caret-color: var(--fg);
   -webkit-text-fill-color: transparent;
-  font: 400 14px/1.5 "Geist", system-ui, sans-serif;
+  font: 400 14px/1.5 "Anthropic Sans Display", "Geist", system-ui, sans-serif;
   padding: 11px 0;
   min-height: 22px;
   max-height: 200px;
@@ -2072,7 +2072,7 @@ html .font-courier {
   color: var(--fg-muted);
   background: transparent;
   cursor: pointer;
-  font: 500 13px/1 "Geist", sans-serif;
+  font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   white-space: nowrap;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
@@ -2146,7 +2146,7 @@ html .font-courier {
   cursor: pointer;
   text-align: left;
   color: var(--fg);
-  font: 500 12.5px/1.2 "Geist", sans-serif;
+  font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 80ms var(--ease-out);
 }
 
@@ -2239,7 +2239,7 @@ html .font-courier {
   padding: 5px 11px;
   border-radius: 6px;
   cursor: pointer;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 

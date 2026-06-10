@@ -317,7 +317,7 @@
   white-space: nowrap;
 }
 .auto-row .auto-trail.dash { color: var(--fg-dim); }
-.auto-row .auto-trail.paused { color: var(--fg-faint); font-family: "Geist", sans-serif; font-size: 12px; }
+.auto-row .auto-trail.paused { color: var(--fg-faint); font-family: "Anthropic Sans Display", "Geist", sans-serif; font-size: 12px; }
 .auto-row .auto-chev { width: 12px; height: 12px; color: var(--fg-faint); flex-shrink: 0; opacity: 0.7; }
 
 /* User menu (popup) */
@@ -342,7 +342,7 @@
   border: 0; background: transparent;
   border-radius: 3px;
   cursor: pointer;
-  font: 400 13px/1 "Geist", sans-serif;
+  font: 400 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   text-align: left;
 }
@@ -370,7 +370,7 @@
   background: transparent;
   border-radius: 4px;
   cursor: pointer;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
 }
 .user-menu-toggle:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); border-color: var(--border); }
@@ -423,7 +423,7 @@
   display: inline-flex; align-items: center; gap: 7px;
   padding: 6px 12px;
   border-radius: 4px;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), transform 80ms var(--ease-out);
 }
@@ -469,14 +469,14 @@
 }
 .ab-hero-icon svg { width: 17px; height: 17px; }
 .ab-hero-label {
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   margin-bottom: 6px;
   letter-spacing: 0;
 }
 .ab-hero-title {
   margin: 0;
-  font: 600 30px/1 "Geist", sans-serif;
+  font: 600 30px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: -0.02em;
   color: var(--fg);
 }
@@ -501,7 +501,7 @@
 }
 .ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
 .ab-kpi-label {
-  font: 500 10.5px/1.1 "Geist", sans-serif;
+  font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   letter-spacing: 0;
   white-space: nowrap;
@@ -509,14 +509,14 @@
   text-overflow: ellipsis;
 }
 .ab-kpi-value {
-  font: 400 22px/1.05 "Geist", sans-serif;
+  font: 400 22px/1.05 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   margin-top: 4px;
   letter-spacing: -0.025em;
 }
 .ab-kpi-breakdown {
   margin-top: 3px;
-  font: 500 10.5px/1.2 "Geist", sans-serif;
+  font: 500 10.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -524,7 +524,7 @@
 }
 .ab-kpi-delta {
   margin-top: 4px;
-  font: 500 10px/1 "Geist", sans-serif;
+  font: 500 10px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   display: inline-flex; align-items: center; gap: 4px;
   white-space: nowrap;
@@ -554,7 +554,7 @@
   padding: 4px 12px;
   border-bottom: 1px solid var(--border-soft);
 }
-.ab-card-title { font: 600 14px/1 "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
+.ab-card-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
 .ab-card-tag {
   font-size: 11.5px;
   color: var(--fg-faint);
@@ -567,7 +567,7 @@
 /* Status badges (action tags) -- sentence case, softer */
 .ab-action-tag {
   flex-shrink: 0;
-  font: 500 11px/1 "Geist", sans-serif;
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   padding: 4px 9px;
   border-radius: 4px;
@@ -585,7 +585,7 @@
 
 /* Automation status badge -- sentence case, no caps */
 .ab-auto-status {
-  font: 500 11px/1 "Geist", sans-serif;
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   padding: 4px 9px;
   border-radius: 4px;
@@ -600,7 +600,7 @@
 /* Work tools tag -- softer */
 .ab-work-tools {
   flex-shrink: 0;
-  font: 500 11px/1 "Geist", sans-serif;
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   color: var(--fg-faint);
   padding: 4px 9px;
@@ -648,7 +648,7 @@
   text-overflow: ellipsis;
 }
 .ab-kpi-value {
-  font: 600 22px/1.05 "Geist", sans-serif;
+  font: 600 22px/1.05 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   margin-top: 6px;
   letter-spacing: -0.01em;
@@ -698,13 +698,13 @@
   letter-spacing: 0.06em;
 }
 .ab-vel-stage-name {
-  font: 500 12px/1.2 "Geist", sans-serif;
+  font: 500 12px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ab-vel-stage.active .ab-vel-stage-name { color: var(--fg); }
 .ab-vel-stage-count {
-  font: 600 18px/1 "Geist", sans-serif;
+  font: 600 18px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   letter-spacing: -0.01em;
 }
@@ -744,7 +744,7 @@
   border: 1px solid var(--border-soft);
   color: var(--fg-muted);
   cursor: pointer;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
 .ab-quick-btn:hover { color: var(--fg); border-color: var(--border); background: var(--bg-3); }
@@ -762,7 +762,7 @@
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-soft);
 }
-.ab-card-title { font: 600 13px/1 "Geist", sans-serif; color: var(--fg); }
+.ab-card-title { font: 600 13px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .ab-card-tag {
   font: 500 10.5px/1 "Geist Mono", monospace;
   color: var(--fg-faint);
@@ -791,7 +791,7 @@
   min-width: 0;
 }
 .ab-top25-title {
-  font: 600 13.5px/1 "Geist", sans-serif;
+  font: 600 13.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   letter-spacing: -0.005em;
 }
@@ -878,7 +878,7 @@
 .ab-top25-card-addr {
   flex: 1;
   min-width: 0;
-  font: 500 12px/1.3 "Geist", sans-serif;
+  font: 500 12px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -914,7 +914,7 @@
 .ab-top25-card-note-text {
   min-width: 0;
   color: var(--fg);
-  font: 500 11px/1.25 "Geist", sans-serif;
+  font: 500 11px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -993,7 +993,7 @@
   z-index: 2;
 }
 .ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
-.ab-modal-close .x { font: 300 22px/1 "Geist", sans-serif; }
+.ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
 .ab-modal-head {
   padding: 26px 32px 18px;
@@ -1001,7 +1001,7 @@
 }
 .ab-modal-crumbs {
   display: flex; align-items: center; gap: 8px;
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   margin-bottom: 12px;
 }
@@ -1009,7 +1009,7 @@
 .ab-modal-crumbs .strong { color: var(--fg-muted); }
 .ab-modal-title {
   margin: 0;
-  font: 600 22px/1.2 "Geist", sans-serif;
+  font: 600 22px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: -0.015em;
   color: var(--fg);
 }
@@ -1029,7 +1029,7 @@
   border-radius: 4px;
   background: color-mix(in srgb, var(--fg) 6%, transparent);
   color: var(--fg);
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .ab-modal-pill.warn {
   color: var(--status-warn);
@@ -1060,12 +1060,12 @@
   margin-bottom: 12px;
 }
 .ab-modal-section-label {
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
 }
 .ab-modal-section-meta {
   margin-left: auto;
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
 }
 
@@ -1091,7 +1091,7 @@
   border-radius: 3px;
   border: 1px solid var(--border-strong);
   display: grid; place-items: center;
-  font: 600 11px/1 "Geist", sans-serif;
+  font: 600 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--bg);
   background: transparent;
   flex-shrink: 0;
@@ -1120,12 +1120,12 @@
   background: var(--bg-2);
 }
 .ab-modal-cell-label {
-  font: 500 11px/1 "Geist", sans-serif;
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   margin-bottom: 6px;
 }
 .ab-modal-cell-value {
-  font: 500 14px/1.3 "Geist", sans-serif;
+  font: 500 14px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
 }
 .ab-modal-cell-action {
@@ -1133,7 +1133,7 @@
   margin-top: 6px;
   padding: 0;
   color: var(--status-info);
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
 }
 .ab-modal-cell-action:hover { text-decoration: underline; }
@@ -1149,7 +1149,7 @@
   border-radius: 5px;
   background: var(--bg-2);
 }
-.ab-modal-auto-name { font: 500 13px/1.2 "Geist", sans-serif; color: var(--fg); }
+.ab-modal-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .ab-modal-auto-id   { font-size: 11.5px; color: var(--fg-faint); margin-top: 3px; }
 
 /* Phase timeline */
@@ -1182,7 +1182,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 20%, transparent);
 }
 .ab-modal-tl-stage { font-size: 10.5px; color: var(--fg-dim); }
-.ab-modal-tl-name  { font: 500 13px/1.3 "Geist", sans-serif; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ab-modal-tl-name  { font: 500 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ab-modal-tl.current .ab-modal-tl-name { color: var(--fg); }
 .ab-modal-tl-next  {
   font-size: 11.5px; color: var(--fg-faint);
@@ -1206,7 +1206,7 @@
 .abm-crumbs .stage { color: var(--status-warn); }
 .abm-title {
   margin: 0;
-  font: 600 22px/1.2 "Geist", sans-serif;
+  font: 600 22px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: -0.015em;
   color: var(--fg);
 }
@@ -1235,7 +1235,7 @@
 }
 .abm-card-title {
   display: inline-flex; align-items: center; gap: 9px;
-  font: 600 14px/1 "Geist", sans-serif;
+  font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
 }
 .abm-card-title svg { width: 14px; height: 14px; color: var(--status-warn); }
@@ -1276,7 +1276,7 @@
 }
 
 .abm-phase-jump {
-  font: 600 18px/1.3 "Geist", sans-serif;
+  font: 600 18px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   margin-bottom: 14px;
   letter-spacing: -0.01em;
@@ -1318,7 +1318,7 @@
   appearance: none; border: 0;
   padding: 7px 14px;
   border-radius: 4px;
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   display: inline-flex; align-items: center; gap: 7px;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
@@ -1348,7 +1348,7 @@
   background: var(--bg-2);
   border: 1px solid var(--border-soft);
   color: var(--fg);
-  font: 400 12.5px/1.2 "Geist", sans-serif;
+  font: 400 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   transition: border-color 120ms var(--ease-out);
 }
 .abm-input:focus { border-color: var(--border); }
@@ -1366,7 +1366,7 @@
   display: flex; align-items: center; gap: 10px;
   margin-bottom: 4px;
 }
-.abm-auto-name { font: 500 13px/1.2 "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
+.abm-auto-name { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
 .abm-auto-id { font: 500 10.5px/1 "Geist Mono", monospace; color: var(--fg-faint); letter-spacing: 0.04em; }
 
 /* Mini cell */
@@ -1385,7 +1385,7 @@
 }
 .abm-mini-label svg { width: 11px; height: 11px; }
 .abm-mini-value {
-  font: 500 13px/1.3 "Geist", sans-serif;
+  font: 500 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -1445,7 +1445,7 @@
 .abm-phase-title-block { min-width: 0; }
 .abm-phase-title {
   display: flex; align-items: center; gap: 10px;
-  font: 600 15px/1.2 "Geist", sans-serif;
+  font: 600 15px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
 }
 .abm-phase-sub {
@@ -1562,7 +1562,7 @@
 }
 .abm-conditions-title {
   margin: 0 0 4px;
-  font: 600 18px/1.2 "Geist", sans-serif;
+  font: 600 18px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   letter-spacing: -0.01em;
 }
@@ -1578,7 +1578,7 @@
   padding: 14px 0;
   border-bottom: 1px solid var(--border-soft);
 }
-.abm-enum-label { font: 500 14px/1.2 "Geist", sans-serif; color: var(--fg); }
+.abm-enum-label { font: 500 14px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .abm-enum-select {
   appearance: none;
   display: inline-flex; align-items: center; gap: 8px;
@@ -1587,7 +1587,7 @@
   background: var(--bg-2);
   color: var(--fg-muted);
   border: 1px solid var(--border);
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   min-width: 140px;
   justify-content: space-between;
@@ -1620,7 +1620,7 @@
 .abm-toggle-check {
   appearance: none; border: 0; background: transparent;
   display: inline-flex; align-items: center; gap: 10px;
-  font: 400 13px/1.2 "Geist", sans-serif; color: var(--fg);
+  font: 400 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg);
   cursor: pointer; padding: 0; text-align: left;
 }
 .abm-toggle-check:disabled { cursor: not-allowed; opacity: 0.6; }
@@ -1728,7 +1728,7 @@
   border-radius: 999px;
   background: var(--bg-2);
   color: var(--fg-muted);
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   overflow: hidden;
   flex: 1;
   min-width: 240px;
@@ -1779,7 +1779,7 @@
   padding: 4px 10px;
   border-radius: 3px;
   color: var(--fg-faint);
-  font: 500 12.5px/1 "Geist", sans-serif;
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: color 120ms var(--ease-out), background 120ms var(--ease-out);
 }
@@ -1808,7 +1808,7 @@
 .ab-search input {
   appearance: none; border: 0; outline: 0; background: transparent;
   color: var(--fg);
-  font: 400 12.5px/1 "Geist", sans-serif;
+  font: 400 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   width: 100%; min-width: 0;
 }
 .ab-search input::placeholder { color: var(--fg-faint); }
@@ -1828,7 +1828,7 @@
   background: transparent;
   border: 1px solid var(--border-soft);
   color: var(--fg-muted);
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
@@ -1847,7 +1847,7 @@
 .ab-chip-ghost {
   appearance: none; background: transparent; border: 0;
   color: var(--fg-faint);
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   padding: 5px 8px;
   border-radius: 3px;
@@ -1941,7 +1941,7 @@
   color: var(--fg-dim);
   letter-spacing: 0.04em;
 }
-.ab-col-name { font: 600 13px/1 "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0;
+.ab-col-name { font: 600 13px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .ab-col-count {
@@ -1997,11 +1997,11 @@
 .ab-deal:active { transform: translateY(1px); }
 .ab-deal-flag {
   margin-left: auto;
-  font: 500 11px/1 "Geist", sans-serif;
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--status-warn);
 }
 .ab-deal-addr {
-  font: 500 13.5px/1.3 "Geist", sans-serif;
+  font: 500 13.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -2059,12 +2059,12 @@
   width: 18px; height: 18px; border-radius: 3px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 50%, var(--bg-3)), color-mix(in srgb, var(--accent) 25%, var(--bg-3)));
   display: grid; place-items: center;
-  font: 600 9.5px/1 "Geist", sans-serif;
+  font: 600 9.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   flex-shrink: 0;
 }
-.ab-deal-time { color: var(--fg-faint); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: "Geist", sans-serif; font-weight: 500; font-size: 11px; }
+.ab-deal-time { color: var(--fg-faint); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: "Anthropic Sans Display", "Geist", sans-serif; font-weight: 500; font-size: 11px; }
 
 /* Sparkline */
 .ab-spark {
@@ -2091,7 +2091,7 @@
   border-bottom: 1px solid var(--border-soft);
 }
 .ab-inbox-title-block { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; white-space: nowrap; }
-.ab-inbox-title { font: 600 14px/1 "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
+.ab-inbox-title { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.005em; }
 .ab-inbox-sub {
   font: 500 11.5px/1 "Geist Mono", monospace;
   color: var(--fg-faint);
@@ -2109,7 +2109,7 @@
   background: transparent;
   border: 0;
   color: var(--fg-faint);
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
@@ -2146,7 +2146,7 @@
 
 .ab-inbox-kind {
   display: inline-flex; align-items: center; gap: 6px;
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   white-space: nowrap;
 }
@@ -2158,7 +2158,7 @@
 
 .ab-inbox-body { min-width: 0; }
 .ab-inbox-title-row {
-  font: 500 12.5px/1.25 "Geist", sans-serif;
+  font: 500 12.5px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -2184,7 +2184,7 @@
   background: transparent;
   border: 1px solid var(--border-soft);
   color: var(--fg-muted);
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
@@ -2220,7 +2220,7 @@
   border: 1px solid var(--border-soft);
   border-radius: 3px;
   color: var(--fg-muted);
-  font: 500 14px/1 "Geist", sans-serif;
+  font: 500 14px/1 "Anthropic Sans Display", "Geist", sans-serif;
   cursor: pointer;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
@@ -2235,7 +2235,7 @@
   background: transparent;
   border: 0;
   color: var(--fg-faint);
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   padding: 4px 8px;
   margin-left: 6px;
   cursor: pointer;
@@ -2285,7 +2285,7 @@
   margin-bottom: 6px;
 }
 .ab-action-title {
-  font: 500 13px/1.3 "Geist", sans-serif;
+  font: 500 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   min-width: 0;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -2332,7 +2332,7 @@
   border: 1px solid var(--border-soft);
   color: var(--fg-muted);
   cursor: pointer;
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   flex-shrink: 0;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
@@ -2363,7 +2363,7 @@
   display: flex; align-items: center; gap: 10px;
   margin-bottom: 6px;
 }
-.ab-auto-name { font: 500 12.5px/1.2 "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
+.ab-auto-name { font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); flex: 1; min-width: 0; }
 .ab-auto-status {
   font: 600 9px/1 "Geist Mono", monospace;
   letter-spacing: 0.1em;

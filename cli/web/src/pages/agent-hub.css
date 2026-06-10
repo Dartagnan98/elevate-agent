@@ -48,7 +48,7 @@
   --hub-card-pad: 18px;
 
   color: var(--fg);
-  font: 13.5px/1.55 "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font: 13.5px/1.55 "Anthropic Sans Display", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .hub-root[data-accent="slate"]    { --accent: #7B9CE5; }
@@ -114,7 +114,7 @@
   appearance: none; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   padding: 8px 14px; border-radius: 8px;
-  font: 500 13px/1 "Geist", sans-serif;
+  font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   border: 1px solid var(--border-soft);
   background: transparent; color: var(--fg-muted);
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out), transform 80ms var(--ease-out);
@@ -133,7 +133,7 @@
 .hub-btn:disabled { opacity: 0.4; cursor: default; }
 .hub-link {
   appearance: none; background: transparent; border: 0; cursor: pointer;
-  color: var(--fg-faint); font: 500 13px/1 "Geist", sans-serif;
+  color: var(--fg-faint); font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   padding: 4px 0; transition: color 120ms var(--ease-out);
   text-decoration: none;
 }
@@ -142,8 +142,8 @@
 /* ── top bar ── */
 .hub-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .hub-topbar-l { display: flex; align-items: baseline; gap: 12px; }
-.hub-brand { font: 700 17px/1 "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
-.hub-gw-pill { font: 500 13px/1 "Geist", sans-serif; color: var(--fg-dim); }
+.hub-brand { font: 700 17px/1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
+.hub-gw-pill { font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-dim); }
 .hub-gw-pill.online { color: var(--status-done); }
 .hub-gw-pill.starting { color: var(--status-warn); }
 
@@ -152,8 +152,8 @@
   display: flex; align-items: center; justify-content: space-between; gap: 24px;
   margin-top: 4px;
 }
-.hub-hero-label { font: 500 11px/1 "Geist", sans-serif; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-faint); margin-bottom: 5px; }
-.hub-hero-title { margin: 0; font: 600 19px/1.2 "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
+.hub-hero-label { font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-faint); margin-bottom: 5px; }
+.hub-hero-title { margin: 0; font: 600 19px/1.2 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
 .hub-hero-sub { margin-top: 3px; font-size: 12.5px; color: var(--fg-muted); }
 .hub-hero-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
@@ -166,8 +166,8 @@
 }
 @media (max-width: 720px) { .hub-kpis { grid-template-columns: repeat(2, 1fr); } }
 .hub-kpi { min-width: 0; }
-.hub-kpi-label { font: 500 12.5px/1 "Geist", sans-serif; color: var(--fg-faint); }
-.hub-kpi-value { margin-top: 9px; font: 500 15px/1 "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.hub-kpi-label { font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint); }
+.hub-kpi-value { margin-top: 9px; font: 500 15px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
 .hub-kpi-value.big { font-size: 22px; letter-spacing: -0.02em; }
 .hub-mini3 .hub-kpi { padding: 11px 13px; background: var(--bg-1); border: 1px solid var(--border-soft); border-radius: 9px; }
 .hub-mini3 .hub-kpi-value { margin-top: 6px; font-size: 17px; }
@@ -175,7 +175,7 @@
 /* ── blocks ── */
 .hub-block { margin-top: var(--hub-gap); }
 .hub-block-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
-.hub-block-title { margin: 0; font: 600 17px/1 "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
+.hub-block-title { margin: 0; font: 600 17px/1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.01em; color: var(--fg); }
 .hub-block-meta { font-weight: 400; color: var(--fg-faint); font-size: 13px; white-space: nowrap; }
 .hub-block-title { display: inline-flex; align-items: baseline; gap: 8px; }
 
@@ -194,11 +194,11 @@
 .hub-runway-tile:disabled { cursor: default; opacity: 0.6; }
 .hub-runway-top { display: flex; align-items: center; gap: 9px; }
 .hub-runway-icon { color: var(--fg-muted); display: inline-flex; }
-.hub-runway-label { font: 600 14px/1 "Geist", sans-serif; color: var(--fg); }
+.hub-runway-label { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .hub-runway-detail { margin-top: 9px; font-size: 11.5px; color: var(--fg-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* state badge */
-.hub-state { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font: 500 11.5px/1 "Geist", sans-serif; }
+.hub-state { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 .hub-state-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .hub-state.ok   { color: var(--status-done); }
 .hub-state.warn { color: var(--status-warn); }
@@ -208,7 +208,7 @@
 /* ── executive telegram ── */
 .hub-exectel { margin-bottom: 24px; }
 .hub-exectel-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; white-space: nowrap; }
-.hub-exectel-title { font: 600 15px/1 "Geist", sans-serif; color: var(--fg); }
+.hub-exectel-title { font: 600 15px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .hub-exectel-tag { font-size: 12px; color: var(--fg-faint); }
 .hub-exectel-form { display: flex; align-items: flex-end; gap: 10px; }
 @media (max-width: 920px) { .hub-exectel-form { flex-wrap: wrap; } }
@@ -220,7 +220,7 @@
   width: 100%; appearance: none;
   background: var(--bg-1); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 10px 13px;
-  color: var(--fg); font: 400 13px/1.3 "Geist", sans-serif;
+  color: var(--fg); font: 400 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   transition: border-color 120ms var(--ease-out), background 120ms var(--ease-out);
 }
 .hub-input.mono { font-family: "Geist Mono", monospace; font-size: 12.5px; }
@@ -285,7 +285,7 @@
   border-radius: 9px;
   background: var(--bg-2);
   color: var(--fg);
-  font: 650 16px/1 "Geist", sans-serif;
+  font: 650 16px/1 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-agent-avatar.lg {
   width: 44px;
@@ -298,14 +298,14 @@
   display: grid;
   gap: 4px;
 }
-.hub-agent-name { font: 600 15px/1.2 "Geist", sans-serif; letter-spacing: -0.005em; color: var(--fg); display: inline-flex; align-items: center; gap: 9px; }
+.hub-agent-name { font: 600 15px/1.2 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.005em; color: var(--fg); display: inline-flex; align-items: center; gap: 9px; }
 .hub-agent-roleline {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
   color: var(--fg-faint);
-  font: 500 11.5px/1.2 "Geist", sans-serif;
+  font: 500 11.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-agent-roleline > span {
   min-width: 0;
@@ -324,7 +324,7 @@
   color: var(--fg-faint); padding: 2px 7px; border-radius: 999px;
   border: 1px solid var(--border-soft); background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
-.hub-agent-status { display: inline-flex; align-items: center; gap: 7px; font: 500 12px/1 "Geist", sans-serif; flex-shrink: 0; }
+.hub-agent-status { display: inline-flex; align-items: center; gap: 7px; font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif; flex-shrink: 0; }
 .hub-agent-status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .hub-agent-status.ok   { color: var(--status-done); }
 .hub-agent-status.warn { color: var(--status-warn); }
@@ -388,14 +388,14 @@
 }
 .hub-agent-console-tile > span {
   color: var(--fg-dim);
-  font: 650 10px/1 "Geist", sans-serif;
+  font: 650 10px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0;
   text-transform: uppercase;
 }
 .hub-agent-console-tile > strong {
   min-width: 0;
   color: var(--fg);
-  font: 600 12.5px/1.25 "Geist", sans-serif;
+  font: 600 12.5px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -403,7 +403,7 @@
 .hub-agent-console-tile > small {
   min-width: 0;
   color: var(--fg-faint);
-  font: 400 11px/1.35 "Geist", sans-serif;
+  font: 400 11px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -420,7 +420,7 @@
 .hub-agent-native-nav > a {
   color: var(--fg-faint);
   text-decoration: none;
-  font: 500 11.5px/1 "Geist", sans-serif;
+  font: 500 11.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   padding: 6px 8px;
   border-radius: 7px;
   background: color-mix(in srgb, var(--fg) 3.5%, transparent);
@@ -442,7 +442,7 @@
 }
 .hub-agent-section-title {
   margin-bottom: 5px;
-  font: 650 10px/1.2 "Geist", sans-serif;
+  font: 650 10px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--fg-dim);
@@ -482,7 +482,7 @@
   color: var(--fg-faint);
   border-radius: 7px;
   padding: 7px 10px;
-  font: 500 12px/1 "Geist", sans-serif;
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .hub-agent-tab:hover {
@@ -518,13 +518,13 @@
 }
 .hub-profile-section-head > span {
   color: var(--fg);
-  font: 650 12px/1.1 "Geist", sans-serif;
+  font: 650 12px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 .hub-profile-section-head > small {
   color: var(--fg-faint);
-  font: 400 12px/1.35 "Geist", sans-serif;
+  font: 400 12px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-profile-grid {
   display: grid;
@@ -572,7 +572,7 @@
 }
 .hub-field-help {
   color: var(--fg-faint);
-  font: 400 11px/1.35 "Geist", sans-serif;
+  font: 400 11px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-setup-status {
   min-width: 0;
@@ -585,14 +585,14 @@
 }
 .hub-setup-status > span {
   color: var(--fg-faint);
-  font: 650 10px/1 "Geist", sans-serif;
+  font: 650 10px/1 "Anthropic Sans Display", "Geist", sans-serif;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 .hub-setup-status > strong {
   min-width: 0;
   color: var(--fg);
-  font: 500 13px/1.3 "Geist", sans-serif;
+  font: 500 13px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   overflow-wrap: anywhere;
 }
 .hub-approval-grid {
@@ -613,12 +613,12 @@
 .hub-approval-row > span {
   min-width: 0;
   color: var(--fg);
-  font: 500 12.5px/1.2 "Geist", sans-serif;
+  font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-approval-row > label,
 .hub-toggle-row {
   color: var(--fg-faint);
-  font: 500 12px/1.25 "Geist", sans-serif;
+  font: 500 12px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-approval-row > label {
   display: inline-flex;
@@ -651,11 +651,11 @@
 }
 .hub-toggle-row strong {
   color: var(--fg);
-  font: 500 12.5px/1.25 "Geist", sans-serif;
+  font: 500 12.5px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-toggle-row small {
   color: var(--fg-faint);
-  font: 400 11.5px/1.35 "Geist", sans-serif;
+  font: 400 11.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
 }
 @media (max-width: 720px) {
   .hub-setup-section {
@@ -771,7 +771,7 @@
   border-radius: 999px;
   border: 1px solid var(--border-soft);
   padding: 3px 7px;
-  font: 500 10.5px/1 "Geist", sans-serif;
+  font: 500 10.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
   background: var(--bg-2);
 }
@@ -877,7 +877,7 @@
 
 .hub-chiprow { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .hub-chiprow-ico { color: var(--fg-dim); flex-shrink: 0; }
-.hub-chip-flat { font: 400 12px/1.3 "Geist", sans-serif; color: var(--fg-faint); }
+.hub-chip-flat { font: 400 12px/1.3 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint); }
 
 /* inline accordion editor (Configure / Telegram lane) */
 .hub-acc {
@@ -889,7 +889,7 @@
 .hub-acc-sum {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 8px; cursor: pointer; list-style: none;
-  font: 500 12.5px/1 "Geist", sans-serif; color: var(--fg-faint);
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint);
   border-radius: 7px;
   transition: color 120ms var(--ease-out), background 120ms var(--ease-out);
 }
@@ -904,7 +904,7 @@
 .hub-acc-switchrow { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .hub-acc-field { display: flex; flex-direction: column; gap: 7px; }
 .hub-acc-fieldhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.hub-acc-k { font: 500 11.5px/1.2 "Geist", sans-serif; color: var(--fg-faint); }
+.hub-acc-k { font: 500 11.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg-faint); }
 .hub-acc-hint { font-size: 11.5px; color: var(--fg-dim); margin-top: 2px; }
 .hub-acc-note { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--fg-faint); }
 .hub-acc-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -912,13 +912,13 @@
   width: 100%; resize: vertical;
   background: var(--bg-1); border: 1px solid var(--border-soft);
   border-radius: 8px; padding: 10px 12px;
-  color: var(--fg); font: 400 12.5px/1.5 "Geist", sans-serif;
+  color: var(--fg); font: 400 12.5px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-textarea:focus { outline: none; border-color: var(--border-strong); }
 .hub-lane-form { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 10px; align-items: end; }
 @media (max-width: 720px) { .hub-lane-form { grid-template-columns: 1fr; } }
 .hub-lane-detail { font-size: 11px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hub-lane-status { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; font: 500 12px/1 "Geist", sans-serif; }
+.hub-lane-status { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 .hub-lane-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .hub-lane-status.ok   { color: var(--fg-faint); }
 .hub-lane-status.ok .hub-lane-dot { background: var(--status-done); }
@@ -937,7 +937,7 @@
   border-radius: 999px;
   background: var(--bg-2);
   color: var(--fg-faint);
-  font: 650 11px/1 "Geist", sans-serif;
+  font: 650 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out), opacity 120ms var(--ease-out);
 }
 .hub-power-toggle:hover {
@@ -976,14 +976,14 @@
 .hub-ms { display: flex; flex-direction: column; gap: 8px; }
 .hub-ms-empty { font-size: 12px; color: var(--fg-dim); padding: 6px 0; }
 .hub-ms-search { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--bg-1); color: var(--fg-faint); }
-.hub-ms-search input { flex: 1; border: 0; background: transparent; color: var(--fg); font: 400 12px/1 "Geist", sans-serif; outline: none; }
+.hub-ms-search input { flex: 1; border: 0; background: transparent; color: var(--fg); font: 400 12px/1 "Anthropic Sans Display", "Geist", sans-serif; outline: none; }
 .hub-ms-grid { display: flex; flex-wrap: wrap; gap: 6px; }
 .hub-ms-chip {
   appearance: none; cursor: pointer;
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 10px; border-radius: 7px;
   border: 1px solid var(--border-soft); background: var(--bg-1);
-  color: var(--fg-faint); font: 500 12px/1 "Geist", sans-serif;
+  color: var(--fg-faint); font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
   transition: all 120ms var(--ease-out);
 }
 .hub-ms-chip:hover { border-color: var(--border); color: var(--fg-muted); }
@@ -1005,7 +1005,7 @@
 }
 .hub-agent-add:hover { border-color: var(--border-strong); background: color-mix(in srgb, var(--fg) 3%, transparent); }
 .hub-agent-add-ico { color: var(--fg-faint); margin-bottom: 4px; }
-.hub-agent-add-label { font: 600 14px/1 "Geist", sans-serif; color: var(--fg); }
+.hub-agent-add-label { font: 600 14px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .hub-agent-add-sub { font-size: 12px; color: var(--fg-faint); }
 
 /* installable agent packs */
@@ -1022,7 +1022,7 @@
   background: color-mix(in srgb, var(--bg-1) 86%, transparent);
 }
 .hub-pack-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.hub-pack-name { color: var(--fg); font: 650 14px/1.15 "Geist", sans-serif; }
+.hub-pack-name { color: var(--fg); font: 650 14px/1.15 "Anthropic Sans Display", "Geist", sans-serif; }
 .hub-pack-role { margin-top: 5px; color: var(--fg-faint); font-size: 11px; }
 .hub-pack-source {
   flex-shrink: 0;
@@ -1080,7 +1080,7 @@
 .hub-handoff-row { padding: 9px 8px; border-radius: 8px; transition: background 120ms var(--ease-out); }
 .hub-handoff-row:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
 .hub-handoff-row-top { display: flex; align-items: center; gap: 10px; }
-.hub-handoff-title { font: 500 13px/1.2 "Geist", sans-serif; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-handoff-title { font: 500 13px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hub-handoff-status { flex-shrink: 0; font-size: 11.5px; color: var(--fg-faint); }
 .hub-handoff-route { margin-top: 3px; font-size: 11.5px; color: var(--fg-faint); }
 .hub-handoff-empty { padding: 4px 0; font-size: 11.5px; color: var(--fg-dim); }
@@ -1107,7 +1107,7 @@
 
 /* ── system status toggle ── */
 .hub-sysstatus { margin-top: var(--hub-gap); }
-.hub-sysstatus-toggle { appearance: none; cursor: pointer; border: 0; background: transparent; padding: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--fg-muted); font: 500 14px/1 "Geist", sans-serif; transition: color 120ms var(--ease-out); list-style: none; }
+.hub-sysstatus-toggle { appearance: none; cursor: pointer; border: 0; background: transparent; padding: 0; display: inline-flex; align-items: center; gap: 7px; color: var(--fg-muted); font: 500 14px/1 "Anthropic Sans Display", "Geist", sans-serif; transition: color 120ms var(--ease-out); list-style: none; }
 .hub-sysstatus-toggle::-webkit-details-marker { display: none; }
 .hub-sysstatus-toggle:hover { color: var(--fg); }
 .hub-sysstatus-hint { font-size: 12px; color: var(--fg-dim); }
@@ -1168,7 +1168,7 @@
   margin-left: auto;
 }
 .hub-modal-titlerow { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
-.hub-modal-title { margin: 0; font: 700 24px/1.1 "Geist", sans-serif; letter-spacing: -0.02em; color: var(--fg); }
+.hub-modal-title { margin: 0; font: 700 24px/1.1 "Anthropic Sans Display", "Geist", sans-serif; letter-spacing: -0.02em; color: var(--fg); }
 .hub-modal-sub { margin-top: 8px; font-size: 13.5px; color: var(--fg-muted); }
 .hub-agent-modal-actions {
   margin-top: 16px;
@@ -1180,7 +1180,7 @@
 .hub-modal-tab {
   appearance: none; cursor: pointer; border: 0; background: transparent;
   padding: 10px 4px; margin-right: 16px;
-  color: var(--fg-faint); font: 500 13px/1 "Geist", sans-serif;
+  color: var(--fg-faint); font: 500 13px/1 "Anthropic Sans Display", "Geist", sans-serif;
   border-bottom: 2px solid transparent;
   transition: color 120ms var(--ease-out), border-color 120ms var(--ease-out);
 }
@@ -1218,7 +1218,7 @@
 .hub-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .hub-stat { background: var(--bg-2); border-radius: 9px; padding: 13px 14px; }
 .hub-stat-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-faint); }
-.hub-stat-val { margin-top: 8px; font: 600 20px/1 "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; }
+.hub-stat-val { margin-top: 8px; font: 600 20px/1 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); letter-spacing: -0.01em; }
 .hub-stat-val.ok { color: var(--status-done); font-size: 16px; }
 .hub-stat-val.warn { color: var(--status-warn); font-size: 16px; }
 
@@ -1275,12 +1275,12 @@
 }
 .hub-template-name {
   color: var(--fg);
-  font: 650 13.5px/1.2 "Geist", sans-serif;
+  font: 650 13.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-template-desc {
   margin-top: 4px;
   color: var(--fg-faint);
-  font: 400 12px/1.45 "Geist", sans-serif;
+  font: 400 12px/1.45 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-template-state {
   flex-shrink: 0;
@@ -1288,7 +1288,7 @@
   border-radius: 999px;
   padding: 4px 8px;
   color: var(--fg-faint);
-  font: 650 11px/1 "Geist", sans-serif;
+  font: 650 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-template-state.on {
   color: var(--status-done);
@@ -1313,7 +1313,7 @@
 }
 .hub-template-grid b {
   color: var(--fg-dim);
-  font: 650 10px/1 "Geist", sans-serif;
+  font: 650 10px/1 "Anthropic Sans Display", "Geist", sans-serif;
 }
 .hub-template-chips {
   display: flex;
@@ -1341,7 +1341,7 @@
 .hub-config-row { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--bg-2); border-radius: 9px; }
 .hub-config-ico { width: 28px; height: 28px; border-radius: 7px; background: var(--bg-3); display: grid; place-items: center; color: var(--fg-muted); flex-shrink: 0; }
 .hub-config-meta { flex: 1; min-width: 0; }
-.hub-config-name { font: 500 13.5px/1.2 "Geist", sans-serif; color: var(--fg); }
+.hub-config-name { font: 500 13.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif; color: var(--fg); }
 .hub-config-desc { margin-top: 3px; font-size: 12px; color: var(--fg-faint); }
 .hub-empty { padding: 18px; text-align: center; color: var(--fg-faint); font-size: 13px; background: var(--bg-2); border-radius: 9px; }
 

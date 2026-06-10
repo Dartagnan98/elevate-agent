@@ -16,7 +16,7 @@ import type { DashboardTheme, ThemeTypography, ThemeLayout } from "./types";
  *  (Claude Code dashboard aesthetic); imported via Google Fonts in index.css.
  *  Falls back to Inter, then platform sans, then system-ui. */
 const SYSTEM_SANS =
-  '"Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif';
+  '"Anthropic Sans Display", "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif';
 const SYSTEM_MONO =
   '"Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
 
