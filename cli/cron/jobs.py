@@ -316,10 +316,14 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "schedule": "0 8,15 * * *",
         "config": {"agent": "outreach"},
         "goal": (
-            "Each run: check new/changed leads since the last run; surface the hot ones "
-            "with a one-line why; list overdue follow-ups and today's showings; draft "
-            "(never send) the next-touch for anyone gone quiet. End with one tight summary; "
-            "say 'all quiet' if nothing changed."
+            "Each run, CONTEXT-FIRST — reconcile before acting: for every new/changed lead, "
+            "check the latest message in the real thread (CRM, SMS/iMessage, email) AND whether a "
+            "draft or pending approval already exists. SKIP anyone already answered or already "
+            "drafted — a duplicate reply is a failure. THEN, on the genuine gap only: surface the "
+            "hot ones with a one-line why, list overdue follow-ups and today's showings, and draft "
+            "(never send) the next-touch for leads with a real unanswered inbound or a due, "
+            "undrafted cadence touch. End with one tight summary; 'all quiet' if nothing is "
+            "genuinely outstanding."
         ),
         "experiment": {
             "every_n_runs": 7, "metric": "next_touch_reply_rate", "metric_type": "qualitative",
@@ -333,9 +337,11 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "schedule": "30 7 * * *",
         "config": {"agent": "admin"},
         "goal": (
-            "Each run: scan the calendar and tasks; flag deadlines, conflicts, and anything "
-            "needing the realtor's decision; reconcile today's agenda. End with one tight "
-            "summary; say 'all quiet' if nothing needs attention."
+            "Each run, CONTEXT-FIRST — read where things actually stand before acting: Gmail, "
+            "Google Calendar, Google Drive, and the dashboard (tasks, deals, approvals). THEN flag "
+            "only GENUINE gaps — deadlines, conflicts, and decisions the realtor owes that are not "
+            "already handled, already on the calendar, or already flagged. Reconcile today's "
+            "agenda. End with one tight summary; 'all quiet' if nothing needs attention."
         ),
         "experiment": {
             "every_n_runs": 7, "metric": "tasks_slipped", "metric_type": "qualitative",

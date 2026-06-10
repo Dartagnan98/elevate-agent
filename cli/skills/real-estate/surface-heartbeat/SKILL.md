@@ -1,7 +1,7 @@
 ---
 name: surface-heartbeat
 description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. A faithful port of the cortextOS theta-wave autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
-version: 0.3.1
+version: 0.4.0
 platforms:
   - macos
   - linux
@@ -49,14 +49,32 @@ only ever changes HOW YOU WORK (your playbook), never the realtor's leads, calen
    leave a draft and it surfaces for sign-off (see below). Skip tasks assigned to `human`.
    If a pulled task's notes say "auto-reset to pending", a previous run crashed mid-task:
    check for partial work (existing drafts/outputs) before redoing it.
-3. **Do the work** in your config `goal`, sharpened by your learnings + playbook, using your
+3. **Reconcile reality FIRST — never act blind (context-first).** Before you draft, flag, or
+   create anything, read the ACTUAL current state from the real sources this surface touches and
+   build a picture of what is ALREADY handled. The dashboard DB and the live source of truth are
+   authoritative — reconcile against them, never assume from memory or a stale list.
+   - **Leads / outreach:** for every candidate lead, check the latest message in the real thread
+     (CRM, SMS/iMessage, email — your messaging tools) AND whether a draft or pending approval
+     already exists for it. If the lead already got a reply, already has a pending draft, or the
+     inbound was already answered — SKIP it. Draft ONLY for a genuine unanswered inbound or a
+     cadence touch that is actually due and not yet drafted. A duplicate reply to an
+     already-answered lead is a failure, not a follow-up.
+   - **Admin / transactions:** read Gmail, Google Calendar, Google Drive, and the dashboard
+     (tasks, deals, approvals) to see exactly where each deal and deadline stands before you act.
+     Before flagging a deadline or creating a task, confirm it isn't already handled, already on
+     the calendar, or already flagged. Surface only genuine gaps.
+   - **Any surface:** when unsure whether something was already done, CHECK before acting. Reading
+     costs a moment; a duplicate or wrong action costs the realtor's trust. If reconciliation
+     shows nothing genuinely outstanding, that is a complete, successful run — report "all quiet."
+4. **Do the work** on the reconciled gap ONLY — the items step 3 confirmed are genuinely
+   outstanding — in your config `goal`, sharpened by your learnings + playbook, using your
    normal Elevate tools/skills for this surface.
-4. **Surface anything needing sign-off.** When you produce a draft/recommendation that must NOT
+5. **Surface anything needing sign-off.** When you produce a draft/recommendation that must NOT
    go out without the realtor's yes, it shows on the Approvals board — resolved on the dashboard
    only, never auto-sent. (Approvals are created for you; you never send on the realtor's behalf.)
-5. **Heartbeat.** `agent_bus {action:"update_heartbeat", message:"<one-line summary>",
+6. **Heartbeat.** `agent_bus {action:"update_heartbeat", message:"<one-line summary>",
    status:"active"}` so the dashboard card shows what you did this run.
-6. **Log** → write `history/<UTC-ISO-timestamp>.json` (file run record, stays on disk):
+7. **Log** → write `history/<UTC-ISO-timestamp>.json` (file run record, stays on disk):
    ```json
    {"ran_at":"<iso>","checked":"<what you looked at>","did":"<actions/drafts>","found":"<key findings>","summary":"<one line>"}
    ```
@@ -64,9 +82,9 @@ only ever changes HOW YOU WORK (your playbook), never the realtor's leads, calen
    `agent_bus {action:"log_run", surface:"<surface>", summary:"<one line>", status:"ok",
    record:{...the same json...}}`. Pass `kind:"experiment"` instead when the run was an
    autoresearch-only run.
-7. **Distill** — if you learned something durable (a pattern, a preference, what landed), append
+8. **Distill** — if you learned something durable (a pattern, a preference, what landed), append
    ONE tight bullet to `learnings.md`. Dedupe. No noise.
-8. **Report** one tight summary to your delivery channel. Nothing changed → "all quiet."
+9. **Report** one tight summary to your delivery channel. Nothing changed → "all quiet."
 
 ---
 
