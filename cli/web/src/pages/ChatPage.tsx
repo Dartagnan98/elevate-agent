@@ -7909,9 +7909,24 @@ function MessageRow({
               (a) => a.kind !== "output",
             );
             if (!inlineArtifacts.length) return null;
+            const shown = inlineArtifacts.slice(-4);
+            const hidden = inlineArtifacts.length - shown.length;
             return (
-              <div className="mt-3 space-y-2">
-                {inlineArtifacts.slice(-4).map((artifact) => (
+              <div className="mt-3.5 space-y-1.5">
+                <div className="flex items-center gap-1.5 px-0.5 text-[10.5px] font-medium uppercase tracking-[0.04em] text-[var(--chat-muted)]">
+                  <FileText className="h-3 w-3 shrink-0" />
+                  <span>
+                    {inlineArtifacts.length === 1
+                      ? "1 file changed"
+                      : `${inlineArtifacts.length} files changed`}
+                  </span>
+                  {hidden > 0 && (
+                    <span className="text-[var(--chat-muted-strong)]">
+                      · showing last {shown.length}
+                    </span>
+                  )}
+                </div>
+                {shown.map((artifact) => (
                   <InlineArtifactCard
                     key={`message-artifact-${artifact.id}`}
                     artifact={artifact}
@@ -8505,6 +8520,29 @@ function ChatActivityDigest({
     [tools],
   );
 
+  // Live "effort" descriptor, derived honestly from how much reasoning the turn
+  // is actually producing — no faked level. Mirrors Claude Code's
+  // "still thinking with high effort" tail on the status line.
+  const reasoningTokens = useMemo(
+    () =>
+      activityTrace.reduce(
+        (sum, trace) =>
+          trace.kind === "reasoning" || trace.kind === "thinking"
+            ? sum + estimateTokens(trace.text)
+            : sum,
+        0,
+      ),
+    [activityTrace],
+  );
+  const effortDescriptor =
+    busy && reasoningTokens > 0
+      ? reasoningTokens > 700
+        ? "still thinking with high effort"
+        : reasoningTokens > 220
+          ? "still thinking"
+          : "thinking"
+      : null;
+
   const show =
     busy ||
     tools.length > 0 ||
@@ -8542,12 +8580,24 @@ function ChatActivityDigest({
             <Sparkles className="h-3.5 w-3.5" />
           </span>
         )}
-        <span className="processing-label min-w-0 truncate">
-          {busy
-            ? compacting
-              ? "Compacting context"
-              : `${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`
-            : `Worked for ${duration}`}
+        <span
+          className={cn(
+            "processing-label min-w-0 truncate",
+            busy && !compacting && "live",
+          )}
+        >
+          {busy ? (
+            compacting ? (
+              "Compacting context"
+            ) : (
+              <>
+                {`${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`}
+                <span className="processing-ellipsis" aria-hidden="true" />
+              </>
+            )
+          ) : (
+            `Worked for ${duration}`
+          )}
         </span>
         <span className="processing-meta">
           {busy && (
@@ -8569,8 +8619,16 @@ function ChatActivityDigest({
                 className="num"
                 title="Tokens this turn generated (output). Not the same as context fill — that's the % ring."
               >
-                {tokens.toLocaleString()} out
+                {busy
+                  ? `↓ ${tokens.toLocaleString()} tokens`
+                  : `${tokens.toLocaleString()} out`}
               </span>
+            </>
+          )}
+          {effortDescriptor && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="processing-effort">{effortDescriptor}</span>
             </>
           )}
         </span>
@@ -8645,7 +8703,13 @@ function InlineArtifactCard({
           <div className="truncate text-[12.5px] font-medium leading-5 text-[var(--chat-text)]">
             {artifact.title}
           </div>
-          <div className="truncate text-[11.5px] leading-4 text-[var(--chat-muted)]">
+          <div
+            className={cn(
+              "truncate text-[11.5px] leading-4 text-[var(--chat-muted)]",
+              artifact.path && "font-mono",
+            )}
+            title={artifact.path || artifact.detail || artifact.source || undefined}
+          >
             {artifact.path || artifact.detail || artifact.source || "Artifact"}
           </div>
         </button>

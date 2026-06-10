@@ -1394,6 +1394,13 @@ html .font-courier {
   width: 14px;
   height: 14px;
   stroke-width: 2.55;
+  animation: pb-spin 3.4s linear infinite;
+}
+
+@keyframes pb-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes pb-glow {
@@ -1419,9 +1426,47 @@ html .font-courier {
   animation: pb-fadein 320ms var(--ease-out) both;
 }
 
+/* Live (streaming) state: the verb burns accent-orange and breathes, the way
+   Claude Code's status line reads. Completed turns keep the muted grey. */
+.processing-label.live {
+  color: var(--status-neon-orange-hot);
+  font-weight: 600;
+  animation: pb-fadein 320ms var(--ease-out) both, pb-breathe 2.6s ease-in-out infinite;
+}
+
 @keyframes pb-fadein {
   from { opacity: 0; transform: translateY(2px); }
   to { opacity: 1; transform: none; }
+}
+
+@keyframes pb-breathe {
+  0%, 100% { opacity: 0.82; }
+  50% { opacity: 1; }
+}
+
+/* Animated trailing ellipsis — cycles "" . .. ... in a fixed-width slot so the
+   verb text never shifts. */
+.processing-ellipsis::after {
+  content: "";
+  display: inline-block;
+  width: 1.1ch;
+  text-align: left;
+  animation: pb-ellipsis 1.5s steps(1, end) infinite;
+}
+
+@keyframes pb-ellipsis {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75%, 100% { content: "..."; }
+}
+
+/* Effort/state descriptor ("still thinking with high effort"). Dim accent so it
+   reads as a live state, not a metric. */
+.processing-effort {
+  color: color-mix(in srgb, var(--status-neon-orange) 64%, var(--fg-faint));
+  font-size: 12.5px;
+  font-style: italic;
 }
 
 .processing-meta {
