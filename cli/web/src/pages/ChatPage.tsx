@@ -7708,11 +7708,13 @@ function ComposerActionBar({
   return (
     <div className="composer-foot">
       <div className="flex min-w-0 items-center gap-1">
-        {/* Only the agent picker row scrolls. The voice cluster stays a
-            sibling OUTSIDE this overflow box — an upward-opening menu
-            inside an overflow-x-auto container gets clipped to nothing
-            (overflow-x:auto forces overflow-y to auto per CSS spec). */}
-        <div className="flex min-w-0 items-center gap-1 overflow-x-auto scrollbar-none">
+        {/* The agent picker's menu opens UPWARD (absolute bottom-full). It must
+            NOT live inside an overflow-x-auto box — overflow-x:auto forces
+            overflow-y to auto per CSS spec, which clips the upward menu to
+            nothing (that was the "no popup on click" bug). The agent button
+            truncates (max-w-[12rem]), so the row doesn't need horizontal
+            scroll. Keep it a plain flex so the menu can escape upward. */}
+        <div className="flex min-w-0 items-center gap-1">
         <button
           type="button"
           onClick={onAttach}
