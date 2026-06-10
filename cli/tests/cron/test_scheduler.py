@@ -1843,7 +1843,14 @@ class TestRunJobSkillBacked:
             calls.append(name)
             return json.dumps({"success": True, "content": f"# {name}\nInstructions for {name}."})
 
-        with patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
+        # Hermetic agent-def seeding: the account DB in a test env (or on a
+        # dev box) can hold a stored agent list without the native "admin"
+        # default (only auto-seed defaults like the EA are re-added on top of
+        # stored rows). Degrade to the built-in DEFAULT_AGENT_DEFS view so the
+        # test exercises prompt assembly, not whatever persistence holds.
+        with patch("elevate_cli.agent_hub._stored_agents", return_value=None), \
+             patch("elevate_cli.agent_hub.load_config", return_value={}), \
+             patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
              patch("tools.skill_usage.bump_use"):
             result = _build_job_prompt(
                 {

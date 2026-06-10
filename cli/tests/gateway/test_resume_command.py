@@ -4,6 +4,7 @@ Tests the _handle_resume_command handler (switch to a previously-named session)
 across gateway messenger platforms.
 """
 
+import uuid
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
@@ -11,6 +12,32 @@ import pytest
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource, build_session_key
+
+
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    """Scope the embedded-Postgres operational store to each test.
+
+    SessionDB.set_session_title mirrors titles into the per-account PG store
+    (``elevate_op_<account_key>``). The embedded pgserver and connection pool
+    are cached process-wide and keyed ONLY by the account key — which is
+    always "default" under the hermetic test env (no license.json) — so every
+    test that lands in the same xdist worker shares one ``chat_sessions``
+    table across the whole run. Generic titles like "My Project" then trip
+    the PG title-uniqueness check in another test of this file depending on
+    how xdist distributes tests (the test_resume_auto_lineage flake: its
+    set_session_title raised ``Title 'My Project' is already in use by
+    session old_session_abc`` whenever test_resume_session_by_name had
+    already run in the same worker).
+
+    A unique account key per test gives each test its own PG database, so
+    the dual-write path stays exercised while titles can no longer collide
+    across tests or workers.
+    """
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr(
+        "elevate_cli.data.connection.get_account_key", lambda: key
+    )
 
 
 def _make_event(text="/resume", platform=Platform.TELEGRAM,

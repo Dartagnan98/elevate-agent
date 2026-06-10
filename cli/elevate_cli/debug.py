@@ -727,7 +727,6 @@ def run_debug(args):
         print("  --lines N    Number of log lines to include (default: 200)")
         print("  --expire N   Paste expiry in days (default: 7)")
         print("  --local      Print report locally instead of uploading")
-        print("  --no-redact  Disable upload-time secret redaction (default: redact)")
         print()
         print("Options (delete):")
         print("  <url> ...    One or more paste URLs to delete")

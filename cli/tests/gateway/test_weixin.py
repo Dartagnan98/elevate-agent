@@ -461,8 +461,7 @@ class TestWeixinOutboundMedia:
         assert upload_url == "https://upload.example.com/media"
         assert upload_kwargs["headers"] == {"Content-Type": "application/octet-stream"}
         assert upload_kwargs["data"]
-        # Timeout managed via asyncio.wait_for() (not aiohttp ClientTimeout)
-        assert "timeout" not in upload_kwargs
+        assert upload_kwargs["timeout"].total == 120
         payload = api_post_mock.await_args.kwargs["payload"]
         media = payload["msg"]["item_list"][0]["image_item"]["media"]
         assert media["encrypt_query_param"] == "enc-param"

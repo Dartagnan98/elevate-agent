@@ -58,7 +58,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
 MAX_STORED_RESPONSES = 100
-MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations with tool calls
+MAX_REQUEST_BYTES = 10_000_000  # 10 MB — accommodates long agent conversations
+# with tool calls and vision/image inputs (base64). Server binds to 127.0.0.1 by
+# default (off-localhost requires API_SERVER_KEY), so a tighter cap buys little
+# DoS protection while a 1 MB cap 413-rejects single image messages + long
+# multi-turn histories on /v1/chat/completions and /v1/responses.
 CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0
 MAX_NORMALIZED_TEXT_LENGTH = 65_536  # 64 KB cap for normalized content parts
 MAX_CONTENT_LIST_SIZE = 1_000  # Max items when content is an array

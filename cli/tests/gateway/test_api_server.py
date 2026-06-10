@@ -35,6 +35,25 @@ from gateway.platforms.api_server import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_operational_store(monkeypatch):
+    """Scope the embedded-Postgres operational store to each test.
+
+    ResponseStore is Postgres-backed (``response_store_*`` tables) and draws
+    from the shared connection pool, which is cached process-wide keyed ONLY
+    by account key — always "default" in the hermetic test env (no
+    license.json). Without isolation, rows from one test (e.g. a ``put`` of
+    ``resp_1``) leak into the next, breaking update-in-place / delete / len
+    assertions depending on xdist ordering. A unique account key per test
+    gives each its own PG database, keeping the real PG path exercised while
+    rows can no longer collide across tests or workers.
+    """
+    key = f"acct_t{uuid.uuid4().hex[:12]}"
+    monkeypatch.setattr(
+        "elevate_cli.data.connection.get_account_key", lambda: key
+    )
+
+
 # ---------------------------------------------------------------------------
 # check_api_server_requirements
 # ---------------------------------------------------------------------------
