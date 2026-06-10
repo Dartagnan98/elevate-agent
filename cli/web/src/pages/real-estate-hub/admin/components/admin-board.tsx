@@ -14,8 +14,6 @@ import {
 import {
   ADMIN_PIPELINE,
   ADMIN_BUYER_PIPELINE,
-  ADMIN_DEALS,
-  ADMIN_BUYER_DEALS,
   ADMIN_ACTIONS,
   ADMIN_AUTOMATIONS,
   ADMIN_SHOWINGS,
@@ -914,8 +912,12 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [showNewDeal, setShowNewDeal] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
-  const listingDeals = deals ?? ADMIN_DEALS;
-  const buyerDealsResolved = buyerDeals ?? ADMIN_BUYER_DEALS;
+  // Never fall back to the ADMIN_DEALS / ADMIN_BUYER_DEALS demo fixtures: a
+  // real account with no deals must see an empty board, not fabricated sample
+  // listings ("Demo Listing", "Sample Drive", MLS DEMO…). The board is driven
+  // entirely by the live /api/admin/deals fetch; absent data = empty.
+  const listingDeals = deals ?? [];
+  const buyerDealsResolved = buyerDeals ?? [];
 
   const isBuyer = tab === "buyer";
   const activePipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
