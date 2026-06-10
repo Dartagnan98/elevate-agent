@@ -682,6 +682,12 @@ def list_session_summaries(
             "            AND p.end_reason = 'branched'"
             "            AND s.started_at >= p.ended_at))"
         )
+        # Hide phantom empties: a session row that never received a message and
+        # never earned a title is a draft the app eagerly minted (session.create
+        # builds the row before the user types). It shouldn't clutter the
+        # sidebar as a "General session" with no chat. Once a message lands
+        # (message_count > 0) or it's titled, it shows.
+        where_clauses.append("(s.message_count > 0 OR s.title IS NOT NULL)")
     if source:
         where_clauses.append("s.source = ?")
         params.append(source)

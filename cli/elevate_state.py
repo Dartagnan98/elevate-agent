@@ -421,6 +421,11 @@ def _list_sessions_rich_pg(
             "            AND p.end_reason = 'branched'"
             "            AND s.started_at >= p.ended_at))"
         )
+        # Hide phantom empties: a row that never received a message and was
+        # never titled is a draft the app eagerly minted (session.create builds
+        # the row before the user types) — it shouldn't show as a "General
+        # session" with no chat. Surfaces once a message lands or it's titled.
+        where_clauses.append("(s.message_count > 0 OR s.title IS NOT NULL)")
     if source:
         where_clauses.append("s.source = %s")
         params.append(source)
