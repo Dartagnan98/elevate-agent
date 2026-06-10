@@ -6136,26 +6136,46 @@ export default function ChatPage() {
     }
     return ids;
   }, [tools]);
-  const visibleMessages = useMemo(
-    () =>
-      messages.filter((message) => {
-        if (shouldKeepTranscriptMessage(message.role, message.content)) {
-          return true;
-        }
-        // Keep an in-flight assistant turn visible even before any
-        // text streams, so its activity digest ("Working for Xs" +
-        // thinking/reasoning trace + tool cards) is on screen while
-        // the model is actually reasoning — not just after it finishes.
-        if (message.role !== "assistant") return false;
-        if (message.status === "streaming") return true;
-        if (traceMessageIds.has(message.id)) return true;
-        if (toolMessageIds.has(message.id)) return true;
-        // Resumed turn: tools/traces live on the message snapshot, not
-        // in the live state arrays.
-        return Boolean(message.tools?.length || message.traces?.length);
-      }),
-    [messages, toolMessageIds, traceMessageIds],
-  );
+  const subagentMessageIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of subagents) if (s.messageId) ids.add(s.messageId);
+    return ids;
+  }, [subagents]);
+  // One delegation = two assistant DB messages: the empty-content step that
+  // fires delegate_task while the subagent runs, then EA's answer. Rendered
+  // raw that's two "Delegated a task" cards. Fold the empty step into the
+  // answer that follows and move its subagent (the drill-in + summary) onto
+  // the answer, so it reads as ONE block. While the subagent is still running
+  // there's no following answer yet, so the step stays on screen as the
+  // "delegated · waiting" card.
+  const messageFold = useMemo(() => {
+    const kept = messages.filter((message) => {
+      if (shouldKeepTranscriptMessage(message.role, message.content)) return true;
+      if (message.role !== "assistant") return false;
+      if (message.status === "streaming") return true;
+      if (traceMessageIds.has(message.id)) return true;
+      if (toolMessageIds.has(message.id)) return true;
+      return Boolean(message.tools?.length || message.traces?.length);
+    });
+    const remap = new Map<string, string>();
+    const visible: ChatMessage[] = [];
+    for (let i = 0; i < kept.length; i += 1) {
+      const m = kept[i];
+      const next = kept[i + 1];
+      if (
+        m.role === "assistant" &&
+        !m.content.trim() &&
+        subagentMessageIds.has(m.id) &&
+        next?.role === "assistant"
+      ) {
+        remap.set(m.id, next.id); // subagent moves onto the answer card
+        continue; // drop the now-redundant delegation step
+      }
+      visible.push(m);
+    }
+    return { visible, remap };
+  }, [messages, toolMessageIds, traceMessageIds, subagentMessageIds]);
+  const visibleMessages = messageFold.visible;
   const latestVisibleMessage = visibleMessages[visibleMessages.length - 1] ?? null;
   const latestVisibleMessageId = latestVisibleMessage?.id ?? "";
   const latestVisibleMessageContentLength = latestVisibleMessage?.content.length ?? 0;
@@ -6219,12 +6239,15 @@ export default function ChatPage() {
     const grouped = new Map<string, SubagentEntry[]>();
     for (const s of subagents) {
       if (!s.messageId) continue;
-      const next = grouped.get(s.messageId) ?? [];
+      // If this subagent's delegation step was folded into the answer card,
+      // attach it to the answer so its summary + drill-in render there.
+      const key = messageFold.remap.get(s.messageId) ?? s.messageId;
+      const next = grouped.get(key) ?? [];
       next.push(s);
-      grouped.set(s.messageId, next);
+      grouped.set(key, next);
     }
     return grouped;
-  }, [subagents]);
+  }, [subagents, messageFold]);
   // Join per-turn usage to assistant turns for the footer. turn_usage.message_id
   // is a gateway id that won't match our ids, so pair chronologically from the
   // most-recent end (the turns the user is actually looking at).
