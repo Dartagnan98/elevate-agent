@@ -776,6 +776,26 @@ def _load_admin_onboarding_memory_block() -> str:
         return ""
 
 
+def _load_leads_onboarding_memory_block() -> str:
+    """Load generated Leads onboarding memory (how this realtor's lead flow is
+    set up) from the active profile, if present. Peer of the Admin block."""
+    try:
+        path = get_elevate_home() / "memories" / "LEADS_ONBOARDING.md"
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        return (
+            "==============================================\n"
+            "LEADS ONBOARDING MEMORY (generated from SQLite)\n"
+            "==============================================\n"
+            f"{content}"
+        )
+    except Exception:
+        return ""
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -5025,6 +5045,10 @@ class AIAgent:
         admin_onboarding_block = _load_admin_onboarding_memory_block()
         if admin_onboarding_block:
             prompt_parts.append(admin_onboarding_block)
+
+        leads_onboarding_block = _load_leads_onboarding_memory_block()
+        if leads_onboarding_block:
+            prompt_parts.append(leads_onboarding_block)
 
         # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:

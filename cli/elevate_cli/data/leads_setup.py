@@ -27,10 +27,15 @@ identity/province/brokerage all live in admin_setup_profile already.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from elevate_cli.data._util import now_iso
+
+LEADS_ONBOARDING_MEMORY_FILE = "LEADS_ONBOARDING.md"
 
 
 STATE_ID = "default"
@@ -297,6 +302,116 @@ def _snapshot(conn: sqlite3.Connection, items: list[dict[str, Any]]) -> dict[str
 _DEPRECATED_KEYS = frozenset({"outreach_imessage", "outreach_sms", "outreach_rcs"})
 
 
+def _leads_identity(conn: sqlite3.Connection) -> dict[str, str]:
+    """Realtor name/brokerage from the admin profile (leads borrows identity)."""
+    try:
+        row = conn.execute(
+            "SELECT realtor_legal_name, license_name, brokerage_name "
+            "FROM admin_setup_profile WHERE id='default'"
+        ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "name": (row["license_name"] or row["realtor_legal_name"] or "").strip(),
+            "brokerage": (row["brokerage_name"] or "").strip(),
+        }
+    except Exception:
+        return {}
+
+
+def leads_setup_memory_summary(conn: sqlite3.Connection, snapshot: Mapping[str, Any]) -> str:
+    """The leads/outreach equivalent of ADMIN_ONBOARDING.md — what the outreach
+    agent should know about HOW this realtor's lead flow is set up: identity,
+    CRM, connected lead sources, outreach channels, and the auto-reply/cadence
+    policy. Explicitly flags what is NOT yet captured (ICP, per-lane cadence,
+    voice) so the agent asks instead of inventing."""
+    items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+    by_key = {it.get("key"): it for it in items if isinstance(it, Mapping)}
+    ident = _leads_identity(conn)
+
+    def source_line(key: str, label: str) -> str:
+        it = by_key.get(key) or {}
+        status = str(it.get("status") or "missing")
+        prov = str(it.get("provider") or "").strip()
+        ready = status in ("connected", "ready", "ok", "complete")
+        return f"- {label}: {'connected' if ready else 'not connected'}{f' ({prov})' if prov else ''}"
+
+    crm = by_key.get("crm") or {}
+    policy = by_key.get("auto_reply_policy") or {}
+    pv = policy.get("value") if isinstance(policy.get("value"), Mapping) else {}
+    auto_on = bool(pv.get("enabled"))
+    cadence = pv.get("followUpCadenceDays")
+
+    connectors = snapshot.get("outreachConnectors") if isinstance(snapshot.get("outreachConnectors"), list) else []
+    channel_names = [
+        str(c.get("label") or c.get("key") or "").strip()
+        for c in connectors
+        if isinstance(c, Mapping) and (c.get("connected") or c.get("importOnly"))
+    ]
+
+    lines = [
+        "# Leads onboarding memory",
+        "",
+        "This file is generated from Leads setup. Use it as durable recall for how THIS realtor's lead flow is set up — don't ask them for setup details already here.",
+        "",
+        "## Realtor",
+        f"- Name: {ident.get('name') or 'unknown'}",
+        f"- Brokerage: {ident.get('brokerage') or 'unknown'}",
+        "",
+        "## CRM (system of record for leads)",
+        f"- Provider: {str(crm.get('provider') or '').strip() or 'not recorded'}",
+        "",
+        "## Connected lead sources",
+        source_line("meta_lead_ads", "Meta lead ads"),
+        source_line("google_lead_forms", "Google lead forms"),
+        source_line("website_form_webhook", "Website form webhook"),
+        f"- Lead sources ready: {'yes' if snapshot.get('leadSourcesReady') else 'no'}",
+        "",
+        "## Outreach channels",
+        f"- {', '.join(channel_names) if channel_names else 'none connected (drafts only until a channel is connected)'}",
+        "",
+        "## Auto-reply & cadence policy",
+        f"- Auto first-touch: {'on' if auto_on else 'off (draft, do not auto-send)'}",
+        f"- Default follow-up cadence: {f'{cadence} day(s)' if cadence else 'not set'}",
+        "",
+        "## Not captured yet — ASK, don't invent",
+        "- Target audience / ICP, per-lane cadence (Hot/Warm/Nurture/Cold), qualification rules, and outreach voice are NOT in setup. If a task needs one, ask the realtor (or read docs/voice/realtor-profile.md) rather than guessing.",
+        "- Always draft; never auto-send unless auto first-touch is on AND the channel is connected.",
+    ]
+    return "\n".join(lines).strip() + "\n"
+
+
+def _leads_setup_memory_path() -> Path:
+    from elevate_constants import get_elevate_home
+    return get_elevate_home() / "memories" / LEADS_ONBOARDING_MEMORY_FILE
+
+
+def sync_leads_setup_memory(conn: sqlite3.Connection, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Publish the current Leads setup into LEADS_ONBOARDING.md (atomic write),
+    the outreach agent's per-account context. Best-effort: never raises into the
+    setup write path."""
+    try:
+        path = _leads_setup_memory_path()
+        content = leads_setup_memory_summary(conn, snapshot)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".leads_setup_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return {"path": str(path), "bytes": len(content.encode("utf-8"))}
+    except Exception:
+        return {}
+
+
 def get_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
     _ensure_seeded(conn)
     rows = conn.execute(
@@ -352,7 +467,9 @@ def update_leads_setup(
         "UPDATE leads_setup_state SET updated_at=? WHERE id=?",
         (now, STATE_ID),
     )
-    return get_leads_setup(conn)
+    snapshot = get_leads_setup(conn)
+    sync_leads_setup_memory(conn, snapshot)
+    return snapshot
 
 
 def complete_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -372,7 +489,9 @@ def complete_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
         "UPDATE leads_setup_state SET completed_at=?, updated_at=? WHERE id=?",
         (now, now, STATE_ID),
     )
-    return get_leads_setup(conn)
+    final = get_leads_setup(conn)
+    sync_leads_setup_memory(conn, final)
+    return final
 
 
 def reset_leads_setup(conn: sqlite3.Connection) -> dict[str, Any]:
