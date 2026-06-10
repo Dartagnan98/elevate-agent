@@ -684,6 +684,11 @@ export async function searchAll(query: string, limit = 10): Promise<SearchResult
   }
   const sb = supabase();
   const pattern = `%${q.toLowerCase()}%`;
+  // The `.or()` filter below interpolates into PostgREST's filter GRAMMAR (not a
+  // bound value), so strip the chars that could inject extra clauses
+  // (comma = separator, parens = grouping, backslash/asterisk). The `.ilike()`
+  // calls are value-bound and need no sanitizing.
+  const orPattern = `%${q.toLowerCase().replace(/[,()\\*]/g, "")}%`;
 
   const [usersRes, orgsRes, licensesRes, auditRes] = await Promise.all([
     sb
@@ -694,7 +699,7 @@ export async function searchAll(query: string, limit = 10): Promise<SearchResult
     sb
       .from("organizations")
       .select("id, slug, name, tier, status")
-      .or(`name.ilike.${pattern},slug.ilike.${pattern}`)
+      .or(`name.ilike.${orPattern},slug.ilike.${orPattern}`)
       .limit(limit),
     sb
       .from("licenses")

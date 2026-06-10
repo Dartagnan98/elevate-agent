@@ -661,6 +661,13 @@ class APIServerAdapter(BasePlatformAdapter):
             raw_port = os.getenv("API_SERVER_PORT", str(DEFAULT_PORT))
         self._port: int = _coerce_port(raw_port, DEFAULT_PORT)
         self._api_key: str = extra.get("key", os.getenv("API_SERVER_KEY", ""))
+        if not self._api_key:
+            # SECURITY: never run keyless. A keyless localhost endpoint that can
+            # drive the agent (and its terminal tool) is reachable by any local
+            # process and by DNS-rebinding/CSRF from a website the user visits.
+            # Auto-generate a key, persist it 0600 so legit local clients can
+            # read it, and require it on every request.
+            self._api_key = self._ensure_persisted_api_key()
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
             extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
         )
@@ -747,16 +754,48 @@ class APIServerAdapter(BasePlatformAdapter):
     # Auth helper
     # ------------------------------------------------------------------
 
+    def _ensure_persisted_api_key(self) -> str:
+        """Read (or first-time generate + persist 0600) the API server key.
+
+        Stored at ``$ELEVATE_HOME/api_server_key`` so a local client can read it
+        and authenticate; the server then requires it on every request instead
+        of running keyless.
+        """
+        import secrets
+        from pathlib import Path
+
+        home = os.getenv("ELEVATE_HOME") or str(Path.home() / ".elevate")
+        key_path = Path(home) / "api_server_key"
+        try:
+            existing = key_path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        except Exception:
+            pass
+        key = secrets.token_urlsafe(32)
+        try:
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            key_path.write_text(key, encoding="utf-8")
+            os.chmod(key_path, 0o600)
+            logger.info(
+                "API server: generated an auth key at %s (required on every "
+                "request). Set API_SERVER_KEY to override.",
+                key_path,
+            )
+        except Exception as exc:  # pragma: no cover - fs edge
+            logger.warning("Could not persist API server key (%s); using ephemeral.", exc)
+        return key
+
     def _check_auth(self, request: "web.Request") -> Optional["web.Response"]:
         """
         Validate Bearer token from Authorization header.
 
-        Returns None if auth is OK, or a 401 web.Response on failure.
-        If no API key is configured, all requests are allowed (only when API
-        server is local).
+        A key is ALWAYS configured (auto-generated + persisted if not set), so
+        every request must present a valid Bearer token — the endpoint never
+        runs keyless even on loopback.
         """
         if not self._api_key:
-            return None  # No key configured — allow all (local-only use)
+            return None  # Defensive: only if key generation failed entirely.
 
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):

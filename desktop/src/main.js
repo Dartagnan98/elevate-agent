@@ -756,7 +756,9 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // Sandbox the renderer: the preload only uses contextBridge + ipcRenderer
+      // (both work under sandbox), so a renderer-side XSS can't reach Node.
+      sandbox: true,
     },
   });
 
@@ -829,8 +831,26 @@ function createWindow() {
     if (url.startsWith(backendUrl)) {
       return { action: "allow" };
     }
-    shell.openExternal(url);
+    // Only hand http(s)/mailto to the OS. The renderer shows untrusted content
+    // (AI output, lead/MLS fields); without this, a window.open("file://…") or
+    // an OS-handler scheme would be launched via openExternal.
+    try {
+      const scheme = new URL(url).protocol;
+      if (scheme === "https:" || scheme === "http:" || scheme === "mailto:") {
+        shell.openExternal(url);
+      }
+    } catch {
+      /* malformed URL — ignore */
+    }
     return { action: "deny" };
+  });
+
+  // Lock the main window to the trusted local origin: block top-level
+  // navigation elsewhere (setWindowOpenHandler only covers window.open).
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith(backendUrl) && !url.startsWith("file://")) {
+      event.preventDefault();
+    }
   });
 }
 
@@ -949,10 +969,35 @@ function setupPermissions() {
   ses.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media" || permission === "audioCapture");
   });
-  // The dashboard is a local, trusted origin. Keep the permission check
-  // permissive so getUserMedia's pre-flight passes without tightening any
-  // other permission the app already relied on.
-  ses.setPermissionCheckHandler(() => true);
+  // Only auto-pass the getUserMedia pre-flight; deny every other permission
+  // check (geolocation, clipboard-read, MIDI, notifications, …) instead of the
+  // previous blanket allow.
+  ses.setPermissionCheckHandler((_webContents, permission) => {
+    return permission === "media" || permission === "audioCapture";
+  });
+  // Defense-in-depth CSP for the local dashboard origin: a renderer XSS has no
+  // 'self' backstop without this. The dashboard already serves only its own
+  // bundled assets, so script-src 'self' is safe.
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        // Permissive on passive resources (styles/fonts/images — the app loads
+        // Google Fonts + data/blob) so this can't break rendering; strict where
+        // it matters: no plugins/embeds, no framing, scripts only from self +
+        // localhost (+ inline, which the bundled app needs).
+        "Content-Security-Policy": [
+          "default-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; " +
+            "script-src 'self' 'unsafe-inline' http://127.0.0.1:* http://localhost:*; " +
+            "style-src 'self' 'unsafe-inline' https: data:; " +
+            "font-src 'self' https: data:; " +
+            "img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; " +
+            "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:* https:; " +
+            "object-src 'none'; frame-ancestors 'none'",
+        ],
+      },
+    });
+  });
 }
 
 async function startDesktop() {
