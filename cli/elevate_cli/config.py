@@ -445,14 +445,22 @@ def _ensure_default_soul_md(home: Path) -> None:
     model default and behaves inconsistently (e.g. confirming instead of
     acting). A SOUL.md with any real content the user wrote is left untouched.
     """
-    from elevate_cli.default_soul import is_placeholder_soul
+    from elevate_cli.default_soul import (
+        is_placeholder_soul,
+        is_unmodified_prior_default,
+    )
 
     soul_path = home / "SOUL.md"
     if soul_path.exists():
         try:
-            if not is_placeholder_soul(soul_path.read_text(encoding="utf-8")):
-                return
+            current = soul_path.read_text(encoding="utf-8")
         except OSError:
+            return
+        # Leave a realtor-customized SOUL.md untouched. Re-seed a placeholder,
+        # AND upgrade an unmodified prior Elevate default to the current persona
+        # so improvements (credentials, onboarding-as-truth, fleet roster) reach
+        # existing installs — not just fresh ones.
+        if not is_placeholder_soul(current) and not is_unmodified_prior_default(current):
             return
     soul_path.write_text(DEFAULT_SOUL_MD, encoding="utf-8")
     _secure_file(soul_path)

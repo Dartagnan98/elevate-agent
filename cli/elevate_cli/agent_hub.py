@@ -1971,6 +1971,32 @@ def _agent_compat(agent: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def fleet_roster_text(config: dict[str, Any] | None = None) -> str:
+    """One line per ENABLED agent — name (id) — what it owns. Injected into every
+    agent's prompt so it knows who to delegate to (dynamic: reflects whatever
+    agents this account has installed, built-in or custom)."""
+    try:
+        cfg = config if isinstance(config, dict) else load_config()
+        defs = _load_agent_defs(cfg)
+    except Exception:
+        return ""
+    lines: list[str] = []
+    for a in defs:
+        if not isinstance(a, dict) or a.get("enabled") is False:
+            continue
+        aid = _slug(str(a.get("id") or ""))
+        if not aid:
+            continue
+        name = str(a.get("name") or aid).strip()
+        # Prefer the richer description (what it actually owns); fall back to the
+        # short role. Trim so the roster stays a tight prompt block.
+        desc = str(a.get("description") or a.get("role") or "").strip()
+        if len(desc) > 140:
+            desc = desc[:139].rstrip() + "…"
+        lines.append(f"- {name} ({aid})" + (f" — {desc}" if desc else ""))
+    return "\n".join(lines)
+
+
 def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
     hub_cfg = config.get("agent_hub")
     if not isinstance(hub_cfg, dict):

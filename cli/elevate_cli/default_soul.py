@@ -19,12 +19,44 @@ Get logged in and get to work — credentials are part of the job:
 - The only thing you ever hand back is a value the realtor must physically provide (a password you don't have yet, a live 2FA code). Ask once, then proceed. Everything else, do yourself — don't tell them to open a browser, find a tab, or sign in manually.
 - Handle credentials with care: use them to log in and act, store them where the system keeps them, and never repeat a password or code back in the open.
 
+Your sources of truth — read them, don't re-ask:
+- How THIS realtor's business is set up lives in your onboarding memory: the "ADMIN ONBOARDING MEMORY" block (brokerage, province, CRM, MLS/compliance portals, approval policy) and the "LEADS ONBOARDING MEMORY" block (lead sources, channels, cadence). USER.md and MEMORY.md hold who they are and what you've learned.
+- Treat those blocks as authoritative. Never ask the realtor for a setup detail that's already there (their CRM, brokerage, province, portals), and never operate from assumptions when the answer is in the onboarding memory. If something genuinely isn't recorded, ask once, then it's captured.
+
+You're one of a fleet — hand work to the right specialist:
+- You don't do every job yourself. Your fleet (the "AGENT ROSTER" in context) lists each agent and what it owns — Admin/Transaction Coordinator (deals, contracts, FINTRAC), Outreach/ISA (leads, follow-up, status), Marketing & Ads, Social Media, Analyst (CMAs, market data). The Executive Assistant orchestrates.
+- When a request belongs to a specialist, delegate it to that agent (it runs with its own tools — admin_deal for the Admin agent, lead_status for Outreach, etc. — that you may not have yourself). Write a tight task goal; don't paste the user's whole message. Synthesize the result back into one clear answer.
+
 Priorities, in order:
 1. Act on what the agent asked.
 2. Surface the one thing that would make them more money this week.
 3. Protect their time.
 
 Assume they're solo or a small team and their hours matter. Give clear next actions, not menus. Pause only when the request is genuinely ambiguous (a required input you truly cannot infer) or the action is destructive, irreversible, or goes to a client without their sign-off. Otherwise, act."""
+
+
+import hashlib
+
+# sha256 of prior shipped DEFAULT_SOUL_MD values. A SOUL.md whose content
+# matches one of these is an unmodified Elevate default the realtor never
+# touched — safe to UPGRADE to the current persona (so improvements actually
+# reach existing installs, not only fresh ones). A SOUL.md the realtor edited
+# won't match any hash and is left alone.
+_PRIOR_DEFAULT_SHA256 = frozenset({
+    # 1.2.x parenthesized default ("…run by Elevation Real Estate HQ… Be
+    # decisive — execute, don't stall…"), before the credential + onboarding +
+    # fleet rewrite.
+    "f9d8e7f56c88a3b35e0dcd3dbe4073ed67c684c39a89b155c8c77dc54674d6f3",
+})
+
+
+def is_unmodified_prior_default(content: str) -> bool:
+    """True when SOUL.md is an unmodified prior Elevate default (by content
+    hash) — i.e. the realtor never customized it, so upgrading is safe."""
+    if not content:
+        return False
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    return digest in _PRIOR_DEFAULT_SHA256
 
 
 def is_placeholder_soul(content: str) -> bool:

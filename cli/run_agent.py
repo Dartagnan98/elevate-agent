@@ -776,6 +776,28 @@ def _load_admin_onboarding_memory_block() -> str:
         return ""
 
 
+def _load_fleet_roster_block() -> str:
+    """The account's agent fleet — who does what — so every agent knows who to
+    hand work to (delegate_task(agent=<id>)). Dynamic from the Agent Hub."""
+    try:
+        from elevate_cli.agent_hub import fleet_roster_text
+        roster = fleet_roster_text()
+        if not roster:
+            return ""
+        return (
+            "==============================================\n"
+            "AGENT ROSTER (your fleet — delegate to the owner)\n"
+            "==============================================\n"
+            "Hand a request to the agent that owns it via "
+            "delegate_task(agent=<id>) — it runs with its own tools (admin_deal "
+            "for admin, lead_status for outreach, etc.). The Executive Assistant "
+            "orchestrates and synthesizes the result.\n"
+            f"{roster}"
+        )
+    except Exception:
+        return ""
+
+
 def _load_leads_onboarding_memory_block() -> str:
     """Load generated Leads onboarding memory (how this realtor's lead flow is
     set up) from the active profile, if present. Peer of the Admin block."""
@@ -5076,6 +5098,10 @@ class AIAgent:
         leads_onboarding_block = _load_leads_onboarding_memory_block()
         if leads_onboarding_block:
             prompt_parts.append(leads_onboarding_block)
+
+        fleet_roster_block = _load_fleet_roster_block()
+        if fleet_roster_block:
+            prompt_parts.append(fleet_roster_block)
 
         # External memory provider system prompt block (additive to built-in)
         if self._memory_manager:
