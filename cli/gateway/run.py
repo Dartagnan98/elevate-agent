@@ -13973,10 +13973,33 @@ class GatewayRunner:
         agent._api_call_count = 0
 
 
-def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, on_delivered=None):
+def _bundled_code_fingerprint() -> Optional[str]:
+    """mtime fingerprint of the running gateway code on disk.
+
+    A desktop auto-update swaps the .app bundle under a LIVE gateway — the
+    process keeps executing the old code in memory while every new file on
+    disk is the new version (stale headers, un-healed skills, missing fixes).
+    Comparing this fingerprint at boot vs. later detects the swap.
+
+    Returns None outside an .app bundle (dev working trees) so editing source
+    never triggers surprise auto-restarts.
+    """
+    try:
+        import elevate_cli
+
+        cli_file = Path(elevate_cli.__file__).resolve()
+        if ".app/" not in str(cli_file):
+            return None
+        run_file = Path(__file__).resolve()
+        return f"{cli_file.stat().st_mtime_ns}:{run_file.stat().st_mtime_ns}"
+    except Exception:
+        return None
+
+
+def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, on_delivered=None, runner=None):
     """
     Background thread that ticks the cron scheduler at a regular interval.
-    
+
     Runs inside the gateway process so cronjobs fire automatically without
     needing a separate `elevate cron daemon` or system cron entry.
 
@@ -13984,7 +14007,10 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     cron delivery path so live adapters can be used for E2EE rooms.
 
     Also refreshes the channel directory every 5 minutes and prunes the
-    image/audio/document cache once per hour.
+    image/audio/document cache once per hour. With ``runner`` provided it
+    additionally watches for the bundled code changing on disk (desktop
+    auto-update) and requests a service restart once the gateway is idle, so
+    a Telegram-only customer who never opens the app still gets the new code.
     """
     from cron.scheduler import tick as cron_tick
     from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
@@ -13995,7 +14021,9 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     MEMORY_MAINTENANCE_EVERY = 15  # ticks — every 15 minutes
     SENDER_TICK_EVERY = 2    # ticks — every 2 minutes at default 60s interval
     INBOUND_TICK_EVERY = 10  # ticks — every 10 minutes; matches composio_capabilities.json default_poll_interval_minutes
+    STALE_CODE_EVERY = 5     # ticks — every 5 minutes
 
+    boot_code_fp = _bundled_code_fingerprint()
     logger.info("Cron ticker started (interval=%ds)", interval)
     tick_count = 0
     while not stop_event.is_set():
@@ -14021,6 +14049,36 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             logger.debug("Cron tick error: %s", e)
 
         tick_count += 1
+
+        # Desktop auto-updates swap the bundle under a live gateway; the
+        # process would keep running last week's code until something killed
+        # it. Detect the swap and restart via the service manager (exit 75 →
+        # launchd KeepAlive relaunches from the NEW bundle), deferring while
+        # any agent turn is in flight.
+        if (
+            runner is not None
+            and loop is not None
+            and boot_code_fp
+            and tick_count % STALE_CODE_EVERY == 0
+        ):
+            try:
+                current_fp = _bundled_code_fingerprint()
+                if current_fp and current_fp != boot_code_fp:
+                    if runner._running_agent_count() == 0:
+                        logger.info(
+                            "Bundled code changed on disk (desktop update) — "
+                            "restarting gateway via service to load it"
+                        )
+                        loop.call_soon_threadsafe(
+                            lambda: runner.request_restart(via_service=True)
+                        )
+                    else:
+                        logger.debug(
+                            "Code update detected on disk; deferring gateway "
+                            "restart until agents are idle"
+                        )
+            except Exception as exc:
+                logger.debug("Stale-code check error: %s", exc)
 
         if tick_count % SENDER_TICK_EVERY == 0:
             try:
@@ -14390,6 +14448,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             "adapters": runner.adapters,
             "loop": asyncio.get_running_loop(),
             "on_delivered": runner.record_cron_delivery,
+            "runner": runner,
         },
         daemon=True,
         name="cron-ticker",
