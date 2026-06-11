@@ -481,13 +481,56 @@ function kickstartGateway(uid) {
   return res.status === 0;
 }
 
+// Probe launchd for the gateway job. Distinguishes:
+//   loaded  — `launchctl print gui/$UID/ai.elevate.gateway` finds the job
+//   running — the loaded job actually has a pid / "state = running"
+// "Could not find service" (not loaded) is exactly what a Squirrel ShipIt
+// auto-update left behind on a customer Mac: the gateway got SIGTERM'd and the
+// job ended up booted out of the gui domain entirely, so KeepAlive could never
+// revive it and Telegram/cron stayed dead until a manual `launchctl bootstrap`.
+function probeGateway(uid) {
+  try {
+    const probe = spawnSync(
+      "launchctl",
+      ["print", `gui/${uid}/ai.elevate.gateway`],
+      { encoding: "utf8", timeout: 8000 },
+    );
+    const out = String(probe.stdout || "");
+    const loaded = probe.status === 0;
+    const running =
+      loaded && (/\bpid = \d+/.test(out) || /state = running/.test(out));
+    return { loaded, running };
+  } catch (e) {
+    return { loaded: false, running: false };
+  }
+}
+
+// Last-resort revival that does NOT depend on the Python CLI working: load the
+// plist already on disk straight into the gui domain. Covers the case where
+// `gateway install` itself fails (e.g. CLI broken mid-update) but a valid
+// plist survived in ~/Library/LaunchAgents. bootstrap of an already-loaded
+// job fails (EALREADY) — fine, the kickstart then starts a loaded-but-dead one.
+function bootstrapGatewayDirect(uid, plist) {
+  const bs = spawnSync(
+    "launchctl",
+    ["bootstrap", `gui/${uid}`, plist],
+    { encoding: "utf8", timeout: 15000 },
+  );
+  appendBackendLog(
+    `[gateway] direct bootstrap rc=${bs.status} ${String(bs.stdout || bs.stderr || "").trim().slice(-200)}\n`,
+  );
+  if (!probeGateway(uid).running) kickstartGateway(uid);
+  return probeGateway(uid).running;
+}
+
 // Self-heal the gateway launchd service. The gateway runs the cron ticker that
 // SEEDS + runs each account's lead/admin automations + heartbeats. If onboarding
 // never installed it (the silent "no automations, no heartbeats" failure mode),
-// install it now. A healthy gateway on the SAME version is never restarted; a
-// healthy gateway on a DIFFERENT version (i.e. just after an update) is
-// restarted ONCE so the new bundled code seeds the current fleet + migrations.
-// Best-effort, non-blocking, logged. macOS only.
+// install it now. If a desktop auto-update (ShipIt) killed it and left the job
+// unloaded, re-bootstrap it. A healthy gateway on the SAME version is never
+// restarted; a healthy gateway on a DIFFERENT version (i.e. just after an
+// update) is restarted ONCE so the new bundled code seeds the current fleet +
+// migrations. Best-effort, non-blocking, logged. macOS only.
 function ensureGatewayInstalled(launcher, baseEnv) {
   if (process.platform !== "darwin") return;
   try {
@@ -498,19 +541,17 @@ function ensureGatewayInstalled(launcher, baseEnv) {
       "ai.elevate.gateway.plist",
     );
     const uid = typeof process.getuid === "function" ? process.getuid() : "";
-    let loaded = false;
-    try {
-      const probe = spawnSync(
-        "launchctl",
-        ["print", `gui/${uid}/ai.elevate.gateway`],
-        { encoding: "utf8", timeout: 8000 },
-      );
-      loaded = probe.status === 0;
-    } catch (e) {
-      loaded = false;
-    }
+    const { loaded, running } = probeGateway(uid);
     const appVersion = app.getVersion();
-    if (fileExists(plist) && loaded) {
+    if (fileExists(plist) && loaded && !running) {
+      // Loaded but dead (no pid): e.g. a stale pre-KeepAlive plist whose
+      // process was SIGTERM'd and never revived. kickstart restarts it in
+      // place; if that fails fall through to the full install path below.
+      appendBackendLog(
+        "[gateway] self-heal: loaded but NOT running -> kickstart\n",
+      );
+      if (kickstartGateway(uid) && probeGateway(uid).running) return;
+    } else if (fileExists(plist) && loaded) {
       const lastVersion = readGatewayVersionMarker();
       if (lastVersion !== appVersion) {
         appendBackendLog(
@@ -539,12 +580,27 @@ function ensureGatewayInstalled(launcher, baseEnv) {
       return;
     }
     appendBackendLog(
-      `[gateway] self-heal: plist=${fileExists(plist)} loaded=${loaded} -> installing\n`,
+      `[gateway] self-heal: plist=${fileExists(plist)} loaded=${loaded} running=${running} -> installing\n`,
     );
+    // `gateway install` is now load-aware on the CLI side: with a current
+    // plist but an unloaded job it re-bootstraps + kickstarts + verifies
+    // (instead of the old "Service already installed" no-op).
     const res = runGatewayCommand(launcher, baseEnv, ["install"]);
     const out = String(res.stdout || res.stderr || "").trim().slice(-400);
     appendBackendLog(`[gateway] self-heal install rc=${res.status}\n${out}\n`);
     if (res.status === 0) writeGatewayVersionMarker(appVersion);
+    // Belt-and-suspenders: verify the job actually came back. If `gateway
+    // install` could not (broken/missing CLI mid-update) but a plist file
+    // exists on disk, load it directly — no Python required.
+    if (!probeGateway(uid).running && fileExists(plist)) {
+      appendBackendLog(
+        "[gateway] self-heal: install did not yield a running job; direct launchctl bootstrap fallback\n",
+      );
+      const revived = bootstrapGatewayDirect(uid, plist);
+      appendBackendLog(
+        `[gateway] self-heal: direct bootstrap ${revived ? "revived the gateway" : "FAILED — gateway still down"}\n`,
+      );
+    }
   } catch (e) {
     appendBackendLog(`[gateway] self-heal error: ${e}\n`);
   }

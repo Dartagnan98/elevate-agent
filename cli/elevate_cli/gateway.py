@@ -2708,7 +2708,9 @@ def _verify_launchd_started(plist_path: Path, label: str, *, retry_bootstrap: bo
     target = f"{_launchd_domain()}/{label}"
     if retry_bootstrap:
         print("↻ launchd did not report the gateway running; retrying bootstrap")
-        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
+        # check=False: bootstrap of an already-loaded job fails with EALREADY,
+        # which is fine — the kickstart below starts a loaded-but-dead job.
+        subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=False, timeout=30)
         subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
         if _launchd_service_is_running(label):
             return
@@ -2721,25 +2723,58 @@ def _verify_launchd_started(plist_path: Path, label: str, *, retry_bootstrap: bo
     raise SystemExit(1)
 
 
+def _ensure_launchd_loaded(plist_path: Path, label: str | None = None) -> None:
+    """Ensure the gateway job is actually LOADED in the gui domain and running.
+
+    A plist file sitting in ~/Library/LaunchAgents means nothing if the job was
+    booted out of launchd — seen live when a desktop auto-update (Squirrel
+    ShipIt) SIGTERM'd the gateway and the service ended up fully unloaded
+    (``launchctl print gui/$UID/ai.elevate.gateway`` → "Could not find
+    service"), killing Telegram + cron until a human ran ``launchctl
+    bootstrap``. Idempotent and silent when the job is already running.
+
+    ``bootstrap`` on an already-loaded job fails (EALREADY) — that's fine,
+    ``kickstart`` then revives the loaded-but-dead job. ``check=False`` on
+    both; the final ``_verify_launchd_started`` is the real gate.
+    """
+    label = label or get_launchd_label()
+    if _launchd_service_is_running(label):
+        return
+    target = f"{_launchd_domain()}/{label}"
+    print("↻ Gateway service not loaded/running; re-bootstrapping launchd job")
+    subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=False, timeout=30)
+    subprocess.run(["launchctl", "kickstart", target], check=False, timeout=30)
+    _verify_launchd_started(plist_path, label, retry_bootstrap=False)
+    print("✓ Gateway service reloaded")
+
+
 def launchd_install(force: bool = False):
     plist_path = get_launchd_plist_path()
-    
+
     if plist_path.exists() and not force:
         if not launchd_plist_is_current():
             print(f"↻ Repairing outdated launchd service at: {plist_path}")
             refresh_launchd_plist_if_needed()
             print("✓ Service definition updated")
+            # refresh bootout/bootstraps with check=False — make sure the job
+            # actually came back before reporting success.
+            _ensure_launchd_loaded(plist_path)
             return
+        # Plist on disk is current, but install must also guarantee the job is
+        # LOADED — the desktop self-heal path relies on this (post-update the
+        # plist often survives while the launchd job does not).
+        _ensure_launchd_loaded(plist_path)
         print(f"Service already installed at: {plist_path}")
         print("Use --force to reinstall")
         return
-    
+
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(generate_launchd_plist())
-    
+
     subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
-    
+    _verify_launchd_started(plist_path, get_launchd_label())
+
     print()
     print("✓ Service installed and loaded!")
     print()

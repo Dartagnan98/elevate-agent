@@ -289,6 +289,11 @@ class TestLaunchdPlistRefresh:
         calls = []
         def fake_run(cmd, check=False, **kwargs):
             calls.append(cmd)
+            if cmd[:2] == ["launchctl", "print"]:
+                # Report running so _verify_launchd_started passes.
+                return SimpleNamespace(
+                    returncode=0, stdout="state = running\n\tpid = 123\n", stderr=""
+                )
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
@@ -310,6 +315,11 @@ class TestLaunchdPlistRefresh:
         calls = []
         def fake_run(cmd, check=False, **kwargs):
             calls.append(cmd)
+            if cmd[:2] == ["launchctl", "print"]:
+                # Report running so _verify_launchd_started passes.
+                return SimpleNamespace(
+                    returncode=0, stdout="state = running\n\tpid = 123\n", stderr=""
+                )
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
