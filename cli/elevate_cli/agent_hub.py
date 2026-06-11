@@ -53,6 +53,36 @@ AGENT_ARTIFACT_SKILLS: tuple[str, ...] = (
     "photo-cleanup",
 )
 
+# Capability toolsets EVERY agent gets by default (unioned into each agent def
+# the same way SHARED_AGENT_SKILLS is). This is the "full working composition" —
+# browser + computer use, web, file/terminal, skills, vision/image-gen, code
+# execution, cron, delegation, and the comms/memory/bus baseline. Before this,
+# the per-agent `toolsets` only declared data/coordination sets (leads_overview,
+# deals_overview, …) so agents had no browser_use / computer / terminal at all
+# and reported the tool "not available." Specialist DATA scope (elevate_db,
+# admin_deal, leads/deals_overview) stays per-agent — only capability is shared.
+# The run_agent loadout union (run_agent.py) never strips, so these always
+# survive the gateway tool-profile filter.
+SHARED_AGENT_TOOLSETS: tuple[str, ...] = (
+    "agent_bus",
+    "agent_handoff",
+    "delegation",
+    "memory",
+    "session_search",
+    "todo",
+    "messaging",
+    "skills",
+    "web",
+    "browser",
+    "computer",
+    "file",
+    "terminal",
+    "vision",
+    "image_gen",
+    "code_execution",
+    "cronjob",
+)
+
 
 _COMMON_NATIVE_RUNTIME: dict[str, Any] = {
     "runtime_type": "native",
@@ -2334,7 +2364,7 @@ def _load_agent_defs(config: dict[str, Any]) -> list[dict[str, Any]]:
             "platforms": _merge_unique(default.get("platforms"), raw.get("platforms")),
             "session_sources": _merge_unique(default.get("session_sources"), raw.get("session_sources")),
             "skills": _merge_unique(SHARED_AGENT_SKILLS, default.get("skills"), raw.get("skills")),
-            "toolsets": _merge_unique(default.get("toolsets"), raw.get("toolsets")),
+            "toolsets": _merge_unique(SHARED_AGENT_TOOLSETS, default.get("toolsets"), raw.get("toolsets")),
             "prompt": str(
                 raw.get("prompt") or raw.get("system_prompt") or default.get("prompt") or ""
             ).strip(),
