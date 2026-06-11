@@ -680,7 +680,11 @@ def _preserve_parent_mcp_toolsets(
 
 
 DEFAULT_MAX_ITERATIONS = 50
-DEFAULT_CHILD_TIMEOUT = 600  # seconds before a child agent is considered stuck
+DEFAULT_CHILD_TIMEOUT = 3600  # 1h hard cap — subagents must be able to run a
+# LONG time (deep research, multi-step builds) without being killed. 600s was
+# killing legitimately-long children. The stale-heartbeat detector below (not
+# this cap) is what catches a genuinely wedged child; this is just the absolute
+# ceiling, overridable via delegation.child_timeout_seconds.
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
 # Stale-heartbeat thresholds. A child with no API-call progress is either:
 #   - idle between turns (no current_tool) — probably stuck on a slow API call
@@ -1633,9 +1637,20 @@ def _run_single_child(
                 # fetch) keeps current_tool set but doesn't advance
                 # api_call_count — we don't want that to look stale at the
                 # idle threshold.
+                # A child waiting out an API rate-limit (429) backoff shows no
+                # api_call/tool progress but is NOT stuck — it's sleeping until
+                # the limit resets. Treat backoff as progress so we keep the
+                # parent alive instead of falsely declaring the child stale and
+                # letting the gateway time the whole turn out.
+                in_backoff = False
+                try:
+                    _until = float(getattr(child, "_rate_limited_until", 0) or 0)
+                    in_backoff = _until > time.monotonic()
+                except Exception:
+                    in_backoff = False
                 iter_advanced = child_iter > _last_seen_iter[0]
                 tool_changed = child_tool != _last_seen_tool[0]
-                if iter_advanced or tool_changed:
+                if iter_advanced or tool_changed or in_backoff:
                     _last_seen_iter[0] = child_iter
                     _last_seen_tool[0] = child_tool
                     _stale_count[0] = 0
