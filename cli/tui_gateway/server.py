@@ -3268,23 +3268,16 @@ def _format_delegate_completion(results: list) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def _wake_main_agent_with_result(
-    sid: str, session: dict, results: list, summary_text: str
-) -> bool:
-    """Re-wake the main agent so it EVALUATES a finished async delegation and
-    replies to the user in its own voice (instead of dumping the raw result).
+def _park_delegate_result(session: dict, results: list, summary_text: str) -> None:
+    """Park a finished async delegation's result on the session.
 
-    Runs a real follow-up turn on the live session via the existing
-    ``prompt.submit`` machinery (streams + persists + emits like any turn). The
-    API sees the full wake prompt (result + "evaluate & respond"); the STORED
-    user message is rewritten (``persist_user_message``) to a clean
-    ``⟦subagent-result:<status>⟧ …`` marker so (a) the agent keeps the result
-    in context for follow-ups and (b) the dashboard renders it as a "sub agent
-    completed" card, never a fake user bubble.
-
-    The dispatching turn is long done by now, but the user may have started
-    another turn — retry briefly while the session is busy; give up after ~60s
-    so a wedged session never blocks the daemon thread forever.
+    The result is NOT pushed as its own competing turn — it waits in
+    ``session["pending_delegate_results"]`` until ONE of two consumers drains
+    it: the user's next ``prompt.submit`` (their turn addresses the result
+    alongside their message) or the idle re-wake watcher (standalone wake turn
+    when the chat is quiet). This serialization is what prevents the
+    wake-vs-user-message collision that mangled the turn flow when a subagent
+    completed at the same moment the user hit send.
     """
     overall_status = "completed"
     goals = []
@@ -3296,43 +3289,97 @@ def _wake_main_agent_with_result(
         g = str(r.get("goal") or "").strip()
         if g:
             goals.append(g)
-    goal_label = "; ".join(goals)
-
-    wake_prompt = (
-        "[automated] A background task you delegated has finished"
-        + (f" ({goal_label})" if goal_label else "")
-        + ". Result below.\n\n"
-        + summary_text
-        + "\n\nEvaluate whether this satisfies what was asked, then reply to the "
-        "user with a brief synthesis: what came back, whether it's complete, and "
-        "any next step. Do NOT re-delegate the same work."
-    )
-    stored_marker = (
-        f"{_SUBAGENT_RESULT_MARKER}:{overall_status}⟧"
-        + (f" {goal_label}\n\n" if goal_label else "\n\n")
-        + summary_text
-    )
-    params = {
-        "session_id": sid,
-        "text": wake_prompt,
-        "persist_user_message": stored_marker,
+    entry = {
+        "status": overall_status,
+        "goal": "; ".join(goals),
+        "summary": summary_text,
     }
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            session.setdefault("pending_delegate_results", []).append(entry)
+    else:
+        session.setdefault("pending_delegate_results", []).append(entry)
 
+
+def _drain_pending_delegate_results(session: dict) -> list:
+    """Atomically take (and clear) the parked delegation results."""
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            drained = list(session.get("pending_delegate_results") or [])
+            session["pending_delegate_results"] = []
+    else:
+        drained = list(session.get("pending_delegate_results") or [])
+        session["pending_delegate_results"] = []
+    return [e for e in drained if isinstance(e, dict)]
+
+
+def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
+    """Idle watcher for parked delegation results.
+
+    Waits for the session to go idle, then runs a standalone wake turn that
+    consumes whatever is still parked: the agent EVALUATES the result(s) and
+    replies in its own voice via the real ``prompt.submit`` machinery (streams
+    + persists + emits like any turn). If a user turn drains the parked list
+    first, this watcher finds it empty and stands down — exactly one consumer
+    ever speaks for a result. The API sees the full wake prompt; the STORED
+    user message is rewritten (``persist_user_message``) to a clean
+    ``⟦subagent-result:<status>⟧ …`` marker so the dashboard renders a
+    "sub-agent completed" card, never a fake user bubble. Gives up after ~60s
+    of sustained busy (the parked result then rides the next user turn).
+    """
     submit = _methods.get("prompt.submit")
     if submit is None:
         return False
     deadline = time.monotonic() + 60.0
     while time.monotonic() < deadline:
+        if not (session.get("pending_delegate_results") or []):
+            return True  # a user turn consumed it — nothing left to say
         if not session.get("running"):
+            drained = _drain_pending_delegate_results(session)
+            if not drained:
+                return True
+            overall = (
+                "error"
+                if any(e.get("status") != "completed" for e in drained)
+                else "completed"
+            )
+            goal_label = "; ".join(g for g in (e.get("goal") for e in drained) if g)
+            summaries = "\n\n---\n\n".join(
+                str(e.get("summary") or "") for e in drained
+            ).strip()
+            wake_prompt = (
+                "[automated] Background task(s) you delegated finished. "
+                "Result below.\n\n" + summaries +
+                "\n\nEvaluate whether this satisfies what was asked, then reply "
+                "to the user with a brief synthesis: what came back, whether "
+                "it's complete, and any next step. Do NOT re-delegate the same "
+                "work."
+            )
+            stored_marker = (
+                f"{_SUBAGENT_RESULT_MARKER}:{overall}⟧"
+                + (f" {goal_label}\n\n" if goal_label else "\n\n")
+                + summaries
+            )
             try:
-                submit(f"wake_{uuid.uuid4().hex[:8]}", params)
+                submit(
+                    f"wake_{uuid.uuid4().hex[:8]}",
+                    {
+                        "session_id": sid,
+                        "text": wake_prompt,
+                        "persist_user_message": stored_marker,
+                    },
+                )
                 return True
             except Exception:
                 logger.exception("re-wake prompt.submit failed (sid=%s)", sid)
                 return False
         time.sleep(3.0)
     logger.warning(
-        "re-wake skipped: session %s busy >60s after delegation finished", sid
+        "re-wake watcher timed out (sid=%s busy >60s) — parked result will ride "
+        "the next user turn",
+        sid,
     )
     return False
 
@@ -3379,10 +3426,22 @@ def _make_async_delegate_sink(sid: str, session: dict):
             #    arrives via the wake turn below, not as a dumped bubble).
             _emit("delegate.complete", sid, {"task_id": task_id})
 
-            # 3) Re-wake the main agent: it evaluates the result and replies to
-            #    the user. This persists the result (as a clean marker) + the
-            #    agent's synthesis through the normal turn path.
-            _wake_main_agent_with_result(sid, session, results, summary_text)
+            # 3) Park the result, then watch for idle. If the user is mid-turn
+            #    (or hits send right now), THEIR turn drains the parked result
+            #    and addresses it — no competing wake turn, no collision. The
+            #    watcher only fires a standalone wake turn when the session is
+            #    idle and nothing else consumed it. Watcher runs on its OWN
+            #    daemon thread so a busy session never blocks the delivery
+            #    thread (per-child parallel deliveries must not queue behind a
+            #    sibling's wake wait); concurrent watchers self-dedupe via the
+            #    atomic drain.
+            _park_delegate_result(session, results, summary_text)
+            threading.Thread(
+                target=_wake_main_agent_with_result,
+                args=(sid, session),
+                name=f"delegate-wake-{task_id or 'unknown'}",
+                daemon=True,
+            ).start()
         except Exception:
             logger.exception("async delegate sink failed (sid=%s)", sid)
 
@@ -3480,6 +3539,20 @@ def _(rid, params: dict) -> dict:
         session["attached_videos"] = []
         files = list(session.get("attached_files", []))
         session["attached_files"] = []
+    # Server-initiated wake turns (a finished delegation being evaluated) have
+    # no client-side optimistic bubble — without this the "sub-agent completed"
+    # card only appeared after a rehydrate. Emit the stored marker as a live
+    # user-message event FIRST (so the card paints inline, in sequence, before
+    # the evaluation streams under it). Same wire id as the persisted row, so
+    # the rehydrate merge dedups instead of doubling.
+    if isinstance(persist_user_message, str) and persist_user_message.startswith(
+        _SUBAGENT_RESULT_MARKER
+    ):
+        _emit(
+            "message.user",
+            sid,
+            {"message_id": turn_ids["user"], "text": persist_user_message},
+        )
     _emit(
         "message.start",
         sid,
@@ -3567,6 +3640,30 @@ def _(rid, params: dict) -> dict:
             if _activity_digest and isinstance(prompt, str):
                 prompt = f"{_activity_digest}\n\n{prompt}"
 
+            # Async-delegation results that finished while a turn was running
+            # (or in the race window around this submit) are PARKED on the
+            # session instead of fired as a competing re-wake turn. Consume
+            # them here: this turn addresses them alongside the user's
+            # message, and the idle watcher then finds the list empty and
+            # stands down. Like the digest, this context is API-only — the
+            # persist_override below keeps the stored user message clean.
+            _pending_delegate_ctx = ""
+            try:
+                _drained_pending = _drain_pending_delegate_results(session)
+                if _drained_pending:
+                    _pending_delegate_ctx = "\n\n---\n\n".join(
+                        str(e.get("summary") or "") for e in _drained_pending
+                    ).strip()
+            except Exception:
+                logger.debug("pending delegate drain failed", exc_info=True)
+            if _pending_delegate_ctx and isinstance(prompt, str):
+                prompt = (
+                    "[automated context] Background task(s) you delegated have "
+                    "finished — results below. Address them in your reply along "
+                    "with the user's message; do NOT re-delegate the same "
+                    "work.\n\n" + _pending_delegate_ctx + "\n\n---\n\n" + prompt
+                )
+
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
                 from agent.model_metadata import get_model_context_length
@@ -3610,9 +3707,12 @@ def _(rid, params: dict) -> dict:
             current_history = list(history)
             current_history_version = history_version
             persist_override = persist_user_message
-            # If we prepended the activity digest, store only the user's real message
-            # so the digest never leaks into resumed history.
-            if _activity_digest and not isinstance(persist_override, str):
+            # If we prepended the activity digest or parked delegation results,
+            # store only the user's real message so neither leaks into resumed
+            # history.
+            if (_activity_digest or _pending_delegate_ctx) and not isinstance(
+                persist_override, str
+            ):
                 persist_override = text
             followup_rounds = 0
             raw = ""
@@ -4132,6 +4232,17 @@ def _(rid, params: dict) -> dict:
 
     threading.Thread(target=run, daemon=True).start()
     return _ok(rid, {"task_id": task_id})
+
+
+@method("session.running")
+def _(rid, params: dict) -> dict:
+    """Authoritative turn-state for a session — the client watchdog polls this
+    to reconcile a stuck "busy" indicator (e.g. a message.complete it missed
+    during an async/re-wake turn). Pure lookup, no side effects: returns the
+    live ``session["running"]`` latch (False for an unknown/closed session)."""
+    sid = params.get("session_id", "")
+    sess = _sessions.get(sid) if sid else None
+    return _ok(rid, {"running": bool(sess and sess.get("running"))})
 
 
 @method("prompt.btw")

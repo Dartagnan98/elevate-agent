@@ -2918,6 +2918,13 @@ function artifactsFromSubagentEvent(
 // (sidebar clicks to resume a chat happen after this has already fired).
 let forcedNewChatThisLoad = false;
 
+// Per-chat composer drafts. The composer's text state survives navigation, so
+// without this a half-typed message FOLLOWS the user into the next chat they
+// open (and is gone from the chat they left). Keyed by the chat identity
+// (resume/new/seed param); module-level so it survives ChatPage remounts
+// within the app session.
+const composerDrafts = new Map<string, string>();
+
 export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeId = searchParams.get("resume");
@@ -3232,6 +3239,29 @@ export default function ChatPage() {
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
   const [input, setInput] = useState("");
   const [caretIndex, setCaretIndex] = useState(0);
+  // Per-chat draft isolation: stash the composer text under the chat we're
+  // LEAVING and restore whatever the chat we're ENTERING had. A draft→session
+  // mint (?new → ?resume of the SAME conversation) carries the text instead —
+  // that's a re-key, not a navigation.
+  const composerDraftKey = resumeId ?? newChatId ?? seedKey ?? "draft";
+  const composerDraftKeyRef = useRef<string | null>(null);
+  const composerInputMirrorRef = useRef("");
+  useEffect(() => {
+    composerInputMirrorRef.current = input;
+  }, [input]);
+  useEffect(() => {
+    const prev = composerDraftKeyRef.current;
+    if (prev === composerDraftKey) return;
+    if (prev !== null) {
+      composerDrafts.set(prev, composerInputMirrorRef.current);
+      // Same conversation re-keyed by the mint URL rewrite — keep the text.
+      if (composerDraftKey !== mintedSessionIdRef.current) {
+        setInput(composerDrafts.get(composerDraftKey) ?? "");
+        setCaretIndex(0);
+      }
+    }
+    composerDraftKeyRef.current = composerDraftKey;
+  }, [composerDraftKey]);
   const composerScrollTopRef = useRef(0);
   const richLayerRef = useRef<HTMLDivElement>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -4962,6 +4992,23 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
+      // Server-initiated user-row (a wake turn's ⟦subagent-result⟧ marker): no
+      // client submitted it, so without this event the completion card only
+      // appeared after a rehydrate. Paint it inline NOW — the evaluation turn
+      // streams under it, in sequence. Shares the persisted row's wire id, so
+      // the rehydrate merge dedups instead of doubling.
+      gw.on("message.user", (ev) => {
+        if (!accepts(ev)) return;
+        const text = eventText(ev);
+        if (!text) return;
+        const wireId = eventString(ev, "message_id");
+        appendMessage("user", text, {
+          createdAt: eventMillis(ev),
+          ...(wireId ? { id: wireId } : {}),
+        });
+      }),
+    );
+    unsubs.push(
       // Async (non-blocking) delegation finished: the child ran on its own
       // thread after the dispatching turn returned. The result is NOT dumped
       // here — the server re-wakes the main agent, which evaluates the result
@@ -5944,6 +5991,108 @@ export default function ChatPage() {
     });
   }, [busy, queuedInputs, sessionId, state, submitGatewayPrompt]);
 
+  // Busy self-heal watchdog. The async-delegation / re-wake turn flow can leave
+  // `busy` stuck true when a terminal message.complete is missed (turn
+  // boundaries race while a background child finishes and re-wakes the main
+  // agent). That strands queued messages (the drain above only fires when
+  // !busy) and shows "Working" when nothing is actually running — previously
+  // only navigating away and back (a remount) cleared it. Poll the gateway's
+  // authoritative running latch; if it reports idle on two consecutive checks
+  // (~8s), force `busy` off so the queue drains live without a remount.
+  useEffect(() => {
+    if (!busy || state !== "open") return;
+    const sid = activeSessionRef.current;
+    if (!sid) return;
+    let misses = 0;
+    let cancelled = false;
+    const iv = window.setInterval(() => {
+      void gw
+        .request<{ running?: boolean }>("session.running", { session_id: sid })
+        .then((res) => {
+          if (cancelled) return;
+          if (res && res.running === false) {
+            misses += 1;
+            if (misses >= 2) {
+              setBusy(false);
+              setStatusText("Ready");
+            }
+          } else {
+            misses = 0;
+          }
+        })
+        .catch(() => {
+          /* transient (gateway busy/race) — keep polling */
+        });
+    }, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+    };
+  }, [busy, state, gw]);
+
+  // Stalled-turn self-hydrate (main chats). A reconnect/draft-mint race can
+  // bind the view to one live session while the turn streams on another —
+  // accepts() then drops every live event and the chat sits BLANK until the
+  // user navigates away and back (the DB hydrate is what painted it). Instead
+  // of depending on perfect binding, poll the persisted transcript while a
+  // turn is believed running and union it in (same no-shrink merge as the
+  // drill-in). When live streaming works this is a cheap no-op; when binding
+  // missed, the content paints in place within seconds.
+  useEffect(() => {
+    if (!busy || sessionKind === "subagent") return;
+    let cancelled = false;
+    const iv = window.setInterval(() => {
+      const pid = persistedSessionIdRef.current;
+      if (!pid) return;
+      void api
+        .getSessionMessages(pid)
+        .then((resp) => {
+          if (cancelled) return;
+          const hydrated = normalizeStoredTranscript(resp.messages);
+          if (!hydrated.length) return;
+          setMessages((prev) =>
+            mergeServerWithCache(hydrated, prev.length ? prev : hydrated, false),
+          );
+        })
+        .catch(() => {
+          /* transient — keep polling while the turn runs */
+        });
+      // Reconcile the Background-tasks panel from the durable child rows too:
+      // children now write a real end marker (delegation_complete) the moment
+      // they finish, so if the live subagent.complete event was dropped by the
+      // same binding race, flip the stuck "running" card from the DB truth.
+      void api
+        .getSessionChildren(pid)
+        .then((childResp) => {
+          if (cancelled) return;
+          const children = (childResp.children ?? []).filter(
+            (c) => c.session_kind === "subagent",
+          );
+          setChildSessions(children);
+          const endedIds = new Set(
+            children.filter((c) => c.ended_at).map((c) => c.id),
+          );
+          if (!endedIds.size) return;
+          setSubagents((prev) =>
+            prev.map((s) =>
+              s.status === "running" &&
+              s.child_session_id &&
+              endedIds.has(s.child_session_id)
+                ? { ...s, status: "done", completedAt: s.completedAt ?? Date.now() }
+                : s,
+            ),
+          );
+        })
+        .catch(() => {
+          /* additive — panel reconciles on the next tick */
+        });
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+    };
+  }, [busy, sessionKind]);
+
   const hasReadyAttachment = attachments.some(
     (item) => item.status === "ready" && !!item.path,
   );
@@ -6706,19 +6855,43 @@ export default function ChatPage() {
     for (const child of childSessions) {
       if (!child.id || liveChildIds.has(child.id)) continue;
       const startedAt = tsMs(child.started_at);
+      // Derive status from whether the child session actually ENDED — not a
+      // blanket "done". A child still running has no ended_at; hardcoding
+      // "done" made the panel flip running→done→running on navigation (the
+      // persisted row briefly replaced the live "running" entry after a
+      // remount, then the next live event flipped it back).
+      const ended = Boolean(child.ended_at);
       items.push({
         id: `child-${child.id}`,
         kind: "subagent",
         label: child.title?.trim() || "Subagent",
-        status: "done",
+        status: ended ? "done" : "running",
         detail: child.model ?? undefined,
         toolCount: child.tool_call_count ?? undefined,
         startedAt,
-        completedAt: tsMs(child.ended_at) ?? startedAt,
+        completedAt: ended ? tsMs(child.ended_at) : undefined,
         child_session_id: child.id,
       });
     }
-    return items.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    // Collapse "ghost" entries: a subagent.start that never carried a
+    // child_session_id renders as a bare, unopenable "Subagent" card — and the
+    // durable child-session row then adds a SECOND card for the same run, so one
+    // delegation shows as two. When any richer entry (one with a child id)
+    // exists, drop finished id-less generic ghosts. Only finished ones, so a
+    // genuinely in-flight subagent still shows while it spins up.
+    const hasRichChild = items.some((i) => i.child_session_id);
+    const deduped = hasRichChild
+      ? items.filter(
+          (i) =>
+            !(
+              i.kind === "subagent" &&
+              !i.child_session_id &&
+              i.status !== "running" &&
+              (!i.label || i.label === "Subagent")
+            ),
+        )
+      : items;
+    return deduped.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   }, [subagents, tools, childSessions]);
   const runningBackgroundTasks = useMemo(
     () => backgroundTasks.filter((task) => task.status === "running").length,

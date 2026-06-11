@@ -923,6 +923,7 @@ def _build_child_progress_callback(
     depth: Optional[int] = None,
     model: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    child_session_ref: Optional[dict] = None,
 ) -> Optional[callable]:
     """Build a callback that relays child agent tool calls to the parent display.
 
@@ -970,6 +971,15 @@ def _build_child_progress_callback(
             kw["model"] = model
         if toolsets is not None:
             kw["toolsets"] = list(toolsets)
+        # The child's own session id — populated once the child agent is built
+        # (after this callback is created). Threading it onto EVERY event (not
+        # just start/complete) keeps the live "running" card openable into the
+        # drill-in and lets the panel dedup the live entry against the durable
+        # child-session row (otherwise one delegation shows as two cards).
+        if child_session_ref is not None:
+            _csid = child_session_ref.get("id")
+            if _csid:
+                kw["child_session_id"] = _csid
         kw["tool_count"] = _tool_count[0]
         return kw
 
@@ -1262,6 +1272,11 @@ def _build_child_agent(
     # Build progress callback to relay tool calls to parent display.
     # Identity kwargs thread the subagent_id through every emitted event so the
     # TUI can reconstruct the spawn tree and route per-branch controls.
+    # Mutable holder: the child's session id isn't known until the AIAgent is
+    # constructed below, but the callback (and its _identity_kwargs) is built
+    # now. Populating this holder post-build back-fills child_session_id onto
+    # every subsequently-relayed event.
+    child_session_ref: dict = {}
     child_progress_cb = _build_child_progress_callback(
         task_index,
         goal,
@@ -1272,6 +1287,7 @@ def _build_child_agent(
         depth=tui_depth,
         model=effective_model_for_cb,
         toolsets=child_toolsets,
+        child_session_ref=child_session_ref,
     )
 
     # Each subagent gets its own iteration budget capped at max_iterations
@@ -1424,6 +1440,13 @@ def _build_child_agent(
     child._subagent_id = subagent_id
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
+    # Back-fill the child's session id into the progress callback's identity so
+    # every relayed event (start/tool/thinking/complete) carries child_session_id
+    # — keeps the live card openable + dedups it against the durable child row.
+    try:
+        child_session_ref["id"] = getattr(child, "session_id", None)
+    except Exception:
+        pass
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
@@ -2232,6 +2255,21 @@ def _run_single_child(
             except (ValueError, UnboundLocalError) as e:
                 logger.debug("Could not remove child from active_children: %s", e)
 
+        # Close the child's SESSION row (set ended_at + end_reason). A delegated
+        # child runs exactly once and is then finished, but nothing else marks
+        # its session ended — so the row stayed ended_at=NULL forever and the
+        # dashboard couldn't tell a running child from a finished one (the panel
+        # showed every past subagent as "running", and the status flickered
+        # running↔done on navigation). With a real end marker, status is
+        # authoritative: ended_at set = done, null = genuinely still running.
+        try:
+            _cdb = getattr(child, "_session_db", None)
+            _csid = getattr(child, "session_id", None)
+            if _cdb is not None and _csid:
+                _cdb.end_session(_csid, "delegation_complete")
+        except Exception:
+            logger.debug("Failed to close child session after delegation")
+
         # Close tool resources (terminal sandboxes, browser daemons,
         # background processes, httpx clients) so subagent subprocesses
         # don't outlive the delegation.
@@ -2479,8 +2517,28 @@ def delegate_task(
         ]
 
         def _run_async():
+            # Per-child delivery: each child's result hits the sink the moment
+            # that child finishes, while its siblings keep running. A parallel
+            # spawn therefore reports each completion separately and promptly —
+            # previously the sink fired once after the WHOLE batch drained, so
+            # the first result sat silent and the batch read as one completion.
+            delivered = set()
+
+            def _deliver(entry):
+                e = dict(entry) if isinstance(entry, dict) else {"summary": str(entry)}
+                _ti = e.get("task_index")
+                if isinstance(_ti, int) and 0 <= _ti < len(task_list):
+                    e.setdefault("goal", (task_list[_ti].get("goal") or "")[:120])
+                    delivered.add(_ti)
+                try:
+                    async_sink({"task_id": task_id, "results": [e]})
+                except Exception:
+                    logger.exception(
+                        "async delegation sink failed for %s", task_id
+                    )
+
             try:
-                payload = _execute_and_finalize_delegation(
+                _execute_and_finalize_delegation(
                     children,
                     task_list,
                     parent_agent,
@@ -2488,35 +2546,22 @@ def delegate_task(
                     n_tasks,
                     task_labels,
                     max_children,
+                    on_child_complete=_deliver,
                 )
-                payload["task_id"] = task_id
-                # Result entries carry task_index but not the goal text; fold it
-                # in so the completion ping reads as "done: <what you asked>".
-                for _r in payload.get("results", []):
-                    _ti = _r.get("task_index")
-                    if isinstance(_ti, int) and 0 <= _ti < len(task_list):
-                        _r.setdefault("goal", (task_list[_ti].get("goal") or "")[:120])
             except Exception as exc:
                 logger.exception("async delegation %s failed", task_id)
-                payload = {
-                    "task_id": task_id,
-                    "results": [
+                # Deliver error entries for any child that never reported.
+                for d in dispatched:
+                    if d["task_index"] in delivered:
+                        continue
+                    _deliver(
                         {
                             "task_index": d["task_index"],
                             "status": "error",
                             "summary": None,
                             "error": str(exc),
                         }
-                        for d in dispatched
-                    ],
-                    "total_duration_seconds": round(
-                        time.monotonic() - overall_start, 2
-                    ),
-                }
-            try:
-                async_sink(payload)
-            except Exception:
-                logger.exception("async delegation sink failed for %s", task_id)
+                    )
 
         threading.Thread(
             target=_run_async, name=f"delegate-async-{task_id}", daemon=True
@@ -2561,6 +2606,7 @@ def _execute_and_finalize_delegation(
     n_tasks,
     task_labels,
     max_children,
+    on_child_complete=None,
 ) -> Dict[str, Any]:
     """Run the built child agents to completion and assemble the result payload.
 
@@ -2569,13 +2615,29 @@ def _execute_and_finalize_delegation(
     provider, fires subagent_stop hooks, rolls up child cost, and returns the
     ``{"results": [...], "total_duration_seconds": ...}`` payload dict (the
     caller json-encodes it for the sync path or hands it to the async sink).
+
+    ``on_child_complete(entry)`` (optional): fired the moment EACH child's
+    result entry is ready, while siblings keep running. The async path uses it
+    to deliver per-child completions immediately instead of sitting on the
+    first result until the whole batch drains (a 2-task parallel spawn used to
+    report nothing until both finished, then read as ONE completion).
     """
+
+    def _notify_child_complete(entry: Dict[str, Any]) -> None:
+        if on_child_complete is None:
+            return
+        try:
+            on_child_complete(entry)
+        except Exception:
+            logger.debug("on_child_complete hook failed", exc_info=True)
+
     results: List[Dict[str, Any]] = []
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
         result = _run_single_child(0, _t["goal"], child, parent_agent)
         results.append(result)
+        _notify_child_complete(result)
     else:
         # Batch -- run in parallel with per-task progress lines
         completed_count = 0
@@ -2639,6 +2701,7 @@ def _execute_and_finalize_delegation(
                             }
                         results.append(entry)
                         completed_count += 1
+                        _notify_child_complete(entry)
                     break
 
                 from concurrent.futures import wait as _cf_wait, FIRST_COMPLETED
@@ -2664,6 +2727,8 @@ def _execute_and_finalize_delegation(
                         }
                     results.append(entry)
                     completed_count += 1
+                    # Deliver THIS child's result now — siblings keep running.
+                    _notify_child_complete(entry)
 
                     # Print per-task completion line above the spinner
                     idx = entry["task_index"]

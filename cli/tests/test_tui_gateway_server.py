@@ -1838,6 +1838,11 @@ def test_async_delegate_sink_rewakes_main_agent():
             ],
             "total_duration_seconds": 12.3,
         })
+        # The idle wake watcher runs on its own daemon thread — wait for it.
+        for _ in range(100):
+            if submitted:
+                break
+            time.sleep(0.03)
 
     kinds = [e[0] for e in emitted]
     assert "subagent.complete" in kinds
@@ -1849,7 +1854,7 @@ def test_async_delegate_sink_rewakes_main_agent():
     # The raw result is NOT threaded as a fake user message.
     assert session["history"] == []
     assert session["history_version"] == 0
-    # The main agent was re-woken via prompt.submit with the result as context.
+    # The idle watcher consumed the parked result and re-woke via prompt.submit.
     assert len(submitted) == 1
     _rid, params = submitted[0]
     assert params["session_id"] == sid
@@ -1858,6 +1863,40 @@ def test_async_delegate_sink_rewakes_main_agent():
     assert params["persist_user_message"].startswith("⟦subagent-result:completed⟧")
     assert "Run the Lewis Creek CMA" in params["persist_user_message"]
     assert "CMA drafted" in params["persist_user_message"]
+    # Consumed: nothing left parked for a later turn to double-report.
+    assert session.get("pending_delegate_results") == []
+
+
+def test_parked_result_yields_to_busy_session():
+    """If the session is BUSY when the delegation finishes (the user hit send
+    at the same moment), the sink must NOT fire a competing wake turn — the
+    result parks on the session for the user's turn to consume."""
+    session = _session(running=True)
+    submitted = []
+
+    def fake_submit(rid, params):
+        submitted.append((rid, params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
+
+    with patch("tui_gateway.server._emit"), \
+         patch.dict("tui_gateway.server._methods", {"prompt.submit": fake_submit}), \
+         patch("tui_gateway.server.time.sleep"), \
+         patch("tui_gateway.server.time.monotonic", side_effect=[0, 0, 100]):
+        sink = server._make_async_delegate_sink("busy-sid", session)
+        sink({
+            "task_id": "dt_busy1",
+            "results": [{
+                "task_index": 0,
+                "status": "completed",
+                "summary": "Found 7 leads.",
+                "goal": "Find leads",
+            }],
+        })
+
+    # No competing wake turn while busy; result parked for the user's turn.
+    assert submitted == []
+    parked = session.get("pending_delegate_results")
+    assert parked and "Found 7 leads" in parked[0]["summary"]
 
 
 def test_async_delegate_sink_never_raises():
