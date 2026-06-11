@@ -1536,7 +1536,7 @@ def _apply_default_agent_settings(config: dict):
     """Apply recommended defaults for all agent settings without prompting."""
     agent_config = config.setdefault("agent", {})
     agent_config["max_turns"] = 150
-    agent_config.setdefault("gateway_tool_profile", "auto")
+    agent_config.setdefault("gateway_tool_profile", "configured")
     agent_config.setdefault("api_turn_deadline", 0)
     save_env_value("ELEVATE_MAX_ITERATIONS", "150")
 

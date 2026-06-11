@@ -532,9 +532,12 @@ DEFAULT_CONFIG = {
     },
     "agent": {
         "max_turns": 150,
-        # Gateway tool routing. "auto" keeps chat turns lightweight and only
-        # loads heavier code/browser/cron tools when the message asks for them.
-        "gateway_tool_profile": "auto",
+        # Gateway tool routing. "configured" keeps the platform's full toolset
+        # on every turn. ("auto" classified each message and stripped
+        # terminal/file/skills from "conversational" ones — it misfired on real
+        # work requests, leaving agents unable to read .env / run browser work
+        # and claiming the capability "isn't available in this chat".)
+        "gateway_tool_profile": "configured",
         # Inactivity timeout for gateway agent execution (seconds).
         # The agent can run indefinitely as long as it's actively calling
         # tools or receiving API responses.  Only fires when the agent has

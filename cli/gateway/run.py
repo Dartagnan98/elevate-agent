@@ -2779,6 +2779,7 @@ class GatewayRunner:
         env_mode = os.getenv("ELEVATE_GATEWAY_TOOL_PROFILE")
         raw_mode = env_mode
         explicit_mode = bool(str(env_mode or "").strip())
+        from_env = explicit_mode
         if not raw_mode:
             agent_cfg = user_config.get("agent", {}) if isinstance(user_config, dict) else {}
             display_cfg = user_config.get("display", {}) if isinstance(user_config, dict) else {}
@@ -2794,6 +2795,15 @@ class GatewayRunner:
             explicit_mode = bool(str(raw_mode or "").strip())
         mode = str(raw_mode or "").strip().lower()
         if mode in {"auto", "focused", "focus"}:
+            # Config-pinned "auto" is legacy: onboarding wrote it into every
+            # install's config.yaml, so it was never a user choice — and its
+            # per-message classifier misfired on real work, stripping
+            # terminal/file/skills and making agents deny their own
+            # capabilities ("isn't available in this chat"). Treat it as
+            # configured. The ELEVATE_GATEWAY_TOOL_PROFILE env var remains the
+            # explicit opt-in for anyone who truly wants focused routing.
+            if not from_env:
+                return "configured", explicit_mode
             return "auto", explicit_mode
         if mode in {"full", "off", "disabled", "configured"}:
             return "configured", explicit_mode
