@@ -8,6 +8,28 @@ category: cortextos
 
 > Elevate compatibility: This skill was imported from CortextOS. Use Elevate-native Agent Hub, Heartbeats, Cron, Comms, Tasks, Approvals, Activity, memory providers, and agent_handoffs instead of CortextOS daemon, IPC, PM2, PTY injection, or file inbox commands. When a CortextOS command is named below, translate it to the matching Elevate UI/API/store or create a waiting-human item.
 
+## Elevate-native: use the `manage_agent` tool — do NOT edit files
+
+In Elevate you reconfigure the fleet with the **`manage_agent` tool**, not by
+editing files. It writes to the per-account agent store and applies to new/
+restarted agent sessions. Everything below that says edit `.env` / `config.json` /
+`ecosystem.config` / run PM2 is CortextOS-only — IGNORE it for Elevate.
+
+- See valid toolset names: `manage_agent(action="available")`
+- See every agent's current toolsets/skills: `manage_agent(action="list")`
+- Give a toolset to one agent (or ALL): `manage_agent(action="add_toolset", agent="admin"|"all", toolset="composio")`
+- Remove a toolset: `manage_agent(action="remove_toolset", agent=..., toolset=...)`
+- Grant/remove a skill: `manage_agent(action="add_skill"|"remove_skill", agent=..., skill=...)`
+- Change role/description/prompt/enabled: `manage_agent(action="set", agent=..., role=..., prompt=..., enabled=true|false)`
+- Create / retire an agent: `manage_agent(action="create"|"retire", ...)`
+- Goals are separate: use the agent_bus tool (`get_goals` / `update_goals`).
+
+**NEVER** edit `config.yaml`, an agent's config, or — critically — ANY file inside
+the app bundle (`.../Elevate.app/Contents/Resources/...`) or installed package
+code. That is read-only, signed code; editing it corrupts the app ("Elevate is
+damaged"). If a capability genuinely doesn't exist as a toolset, say so and create
+a [HUMAN] task — don't patch code by hand.
+
 # Agent Management
 
 > The definitive guide for managing cortextOS agent lifecycle. Every operation, every script, every protocol. Follow these EXACTLY - do not improvise.

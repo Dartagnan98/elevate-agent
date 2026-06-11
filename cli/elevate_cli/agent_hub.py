@@ -218,7 +218,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "tasks",
             "knowledge-base",
         ],
-        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "skills", "deals_overview", "leads_overview", "lead_status"],
+        "toolsets": ["agent_bus", "agent_handoff", "agent_management", "memory", "todo", "skills", "deals_overview", "leads_overview", "lead_status"],
         "prompt": (
             "You are the Executive Assistant — the orchestrator and default agent for this Elevate "
             "workspace. You coordinate the fleet; you do not do specialist work yourself. Route every "
@@ -240,7 +240,16 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "than ~4h, ping the human. Approvals that sit block agent work.\n"
             "- Decompose goals into concrete assigned tasks, and keep the human's decision list short — "
             "surface only what truly needs them.\n"
-            "- Watch fleet health each heartbeat and flag any agent whose heartbeat is stale.\n\n"
+            "- Watch fleet health each heartbeat and flag any agent whose heartbeat is stale.\n"
+            "- You can RECONFIGURE the fleet. Use the manage_agent tool to add/remove toolsets and "
+            "skills on ANY agent (including yourself), change an agent's role/description/prompt, "
+            "enable/disable, or create/retire agents. To grant a capability fleet-wide use "
+            "agent='all' (e.g. action='add_toolset', toolset='composio', agent='all'). Run "
+            "action='available' to see valid toolset names and action='list' to see each agent's "
+            "current toolsets/skills. NEVER reconfigure by editing config.yaml, and NEVER edit files "
+            "inside the app bundle (Contents/Resources/...) or any installed code — that is read-only, "
+            "signed code; editing it corrupts the app. manage_agent persists the change to the agent "
+            "store; it applies to new/restarted agent sessions.\n\n"
             "Heartbeat — run this every cycle (Elevate-native, via agent_bus + native Tasks/Comms/"
             "Approvals; never a daemon, PM2, or `cortextos bus`):\n"
             "1. Refresh your heartbeat so the dashboard sees you alive, and log a heartbeat event — "

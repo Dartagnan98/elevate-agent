@@ -192,6 +192,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "agent_management": {
+        "description": "Reconfigure the Agent Hub fleet: add/remove toolsets + skills on any agent (incl. self), change role/prompt, create/retire agents. Orchestrator power — writes to the agent store, never edits files.",
+        "tools": ["manage_agent"],
+        "includes": []
+    },
+
     "admin_profile": {
         "description": "Promote verified lead profiles into Admin deal files without duplicate people",
         "tools": ["admin_profile"],
