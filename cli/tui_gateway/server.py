@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -2160,6 +2161,16 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
 
+    def _stable_id(m: dict) -> Optional[str]:
+        # Wire `message_id` = Elevate's stable per-message identity
+        # (chat_messages.client_message_id; `legacy.{sid}.{ordinal}` fallback
+        # stamped by get_messages_as_conversation for pre-upgrade rows).
+        # NEVER m.get("message_id") — that key is the EXTERNAL platform's id
+        # (telegram update_id, yuanbao msg_id) and must not leak into the
+        # transcript identity namespace.
+        cmid = m.get("client_message_id")
+        return cmid if isinstance(cmid, str) and cmid else None
+
     for m in history:
         if not isinstance(m, dict):
             continue
@@ -2183,14 +2194,18 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             tc_info = tool_call_args.get(tc_id) if tc_id else None
             name = (tc_info[0] if tc_info else None) or m.get("tool_name") or "tool"
             args = (tc_info[1] if tc_info else None) or {}
-            messages.append(
-                {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
-            )
+            entry = {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
+            if _stable_id(m):
+                entry["message_id"] = _stable_id(m)
+            messages.append(entry)
             continue
         display = _content_to_text(m.get("content"))
         if not display.strip():
             continue
-        messages.append({"role": role, "text": display})
+        entry = {"role": role, "text": display}
+        if _stable_id(m):
+            entry["message_id"] = _stable_id(m)
+        messages.append(entry)
 
     return messages
 
@@ -3186,6 +3201,22 @@ def _license_signed_in() -> bool:
     return float(expires_at) > (time.time() + 30)
 
 
+_WIRE_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _wire_message_id(candidate: object = None) -> str:
+    """Validate a client-supplied message id or mint a fresh uuid hex.
+
+    Wire `message_id` is Elevate's stable per-message identity (persisted as
+    chat_messages.client_message_id) — see plans/chat-transcript-refactor.md.
+    Client-minted ids let the dashboard reconcile its optimistic user bubble
+    with the persisted row without content matching.
+    """
+    if isinstance(candidate, str) and _WIRE_MESSAGE_ID_RE.match(candidate):
+        return candidate
+    return uuid.uuid4().hex
+
+
 def _emit_sign_in_nag(sid: str) -> None:
     """Render the sign-in CTA as an assistant turn in the dashboard chat."""
     body = (
@@ -3193,12 +3224,13 @@ def _emit_sign_in_nag(sid: str) -> None:
         "Open the Sign In window (Elevate → Sign In, or press ⌘L) and use your "
         "Elevation Real Estate HQ account. Send your message again once you're in."
     )
-    _emit("message.start", sid)
-    _emit("message.delta", sid, {"text": body, "rendered": body})
+    nag_id = _wire_message_id()
+    _emit("message.start", sid, {"message_id": nag_id})
+    _emit("message.delta", sid, {"text": body, "rendered": body, "message_id": nag_id})
     _emit(
         "message.complete",
         sid,
-        {"text": body, "rendered": body, "status": "complete"},
+        {"text": body, "rendered": body, "status": "complete", "message_id": nag_id},
     )
 
 
@@ -3245,6 +3277,16 @@ def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     persist_user_message = params.get("persist_user_message")
     agent_id = str(params.get("agent_id") or "").strip()
+    # Stable per-message identity for this round trip. The client may mint the
+    # user-message id (so its optimistic bubble and the persisted row share an
+    # identity); the assistant id is always server-minted and rides on every
+    # message.start/delta/complete of the turn. Followup/steer rounds re-mint
+    # both (see turn loop). Holder dict so the _stream closure reads the
+    # CURRENT round's id.
+    turn_ids = {
+        "user": _wire_message_id(params.get("user_message_id")),
+        "assistant": _wire_message_id(),
+    }
     session, err = _sess(params, rid)
     if err:
         return err
@@ -3283,7 +3325,11 @@ def _(rid, params: dict) -> dict:
         session["attached_videos"] = []
         files = list(session.get("attached_files", []))
         session["attached_files"] = []
-    _emit("message.start", sid)
+    _emit(
+        "message.start",
+        sid,
+        {"message_id": turn_ids["assistant"], "user_message_id": turn_ids["user"]},
+    )
 
     def run():
         approval_token = None
@@ -3374,7 +3420,7 @@ def _(rid, params: dict) -> dict:
                 streamer = make_stream_renderer(cols)
 
                 def _stream(delta, _streamer=streamer):
-                    payload = {"text": delta}
+                    payload = {"text": delta, "message_id": turn_ids["assistant"]}
                     if _streamer and (r := _streamer.feed(delta)) is not None:
                         payload["rendered"] = r
                     _emit("message.delta", sid, payload)
@@ -3382,6 +3428,11 @@ def _(rid, params: dict) -> dict:
                 run_kwargs = {
                     "conversation_history": current_history,
                     "stream_callback": _stream,
+                    # Thread the wire ids into the agent so the persisted rows
+                    # (SessionDB.append_message → client_message_id) match
+                    # exactly what we emitted on message.start/delta/complete.
+                    "user_message_id": turn_ids["user"],
+                    "assistant_message_id": turn_ids["assistant"],
                 }
                 # persist_user_message rewrites the stored user-message
                 # content to a clean string so the routing envelope never
@@ -3465,7 +3516,12 @@ def _(rid, params: dict) -> dict:
                     and followup_rounds < 8
                 )
 
-                payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+                payload = {
+                    "text": raw,
+                    "usage": _get_usage(agent),
+                    "status": status,
+                    "message_id": turn_ids["assistant"],
+                }
                 if last_reasoning:
                     payload["reasoning"] = last_reasoning
                 if status_note:
@@ -3516,7 +3572,20 @@ def _(rid, params: dict) -> dict:
                 persist_override = None
                 if isinstance(result, dict) and isinstance(result.get("messages"), list):
                     current_history = list(result["messages"])
-                _emit("message.start", sid)
+                # New round = new identities: the steer text becomes a fresh
+                # (server-minted) user message and the reply a fresh assistant
+                # message. The _stream closure + complete payload read the
+                # holder, so re-minting here re-binds the whole round.
+                turn_ids["user"] = _wire_message_id()
+                turn_ids["assistant"] = _wire_message_id()
+                _emit(
+                    "message.start",
+                    sid,
+                    {
+                        "message_id": turn_ids["assistant"],
+                        "user_message_id": turn_ids["user"],
+                    },
+                )
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
@@ -3572,8 +3641,22 @@ def _(rid, params: dict) -> dict:
             # on dashboard reattach.
             _mark_session_idle(session)
 
+    # Capture round-0 ids BEFORE starting the worker: followup rounds re-mint
+    # turn_ids in the background thread, and the ack must always describe the
+    # submitted turn, not whatever round happens to be live at return time.
+    ack_user_id = turn_ids["user"]
+    ack_assistant_id = turn_ids["assistant"]
     threading.Thread(target=run, daemon=True).start()
-    return _ok(rid, {"status": "streaming"})
+    # Echo the ids so the client can stamp its optimistic user bubble and
+    # pre-bind the assistant message without waiting for message.start.
+    return _ok(
+        rid,
+        {
+            "status": "streaming",
+            "user_message_id": ack_user_id,
+            "message_id": ack_assistant_id,
+        },
+    )
 
 
 @method("clipboard.paste")

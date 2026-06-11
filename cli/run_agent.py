@@ -3559,6 +3559,43 @@ class AIAgent:
                 else:
                     msg["content"] = override
 
+    def _ensure_client_message_ids(self, messages: List[Dict]) -> None:
+        """Stamp a stable ``client_message_id`` on every history dict.
+
+        The turn's final content-bearing assistant message (non-empty content,
+        no tool_calls) gets the gateway-supplied ``_turn_assistant_message_id``
+        so the persisted row matches the id already emitted on
+        message.start/delta/complete. Everything else (intermediate tool-call
+        assistant messages, tool results) gets a fresh uuid. Idempotent:
+        existing ids are never overwritten, and the turn id is applied at most
+        once even across repeated flush calls.
+        """
+        turn_aid = getattr(self, "_turn_assistant_message_id", None)
+        turn_aid_taken = turn_aid and any(
+            isinstance(m, dict) and m.get("client_message_id") == turn_aid
+            for m in messages
+        )
+        final_idx = None
+        if turn_aid and not turn_aid_taken:
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                if not isinstance(m, dict) or m.get("role") != "assistant":
+                    continue
+                content = m.get("content")
+                has_text = isinstance(content, str) and content.strip() or (
+                    isinstance(content, list) and content
+                )
+                if has_text and not m.get("tool_calls"):
+                    final_idx = i
+                break
+        for i, m in enumerate(messages):
+            if not isinstance(m, dict) or m.get("client_message_id"):
+                continue
+            if i == final_idx:
+                m["client_message_id"] = turn_aid
+            else:
+                m["client_message_id"] = uuid.uuid4().hex
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
@@ -3582,6 +3619,7 @@ class AIAgent:
         if not self._session_db:
             return
         self._apply_persist_user_message_override(messages)
+        self._ensure_client_message_ids(messages)
         try:
             # If create_session() failed at startup (e.g. transient lock), the
             # session row may not exist yet.  ensure_session() uses INSERT OR
@@ -3639,6 +3677,7 @@ class AIAgent:
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
+                    client_message_id=msg.get("client_message_id"),
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -9950,6 +9989,8 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        user_message_id: Optional[str] = None,
+        assistant_message_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -9966,6 +10007,11 @@ class AIAgent:
                 transcripts/history when user_message contains API-only
                 synthetic prefixes.
                     or queuing follow-up prefetch work.
+            user_message_id / assistant_message_id: Optional stable wire ids
+                (chat_messages.client_message_id) for this turn's user dict
+                and final content-bearing assistant dict. Supplied by the
+                gateway so persisted rows match the ids it already emitted on
+                message.start/delta/complete. Minted here when absent.
 
         Returns:
             Dict: Complete conversation result with final response and message history
@@ -10006,6 +10052,11 @@ class AIAgent:
         self._stream_callback = stream_callback
         self._persist_user_message_idx = None
         self._persist_user_message_override = persist_user_message
+        # Stable wire ids for this turn (see docstring). Read by the user-turn
+        # append below and the end-of-turn assistant stamping in
+        # _ensure_client_message_ids.
+        self._turn_user_message_id = user_message_id
+        self._turn_assistant_message_id = assistant_message_id
         # Generate unique task_id if not provided to isolate VMs between concurrent tasks
         effective_task_id = task_id or str(uuid.uuid4())
         # Expose the active task_id so tools running mid-turn (e.g. delegate_task
@@ -10157,6 +10208,11 @@ class AIAgent:
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}
+        # Stamp the stable wire id so SessionDB persistence + resume hydration
+        # carry the same identity the gateway emitted/echoed to the client.
+        user_msg["client_message_id"] = (
+            getattr(self, "_turn_user_message_id", None) or uuid.uuid4().hex
+        )
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx

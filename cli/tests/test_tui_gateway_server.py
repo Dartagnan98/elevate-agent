@@ -501,7 +501,8 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
 
     class _Agent:
         def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
         ):
             captured["session_key"] = get_current_session_key(default="")
             return {
@@ -543,7 +544,8 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
         api_key = ""
 
         def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
         ):
             captured["prompt"] = prompt
             return {
@@ -600,6 +602,7 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
             conversation_history=None,
             stream_callback=None,
             persist_user_message=None,
+            **kwargs,
         ):
             captured["prompt"] = prompt
             captured["persist_user_message"] = persist_user_message
@@ -644,7 +647,8 @@ def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
 
     class _Agent:
         def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
         ):
             return {
                 "final_response": "ok",
@@ -1060,7 +1064,8 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
 
     class _RacyAgent:
         def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
         ):
             # Simulate: something external bumped history_version
             # while we were running.
@@ -1122,7 +1127,8 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
 
     class _Agent:
         def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
         ):
             return {
                 "final_response": "reply",

@@ -4735,6 +4735,17 @@ async def get_session_messages(session_id: str):
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         messages = db.get_messages(active_id)
+        # Decorate each row with the stable wire id used for transcript
+        # reconciliation. Pre-upgrade rows (NULL client_message_id) get the
+        # deterministic weak fallback `legacy.{session}.{ordinal}` — ordinal =
+        # raw row position in pk order, the SAME scheme
+        # get_messages_as_conversation uses, so REST and gateway-resume mint
+        # identical ids for the same legacy row.
+        for i, msg in enumerate(messages):
+            if isinstance(msg, dict) and not msg.get("client_message_id"):
+                msg["client_message_id"] = f"legacy.{active_id}.{i}"
+            if isinstance(msg, dict):
+                msg["message_id"] = msg["client_message_id"]
         return {
             "session_id": active_id,
             "requested_session_id": sid,
