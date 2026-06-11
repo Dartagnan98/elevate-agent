@@ -1114,7 +1114,17 @@ function sessionTitle(session: SessionInfo): string {
 
 const SIDEBAR_ACTIVE_STALE_SECONDS = 120;
 const SIDEBAR_CRON_RECENT_EMPTY_SECONDS = 120;
-const SIDEBAR_LOCAL_TURN_STALE_MS = 30 * 60 * 1000;
+// Backstop only. A local "working" turn normally clears on the
+// agent-turn-complete window event (or server reconciliation below). This cap
+// is the last resort if BOTH signals are missed — kept short so a stuck row
+// self-heals in minutes, not the old 30. (The 30-min cap is what made the
+// three-dots spinner appear to run "forever" when a turn ended without its
+// completion event — e.g. navigating away from the chat mid-turn.)
+const SIDEBAR_LOCAL_TURN_STALE_MS = 4 * 60 * 1000;
+// Grace before we trust the SERVER's "not active" over a local turn: the
+// session row can lag a freshly-started turn by a poll, so don't reconcile-drop
+// a turn younger than this.
+const SIDEBAR_LOCAL_TURN_RECONCILE_GRACE_MS = 12 * 1000;
 const CRON_SESSION_ID_RE = /^cron_([^_]+)_\d{8}_\d{6}$/;
 
 function sessionActivitySeconds(session: SessionInfo): number {
@@ -1205,9 +1215,25 @@ function applyLocalActiveTurns(
 ): SessionInfo[] {
   if (!activeTurns.size) return sessions;
   const nowSec = nowMs / 1000;
+  const byId = new Map(sessions.map((s) => [s.id, s]));
   const liveIds = new Set<string>();
   for (const [sid, turn] of activeTurns) {
-    if (nowMs - turn.startedAt > SIDEBAR_LOCAL_TURN_STALE_MS) {
+    const ageMs = nowMs - turn.startedAt;
+    // Hard backstop.
+    if (ageMs > SIDEBAR_LOCAL_TURN_STALE_MS) {
+      activeTurns.delete(sid);
+      continue;
+    }
+    // Self-heal a missed agent-turn-complete: once the turn is past the grace
+    // window and the SERVER (independently, from the real session row) reports
+    // the session as no longer active, the turn is done — drop it so the dots
+    // stop instead of re-bumping last_active forever.
+    const srv = byId.get(sid);
+    if (
+      ageMs > SIDEBAR_LOCAL_TURN_RECONCILE_GRACE_MS &&
+      srv &&
+      srv.is_active === false
+    ) {
       activeTurns.delete(sid);
       continue;
     }
@@ -1320,6 +1346,12 @@ function DesktopSidebar({
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>(readCachedSessions);
+  // Sessions whose agent is currently waiting on the user (clarify/approval/
+  // sudo/secret prompt) — drives the amber sidebar dot. Fed by the
+  // elevate:agent-needs-approval window event ChatPage emits.
+  const [needsApprovalIds, setNeedsApprovalIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   // If we have a cached list, don't show the loading state — paint it instantly.
   const [sessionsLoading, setSessionsLoading] = useState(
     () => readCachedSessions().length === 0,
@@ -1671,11 +1703,32 @@ function DesktopSidebar({
       }
       loadSessions({ refresh: true });
     };
+    const onApproval = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; pending?: boolean }>)
+        .detail;
+      const sid = detail?.sessionId;
+      if (!sid) return;
+      setNeedsApprovalIds((prev) => {
+        const has = prev.has(sid);
+        if (detail?.pending) {
+          if (has) return prev;
+          const next = new Set(prev);
+          next.add(sid);
+          return next;
+        }
+        if (!has) return prev;
+        const next = new Set(prev);
+        next.delete(sid);
+        return next;
+      });
+    };
     window.addEventListener("elevate:agent-turn-complete", onActivity);
     window.addEventListener("elevate:agent-turn-start", onActivity);
+    window.addEventListener("elevate:agent-needs-approval", onApproval);
     return () => {
       window.removeEventListener("elevate:agent-turn-complete", onActivity);
       window.removeEventListener("elevate:agent-turn-start", onActivity);
+      window.removeEventListener("elevate:agent-needs-approval", onApproval);
     };
   }, [loadSessions, readyToLoad]);
 
@@ -2216,6 +2269,7 @@ function DesktopSidebar({
             onCancelRename={() => setRenamingSessionId(null)}
             sessions={pinnedSessions}
             unreadIds={unreadIds}
+            needsApprovalIds={needsApprovalIds}
           />
         )}
 
@@ -2232,6 +2286,7 @@ function DesktopSidebar({
           onCancelRename={() => setRenamingSessionId(null)}
           sessions={chatSessions}
           unreadIds={unreadIds}
+          needsApprovalIds={needsApprovalIds}
           statusText={
             sessionError
               ? "Sessions unavailable"
@@ -2494,6 +2549,7 @@ function SessionSection({
   sessions,
   statusText,
   unreadIds,
+  needsApprovalIds,
 }: {
   embeddedChat: boolean;
   label: string;
@@ -2508,6 +2564,7 @@ function SessionSection({
   sessions: SessionInfo[];
   statusText?: string;
   unreadIds: string[];
+  needsApprovalIds?: Set<string>;
 }) {
   const groupedSessions = useMemo(() => {
     if (label !== "Chats") return null;
@@ -2541,6 +2598,7 @@ function SessionSection({
       pinned={pinnedIds.includes(session.id)}
       session={session}
       unread={unreadIds.includes(session.id)}
+      needsApproval={needsApprovalIds?.has(session.id) ?? false}
     />
   );
 
@@ -2580,14 +2638,22 @@ function SessionStatusDot({
   lastActive,
   unread,
   running,
+  needsApproval,
 }: {
   lastActive: number;
   unread: boolean;
   running?: boolean;
+  needsApproval?: boolean;
 }) {
   let tone: "warning" | "idle" | "ok";
   let label: string;
-  if (running) {
+  // Precedence: needs-input (amber) beats working (the agent has PAUSED for the
+  // user, so showing "working" dots would be misleading) which beats
+  // unread/idle/done.
+  if (needsApproval) {
+    tone = "warning";
+    label = "Needs your input";
+  } else if (running) {
     tone = "ok";
     label = "Running";
   } else if (unread) {
@@ -2603,9 +2669,9 @@ function SessionStatusDot({
     tone = "ok";
     label = "Done";
   }
-  // While a chat is actively running a turn, show three sequenced dots (the
-  // "working" indicator) on its sidebar row instead of the single status dot.
-  if (running) {
+  // While a chat is actively running a turn (and not paused for input), show
+  // three sequenced dots (the "working" indicator) instead of a single dot.
+  if (running && !needsApproval) {
     return (
       <span
         aria-label={label}
@@ -2643,6 +2709,7 @@ function SessionListItem({
   pinned,
   session,
   unread,
+  needsApproval = false,
   displayTitle,
 }: {
   embeddedChat: boolean;
@@ -2655,6 +2722,7 @@ function SessionListItem({
   pinned: boolean;
   session: SessionInfo;
   unread: boolean;
+  needsApproval?: boolean;
   displayTitle?: string;
 }) {
   const route = sessionRoute(session, embeddedChat);
@@ -2665,7 +2733,7 @@ function SessionListItem({
     location.pathname === "/chat" &&
     new URLSearchParams(location.search).get("resume") === session.id;
   const title = displayTitle ?? sessionTitle(session);
-  const running = isFreshActiveSession(session);
+  const running = isFreshActiveSession(session) && !needsApproval;
 
   useEffect(() => {
     if (isRenaming) renameRef.current?.focus();
@@ -2701,7 +2769,7 @@ function SessionListItem({
       role="button"
       tabIndex={0}
       title={title}
-      data-status={unread ? "needs-perms" : running ? "working" : Date.now() - sessionActivitySeconds(session) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
+      data-status={needsApproval ? "needs-perms" : unread ? "needs-perms" : running ? "working" : Date.now() - sessionActivitySeconds(session) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
       className={cn(
         "session-row",
         active && "active",
@@ -2721,6 +2789,7 @@ function SessionListItem({
           lastActive={session.last_active}
           unread={unread}
           running={running}
+          needsApproval={needsApproval}
         />
         </span>
         <span className="title">{title}</span>

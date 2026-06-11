@@ -2996,6 +2996,14 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
   const [busy, setBusy] = useState(false);
+  // Mirror of `busy` for the unmount cleanup (a cleanup closure would capture a
+  // stale `busy`). The sidebar's "working" dots are cleared by the
+  // agent-turn-complete window event — which only fires from message.complete
+  // here. If the user navigates away mid-turn this page unmounts before that
+  // event, so the dots would spin for minutes. Fire a synthetic completion on
+  // unmount so the sidebar releases the row immediately.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
   const [voiceListening, setVoiceListening] = useState(false);
   const [voiceTranscribing, setVoiceTranscribing] = useState(false);
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
@@ -3142,8 +3150,56 @@ export default function ChatPage() {
     [ensureAssistant],
   );
 
+  // On unmount, if a turn is still in flight, tell the sidebar the row is no
+  // longer "working" (the real completion event can't fire from an unmounted
+  // page). The turn keeps running in the gateway; this only releases the
+  // sidebar indicator, and the next /api/sessions poll reconciles truth.
+  useEffect(() => {
+    return () => {
+      if (!busyRef.current || typeof window === "undefined") return;
+      const sid =
+        persistedSessionIdRef.current ?? activeSessionRef.current ?? null;
+      if (!sid) return;
+      window.dispatchEvent(
+        new CustomEvent("elevate:agent-turn-complete", {
+          detail: { sessionId: sid },
+        }),
+      );
+    };
+  }, []);
+
   const pendingAssistantDeltaRef = useRef("");
   const assistantDeltaFlushTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  // Drive the sidebar's amber "needs your input" dot: when the agent raises a
+  // clarify/approval/sudo/secret prompt and is waiting on the user, mark the
+  // row; clear it when resolved (or this page unmounts). Mirrors the
+  // agent-turn-start/complete events the sidebar already consumes.
+  const approvalSidRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sid = persistedSessionIdRef.current ?? activeSessionRef.current ?? null;
+    const pending = Boolean(pendingPrompt) && Boolean(sid);
+    if (pending) approvalSidRef.current = sid;
+    const targetSid = sid ?? approvalSidRef.current;
+    if (!targetSid) return;
+    window.dispatchEvent(
+      new CustomEvent("elevate:agent-needs-approval", {
+        detail: { sessionId: targetSid, pending },
+      }),
+    );
+    if (!pending) approvalSidRef.current = null;
+  }, [pendingPrompt]);
+  useEffect(() => {
+    return () => {
+      if (!approvalSidRef.current || typeof window === "undefined") return;
+      window.dispatchEvent(
+        new CustomEvent("elevate:agent-needs-approval", {
+          detail: { sessionId: approvalSidRef.current, pending: false },
+        }),
+      );
+    };
+  }, []);
   const clearPendingAssistantDelta = useCallback(() => {
     if (assistantDeltaFlushTimerRef.current) {
       window.clearTimeout(assistantDeltaFlushTimerRef.current);
