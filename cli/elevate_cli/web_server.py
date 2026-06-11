@@ -3055,6 +3055,32 @@ async def upload_attachment(session_id: str, file: UploadFile = File(...)):
 # now, not recently-touched — so this stays tight. 300s made idle chats spin.
 _SESSION_ACTIVE_WINDOW_SEC = 25
 _STATUS_CACHE_TTL_SEC = 1.5
+
+
+def _live_running_session_keys() -> set[str]:
+    """DB session keys the in-process gateway is ACTIVELY running a turn for.
+
+    A long interactive turn persists nothing until it finishes, so its
+    ``last_active`` freezes at the user-message time and the 25s active-window
+    check above flips ``is_active`` to False mid-turn — which makes the sidebar
+    drop its "working" dots while the agent is genuinely still working. The
+    gateway tracks ``session["running"]`` in-process (dashboard --tui hosts both),
+    so consult it as the source of truth for "running right now". Best-effort:
+    returns empty if the gateway module isn't loaded (e.g. headless dashboard).
+    """
+    keys: set[str] = set()
+    try:
+        from tui_gateway import server as _gw
+
+        for sess in list(getattr(_gw, "_sessions", {}).values()):
+            if not isinstance(sess, dict) or not sess.get("running"):
+                continue
+            for k in (sess.get("session_key"), sess.get("session_id")):
+                if k:
+                    keys.add(str(k))
+    except Exception:
+        pass
+    return keys
 _status_cache_payload: dict[str, Any] | None = None
 _status_cache_expires_at = 0.0
 _status_cache_lock = threading.Lock()
@@ -3129,12 +3155,13 @@ async def get_sessions(
                 sessions = list_session_summaries(limit=limit, offset=offset)
                 total = pg_session_count() if include_total else offset + len(sessions)
                 now = time.time()
+                _running = _live_running_session_keys()
                 for s in sessions:
                     s["is_active"] = (
                         s.get("ended_at") is None
                         and (now - s.get("last_active", s.get("started_at", 0)))
                         < _SESSION_ACTIVE_WINDOW_SEC
-                    )
+                    ) or (str(s.get("id") or "") in _running)
                 return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
             except Exception:
                 _log.debug("PG slim session list failed, falling back to SessionDB", exc_info=True)
@@ -3145,12 +3172,13 @@ async def get_sessions(
             sessions = db.list_sessions_rich(limit=limit, offset=offset)
             total = db.session_count() if include_total else offset + len(sessions)
             now = time.time()
+            _running = _live_running_session_keys()
             for s in sessions:
                 s["is_active"] = (
                     s.get("ended_at") is None
                     and (now - s.get("last_active", s.get("started_at", 0)))
                     < _SESSION_ACTIVE_WINDOW_SEC
-                )
+                ) or (str(s.get("id") or "") in _running)
             if not include_details:
                 sessions = [_session_list_payload(s) for s in sessions]
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}

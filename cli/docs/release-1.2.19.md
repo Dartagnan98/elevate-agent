@@ -1,8 +1,18 @@
 # Elevate 1.2.19 — release notes
 
-Long-running delegated tasks no longer get cut off early.
+Long-running delegated tasks no longer get cut off early + the sidebar "working"
+indicator stays on for the whole turn.
 
 ## What's fixed
+
+- **Sidebar "working" dots dropped mid-turn.** A chat that was still actively
+  working (e.g. a long reasoning turn) reverted to a plain idle dot after ~25
+  seconds, because the server only considered a session "active" if it had
+  persisted something recently — and a long turn persists nothing until it
+  finishes. The server now reports a session as active whenever the gateway is
+  genuinely running a turn for it, so the animated working indicator stays on for
+  the full turn and clears the instant it completes.
+
 
 - **A long task could abort with "API call sequence exceeded the per-turn
   wall-clock budget."** A safety timeout meant to catch a single hung API call
