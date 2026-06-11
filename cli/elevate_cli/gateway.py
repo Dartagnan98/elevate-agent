@@ -2534,6 +2534,21 @@ def generate_launchd_plist() -> str:
     elevate_home = str(get_elevate_home().resolve())
     log_dir = get_elevate_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    # Redirect Python's bytecode cache OUTSIDE any signed app bundle. On macOS
+    # desktop installs the gateway runs the BUNDLED python from inside
+    # Elevate.app; without this it writes .pyc into Contents/Resources, which
+    # breaks the codesign seal and macOS then refuses to open the app
+    # ("Elevate is damaged"). The desktop app's own python spawns already set
+    # this, but the long-lived launchd gateway did not — so it was the silent
+    # bundle-mutator. Pointing the cache under ELEVATE_HOME keeps .pyc writable
+    # and never in the bundle. (Do NOT set PYTHONDONTWRITEBYTECODE — any
+    # non-empty value disables caching entirely and slows every launch.)
+    pycache_dir = get_elevate_home() / "cache" / "python-pycache"
+    try:
+        pycache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    pycache_dir = str(pycache_dir.resolve())
     label = get_launchd_label()
     profile_arg = _profile_arg(elevate_home)
     # Build a sane PATH for the launchd plist.  launchd provides only a
@@ -2596,6 +2611,8 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>ELEVATE_HOME</key>
         <string>{elevate_home}</string>
+        <key>PYTHONPYCACHEPREFIX</key>
+        <string>{pycache_dir}</string>
     </dict>
     
     <key>RunAtLoad</key>

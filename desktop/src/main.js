@@ -514,9 +514,23 @@ function ensureGatewayInstalled(launcher, baseEnv) {
       const lastVersion = readGatewayVersionMarker();
       if (lastVersion !== appVersion) {
         appendBackendLog(
-          `[gateway] version change ${lastVersion || "(none)"} -> ${appVersion}; restarting to load new code\n`,
+          `[gateway] version change ${lastVersion || "(none)"} -> ${appVersion}; reinstalling to load new code + refresh plist env\n`,
         );
-        if (kickstartGateway(uid)) writeGatewayVersionMarker(appVersion);
+        // Run `gateway install` (not a bare kickstart) so a STALE plist is
+        // rewritten + bootout/bootstrapped. Critical: older plists lack
+        // PYTHONPYCACHEPREFIX, so the launchd gateway wrote .pyc INTO the signed
+        // bundle and broke the codesign seal ("Elevate is damaged"). install →
+        // refresh_launchd_plist_if_needed applies the new env; a bare kickstart
+        // would just restart under the old (broken) plist. Falls back to
+        // kickstart if install fails.
+        const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
+        const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
+        appendBackendLog(`[gateway] version-change reinstall rc=${reinstall.status}\n${rout}\n`);
+        if (reinstall.status === 0) {
+          writeGatewayVersionMarker(appVersion);
+        } else if (kickstartGateway(uid)) {
+          writeGatewayVersionMarker(appVersion);
+        }
       } else {
         appendBackendLog(
           "[gateway] self-heal: healthy (plist present + loaded, version current)\n",

@@ -1,6 +1,19 @@
 # Elevate 1.2.18 — release notes
 
-Agents now remember what they did on their heartbeats when you ask in chat.
+Critical stability fix (app could become "damaged") + heartbeat memory in chat.
+
+## Critical: "Elevate is damaged" fix
+
+Some installs hit a macOS "'Elevate' is damaged and can't be opened" error. Cause:
+the background gateway service launched the bundled Python without redirecting its
+bytecode cache, so Python wrote `.pyc` files *into* the signed app bundle, breaking
+the code signature. The gateway's launchd service now sets `PYTHONPYCACHEPREFIX`
+(cache lives under `~/.elevate/cache`, never in the bundle), matching what the app
+already did for its own processes. On update, an out-of-date gateway service is
+rewritten and reloaded automatically so existing installs self-heal.
+
+If your app is already showing "damaged," reinstall this version fresh (download +
+replace the app) — the new build keeps the signature intact going forward.
 
 ## What's fixed
 
