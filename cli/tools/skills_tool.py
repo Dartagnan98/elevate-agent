@@ -170,6 +170,54 @@ _REMOTE_ENV_BACKENDS = frozenset(
 _secret_capture_callback = None
 
 
+# Skills retired by the 1.2.22 cortextOS scrub — their bodies were nativized
+# into built-in tools (agent_bus, Tasks, Comms, manage_agent, …) and the skill
+# files deleted. Agent definitions and cron jobs persisted on customer boxes
+# from before the scrub still LIST these names; a load failure for one of them
+# is expected forever and must not surface a "⚠️ Skill(s) not found" warning
+# to the customer on every handoff run. Only the WARNING is suppressed — if a
+# user later creates a custom skill with one of these names it loads normally.
+RETIRED_SKILL_NAMES = frozenset({
+    "task system",
+    "activity-channel",
+    "agent-management",
+    "agent-migration",
+    "approvals",
+    "bus-reference",
+    "business-news-monitor",
+    "calendar-management",
+    "catalog-browse",
+    "comms",
+    "community-publish",
+    "cortextos-theta-wave",
+    "cron-management",
+    "ecosystem-monitoring",
+    "email-triage",
+    "env-management",
+    "event-logging",
+    "framework-upstream-auto-update",
+    "goal-management",
+    "guardrails-reference",
+    "human-tasks",
+    "knowledge-base",
+    "local-version-control",
+    "m2c1-worker",
+    "mcp-integration",
+    "meeting-prep",
+    "morning-review",
+    "nighttime-mode",
+    "oauth-rotation",
+    "onboarding",
+    "pending-items-summary",
+    "relationship-review",
+    "research-quality-review",
+    "soul-philosophy",
+    "system-diagnostics",
+    "tool-registration",
+    "upstream-sync",
+})
+
+
 def load_env() -> Dict[str, str]:
     """Load profile-scoped environment variables from ELEVATE_HOME/.env."""
     env_path = get_elevate_home() / ".env"

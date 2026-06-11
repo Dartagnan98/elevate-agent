@@ -2249,6 +2249,32 @@ class TestBuildJobPromptMissingSkill:
         assert "ghost-skill" in result
         assert "not found" in result.lower() or "skipped" in result.lower()
 
+    def test_retired_skills_skip_silently_without_customer_notice(self, caplog):
+        """Pre-scrub agent defs still list retired (nativized) skills — their
+        absence is permanent and must not warn the customer on every handoff
+        run ('⚠️ Skill(s) not found and skipped: comms, …'). A genuinely
+        unknown skill in the same list still warns."""
+        with caplog.at_level(logging.WARNING, logger="cron.scheduler"):
+            with patch("tools.skills_tool.skill_view", side_effect=self._missing_skill_view):
+                result = _build_job_prompt({
+                    "name": "handoff:executive-assistant",
+                    "skills": [
+                        "comms",
+                        "cortextos-theta-wave",
+                        "knowledge-base",
+                        "oauth-rotation",
+                        "ghost-skill",
+                    ],
+                    "prompt": "do the thing",
+                })
+        # Retired names: no notice, no warning.
+        for retired in ("comms", "cortextos-theta-wave", "knowledge-base", "oauth-rotation"):
+            assert retired not in result, retired
+        assert not any("comms" in record.message for record in caplog.records)
+        # Unknown name: still surfaced.
+        assert "ghost-skill" in result
+        assert "do the thing" in result
+
     def test_missing_skill_logs_warning(self, caplog):
         """A warning is logged when a skill cannot be found."""
         with caplog.at_level(logging.WARNING, logger="cron.scheduler"):

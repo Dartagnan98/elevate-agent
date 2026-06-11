@@ -1678,6 +1678,17 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             skipped.append(skill_name)
             continue
         if not loaded or not loaded.get("success"):
+            # Retired (nativized) skills linger in pre-scrub agent defs and
+            # persisted jobs on customer boxes — their absence is expected
+            # forever, so don't warn the customer about it on every run.
+            from tools.skills_tool import RETIRED_SKILL_NAMES
+
+            if skill_name.strip().lower() in RETIRED_SKILL_NAMES:
+                logger.debug(
+                    "Cron job '%s': retired skill '%s' skipped silently",
+                    job.get("name", job.get("id")), skill_name,
+                )
+                continue
             error = load_error or f"Failed to load skill '{skill_name}'"
             logger.warning("Cron job '%s': skill not found, skipping — %s", job.get("name", job.get("id")), error)
             skipped.append(skill_name)
