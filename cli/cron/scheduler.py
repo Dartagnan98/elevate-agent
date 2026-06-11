@@ -1033,14 +1033,16 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         pass
 
     if wrap_response:
-        task_name = job.get("name", job["id"])
-        job_id = job.get("id", "")
+        # Natural-language wrapper. The old header ("Cronjob Response: <name>
+        # (job_id: …) -------------") read like a machine log in the user's
+        # chat; one human line carries the same context. Job ids and stop
+        # instructions live in the dashboard, not every delivery.
+        task_name = str(job.get("name", job["id"]) or "").strip()
+        nice_name = task_name.replace("-", " ").replace("_", " ").strip()
         delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job_id})\n"
-            f"-------------\n\n"
-            f"{content}\n\n"
-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+            f"I ran “{nice_name}” — here’s what I found:\n\n{content}"
+            if nice_name
+            else content
         )
     else:
         delivery_content = content

@@ -12006,7 +12006,21 @@ class GatewayRunner:
             if progress_mode == "new" and tool_name == last_tool[0]:
                 return
             last_tool[0] = tool_name
-            
+
+            # Delegations read as a human action, never a raw tool dump — the
+            # goal/context JSON ("delegate_task(['agent','goal','context'])
+            # {…}") is noise in a chat, and the result follows later anyway.
+            if tool_name in ("delegate_task", "delegate"):
+                _agent_label = ""
+                if isinstance(args, dict):
+                    _agent_label = str(args.get("agent") or "").strip()
+                progress_queue.put(
+                    f"🔀 Delegated a task to {_agent_label}"
+                    if _agent_label
+                    else "🔀 Delegated a task"
+                )
+                return
+
             # Build progress message with primary argument preview
             from agent.display import get_tool_emoji
             emoji = get_tool_emoji(tool_name, default="⚙️")
