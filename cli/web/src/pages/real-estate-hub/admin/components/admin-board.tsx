@@ -16,7 +16,6 @@ import {
   ADMIN_BUYER_PIPELINE,
   ADMIN_ACTIONS,
   ADMIN_AUTOMATIONS,
-  ADMIN_SHOWINGS,
 } from "../admin-data";
 import type { BuyerDeal } from "../admin-data";
 import type { AdminKpi } from "../compute-admin-kpis";
@@ -1012,7 +1011,11 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
               <button className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
                 <span>Buyer admin</span><span className="count mono">{buyerDealsResolved.length}</span>
               </button>
-              <CyclingShowings items={events && events.length > 0 ? events : (ADMIN_SHOWINGS || [])} />
+              {/* Real events only (Google Calendar + deal milestones via
+                  useAdminEvents / computeAdminEvents). Never fall back to the
+                  ADMIN_SHOWINGS demo fixtures — with no events the ticker
+                  renders nothing (CyclingShowings returns null on empty). */}
+              <CyclingShowings items={events ?? []} />
             </div>
             <div className="ab-card-actions">
               <div className="ab-search">
