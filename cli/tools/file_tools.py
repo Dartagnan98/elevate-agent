@@ -156,6 +156,42 @@ _SENSITIVE_PATH_PREFIXES = (
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
+def _compute_protected_code_roots() -> tuple[str, ...]:
+    """Dir prefixes agents must never WRITE into (reads are always fine): the
+    installed Elevate code tree and the Python runtime. Editing these breaks the
+    install. The .app bundle is handled separately. Computed once at import."""
+    import sys as _sys
+
+    roots: list[str] = []
+    try:
+        # cli/tools/file_tools.py → parents[1] is the install code root (cli/).
+        roots.append(str(Path(__file__).resolve().parents[1]).rstrip(os.sep) + os.sep)
+    except Exception:
+        pass
+    try:
+        roots.append(str(Path(_sys.prefix).resolve()).rstrip(os.sep) + os.sep)
+    except Exception:
+        pass
+    # De-dup, drop empties.
+    return tuple(r for r in dict.fromkeys(roots) if r and r != os.sep)
+
+
+def _compute_protected_config_files() -> set[str]:
+    """Exact files agents must not WRITE (config lives behind manage_agent / UI)."""
+    out: set[str] = set()
+    try:
+        from elevate_constants import get_elevate_home
+
+        out.add(str((get_elevate_home() / "config.yaml").resolve()))
+    except Exception:
+        pass
+    return out
+
+
+_PROTECTED_CODE_ROOTS = _compute_protected_code_roots()
+_PROTECTED_CONFIG_FILES = _compute_protected_config_files()
+
+
 def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None:
     """Return an error message if the path targets a sensitive system location."""
     try:
@@ -185,6 +221,20 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             "or config use the manage_agent tool; write working files under "
             "~/Elevation or ~/.elevate instead."
         )
+    # Installed code / Python runtime / config = off-limits to WRITES (reads are
+    # fine). Editing these breaks the install; agent config goes through the
+    # manage_agent tool or the Agent Hub UI, never file edits.
+    _code_err = (
+        f"Refusing to modify installed app code/runtime/config: {filepath}\n"
+        "This is part of the Elevate install and is off-limits to edits. To change "
+        "an agent's tools/skills/config use the manage_agent tool (or the Agent Hub "
+        "Tools & Skills panel); write working files under ~/Elevation or ~/.elevate."
+    )
+    for _root in _PROTECTED_CODE_ROOTS:
+        if resolved.startswith(_root) or normalized.startswith(_root):
+            return _code_err
+    if resolved in _PROTECTED_CONFIG_FILES or normalized in _PROTECTED_CONFIG_FILES:
+        return _code_err
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
