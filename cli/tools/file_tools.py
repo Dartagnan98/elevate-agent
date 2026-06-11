@@ -173,6 +173,18 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             return None
     except Exception:
         pass
+    # Hard guard: NEVER modify the signed application bundle. Any write under
+    # .../<App>.app/Contents/ mutates the code signature → macOS refuses to open
+    # the app ("Elevate is damaged"). Agents reconfigure the fleet via the
+    # manage_agent tool and work in ~/Elevation / ~/.elevate — never in here.
+    if ".app/contents/" in str(resolved).lower() or ".app/contents/" in str(normalized).lower():
+        return (
+            f"Refusing to modify the application bundle: {filepath}\n"
+            "Files inside the .app bundle are read-only signed code — editing them "
+            "corrupts the app and it won't open. To change an agent's tools, skills, "
+            "or config use the manage_agent tool; write working files under "
+            "~/Elevation or ~/.elevate instead."
+        )
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."

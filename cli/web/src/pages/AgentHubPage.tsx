@@ -538,6 +538,136 @@ function FactLine({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
+// Add/remove an agent's TOOLSETS and SKILLS from the dashboard — so you don't
+// have to ask the agent to reconfigure itself (which it did badly, by editing
+// files). Writes via the existing updateAgent PATCH (toolsets/skills). Self-
+// fetches the catalogs; merges in any of the agent's current entries that aren't
+// in the catalog (e.g. MCP/registry toolsets) so nothing is silently dropped.
+function AgentToolsetSkillEditor({
+  agent,
+  saving,
+  onSave,
+}: {
+  agent: AgentHubAgent;
+  saving: boolean;
+  onSave: (patch: AgentEditPatch) => Promise<void>;
+}) {
+  type CatItem = { name: string; label?: string; description?: string; category?: string };
+  const [toolsets, setToolsets] = useState<string[]>(() => [...(agent.toolsets ?? [])]);
+  const [skills, setSkills] = useState<string[]>(() => [...(agent.skills ?? [])]);
+  const [catTs, setCatTs] = useState<CatItem[]>([]);
+  const [catSk, setCatSk] = useState<CatItem[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setToolsets([...(agent.toolsets ?? [])]);
+    setSkills([...(agent.skills ?? [])]);
+    setSaved(false);
+    setErr(null);
+  }, [agent.id]);
+
+  useEffect(() => {
+    let alive = true;
+    api.getToolsets().then((t) => alive && setCatTs(t as CatItem[])).catch(() => {});
+    api.getSkills().then((s) => alive && setCatSk(s as CatItem[])).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const norm = (xs: string[]) => [...xs].sort().join(" ");
+  const dirty =
+    norm(toolsets) !== norm(agent.toolsets ?? []) || norm(skills) !== norm(agent.skills ?? []);
+
+  const tsNames = useMemo(() => {
+    const s = new Set<string>([...catTs.map((t) => t.name), ...toolsets]);
+    return [...s].sort();
+  }, [catTs, toolsets]);
+  const skNames = useMemo(() => {
+    const s = new Set<string>([...catSk.map((t) => t.name), ...skills]);
+    return [...s].sort();
+  }, [catSk, skills]);
+
+  const toggle = (list: string[], set: (v: string[]) => void, name: string) =>
+    set(list.includes(name) ? list.filter((x) => x !== name) : [...list, name]);
+
+  const save = async () => {
+    setErr(null);
+    try {
+      await onSave({ toolsets, skills });
+      setSaved(true);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "save failed");
+    }
+  };
+
+  const chip = (name: string, active: boolean, onClick: () => void, title?: string) => (
+    <button
+      key={name}
+      type="button"
+      title={title}
+      onClick={onClick}
+      className="hub-chip"
+      style={{
+        padding: "3px 9px",
+        margin: "0 6px 6px 0",
+        borderRadius: 999,
+        border: "1px solid var(--sidebar-border)",
+        background: active ? "var(--accent, #2563eb)" : "transparent",
+        color: active ? "#fff" : "var(--sidebar-text-muted)",
+        fontSize: "0.8rem",
+        cursor: "pointer",
+      }}
+    >
+      {active ? "✓ " : "+ "}
+      {name}
+    </button>
+  );
+
+  return (
+    <section className="hub-profile-section">
+      <h4>Tools &amp; Skills</h4>
+      <p className="hub-input-label">
+        Toggle the toolsets and skills this agent has. Saved to the agent and applied
+        to new/restarted sessions — no need to ask the agent to reconfigure itself.
+      </p>
+      {saved && !dirty && <div className="hub-save-note">Saved.</div>}
+      {err && <div className="hub-import-error">{err}</div>}
+
+      <div style={{ marginTop: 10 }}>
+        <div className="hub-input-label" style={{ marginBottom: 6 }}>
+          Toolsets ({toolsets.length})
+        </div>
+        <div>
+          {tsNames.map((n) => {
+            const meta = catTs.find((t) => t.name === n);
+            return chip(n, toolsets.includes(n), () => toggle(toolsets, setToolsets, n), meta?.description || meta?.label);
+          })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <div className="hub-input-label" style={{ marginBottom: 6 }}>
+          Skills ({skills.length})
+        </div>
+        <div>
+          {skNames.map((n) => {
+            const meta = catSk.find((t) => t.name === n);
+            return chip(n, skills.includes(n), () => toggle(skills, setSkills, n), meta?.description);
+          })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <button className="hub-btn" disabled={!dirty || saving} onClick={save}>
+          {saving ? "Saving…" : "Save tools & skills"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function AgentProfileForm({
   agent,
   saving,
@@ -1598,7 +1728,10 @@ function AgentDetailWorkspace({
       </div>
       <div className="hub-agent-detail-body">
         {activeTab === "profile" && (
-          <AgentProfileForm agent={agent} saving={savingConfig} onSave={onConfigSave} />
+          <>
+            <AgentProfileForm agent={agent} saving={savingConfig} onSave={onConfigSave} />
+            <AgentToolsetSkillEditor agent={agent} saving={savingConfig} onSave={onConfigSave} />
+          </>
         )}
         {activeTab === "tasks" && (
           <AgentTasksPanel agent={agent} data={detail.data} loading={detail.loading} />
