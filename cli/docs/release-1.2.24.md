@@ -38,6 +38,12 @@ this was why.
 
 ## Telegram
 
+- **Background tasks don't block the chat anymore.** Delegating from
+  Telegram now works like the desktop: the agent confirms it sent the work
+  off and the chat stays usable — your messages don't sit in a queue behind
+  the sub-agent. When the result lands, the agent follows up on its own (or
+  folds it into its next reply if you're mid-conversation).
+
 - **Agent bots now show slash commands.** Typing "/" in any agent's bot chat
   pops the full command menu (previously only the primary bot had one).
 - **New agents appear without a restart.** Pair a new agent's bot and it

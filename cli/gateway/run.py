@@ -1496,6 +1496,13 @@ class GatewayRunner:
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
         self._busy_ack_ts: Dict[str, float] = {}  # last busy-ack timestamp per session (debounce)
         self._session_run_generation: Dict[str, int] = {}
+        # Parked async-delegation results per session_key (platform mirror of
+        # the dashboard's parking design): a finished background subagent's
+        # result waits here until ONE consumer drains it — the user's next
+        # message turn (folded into that reply) or the idle wake watcher (a
+        # standalone follow-up message). Exactly one speaker per result.
+        self._pending_platform_delegates: Dict[str, list] = {}
+        self._pending_platform_delegates_lock = threading.Lock()
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -2533,6 +2540,171 @@ class GatewayRunner:
             for session_key, agent in self._running_agents.items()
             if agent is not _AGENT_PENDING_SENTINEL
         }
+
+    # ── Async delegation for platform sessions (Telegram/WhatsApp/…) ──────
+    # Platform mirror of the dashboard's parking design: delegate_task returns
+    # "dispatched" immediately (the user keeps chatting; new messages queue or
+    # interrupt as usual), and each finished child's result PARKS here until
+    # exactly one consumer drains it — the user's next message turn (folded
+    # into that reply) or the idle wake watcher (a standalone follow-up
+    # message sent to the chat).
+
+    def _park_platform_delegate_result(self, session_key: str, results: list) -> None:
+        blocks: list[str] = []
+        overall = "completed"
+        goals: list[str] = []
+        for r in results if isinstance(results, list) else []:
+            if not isinstance(r, dict):
+                continue
+            status = str(r.get("status") or "completed").lower()
+            if status != "completed":
+                overall = "error"
+            goal = str(r.get("goal") or "").strip()
+            if goal:
+                goals.append(goal)
+            ok = status == "completed"
+            header = (
+                "✅ Background task done"
+                if ok
+                else "⚠️ Background task finished with issues"
+            )
+            if goal:
+                header += f": {goal}"
+            body = (
+                str(r.get("summary") or r.get("error") or "").strip()
+                or "(the agent returned no summary)"
+            )
+            blocks.append(f"{header}\n\n{body}")
+        entry = {
+            "status": overall,
+            "goal": "; ".join(goals),
+            "summary": "\n\n---\n\n".join(blocks) or "✅ Background task complete.",
+        }
+        with self._pending_platform_delegates_lock:
+            self._pending_platform_delegates.setdefault(session_key, []).append(entry)
+
+    def _drain_platform_delegate_results(self, session_key: str) -> list:
+        if not session_key:
+            return []
+        with self._pending_platform_delegates_lock:
+            drained = self._pending_platform_delegates.pop(session_key, [])
+        return [e for e in drained if isinstance(e, dict)]
+
+    def _make_platform_delegate_sink(self, *, session_key, session_id, source, loop):
+        """Build the completion callback delegate_task fires for an async
+        (non-blocking) delegation dispatched from a platform message turn."""
+        platform = source.platform
+        chat_id = getattr(source, "chat_id", None)
+        thread_id = getattr(source, "thread_id", None)
+
+        def _watcher() -> None:
+            deadline = time.monotonic() + 600.0
+            while time.monotonic() < deadline:
+                if not self._pending_platform_delegates.get(session_key):
+                    return  # a user turn consumed it
+                if session_key not in self._running_agents:
+                    drained = self._drain_platform_delegate_results(session_key)
+                    if not drained:
+                        return
+                    self._run_platform_delegate_wake(
+                        session_key=session_key,
+                        session_id=session_id,
+                        drained=drained,
+                        platform=platform,
+                        chat_id=chat_id,
+                        thread_id=thread_id,
+                        loop=loop,
+                    )
+                    return
+                time.sleep(3.0)
+            logger.warning(
+                "platform delegate wake timed out waiting for idle (session %s); "
+                "parked result rides the next user turn",
+                session_key,
+            )
+
+        def _sink(payload: dict) -> None:
+            try:
+                results = (payload or {}).get("results") or []
+                if not results:
+                    return
+                self._park_platform_delegate_result(session_key, results)
+                threading.Thread(
+                    target=_watcher,
+                    name=f"platform-delegate-wake-{session_id}",
+                    daemon=True,
+                ).start()
+            except Exception:
+                logger.exception(
+                    "platform delegate sink failed (session %s)", session_key
+                )
+
+        return _sink
+
+    def _run_platform_delegate_wake(
+        self, *, session_key, session_id, drained, platform, chat_id, thread_id, loop
+    ) -> None:
+        """Wake the session's agent to evaluate parked results and message the
+        user. Falls back to delivering the raw result if no agent is available
+        — the user must never silently miss a finished task."""
+        summaries = "\n\n---\n\n".join(
+            str(e.get("summary") or "") for e in drained
+        ).strip()
+        wake_prompt = (
+            "[automated] Background task(s) you delegated finished. Result "
+            "below.\n\n" + summaries +
+            "\n\nEvaluate whether this satisfies what was asked, then reply to "
+            "the user with a brief synthesis: what came back, whether it's "
+            "complete, and any next step. Do NOT re-delegate the same work. "
+            "Reply in plain text suitable for messaging."
+        )
+        stored = "[Background task result]\n\n" + summaries
+        response = ""
+        agent = None
+        with self._agent_cache_lock:
+            cached = self._agent_cache.get(session_key)
+            if cached:
+                agent = cached[0]
+        if agent is not None and session_key not in self._running_agents:
+            # Register as the running turn so user messages queue/interrupt
+            # through the normal busy handling instead of colliding.
+            self._running_agents[session_key] = agent
+            self._running_agents_ts[session_key] = time.time()
+            try:
+                result = agent.run_conversation(
+                    wake_prompt,
+                    task_id=session_id,
+                    persist_user_message=stored,
+                )
+                if isinstance(result, dict):
+                    response = str(result.get("final_response") or "").strip()
+            except Exception:
+                logger.exception(
+                    "platform delegate wake turn failed (session %s)", session_key
+                )
+            finally:
+                self._running_agents.pop(session_key, None)
+                self._running_agents_ts.pop(session_key, None)
+        if not response:
+            response = summaries
+        try:
+            from gateway.delivery import DeliveryTarget
+
+            target = DeliveryTarget(
+                platform=platform,
+                chat_id=str(chat_id) if chat_id else None,
+                thread_id=str(thread_id) if thread_id else None,
+                is_origin=True,
+                is_explicit=bool(chat_id),
+            )
+            fut = asyncio.run_coroutine_threadsafe(
+                self.delivery_router.deliver(response, [target]), loop
+            )
+            fut.result(timeout=120)
+        except Exception:
+            logger.exception(
+                "platform delegate wake delivery failed (session %s)", session_key
+            )
 
     def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
         adapter = self.adapters.get(event.source.platform)
@@ -12338,6 +12510,22 @@ class GatewayRunner:
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides")
+            # Async (non-blocking) delegation for platform chats: same UX as
+            # the dashboard — delegate_task returns "dispatched" instantly so
+            # the turn ends and the chat stays usable; each child's result is
+            # parked and either folded into the user's next reply or delivered
+            # as a follow-up message when the chat is idle. Without this sink
+            # the platform path ran delegations synchronously (typing… until
+            # the subagent finished, with messages stuck behind it).
+            try:
+                agent._async_delegate_sink = self._make_platform_delegate_sink(
+                    session_key=session_key,
+                    session_id=session_id,
+                    source=source,
+                    loop=_loop_for_step,
+                )
+            except Exception:
+                logger.debug("could not attach platform delegate sink", exc_info=True)
 
             _bg_review_release = threading.Event()
             _bg_review_pending: list[str] = []
@@ -12639,6 +12827,26 @@ class GatewayRunner:
             register_gateway_notify(_approval_session_key, _approval_notify_sync)
             try:
                 _persist_override = persist_user_message
+                # Consume any parked async-delegation results: this turn
+                # addresses them alongside the user's message (and the idle
+                # wake watcher then finds the list empty and stands down).
+                # API-only context — the stored user message stays clean.
+                _parked = self._drain_platform_delegate_results(session_key or "")
+                if _parked:
+                    _parked_summaries = "\n\n---\n\n".join(
+                        str(e.get("summary") or "") for e in _parked
+                    ).strip()
+                    if _persist_override is None:
+                        _persist_override = message
+                    message = (
+                        "[automated context] Background task(s) you delegated "
+                        "have finished — results below. Address them in your "
+                        "reply along with the user's message; do NOT "
+                        "re-delegate the same work.\n\n"
+                        + _parked_summaries
+                        + "\n\n---\n\n"
+                        + message
+                    )
                 result = agent.run_conversation(
                     message,
                     conversation_history=agent_history,
