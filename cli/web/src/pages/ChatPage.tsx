@@ -1507,6 +1507,17 @@ function mergeServerWithCache(
   const enriched = serverMessages.map((msg) => {
     const match = cachedByFp.get(fp(msg));
     let next = msg;
+    // No-shrink rule: the fingerprint says these are the same logical message
+    // (same role + first 200 normalized chars). If the cached/rendered copy is
+    // LONGER, the server copy is a stale partial persisted mid-stream —
+    // keeping it visibly truncates an answer the user already read (the
+    // 945→417 shrink in blank-trace). The longer content wins.
+    if (
+      match &&
+      (match.content?.length ?? 0) > (next.content?.length ?? 0)
+    ) {
+      next = { ...next, content: match.content };
+    }
     // The server transcript never stores attachment metadata. Re-attach
     // it from the cache so a sent image still shows its chip on resume.
     if (
@@ -2566,6 +2577,18 @@ function makeArtifact(
   };
 }
 
+// Internal plumbing must never surface as a customer-facing artifact card:
+// macOS/POSIX temp dirs (the terminal tool's elevate-cwd-*/elevate-snap-*
+// shims live there), Elevate's own home/state, and data-plumbing files
+// (.jsonl/.log/.sh) that are pipeline internals, not deliverables. Realtors
+// see PDFs, docs, images, reports — not /private/var/folders/... shims.
+const INTERNAL_ARTIFACT_PATH_RE =
+  /^(?:\/private)?\/(?:var\/folders|tmp)\/|\/\.elevate\/(?:logs|state|scripts|sessions|cache|pgdata)\/|\/(?:elevate-cwd-|elevate-snap-)[^/]*$/;
+
+function isInternalArtifactPath(path: string): boolean {
+  return INTERNAL_ARTIFACT_PATH_RE.test(path);
+}
+
 function extractPathsFromText(text: string): string[] {
   const matches = text.match(
     /(?:~|\/)[A-Za-z0-9._~+\-/ ]+\.(?:csv|docx|gif|html|jpeg|jpg|json|log|md|pdf|png|pptx|svg|txt|webp|xlsx|ya?ml|zip)\b/g,
@@ -2577,6 +2600,7 @@ function extractPathsFromText(text: string): string[] {
     // artifact gets stuck open. Real local artifacts always live inside
     // a directory (/Users/.../x.html, /tmp/.../x.html, ~/dir/x.html).
     .filter((path) => !(path.startsWith("/") && path.indexOf("/", 1) === -1))
+    .filter((path) => !isInternalArtifactPath(path))
     .slice(0, 12);
 }
 
@@ -2725,6 +2749,10 @@ function artifactsFromSubagentEvent(
   const summary = typeof payload.summary === "string" ? payload.summary : "";
 
   for (const path of filesWritten) {
+    // files_written is unfiltered tool plumbing — skip temp/internal files
+    // (elevate-cwd-*/elevate-snap-* shims, .elevate state, /var/folders) so
+    // only customer-facing deliverables become artifact cards.
+    if (isInternalArtifactPath(path)) continue;
     artifacts.push(
       makeArtifact({
         detail: path,
@@ -2904,7 +2932,10 @@ export default function ChatPage() {
           typeof updater === "function"
             ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev)
             : updater;
-        if (prev.length >= 2 && (next?.length ?? 0) === 0) {
+        // >= 1, not >= 2: blank-trace caught a single rendered assistant
+        // answer wiped to empty (listBefore: 1 → 0) — a one-message
+        // transcript deserves the same protection as a long one.
+        if (prev.length >= 1 && (next?.length ?? 0) === 0) {
           // INVARIANT: a populated transcript clears to empty ONLY for a
           // deliberate new chat (URL carries ?new=). Every other populated ->
           // empty transition is the spurious render-then-vanish blank — resume
@@ -6228,10 +6259,6 @@ export default function ChatPage() {
     }
     return grouped;
   }, [artifacts]);
-  const unanchoredArtifacts = useMemo(
-    () => artifacts.filter((artifact) => !artifact.messageId),
-    [artifacts],
-  );
   // Subagents grouped by the parent turn they ran under — surfaced inline in
   // that turn's digest (live/recent turns; resumed turns use the panel).
   const subagentsByMessage = useMemo(() => {
@@ -6841,10 +6868,10 @@ export default function ChatPage() {
                     />
                   );
                 })}
-                <ChatArtifactShelf
-                  artifacts={unanchoredArtifacts}
-                  onOpenArtifact={openArtifactPreview}
-                />
+                {/* Unanchored artifacts no longer render as a persistent
+                    inline shelf in the transcript — they live in the
+                    artifacts/files side panel only (realtors kept seeing
+                    internal file chips pinned for the whole session). */}
                 {pendingPrompt && (
                   <PendingPromptCard
                     pendingPrompt={pendingPrompt}
@@ -9097,93 +9124,6 @@ function ChatActivityDigest({
         </div>
       )}
     </section>
-  );
-}
-
-function ChatArtifactShelf({
-  artifacts,
-  onOpenArtifact,
-}: {
-  artifacts: ArtifactEntry[];
-  onOpenArtifact(artifact: ArtifactEntry): void;
-}) {
-  // Tool/subagent outputs live in the Background tasks panel, not the inline
-  // shelf — only durable file/document artifacts surface here.
-  const visible = artifacts
-    .filter((a) => a.kind !== "output")
-    .slice(-3)
-    .reverse();
-  if (!visible.length) return null;
-
-  return (
-    <section className="space-y-2">
-      {visible.map((artifact) => (
-        <InlineArtifactCard
-          key={`inline-${artifact.id}`}
-          artifact={artifact}
-          onOpenArtifact={onOpenArtifact}
-        />
-      ))}
-    </section>
-  );
-}
-
-function InlineArtifactCard({
-  artifact,
-  onOpenArtifact,
-}: {
-  artifact: ArtifactEntry;
-  onOpenArtifact(artifact: ArtifactEntry): void;
-}) {
-  const { copied, copy } = useCopyToClipboard();
-  const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
-
-  return (
-    <div className="max-w-[38rem] rounded-[8px] border border-[var(--chat-border)] bg-[var(--chat-surface)] px-2.5 py-2 shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
-      <div className="flex items-center gap-2">
-        <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--chat-muted-strong)]" />
-        <button
-          className="min-w-0 flex-1 text-left"
-          onClick={() => onOpenArtifact(artifact)}
-          type="button"
-        >
-          <div className="truncate text-[12.5px] font-medium leading-5 text-[var(--chat-text)]">
-            {artifact.title}
-          </div>
-          <div
-            className={cn(
-              "truncate text-[11.5px] leading-4 text-[var(--chat-muted)]",
-              artifact.path && "font-mono",
-            )}
-            title={artifact.path || artifact.detail || artifact.source || undefined}
-          >
-            {artifact.path || artifact.detail || artifact.source || "Artifact"}
-          </div>
-        </button>
-        <button
-          aria-label="Open artifact"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
-          onClick={() => onOpenArtifact(artifact)}
-          title="Open"
-          type="button"
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
-        <button
-          aria-label="Copy artifact"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--chat-muted)] transition-colors hover:bg-[var(--chat-surface-strong)] hover:text-[var(--chat-text)]"
-          onClick={() => copy(copyText)}
-          title={copied ? "Copied" : "Copy"}
-          type="button"
-        >
-          {copied ? (
-            <CheckCircle2 className="h-3.5 w-3.5" />
-          ) : (
-            <Clipboard className="h-3.5 w-3.5" />
-          )}
-        </button>
-      </div>
-    </div>
   );
 }
 
