@@ -2387,6 +2387,9 @@ export interface EnvVarInfo {
 export interface SessionMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | null;
+  /** Stable per-message id (client_message_id), decorated by the REST reader
+   *  in web_server.get_session_messages. Used for transcriptStore dedup. */
+  message_id?: string | null;
   tool_calls?: Array<{
     id: string;
     function: { name: string; arguments: string };

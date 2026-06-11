@@ -12,6 +12,7 @@ import {
   _flushWritesForTests,
   _resetForTests,
   _setStorageForTests,
+  _setStoreActiveForTests,
   appendDelta,
   appendLocal,
   beginAssistant,
@@ -214,12 +215,23 @@ describe("remount mid-turn (cache restore + replay)", () => {
     expect(snap[0].content).toBe("never finished");
   });
 
-  it("v1 cache keys are purged on first store access", () => {
+  it("v1 cache keys are purged on first store access (when active)", () => {
+    _setStoreActiveForTests(true);
     store.setItem("elevate.chat.messageCache.v1", "{}");
     store.setItem("elevate.chat.activeTurnCache.v1", "{}");
     getSnapshot(KEY);
     expect(store.getItem("elevate.chat.messageCache.v1")).toBeNull();
     expect(store.getItem("elevate.chat.activeTurnCache.v1")).toBeNull();
+  });
+
+  it("leaves v1 caches intact while the store is passive (flag off)", () => {
+    // Default state is passive — flag-off boxes mount ChatPage (which calls
+    // useTranscript) but must NOT lose the legacy warm-restore caches.
+    store.setItem("elevate.chat.messageCache.v1", "{}");
+    store.setItem("elevate.chat.activeTurnCache.v1", "{}");
+    getSnapshot(KEY);
+    expect(store.getItem("elevate.chat.messageCache.v1")).toBe("{}");
+    expect(store.getItem("elevate.chat.activeTurnCache.v1")).toBe("{}");
   });
 });
 

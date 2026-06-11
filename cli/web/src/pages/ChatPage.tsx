@@ -34,6 +34,16 @@ import {
   type GatewayEvent,
 } from "@/lib/gatewayClient";
 import { executeSlash } from "@/lib/slashExec";
+import {
+  activateStore as activateTranscriptStore,
+  clear as transcriptClear,
+  getSnapshot as transcriptSnapshot,
+  hasMessages as transcriptHasMessages,
+  rekey as transcriptRekey,
+  upsert as transcriptUpsert,
+  useTranscript,
+  type TranscriptMessage,
+} from "@/lib/transcriptStore";
 import { cn } from "@/lib/utils";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import {
@@ -113,6 +123,9 @@ interface MicDevice {
 
 interface GatewayTranscriptMessage {
   context?: string;
+  // Stable gateway id (client_message_id mapped to the wire by
+  // _history_to_messages). Additive — used for transcriptStore reconciliation.
+  message_id?: string | null;
   name?: string;
   role: "assistant" | "system" | "tool" | "user";
   text?: string;
@@ -773,6 +786,40 @@ function id(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
+// ── transcriptStore feature flag ────────────────────────────────────────
+// Phase 4 (chat-transcript-refactor.md) backs the transcript onto an external
+// store where "replace the whole list" doesn't exist as an operation. It ships
+// OFF by default; flip per-box for burn-in via `window.__ELEVATE_TRANSCRIPT_STORE__`
+// or `localStorage["elevate.flags.transcriptStore"] = "1"` then reload. Read
+// once at module load so it can't flip mid-session and desync rendered state.
+const TRANSCRIPT_STORE_ENABLED = (() => {
+  try {
+    if (typeof window !== "undefined") {
+      const w = window as unknown as { __ELEVATE_TRANSCRIPT_STORE__?: boolean };
+      if (w.__ELEVATE_TRANSCRIPT_STORE__ === true) return true;
+      if (w.__ELEVATE_TRANSCRIPT_STORE__ === false) return false;
+      const ls = window.localStorage?.getItem("elevate.flags.transcriptStore");
+      return ls === "1" || ls === "true";
+    }
+  } catch {
+    /* SSR / sandboxed */
+  }
+  return false;
+})();
+
+// When the store is the source of truth, hydrated rows must carry the gateway's
+// stable id so a reload dedupes against the live-streamed copy instead of
+// duplicating it. Off-flag, keep the legacy random ids byte-for-byte.
+function stableHydrateId(
+  serverId: string | null | undefined,
+  fallbackPrefix: string,
+): string {
+  if (TRANSCRIPT_STORE_ENABLED && typeof serverId === "string" && serverId) {
+    return serverId;
+  }
+  return id(fallbackPrefix);
+}
+
 function parseObjectPayload(text: string): Record<string, unknown> | null {
   const clean = text.trim();
   if (!clean || (!clean.startsWith("{") && !clean.startsWith("["))) return null;
@@ -877,7 +924,7 @@ function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage
         String(m.text ?? m.context ?? ""),
       ),
       createdAt: Date.now() - Math.max(0, (messages?.length ?? 0) - index),
-      id: id(`history-${index}`),
+      id: stableHydrateId(m.message_id, `history-${index}`),
       role: m.role,
       status: "complete" as const,
       title: m.name,
@@ -959,7 +1006,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       return; // dropped (tool results, empty turns) — tool calls already buffered
     }
 
-    const messageId = id(`stored-${index}`);
+    const messageId = stableHydrateId(m.message_id, `stored-${index}`);
     const chat: ChatMessage = {
       content: collapseSkillInvocation(
         m.role,
@@ -2920,13 +2967,98 @@ export default function ChatPage() {
   const lastTodoSigRef = useRef<string>("");
   const [previewPanelWidth, setPreviewPanelWidth] = useState(defaultPreviewPanelWidth);
   const [chatWidth, setChatWidth] = useState<number | null>(defaultChatWidth);
-  const [messages, setMessagesRaw] = useState<ChatMessage[]>([]);
-  // Wrap the setter so ANY call that wipes a populated list to empty is caught
-  // with its call stack. This is how we pin the exact eraser of the blank bug
-  // (a reconnect/watchdog re-run clearing the conversation) regardless of which
-  // setMessages site does it.
+  // ── transcript state (Phase 4: external store behind a flag) ──────────
+  // chatKey identifies the conversation for the transcriptStore. It mirrors the
+  // existing identity expression so draft/resume/seed collapse to one bucket;
+  // on session mint the URL rewrites ?new=→?resume= (key change) — see the
+  // rekey effect below. `useTranscript` is always called (hooks can't be
+  // conditional); the store stays passive until activateTranscriptStore() runs,
+  // so flag-off boxes are byte-for-byte unaffected.
+  const chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+  const chatKeyRef = useRef(chatKey);
+  chatKeyRef.current = chatKey;
+  const storeMessages = useTranscript(chatKey);
+  const [messagesRaw, setMessagesRaw] = useState<ChatMessage[]>([]);
+  const storeMessagesAsChat = useMemo<ChatMessage[]>(
+    () => storeMessages.slice() as unknown as ChatMessage[],
+    [storeMessages],
+  );
+  const messages = TRANSCRIPT_STORE_ENABLED ? storeMessagesAsChat : messagesRaw;
+
+  // Activate the store once when the flag is on (this is what authorizes the
+  // legacy-cache purge + localStorage write-through).
+  useEffect(() => {
+    if (TRANSCRIPT_STORE_ENABLED) activateTranscriptStore();
+  }, []);
+
+  // Draft→session mint moves the key (?new=<draft> → ?resume=<minted>); carry
+  // the bucket across so the streamed turn doesn't blank. Pre-paint (layout) so
+  // the empty new-key snapshot never reaches the screen. Scoped to the mint
+  // transition ONLY (new key === the id we just minted), so genuine
+  // chat-to-chat navigation never merges two conversations' buckets.
+  const prevChatKeyRef = useRef(chatKey);
+  useLayoutEffect(() => {
+    const prev = prevChatKeyRef.current;
+    prevChatKeyRef.current = chatKey;
+    if (!TRANSCRIPT_STORE_ENABLED || prev === chatKey) return;
+    if (
+      mintedSessionIdRef.current &&
+      chatKey === mintedSessionIdRef.current &&
+      transcriptHasMessages(prev) &&
+      !transcriptHasMessages(chatKey)
+    ) {
+      transcriptRekey(prev, chatKey);
+    }
+  }, [chatKey]);
+
+  // setMessages: off-flag, the legacy useState wrapper (the blank-wipe guard
+  // that pins any populated→empty eraser). On-flag, an upsert-only shim onto
+  // the store — per-message create/grow keyed by stable id, NEVER a whole-list
+  // replace (the list replace WAS the vanish bug). Messages dropped from `next`
+  // simply stay in the store: that's the structural invariant. An empty `next`
+  // routes to clear() only for a deliberate New Chat.
+  const writeStoreFromUpdater = useCallback(
+    (updater: ChatMessage[] | ((p: ChatMessage[]) => ChatMessage[])) => {
+      const key = chatKeyRef.current;
+      const prev = transcriptSnapshot(key) as unknown as ChatMessage[];
+      const next =
+        typeof updater === "function"
+          ? (updater as (p: ChatMessage[]) => ChatMessage[])(prev)
+          : updater;
+      if (!Array.isArray(next)) return;
+      if (prev.length >= 1 && next.length === 0) {
+        if (!newChatPresentRef.current) {
+          blankTrace("blocked spurious list wipe (store)", {
+            prevCount: prev.length,
+            key,
+          });
+          return;
+        }
+        blankTrace("list cleared for new chat (store)", { prevCount: prev.length });
+        transcriptClear(key);
+        return;
+      }
+      // seq = array index so store order tracks the array exactly on first
+      // insert; upsert keeps an existing message's seq (append-only growth).
+      next.forEach((msg, index) => {
+        if (!msg || !msg.id) return;
+        transcriptUpsert(
+          key,
+          { ...(msg as unknown as TranscriptMessage), seq: index },
+          { allowShrink: false },
+        );
+      });
+    },
+    [],
+  );
   const setMessages = useCallback(
     (updater: Parameters<typeof setMessagesRaw>[0]) => {
+      if (TRANSCRIPT_STORE_ENABLED) {
+        writeStoreFromUpdater(
+          updater as ChatMessage[] | ((p: ChatMessage[]) => ChatMessage[]),
+        );
+        return;
+      }
       setMessagesRaw((prev) => {
         const next =
           typeof updater === "function"
@@ -2959,7 +3091,7 @@ export default function ChatPage() {
         return next;
       });
     },
-    [],
+    [writeStoreFromUpdater],
   );
   const [tools, setTools] = useState<ToolEntry[]>([]);
   // Subagent lifecycle (start/complete) — surfaced in the Background tasks panel
@@ -3099,7 +3231,7 @@ export default function ChatPage() {
     [],
   );
 
-  const ensureAssistant = useCallback((createdAt?: number) => {
+  const ensureAssistant = useCallback((createdAt?: number, explicitId?: string) => {
     const startedAt = timestampMillis(createdAt, Date.now());
     if (currentAssistantRef.current) {
       const messageId = currentAssistantRef.current;
@@ -3118,7 +3250,11 @@ export default function ChatPage() {
       }
       return messageId;
     }
-    const messageId = id("assistant");
+    // Adopt the gateway's stable message id (from message.start) when the store
+    // owns identity — so a reload dedupes the streamed turn against its
+    // persisted row instead of duplicating it. Off-flag, mint as before.
+    const messageId =
+      TRANSCRIPT_STORE_ENABLED && explicitId ? explicitId : id("assistant");
     currentAssistantRef.current = messageId;
     setMessages((prev) => [
       ...prev,
@@ -4435,7 +4571,7 @@ export default function ChatPage() {
         const at = eventMillis(ev);
         lastToolActivityAtRef.current = 0;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
-        ensureAssistant(at);
+        ensureAssistant(at, eventString(ev, "message_id") || undefined);
         // Snapshot cumulative output tokens so message.complete can diff
         // out exactly this turn's count.
         turnOutputBaselineRef.current = usageRef.current?.output ?? null;
@@ -5372,6 +5508,7 @@ export default function ChatPage() {
       status = "Sending...",
       targetSessionId?: string,
       skipUserMessage = false,
+      userMessageId?: string,
     ) => {
       const effectiveSessionId = targetSessionId ?? sessionId;
       if (!effectiveSessionId) return;
@@ -5393,8 +5530,9 @@ export default function ChatPage() {
       );
       // When the caller already showed the user bubble optimistically (the
       // new-chat cold-start path), don't append it a second time.
+      let effectiveUserMessageId = userMessageId ?? "";
       if (!skipUserMessage) {
-        appendMessage(
+        effectiveUserMessageId = appendMessage(
           "user",
           text,
           messageAttachments.length ? { attachments: messageAttachments } : {},
@@ -5426,6 +5564,11 @@ export default function ChatPage() {
         }
         if (agentId) {
           payload.agent_id = agentId;
+        }
+        // Persist the on-screen bubble's id so a reload hydrates the same id
+        // (store dedup). Gateway validates [A-Za-z0-9._-]{1,64} else mints.
+        if (TRANSCRIPT_STORE_ENABLED && effectiveUserMessageId) {
+          payload.user_message_id = effectiveUserMessageId;
         }
 
         await gw.request("prompt.submit", payload);
@@ -5722,10 +5865,13 @@ export default function ChatPage() {
       );
       const showedUserMessage = !isSlashCommand && !previewIntent && !busy && !!trimmed;
 
+      // Capture the optimistic bubble's id so the gateway persists the SAME id
+      // (user_message_id) it carries on screen — store dedup on reload.
+      let optimisticUserMessageId = "";
       if (showedUserMessage) {
         flushSync(() => {
           resetComposerForSend();
-          appendMessage(
+          optimisticUserMessageId = appendMessage(
             "user",
             trimmed,
             messageAttachments.length ? { attachments: messageAttachments } : {},
@@ -5876,6 +6022,7 @@ export default function ChatPage() {
         "Sending...",
         targetSessionId,
         showedUserMessage,
+        optimisticUserMessageId || undefined,
       );
       pinCreatedSessionInUrl();
     },

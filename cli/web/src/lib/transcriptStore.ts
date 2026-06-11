@@ -204,11 +204,22 @@ const telemetry: TranscriptTelemetry = {
 };
 
 let legacyKeysPurged = false;
+// The store stays PASSIVE until ChatPage activates it (transcriptStore feature
+// flag ON). While passive it never purges the legacy v1 caches the old
+// ChatPage path still reads — so flag-off boxes keep their warm-restore. Hooks
+// can't be conditional, so `useTranscript` runs even when the flag is off; this
+// gate is what makes that safe.
+let storeActive = false;
 const dirtyChats = new Set<string>();
 let writeTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** ChatPage calls this once on mount when the transcriptStore flag is ON. */
+export function activateStore(): void {
+  storeActive = true;
+}
+
 function purgeLegacyKeysOnce(): void {
-  if (legacyKeysPurged) return;
+  if (legacyKeysPurged || !storeActive) return;
   legacyKeysPurged = true;
   const s = storage();
   if (!s) return;
@@ -358,6 +369,72 @@ export function appendLocal(
     weakId: isWeakId(msg.id),
   });
   bump(chatKey, b);
+}
+
+/**
+ * Create-or-update a single message by id. Content grows monotonically (a
+ * shorter incoming content is ignored unless `allowShrink`, e.g. finalize /
+ * interrupt carrying authoritative final text). Metadata overwrites when
+ * provided. This is the general per-message op the ChatPage compatibility shim
+ * maps array-style updates onto — per-message upsert, NEVER whole-list replace
+ * (the latter was the vanish bug). Returns true if anything changed.
+ */
+export function upsert(
+  chatKey: string,
+  msg: Omit<TranscriptMessage, "seq" | "origin" | "weakId"> &
+    Partial<Pick<TranscriptMessage, "seq" | "origin" | "weakId">>,
+  opts: { allowShrink?: boolean } = {},
+): boolean {
+  const b = bucket(chatKey);
+  const existing = b.byId.get(msg.id);
+  if (!existing) {
+    b.byId.set(msg.id, {
+      ...msg,
+      seq: msg.seq ?? b.liveSeq++,
+      origin: msg.origin ?? "local",
+      weakId: msg.weakId ?? isWeakId(msg.id),
+    });
+    bump(chatKey, b);
+    return true;
+  }
+  const next: TranscriptMessage = { ...existing };
+  let changed = false;
+  const incoming = msg.content ?? "";
+  const grew = incoming.length > (existing.content?.length ?? 0);
+  if (grew || (opts.allowShrink && incoming !== existing.content)) {
+    next.content = incoming;
+    changed = true;
+  }
+  for (const key of [
+    "status",
+    "completedAt",
+    "tokenCount",
+    "title",
+    "warning",
+    "tools",
+    "traces",
+    "attachments",
+  ] as const) {
+    const v = (msg as unknown as Record<string, unknown>)[key];
+    if (v !== undefined && v !== (existing as unknown as Record<string, unknown>)[key]) {
+      // Never demote a finished message back to streaming.
+      if (
+        key === "status" &&
+        v === "streaming" &&
+        existing.status &&
+        existing.status !== "streaming"
+      ) {
+        continue;
+      }
+      (next as unknown as Record<string, unknown>)[key] = v;
+      changed = true;
+    }
+  }
+  if (changed) {
+    b.byId.set(msg.id, next);
+    bump(chatKey, b);
+  }
+  return changed;
 }
 
 export function beginAssistant(
@@ -678,6 +755,11 @@ export function useTranscript(chatKey: string): readonly TranscriptMessage[] {
 export function _setStorageForTests(s: StorageLike | null): void {
   storageOverride = s;
   legacyKeysPurged = false;
+  storeActive = false;
+}
+
+export function _setStoreActiveForTests(v: boolean): void {
+  storeActive = v;
 }
 
 export function _resetForTests(): void {
