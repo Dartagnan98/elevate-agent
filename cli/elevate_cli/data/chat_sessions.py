@@ -42,6 +42,7 @@ _MESSAGE_COLUMNS = (
     "tool_name", "timestamp", "token_count", "finish_reason",
     "reasoning", "reasoning_content", "reasoning_details",
     "codex_reasoning_items", "codex_message_items", "platform_message_id",
+    "client_message_id",
 )
 
 
@@ -416,6 +417,7 @@ def append_message_shadow(
     codex_reasoning_items_json: Optional[str] = None,
     codex_message_items_json: Optional[str] = None,
     platform_message_id: Optional[str] = None,
+    client_message_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     num_tool_calls: int = 0,
 ) -> None:
@@ -434,14 +436,14 @@ def append_message_shadow(
             "tool_name, timestamp, token_count, finish_reason, "
             "reasoning, reasoning_content, reasoning_details, "
             "codex_reasoning_items, codex_message_items, "
-            "platform_message_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "platform_message_id, client_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id, role, content, tool_call_id, tool_calls_json,
                 tool_name, timestamp, token_count, finish_reason,
                 reasoning, reasoning_content, reasoning_details_json,
                 codex_reasoning_items_json, codex_message_items_json,
-                platform_message_id,
+                platform_message_id, client_message_id,
             ),
         )
         if num_tool_calls > 0:
@@ -500,6 +502,7 @@ def replace_messages_shadow(
                     r.get("codex_reasoning_items_json"),
                     r.get("codex_message_items_json"),
                     r.get("platform_message_id"),
+                    r.get("client_message_id"),
                 )
                 for r in rows
             ]
@@ -509,8 +512,8 @@ def replace_messages_shadow(
                 "tool_name, timestamp, token_count, finish_reason, "
                 "reasoning, reasoning_content, reasoning_details, "
                 "codex_reasoning_items, codex_message_items, "
-                "platform_message_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "platform_message_id, client_message_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
         conn.execute(

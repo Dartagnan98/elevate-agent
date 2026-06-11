@@ -22,6 +22,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -238,7 +239,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
-    platform_message_id TEXT
+    platform_message_id TEXT,
+    client_message_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -349,26 +351,18 @@ END;
 
 
 # ---------------------------------------------------------------------------
-# SessionDB → Postgres cutover plumbing (2026-05-24)
+# SessionDB → Postgres read/shadow plumbing (2026-05-24)
 # ---------------------------------------------------------------------------
-# These two env-var flags are the staged hand-over from SQLite to the
-# embedded Postgres `chat_sessions` / `chat_messages` / `chat_state_meta`
-# tables. Both default ON now (2026-05-24 cutover) — PG is the
-# source of truth. The env vars below are kept as kill-switches so the
-# gateway can be reverted to SQLite-primary instantly without a code
-# change if PG hits a regression:
+# `state.db` is still the local SessionDB writer for chat/session/meta rows.
+# Embedded Postgres mirrors those writes through
+# ``elevate_cli.data.sessiondb_shadow`` and may serve reads when the read
+# cutover flag is enabled. The old SQLite-write disable switch was removed
+# after the 1.2.0 surface-state migration because local SessionDB writes are
+# still live for sessions, transcript repair, handoff state, and maintenance.
 #
 #   ELEVATE_SESSIONDB_READ_FROM_PG=0  → revert to SQLite-first reads
-#   ELEVATE_DISABLE_SQLITE_WRITE=0    → re-enable the SQLite write half
-#
-# When both flags resolve to True (the default), the SQLite half of
-# `_execute_write` is a no-op, all reads come from PG, and the shadow
-# writer in ``elevate_cli.data.sessiondb_shadow`` is the primary writer.
-# The on-disk ``state.db`` is kept only for emergency rollback and is
-# scheduled for archival in the post-cutover cleanup.
 
 _SESSIONDB_READ_FROM_PG_ENV = "ELEVATE_SESSIONDB_READ_FROM_PG"
-_SESSIONDB_DISABLE_SQLITE_WRITE_ENV = "ELEVATE_DISABLE_SQLITE_WRITE"
 
 
 def _env_truthy(name: str, *, default: bool = False) -> bool:
@@ -381,11 +375,6 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
 def _read_from_pg() -> bool:
     """Is the PG-first read cutover enabled for this process? (default: True)"""
     return _env_truthy(_SESSIONDB_READ_FROM_PG_ENV, default=True)
-
-
-def _sqlite_writes_disabled() -> bool:
-    """Should `_execute_write` skip the SQLite half? (default: True)"""
-    return _env_truthy(_SESSIONDB_DISABLE_SQLITE_WRITE_ENV, default=True)
 
 
 def _list_sessions_rich_pg(
@@ -559,25 +548,10 @@ class SessionDB:
         random 20-150ms, and retry — breaking the convoy pattern that
         SQLite's built-in deterministic backoff creates.
 
-        Returns whatever *fn* returns.
-
-        Kill switch: when ``ELEVATE_DISABLE_SQLITE_WRITE=1`` the SQLite
-        half is skipped entirely (returns ``None``) — the shadow-write
-        helpers that callers invoke after this method become the primary
-        writers. Used during the SessionDB → PG cutover so we can flip
-        a single env var to retire SQLite without surgery on every
-        write method. The flag is OFF by default; the helper that reads
-        it lives at module scope so it's testable without a SessionDB.
+        Returns whatever *fn* returns. Postgres shadow writes are invoked by
+        callers after this helper and must stay best-effort; they do not
+        replace the local SQLite transaction.
         """
-        if _sqlite_writes_disabled():
-            # No-op: caller's shadow-write call (which always follows
-            # _execute_write today) is the actual write under this flag.
-            # We return None because every existing caller either ignores
-            # the return value or computes it from PG state in a follow
-            # up read. If a write path relies on the SQLite rowcount,
-            # this flag must stay off for that path until the PG twin
-            # returns the equivalent value.
-            return None  # type: ignore[return-value]
         last_err: Optional[Exception] = None
         for attempt in range(self._WRITE_MAX_RETRIES):
             try:
@@ -927,9 +901,6 @@ class SessionDB:
                 started_at=started_at,
             )
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary session insert failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow session insert failed for %s: %s", session_id, exc)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
@@ -958,9 +929,6 @@ class SessionDB:
             from elevate_cli.data.sessiondb_shadow import shadow_end_session
             shadow_end_session(session_id, ended_at, end_reason)
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary session end failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow session end failed for %s: %s", session_id, exc)
 
     def reopen_session(self, session_id: str) -> None:
@@ -975,9 +943,6 @@ class SessionDB:
             from elevate_cli.data.sessiondb_shadow import shadow_reopen_session
             shadow_reopen_session(session_id)
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary session reopen failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow session reopen failed for %s: %s", session_id, exc)
 
     def update_system_prompt(self, session_id: str, system_prompt: str) -> None:
@@ -992,9 +957,6 @@ class SessionDB:
             from elevate_cli.data.sessiondb_shadow import shadow_update_system_prompt
             shadow_update_system_prompt(session_id, system_prompt)
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary system prompt update failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow system prompt update failed for %s: %s", session_id, exc)
 
     def update_token_counts(
@@ -1117,9 +1079,6 @@ class SessionDB:
                 api_call_count=api_call_count,
             )
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary token count update failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow token count update failed for %s: %s", session_id, exc)
 
     def ensure_session(
@@ -1350,9 +1309,6 @@ class SessionDB:
         except ValueError:
             raise
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary title update failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow title update failed for %s: %s", session_id, exc)
         return (rowcount or 0) > 0 or pg_rowcount > 0
 
@@ -1678,9 +1634,8 @@ class SessionDB:
         a recursive CTE that walks compression-continuation edges, so LIMIT
         and OFFSET still apply efficiently.
         """
-        # PG-first read (cutover 2026-05-24). SQLite writes are off by default,
-        # so SQLite reads here would return stale data. Fall back to SQLite
-        # on PG error to preserve the legacy code path during the soak window.
+        # PG-first read (cutover 2026-05-24). SQLite remains the local writer,
+        # so PG read misses/errors fall back to the live state.db path.
         # 2026-05-25: this method was missed in the original cutover; the
         # sidebar was showing cron sessions only through 2026-05-23 because
         # of it. Restored real-time cron sessions in the sidebar.
@@ -1952,6 +1907,7 @@ class SessionDB:
         codex_reasoning_items: Any = None,
         codex_message_items: Any = None,
         platform_message_id: str = None,
+        client_message_id: str = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -1964,7 +1920,16 @@ class SessionDB:
         independent of the SQLite autoincrement primary key and is used by
         platform-specific flows like yuanbao's recall guard to redact a
         message by its platform-side identifier.
+
+        ``client_message_id`` is Elevate's OWN stable per-message identity,
+        exposed to UI clients as wire ``message_id`` for transcript
+        reconciliation. Default-minted here (uuid4 hex) when the caller
+        doesn't supply one, so every writer in the codebase produces
+        identified rows without changes. The gateway passes an explicit id
+        for streamed turns so the persisted row matches the id it already
+        emitted on message.start/delta/complete.
         """
+        client_message_id = client_message_id or uuid.uuid4().hex
         # Serialize structured fields to JSON before entering the write txn
         reasoning_details_json = (
             json.dumps(reasoning_details)
@@ -1995,8 +1960,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, client_message_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -2013,6 +1978,7 @@ class SessionDB:
                     codex_items_json,
                     codex_message_items_json,
                     platform_message_id,
+                    client_message_id,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -2050,13 +2016,11 @@ class SessionDB:
                 codex_reasoning_items_json=codex_items_json,
                 codex_message_items_json=codex_message_items_json,
                 platform_message_id=platform_message_id,
+                client_message_id=client_message_id,
                 timestamp=msg_timestamp,
                 num_tool_calls=num_tool_calls,
             )
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary append_message failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow append_message failed for %s: %s", session_id, exc)
         return result
 
@@ -2164,6 +2128,12 @@ class SessionDB:
                 len(_tc) if isinstance(_tc, list) else 1
             ) if _tc is not None else 0
             _content_raw = self._encode_content(_msg.get("content"))
+            # Stamp a stable id onto the message dict itself (not just the
+            # row): rewrite flows (/retry, /undo, /compress) pass the live
+            # in-memory history here, so stamping keeps the id attached to
+            # the dict for later flushes/resume. Existing ids are preserved.
+            _cmid = _msg.get("client_message_id") or uuid.uuid4().hex
+            _msg["client_message_id"] = _cmid
             _shadow_rows.append({
                 "role": _role,
                 "content": _content_raw if isinstance(_content_raw, str) else None,
@@ -2181,6 +2151,7 @@ class SessionDB:
                 "platform_message_id": (
                     _msg.get("platform_message_id") or _msg.get("message_id")
                 ),
+                "client_message_id": _cmid,
                 "num_tool_calls": _num_tc,
             })
 
@@ -2227,8 +2198,8 @@ class SessionDB:
                     """INSERT INTO messages (session_id, role, content, tool_call_id,
                        tool_calls, tool_name, timestamp, token_count, finish_reason,
                        reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                       codex_message_items, platform_message_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       codex_message_items, platform_message_id, client_message_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         role,
@@ -2245,6 +2216,8 @@ class SessionDB:
                         codex_items_json,
                         codex_message_items_json,
                         platform_msg_id,
+                        # Stamped in the shadow-row loop above (same dicts).
+                        msg.get("client_message_id"),
                     ),
                 )
                 total_messages += 1
@@ -2264,9 +2237,6 @@ class SessionDB:
             from elevate_cli.data.sessiondb_shadow import shadow_replace_messages
             shadow_replace_messages(session_id, _shadow_rows)
         except Exception as exc:
-            if _sqlite_writes_disabled():
-                logger.error("PG-primary replace_messages failed for %s: %s", session_id, exc)
-                raise
             logger.debug("PG shadow replace_messages failed for %s: %s", session_id, exc)
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
@@ -2605,14 +2575,20 @@ class SessionDB:
             with self._lock:
                 placeholders = ",".join("?" for _ in session_ids)
                 rows = self._conn.execute(
-                    "SELECT role, content, tool_call_id, tool_calls, tool_name, "
+                    "SELECT session_id, role, content, tool_call_id, tool_calls, tool_name, "
                     "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                    "codex_reasoning_items, codex_message_items, platform_message_id "
+                    "codex_reasoning_items, codex_message_items, platform_message_id, "
+                    "client_message_id "
                     f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
                     tuple(session_ids),
                 ).fetchall()
 
         messages = []
+        # Per-session ordinal over RAW rows (pre-dedup), used to mint
+        # deterministic weak ids for pre-upgrade rows with NULL
+        # client_message_id. Must match the REST decorator's scheme in
+        # web_server.get_session_messages: legacy.{session_id}.{ordinal}.
+        _legacy_ordinals: Dict[str, int] = {}
         for row in rows:
             content = self._decode_content(row["content"])
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
@@ -2635,6 +2611,18 @@ class SessionDB:
             # for backward compatibility with the JSONL transcript shape.
             if row["platform_message_id"]:
                 msg["message_id"] = row["platform_message_id"]
+            # Elevate's OWN stable id (NOT the platform id above). Pre-upgrade
+            # rows get a deterministic weak fallback so old transcripts still
+            # hydrate with stable identity. Ordinal counts raw rows per
+            # session — incremented even for dedupe-skipped rows so the
+            # numbering matches the REST reader's raw-row indexing.
+            _row_sid = row["session_id"]
+            _ordinal = _legacy_ordinals.get(_row_sid, 0)
+            _legacy_ordinals[_row_sid] = _ordinal + 1
+            msg["client_message_id"] = (
+                row["client_message_id"]
+                or f"legacy.{_row_sid}.{_ordinal}"
+            )
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.
@@ -3352,9 +3340,8 @@ class SessionDB:
     def set_meta(self, key: str, value: str) -> None:
         """Write a value to the state_meta key/value store.
 
-        SQLite write is no-op'd when ELEVATE_DISABLE_SQLITE_WRITE=1; in
-        that mode the shadow PG write becomes the primary write and must
-        not be silently swallowed.
+        SQLite remains the local writer. The Postgres shadow update is
+        best-effort so maintenance bookkeeping never depends on PG.
         """
         def _do(conn):
             conn.execute(
@@ -3363,15 +3350,11 @@ class SessionDB:
                 (key, value),
             )
         self._execute_write(_do)
-        if _sqlite_writes_disabled():
+        try:
             from elevate_cli.data.sessiondb_shadow import shadow_set_meta
             shadow_set_meta(key, value)
-        else:
-            try:
-                from elevate_cli.data.sessiondb_shadow import shadow_set_meta
-                shadow_set_meta(key, value)
-            except Exception as exc:
-                logger.debug("PG shadow meta write failed for %s: %s", key, exc)
+        except Exception as exc:
+            logger.debug("PG shadow meta write failed for %s: %s", key, exc)
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.

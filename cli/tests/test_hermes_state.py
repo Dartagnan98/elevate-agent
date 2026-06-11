@@ -35,6 +35,37 @@ class TestSessionLifecycle:
         assert session["model"] == "test-model"
         assert session["ended_at"] is None
 
+    def test_sqlite_writes_are_live_when_old_disable_env_is_unset(self, tmp_path, monkeypatch):
+        """The removed PG-primary write flag must not turn state.db into a no-op."""
+        monkeypatch.setenv("ELEVATE_SESSIONDB_READ_FROM_PG", "0")
+        monkeypatch.delenv("ELEVATE_DISABLE_SQLITE_WRITE", raising=False)
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session(session_id="s1", source="cli")
+            msg_id = db.append_message("s1", role="user", content="hello")
+
+            session = db.get_session("s1")
+            messages = db.get_messages("s1")
+
+            assert msg_id is not None
+            assert session is not None
+            assert session["message_count"] == 1
+            assert [m["content"] for m in messages] == ["hello"]
+        finally:
+            db.close()
+
+    def test_shadow_failure_stays_best_effort_with_old_disable_env(self, monkeypatch):
+        """A stale shell env must not make PG shadow writes primary again."""
+        from elevate_cli.data import sessiondb_shadow
+
+        monkeypatch.setenv("ELEVATE_DISABLE_SQLITE_WRITE", "1")
+
+        def boom():
+            raise RuntimeError("pg unavailable")
+
+        sessiondb_shadow._safe(boom)
+
     def test_get_nonexistent_session(self, db):
         assert db.get_session("nonexistent") is None
 
@@ -219,8 +250,11 @@ class TestMessageStorage:
 
         conv = db.get_messages_as_conversation("s1")
         assert len(conv) == 2
-        assert conv[0] == {"role": "user", "content": "Hello"}
-        assert conv[1] == {"role": "assistant", "content": "Hi!"}
+        # Every message now carries Elevate's stable per-message identity
+        # (client_message_id) — see tests/test_client_message_id.py.
+        assert conv[0]["role"] == "user" and conv[0]["content"] == "Hello"
+        assert conv[1]["role"] == "assistant" and conv[1]["content"] == "Hi!"
+        assert conv[0]["client_message_id"] and conv[1]["client_message_id"]
 
     def test_finish_reason_stored(self, db):
         db.create_session(session_id="s1", source="cli")

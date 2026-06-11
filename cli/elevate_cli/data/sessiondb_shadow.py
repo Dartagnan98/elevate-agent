@@ -14,8 +14,8 @@ Every public function here is:
     ``json.dumps`` of structured fields before the transaction). Keeps
     the shadow hooks free of policy decisions.
 
-Reads are NOT shadowed — they stay on SQLite until the writer cutover
-ships and the SQLite path is removed.
+PG reads are controlled separately by ``ELEVATE_SESSIONDB_READ_FROM_PG`` in
+``elevate_state``. Local SQLite writes remain live.
 """
 
 from __future__ import annotations
@@ -40,11 +40,6 @@ def _safe(fn, *args, **kwargs) -> None:
     try:
         fn(*args, **kwargs)
     except Exception as exc:
-        if os.environ.get("ELEVATE_DISABLE_SQLITE_WRITE", "1").strip().lower() in {
-            "1", "true", "yes", "on",
-        }:
-            logger.error("pg-primary write failed: %s: %s", fn.__name__, exc)
-            raise
         logger.debug("pg-shadow: %s failed: %s", fn.__name__, exc)
 
 
@@ -151,6 +146,7 @@ def shadow_append_message(
     codex_reasoning_items_json: Optional[str] = None,
     codex_message_items_json: Optional[str] = None,
     platform_message_id: Optional[str] = None,
+    client_message_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     num_tool_calls: int = 0,
 ) -> None:
@@ -171,6 +167,7 @@ def shadow_append_message(
         codex_reasoning_items_json=codex_reasoning_items_json,
         codex_message_items_json=codex_message_items_json,
         platform_message_id=platform_message_id,
+        client_message_id=client_message_id,
         timestamp=timestamp,
         num_tool_calls=num_tool_calls,
     )
