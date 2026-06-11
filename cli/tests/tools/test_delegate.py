@@ -2343,6 +2343,24 @@ class TestOrchestratorRoleBehavior(unittest.TestCase):
         self.assertNotIn("delegate_task", prompt)
         self.assertNotIn("Orchestrator Role", prompt)
 
+    def test_leaf_prompt_tells_it_to_hand_work_up(self):
+        # Single-orchestrator model: a leaf that finds more work must return it
+        # UP to the main agent, not attempt to spawn its own subagent.
+        prompt = _build_child_system_prompt(
+            "Fix tests", role="leaf",
+            max_spawn_depth=2, child_depth=1,
+        )
+        self.assertIn("HANDOFF RULE", prompt)
+        self.assertIn("NEEDS FOLLOW-UP", prompt)
+        self.assertIn("cannot spawn", prompt)
+
+    def test_orchestrator_prompt_omits_leaf_handoff_rule(self):
+        prompt = _build_child_system_prompt(
+            "Survey approaches", role="orchestrator",
+            max_spawn_depth=2, child_depth=1,
+        )
+        self.assertNotIn("HANDOFF RULE", prompt)
+
     def test_orchestrator_prompt_mentions_delegation_capability(self):
         prompt = _build_child_system_prompt(
             "Survey approaches", role="orchestrator",

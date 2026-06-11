@@ -793,6 +793,21 @@ def _build_child_system_prompt(
         "Be thorough but concise -- your response is returned to the "
         "parent agent as a summary."
     )
+    if role != "orchestrator":
+        # Single-orchestrator model: leaves cannot spawn their own subagents.
+        # Instead of getting stuck or half-doing another specialist's job, a
+        # leaf finishes what it can and hands the rest back UP — the main agent
+        # owns all spawning and will dispatch the next worker.
+        parts.append(
+            "\nHANDOFF RULE: You are a leaf worker — you cannot spawn or hand "
+            "off to another agent yourself. If finishing this reveals work that "
+            "belongs to a different specialist, or independent subtasks worth "
+            "running in parallel, do NOT attempt them yourself. Complete your "
+            "own scope, then return your FULL answer plus an explicit line:\n"
+            "  NEEDS FOLLOW-UP: <what needs doing and which specialist/why>\n"
+            "The main agent reads your summary and dispatches the next worker "
+            "from there. Returning a clear handoff up is success, not failure."
+        )
     if role == "orchestrator":
         child_note = (
             "Your own children MUST be leaves (cannot delegate further) "
@@ -1176,6 +1191,14 @@ def _build_child_agent(
     # test_intersection_preserves_delegation_bound test for the design rationale.
     if effective_role == "orchestrator" and "delegation" not in child_toolsets:
         child_toolsets.append("delegation")
+    else:
+        # SINGLE-ORCHESTRATOR: a leaf subagent must NEVER spawn its own
+        # subagent. Strip the delegation toolset even when a named specialist's
+        # loadout carries it (every hub agent now ships `delegation`), so the
+        # only delegation tool in the tree belongs to the main agent. A leaf
+        # that discovers more work returns it upward (see the prompt note) and
+        # the main agent spawns the next worker from there.
+        child_toolsets = [t for t in child_toolsets if t != "delegation"]
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
