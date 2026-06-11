@@ -103,3 +103,41 @@ def test_heartbeat_cron_idempotent(iso_cron):
 def test_enabled_flag_seeds_active(iso_cron):
     job = jobs.ensure_agent_heartbeat_cron("marketing", enabled=True)
     assert job.get("state") != "paused"
+
+
+def test_orchestrator_heartbeat_has_step3_and_step6(iso_cron):
+    ea = jobs.ensure_agent_heartbeat_md("executive-assistant").read_text()
+    # Step 3 fleet health (orchestrator only): heartbeats, approvals >4h, human tasks.
+    assert "FLEET HEALTH" in ea
+    assert "older than 4h" in ea
+    # Step 6 org goals: morning-review trigger + write missing agents' goals.
+    assert "before 10" in ea.lower()
+    assert "north-star" in ea.lower() or "north star" in ea.lower()
+
+
+def test_orchestrator_crons_seeded_paused_and_ea_bound(iso_cron):
+    # Full system seed installs the default fleet (incl. EA) then seeds these.
+    jobs.ensure_system_jobs()
+    orch = [
+        j
+        for j in jobs.load_jobs()
+        if (j.get("origin") or {}).get("source") == "orchestrator-cron"
+    ]
+    names = {j.get("name") for j in orch}
+    assert names == {
+        "check-approvals",
+        "morning-review",
+        "evening-review",
+        "weekly-review",
+        "morning-brief",
+    }
+    assert all(j.get("state") == "paused" for j in orch)
+    assert all(jobs._slug_agent(str(j.get("agent"))) == "executive-assistant" for j in orch)
+    # Idempotent.
+    jobs.ensure_orchestrator_crons()
+    orch2 = [
+        j
+        for j in jobs.load_jobs()
+        if (j.get("origin") or {}).get("source") == "orchestrator-cron"
+    ]
+    assert len(orch2) == 5

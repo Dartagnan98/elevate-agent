@@ -1197,11 +1197,23 @@ def _agent_heartbeat_md_template(agent_id: str) -> str:
     lane = f"{name}" + (f" ({role})" if role else "")
 
     orchestrator_block = (
-        "\n## Orchestrator duty (you only)\n"
-        "As the Executive Assistant you ALSO own FLEET HEALTH every beat: agent_bus "
-        "`read_heartbeats` — flag any agent silent > 5h, nudge it, and escalate to the "
-        "realtor if it stays dark. Refresh the fleet's goals each morning so every "
-        "agent's Step 6 finds fresh goals.\n"
+        "\n## Orchestrator duties (Executive Assistant only)\n"
+        "You run two extra steps the workers don't — do them as part of your beat:\n\n"
+        "STEP 3 — FLEET HEALTH (do this BEFORE your own tasks):\n"
+        "- agent_bus `read_heartbeats` — for each agent whose heartbeat is older than "
+        "5h, send it a nudge and note it; if it stays dark, escalate to the realtor.\n"
+        "- agent_bus `list_approvals` — for any pending approval older than 4h, ping "
+        "the realtor (Comms) with the title and what it blocks.\n"
+        "- Check [HUMAN] tasks (`check_human_tasks`) — for any pending longer than 4h, "
+        "ping the realtor with the title and which agent/parent task it blocks.\n\n"
+        "STEP 6 — ORG GOALS (instead of the worker goal check):\n"
+        "- Read the org goals (agent_bus `get_goals` / your `GOALS.md`). If today's "
+        "daily focus isn't set yet AND it's before 10 AM, run your morning review now "
+        "(morning-review skill). If the north-star is empty, ping the realtor to set it.\n"
+        "- If any agent has empty goals, write their goals and regenerate their GOALS.md "
+        "so their Step 6 finds fresh objectives.\n\n"
+        "Your other rhythm (approvals watch, morning/evening/weekly review, morning "
+        "brief) runs as its own separate crons — keep them enabled.\n"
         if is_orchestrator
         else ""
     )
@@ -1380,6 +1392,111 @@ def ensure_agent_heartbeats(*, enabled: bool = False) -> List[Dict[str, Any]]:
             continue
         if job:
             out.append(job)
+    return out
+
+
+# The Executive Assistant's coordination crons beyond its heartbeat — the cortextOS
+# orchestrator companion set (approvals watch + daily/weekly reviews + morning brief),
+# translated to Elevate-native (agent_bus + native Tasks/Comms/Approvals + the EA's
+# review skills; no `cortextos bus`). EA-bound, seeded paused/opt-in.
+_ORCHESTRATOR_AGENT = "executive-assistant"
+_ORCHESTRATOR_CRONS: List[Dict[str, Any]] = [
+    {
+        "name": "check-approvals",
+        "schedule": "every 2h",
+        "skill": None,
+        "prompt": (
+            "Check pending approvals and human tasks. (1) agent_bus `list_approvals` — "
+            "for any pending approval older than 1h, ping the realtor via Comms with the "
+            "title and what it blocks. (2) `check_human_tasks` — for any [HUMAN] task "
+            "pending > 4h, ping the realtor with the title and what's blocked. ACK any "
+            "approval/human-task messages addressed to you. Native Elevate tools only."
+        ),
+    },
+    {
+        "name": "morning-review",
+        "schedule": "0 8 * * *",
+        "skill": "morning-review",
+        "prompt": (
+            "Run your full morning review (morning-review skill), including the goal "
+            "cascade (goal-management): set the day's focus, cascade goals to each agent, "
+            "then send the realtor a briefing."
+        ),
+    },
+    {
+        "name": "evening-review",
+        "schedule": "0 18 * * *",
+        "skill": "evening-review",
+        "prompt": (
+            "Run your full evening review (evening-review skill): summarize the day, "
+            "propose overnight tasks, and queue nighttime work."
+        ),
+    },
+    {
+        "name": "weekly-review",
+        "schedule": "0 8 * * 1",
+        "skill": "weekly-review",
+        "prompt": (
+            "Run your full weekly review (weekly-review skill): review all agent outputs, "
+            "evaluate performance, and plan next week."
+        ),
+    },
+    {
+        "name": "morning-brief",
+        "schedule": "every 24h",
+        "skill": None,
+        "prompt": (
+            "Build the morning brief: summarize the top 3-5 actions across the fleet from "
+            "the overnight agent activity and surface-heartbeat outputs, and DM the realtor "
+            "a punchy summary via Comms — keep it under 8 lines."
+        ),
+    },
+]
+
+
+def ensure_orchestrator_crons(*, enabled: bool = False) -> List[Dict[str, Any]]:
+    """Seed the Executive Assistant's coordination crons (approvals watch + daily/weekly
+    reviews + morning brief), mirroring the cortextOS orchestrator. EA-bound, seeded
+    paused/opt-in, idempotent (find by name+agent). No-op if the EA isn't installed."""
+    aid = _ORCHESTRATOR_AGENT
+    if aid not in _installed_agent_ids():
+        return []
+    md = ensure_agent_heartbeat_md(aid)  # ensure the EA workdir exists
+    workdir = str(md.parent) if md else str(agent_heartbeat_dir(aid))
+    out: List[Dict[str, Any]] = []
+    for spec in _ORCHESTRATOR_CRONS:
+        try:
+            existing = next(
+                (
+                    j
+                    for j in load_jobs()
+                    if (j.get("name") or "").strip().lower() == spec["name"]
+                    and _slug_agent(str(j.get("agent") or "")) == aid
+                ),
+                None,
+            )
+            if existing:
+                out.append(existing)
+                continue
+            job = create_job(
+                prompt=spec["prompt"],
+                schedule=spec["schedule"],
+                name=spec["name"],
+                skill=spec.get("skill"),
+                deliver="local",
+                origin={"type": "system", "source": "orchestrator-cron", "agent": aid},
+                workdir=workdir,
+                agent=aid,
+            )
+            if not enabled:
+                job = pause_job(
+                    job["id"], reason="orchestrator cron is opt-in (seeded off)"
+                ) or job
+            out.append(job)
+        except Exception:
+            logger.debug(
+                "ensure_orchestrator_crons: %s failed", spec.get("name"), exc_info=True
+            )
     return out
 
 
@@ -1797,6 +1914,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         *ensure_surface_heartbeats(),
         *ensure_surface_automations(),
         *ensure_agent_heartbeats(),
+        *ensure_orchestrator_crons(),
         ensure_theta_wave(),
         ensure_memory_benchmark_job(),
     ]
