@@ -10570,14 +10570,15 @@ class AIAgent:
                 if isinstance(_u, dict) and _u.get("role") == "user":
                     _u["_ephemeral_context"] = _ephemeral_injection
 
-        # Absolute per-turn deadline (see __init__). Anchored on the monotonic
-        # clock — this measures a *duration*, so it must be immune to
-        # wall-clock steps (NTP/DST) and is the correct clock for an
-        # elapsed-time budget. Computed ONCE here, OUTSIDE the outer agentic
-        # loop, so neither a tool round nor a length/compression continuation
-        # (which `continue` back into this loop) can re-anchor it — the budget
-        # bounds the whole cumulative turn, not a single API call's retries.
-        # Local endpoints are exempt (no SLA).
+        # Per-API-call-sequence deadline (see __init__). Anchored on the
+        # monotonic clock (measures a *duration*, immune to NTP/DST steps).
+        # RE-ANCHORED at the top of each agentic iteration (below) so the budget
+        # bounds ONE API call + ITS retries — NOT the whole multi-step turn. A
+        # legitimately long agentic task (e.g. a 10-min delegated SkySlope
+        # extraction: dozens of fast calls, 0 retries) must not be aborted; the
+        # outer loop is already bounded by max_iterations + max_session_seconds,
+        # and a single hung/retry-storming call is still caught here. Local
+        # endpoints are exempt (no SLA).
         _turn_budget = self._api_turn_deadline_s
         if _turn_budget and self.base_url and is_local_endpoint(self.base_url):
             _turn_budget = 0.0
@@ -10586,6 +10587,15 @@ class AIAgent:
         _session_deadline_hit = False
         _turn_loop_started = time.monotonic()
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+            # Re-anchor the per-call wall-clock budget at the start of each
+            # agentic iteration: each API-call sequence (one model response +
+            # ITS retries) gets a fresh budget, so a long multi-step turn is
+            # never falsely aborted while a single hung call still is.
+            # max_iterations bounds the loop, so re-anchoring cannot create an
+            # unbounded run. (Was anchored once outside the loop, which killed
+            # legit 10-min+ delegated tasks — Justin's SkySlope extraction.)
+            if _turn_budget:
+                _turn_deadline_mono0 = time.monotonic()
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
 
