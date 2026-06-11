@@ -3492,6 +3492,25 @@ def _(rid, params: dict) -> dict:
             streamer = make_stream_renderer(cols)
             prompt = text
 
+            # Continuity: prepend a fresh digest of this agent's recent autonomous
+            # (heartbeat/cron) activity so the interactive turn knows what it did out
+            # of band. Each heartbeat runs in its OWN session, so the interactive
+            # session's same-session recall never surfaces it — without this the agent
+            # "isn't aware" when you ask about a heartbeat afterward. Not persisted to
+            # history (persist_override below keeps the stored user message clean), and
+            # '' when there's nothing recent (quiet accounts pay no tokens).
+            _activity_digest = ""
+            try:
+                from elevate_cli.agent_hub import agent_recent_activity_digest
+
+                _activity_digest = agent_recent_activity_digest(
+                    agent_id or "executive-assistant"
+                )
+            except Exception:
+                logger.debug("activity digest skipped", exc_info=True)
+            if _activity_digest and isinstance(prompt, str):
+                prompt = f"{_activity_digest}\n\n{prompt}"
+
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
                 from agent.model_metadata import get_model_context_length
@@ -3535,6 +3554,10 @@ def _(rid, params: dict) -> dict:
             current_history = list(history)
             current_history_version = history_version
             persist_override = persist_user_message
+            # If we prepended the activity digest, store only the user's real message
+            # so the digest never leaks into resumed history.
+            if _activity_digest and not isinstance(persist_override, str):
+                persist_override = text
             followup_rounds = 0
             raw = ""
             status = "complete"

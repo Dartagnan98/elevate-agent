@@ -1991,6 +1991,75 @@ def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> st
     return "\n".join(lines)
 
 
+def agent_recent_activity_digest(
+    agent_id: str, *, limit: int = 8, max_chars: int = 1600
+) -> str:
+    """Compact digest of an agent's recent AUTONOMOUS activity (heartbeats/crons),
+    for injection into an INTERACTIVE turn so the agent knows what it did out of
+    band from this chat. Each heartbeat/cron runs in its own session, so without
+    this the interactive session (same-session recall) never sees that work.
+
+    The executive-assistant gets a fleet view (recent activity across all agents +
+    each agent's last heartbeat); a specialist gets just its own. Returns '' when
+    there's nothing recent (quiet accounts pay no tokens).
+    """
+    aid = _slug(str(agent_id or "")) or "executive-assistant"
+    is_orchestrator = aid == "executive-assistant"
+    try:
+        from elevate_cli.data import connect
+        from elevate_cli.data import surface_state
+
+        with connect() as conn:
+            acts = surface_state.list_activity(
+                conn, None if is_orchestrator else aid, limit=limit
+            )
+            all_beats = surface_state.list_heartbeats(conn, limit=50)
+    except Exception:
+        return ""
+
+    self_beat = None
+    fleet_beats: list[dict[str, Any]] = []
+    if is_orchestrator:
+        fleet_beats = all_beats[:8]
+    else:
+        self_beat = next(
+            (b for b in all_beats if _slug(str(b.get("agent") or "")) == aid), None
+        )
+    if not acts and not fleet_beats and not self_beat:
+        return ""
+
+    lines = [
+        "[RECENT AUTONOMOUS ACTIVITY — work you did on your heartbeats/crons, "
+        "outside this chat. Treat as your own memory.]"
+    ]
+    if is_orchestrator and fleet_beats:
+        bl = [
+            f"{b.get('agent')}: {b.get('status') or '?'} — "
+            f"{str(b.get('current_task') or '').strip()[:60]} ({b.get('at') or '?'})"
+            for b in fleet_beats
+        ]
+        lines.append("Fleet heartbeats (last seen):\n  " + "\n  ".join(bl))
+    elif self_beat:
+        lines.append(
+            f"Your last heartbeat: {self_beat.get('status') or '?'} — "
+            f"{str(self_beat.get('current_task') or '').strip()[:90]} "
+            f"({self_beat.get('at') or '?'})"
+        )
+    if acts:
+        al = [
+            f"[{a.get('at') or '?'}] {a.get('agent')}/{a.get('event')}: "
+            f"{str(a.get('message') or '').strip()[:90]}"
+            for a in acts[:limit]
+        ]
+        lines.append("Recent events:\n  " + "\n  ".join(al))
+    lines.append(
+        "If asked what you've done or about a heartbeat, answer from this; for more "
+        "detail use agent_bus list_activity / read_heartbeats."
+    )
+    lines.append("[/RECENT AUTONOMOUS ACTIVITY]")
+    return "\n".join(lines)[:max_chars]
+
+
 def _utc_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
