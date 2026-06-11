@@ -72,7 +72,9 @@ SHARED_AGENT_TOOLSETS: tuple[str, ...] = (
     "todo",
     "messaging",
     "skills",
+    "clarify",
     "web",
+    "search",
     "browser",
     "computer",
     "file",
@@ -292,7 +294,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "approvals",
             "knowledge-base",
         ],
-        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "deals_overview", "elevate_db", "admin_deal"],
+        "toolsets": ["agent_bus", "agent_handoff", "memory", "todo", "deals_overview", "elevate_db", "admin_deal", "admin_profile"],
         "prompt": (
             "You are Admin — the Transaction Coordinator for this Elevate workspace. You own the deal "
             "file from accepted contract to a clean close: keep every critical date visible, coordinate "
