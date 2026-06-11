@@ -3116,6 +3116,43 @@ export default function ChatPage() {
       setTurnUsage([]);
     }
   }, [resumeId]);
+  // WS2 (drill-in live refresh): opening a subagent is a one-shot REST snapshot,
+  // so while the child is still running its drill-in shows a frozen/blank tail.
+  // Poll its transcript every few seconds and union the fresh rows in
+  // (no-shrink merge) so its live thinking + bash appear as it works. Stops once
+  // the child settles (no pending turn). A finished child polls once then stops.
+  useEffect(() => {
+    if (sessionKind !== "subagent" || !resumeId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      cancelled = true;
+      if (timer) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const resp = await api.getSessionMessages(resumeId);
+        if (cancelled) return;
+        const hydrated = normalizeStoredTranscript(resp.messages);
+        setMessages((prev) =>
+          mergeServerWithCache(hydrated, prev.length ? prev : hydrated, false),
+        );
+        if (!hasPendingTurn(hydrated)) {
+          stop();
+          setBusy(false);
+          setStatusText("Ready");
+        }
+      } catch {
+        /* transient (gateway busy / race) — keep polling */
+      }
+    };
+    timer = window.setInterval(() => void tick(), 3000);
+    return stop;
+  }, [sessionKind, resumeId]);
   // Per-turn usage (model/tokens/cost/latency) for the footer, fetched on resume.
   const [turnUsage, setTurnUsage] = useState<TurnUsageEntry[]>([]);
   const [activityTrace, setActivityTrace] = useState<ActivityTrace[]>([]);
