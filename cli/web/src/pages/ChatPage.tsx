@@ -4888,6 +4888,31 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
+      // Async (non-blocking) delegation finished: the child ran on its own
+      // thread after the dispatching turn already returned. Render its result
+      // as a full assistant bubble (the "ping"), and release the sidebar
+      // "working" indicator for this session.
+      gw.on("delegate.complete", (ev) => {
+        if (!accepts(ev)) return;
+        appendMessage(
+          "assistant",
+          eventText(ev) || "Background task complete",
+          { createdAt: eventMillis(ev) },
+        );
+        if (typeof window !== "undefined") {
+          const sidebarSessionId =
+            persistedSessionIdRef.current ??
+            activeSessionRef.current ??
+            (typeof ev.session_id === "string" ? ev.session_id : null);
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId ?? undefined },
+            }),
+          );
+        }
+      }),
+    );
+    unsubs.push(
       gw.on("btw.complete", (ev) => {
         if (!accepts(ev)) return;
         appendMessage("system", eventText(ev) || "Background task complete");

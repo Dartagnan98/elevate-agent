@@ -4,7 +4,11 @@ Delegate Tool -- Subagent Architecture
 
 Spawns child AIAgent instances with isolated context, restricted toolsets,
 and their own terminal sessions. Supports single-task and batch (parallel)
-modes. The parent blocks until all children complete.
+modes. In the interactive gateway, top-level delegation is non-blocking: the
+children run on a daemon thread and their result returns as a new turn via the
+agent's _async_delegate_sink (see _get_async_delegation_enabled). CLI, cron,
+tests, and nested orchestrators have no sink and run synchronously, with the
+parent blocking until all children complete.
 
 Each child gets:
   - A fresh conversation (no parent history)
@@ -620,6 +624,28 @@ def _get_inherit_mcp_toolsets() -> bool:
     """Whether narrowed child toolsets should keep the parent's MCP toolsets."""
     cfg = _load_config()
     return is_truthy_value(cfg.get("inherit_mcp_toolsets"), default=True)
+
+
+def _get_async_delegation_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether top-level delegate_task dispatches non-blocking (async).
+
+    Default True. Only takes effect when the gateway has wired an async sink
+    onto the parent agent (i.e. interactive dashboard/desktop sessions); CLI,
+    cron, tests, and nested orchestrators never have a sink, so they keep the
+    synchronous path regardless. Operator kill switch:
+    ``delegation.async_enabled: false`` in config.yaml (or
+    ``DELEGATION_ASYNC_ENABLED=0``) forces the legacy blocking behavior even in
+    the gateway.
+    """
+    if cfg is None:
+        cfg = _load_config()
+    val = cfg.get("async_enabled")
+    if val is None:
+        env_val = os.getenv("DELEGATION_ASYNC_ENABLED")
+        if env_val is not None:
+            return is_truthy_value(env_val, default=True)
+        return True
+    return is_truthy_value(val, default=True)
 
 
 def _is_mcp_toolset_name(name: str) -> bool:
@@ -2430,6 +2456,121 @@ def delegate_task(
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
+    # Async (non-blocking) delegation: when the gateway has wired an async sink
+    # onto the parent agent AND this is a TOP-LEVEL agent (depth 0), the parent
+    # does not block waiting for children. We run them on a daemon thread and
+    # hand the result back as a new turn via the sink when they finish, then
+    # return a "dispatched" ack immediately so the parent's turn completes and
+    # the user can keep working. CLI/cron/tests (no sink) and nested
+    # orchestrators (depth > 0, which must synthesise their children's output
+    # inline) keep the synchronous path below.
+    async_sink = getattr(parent_agent, "_async_delegate_sink", None)
+    if callable(async_sink) and depth == 0 and _get_async_delegation_enabled(cfg):
+        import uuid as _uuid_async
+
+        task_id = f"dt_{_uuid_async.uuid4().hex[:8]}"
+        dispatched = [
+            {
+                "task_index": i,
+                "goal": (t.get("goal") or "")[:120],
+                "agent": t.get("agent") or agent,
+            }
+            for i, t in enumerate(task_list)
+        ]
+
+        def _run_async():
+            try:
+                payload = _execute_and_finalize_delegation(
+                    children,
+                    task_list,
+                    parent_agent,
+                    overall_start,
+                    n_tasks,
+                    task_labels,
+                    max_children,
+                )
+                payload["task_id"] = task_id
+                # Result entries carry task_index but not the goal text; fold it
+                # in so the completion ping reads as "done: <what you asked>".
+                for _r in payload.get("results", []):
+                    _ti = _r.get("task_index")
+                    if isinstance(_ti, int) and 0 <= _ti < len(task_list):
+                        _r.setdefault("goal", (task_list[_ti].get("goal") or "")[:120])
+            except Exception as exc:
+                logger.exception("async delegation %s failed", task_id)
+                payload = {
+                    "task_id": task_id,
+                    "results": [
+                        {
+                            "task_index": d["task_index"],
+                            "status": "error",
+                            "summary": None,
+                            "error": str(exc),
+                        }
+                        for d in dispatched
+                    ],
+                    "total_duration_seconds": round(
+                        time.monotonic() - overall_start, 2
+                    ),
+                }
+            try:
+                async_sink(payload)
+            except Exception:
+                logger.exception("async delegation sink failed for %s", task_id)
+
+        threading.Thread(
+            target=_run_async, name=f"delegate-async-{task_id}", daemon=True
+        ).start()
+        return json.dumps(
+            {
+                "status": "dispatched",
+                "task_id": task_id,
+                "dispatched": dispatched,
+                "note": (
+                    "The delegated work is now running in the background. You are "
+                    "NOT blocked and should NOT wait for it. Briefly tell the user "
+                    "what you set up and which agent(s) you handed it to, that "
+                    "you'll ping them with the result when it's done, and ask if "
+                    "there's anything else — then end your turn. The result arrives "
+                    "as a new message on its own; do not call delegate_task again "
+                    "for the same work."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    return json.dumps(
+        _execute_and_finalize_delegation(
+            children,
+            task_list,
+            parent_agent,
+            overall_start,
+            n_tasks,
+            task_labels,
+            max_children,
+        ),
+        ensure_ascii=False,
+    )
+
+
+def _execute_and_finalize_delegation(
+    children,
+    task_list,
+    parent_agent,
+    overall_start,
+    n_tasks,
+    task_labels,
+    max_children,
+) -> Dict[str, Any]:
+    """Run the built child agents to completion and assemble the result payload.
+
+    Shared by the synchronous and async delegation paths. Runs children
+    (single direct, or batch in a thread pool), notifies the parent memory
+    provider, fires subagent_stop hooks, rolls up child cost, and returns the
+    ``{"results": [...], "total_duration_seconds": ...}`` payload dict (the
+    caller json-encodes it for the sync path or hands it to the async sink).
+    """
+    results: List[Dict[str, Any]] = []
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
         _i, _t, child = children[0]
@@ -2658,13 +2799,10 @@ def delegate_task(
 
     total_duration = round(time.monotonic() - overall_start, 2)
 
-    return json.dumps(
-        {
-            "results": results,
-            "total_duration_seconds": total_duration,
-        },
-        ensure_ascii=False,
-    )
+    return {
+        "results": results,
+        "total_duration_seconds": total_duration,
+    }
 
 
 def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
@@ -2907,13 +3045,19 @@ def _build_top_level_description() -> str:
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
-        "- Durable long-running work that must outlive the current turn -> "
-        "use cronjob (action='create') or terminal(background=True, "
-        "notify_on_complete=True) instead. delegate_task runs SYNCHRONOUSLY "
-        "inside the parent turn: if the parent is interrupted (user sends a "
-        "new message, /stop, /new) the child is cancelled with status="
-        "'interrupted' and its work is discarded. Children cannot continue "
-        "in the background.\n\n"
+        "- Durable work that must survive an app restart / reboot -> use "
+        "cronjob (action='create') or terminal(background=True, "
+        "notify_on_complete=True) instead.\n\n"
+        "DISPATCH BEHAVIOR:\n"
+        "- In the interactive app this tool is NON-BLOCKING: it dispatches the "
+        "subagent(s) on a background thread and returns immediately with "
+        "{status:'dispatched', task_id}. You are NOT blocked. When that happens, "
+        "briefly tell the user what you set up and which agent(s) you handed it "
+        "to, say you'll ping them with the result when it's done, ask if there's "
+        "anything else, then END YOUR TURN. The result arrives on its own as a "
+        "new message; do NOT wait for it or re-dispatch the same work.\n"
+        "- If instead you get a full {results:[...]} payload back inline, the "
+        "run was synchronous (CLI/cron) — use the summaries directly.\n\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"

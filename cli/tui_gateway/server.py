@@ -3234,6 +3234,105 @@ def _emit_sign_in_nag(sid: str) -> None:
     )
 
 
+def _format_delegate_completion(results: list) -> str:
+    """Render an async-delegation result payload as a chat-ready summary.
+
+    One block per child: a ✓/⚠️ header with the goal, then the child's own
+    summary (or its error). Multiple children are separated by a rule.
+    """
+    blocks: list[str] = []
+    for r in results if isinstance(results, list) else []:
+        if not isinstance(r, dict):
+            continue
+        status = str(r.get("status") or "completed").lower()
+        ok = status == "completed"
+        goal = str(r.get("goal") or "").strip()
+        summary = str(r.get("summary") or r.get("error") or "").strip()
+        header = "✓ Background task done" if ok else "⚠️ Background task finished with issues"
+        if goal:
+            header += f": {goal}"
+        body = summary or "(the agent returned no summary)"
+        blocks.append(f"{header}\n\n{body}")
+    if not blocks:
+        return "✓ Background task complete."
+    return "\n\n---\n\n".join(blocks)
+
+
+def _make_async_delegate_sink(sid: str, session: dict):
+    """Build the completion callback delegate_task invokes when an async
+    (non-blocking) delegation finishes.
+
+    The dispatching turn already returned, so this runs later on the
+    delegation's own daemon thread. It (1) emits the child's result as a new
+    assistant ping in the parent dashboard session + flips the sidebar
+    subagent dots, and (2) threads the result into the session history (and DB)
+    as a clearly-marked reference message so the main agent has the answer in
+    context on the user's next turn.
+    """
+
+    def _sink(payload: dict) -> None:
+        try:
+            results = payload.get("results") if isinstance(payload, dict) else None
+            results = results or []
+            task_id = str((payload or {}).get("task_id") or "")
+            summary_text = _format_delegate_completion(results)
+
+            # 1) Flip any still-running subagent dots to done/error.
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                _emit(
+                    "subagent.complete",
+                    sid,
+                    {
+                        "subagent_id": r.get("subagent_id")
+                        or f"{task_id}-{r.get('task_index')}",
+                        "status": r.get("status") or "completed",
+                        "summary": str(r.get("summary") or "")[:600],
+                        "child_session_id": r.get("child_session_id"),
+                        "goal": r.get("goal"),
+                    },
+                )
+
+            # 2) Surface the result as its own assistant turn so the user is
+            #    pinged with the full answer (the client renders this as a
+            #    message bubble + clears the "working" sidebar indicator).
+            _emit(
+                "delegate.complete",
+                sid,
+                {"task_id": task_id, "text": summary_text},
+            )
+
+            # 3) Thread it into history (+ DB) so the main agent has the result
+            #    in context next turn. User-role keeps role alternation valid
+            #    (the prior message is the agent's "I'll ping you" reply); the
+            #    bracket marker makes the provenance unambiguous.
+            ctx = (
+                "[Delegated task result — the user has already been shown this; "
+                "use it if they follow up]\n" + summary_text
+            )
+            lock = session.get("history_lock")
+            if lock is not None:
+                with lock:
+                    hist = session.get("history")
+                    if isinstance(hist, list):
+                        hist.append({"role": "user", "content": ctx})
+                        session["history_version"] = (
+                            int(session.get("history_version", 0)) + 1
+                        )
+            try:
+                db = _get_db()
+                skey = session.get("session_key")
+                if db is not None and skey:
+                    db.append_message(skey, "user", content=ctx)
+            except Exception:
+                logger.debug("async delegate sink: DB persist failed", exc_info=True)
+        except Exception:
+            logger.exception("async delegate sink failed (sid=%s)", sid)
+
+    return _sink
+
+
 def _mark_session_idle(session: dict) -> None:
     """Release the dashboard running latch once the visible turn is complete."""
     events_lock = session.get("events_lock")
@@ -3373,6 +3472,15 @@ def _(rid, params: dict) -> dict:
                 history = list(session["history"])
                 history_version = int(session.get("history_version", 0))
             agent = session["agent"]
+            # Wire the async-delegation sink so top-level delegate_task calls
+            # dispatch non-blocking: the child runs on its own thread and its
+            # result returns as a new turn via this sink instead of blocking
+            # the parent. Interactive dashboard sessions only — CLI/cron never
+            # set this, so they keep the synchronous path. Idempotent per turn.
+            try:
+                agent._async_delegate_sink = _make_async_delegate_sink(sid, session)
+            except Exception:
+                logger.debug("could not attach async delegate sink", exc_info=True)
             from tools.approval import (
                 reset_current_session_key,
                 set_current_session_key,

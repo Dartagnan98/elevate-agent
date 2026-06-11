@@ -1803,3 +1803,55 @@ def test_model_options_propagates_list_exception(monkeypatch):
     assert "error" in resp
     assert resp["error"]["code"] == 5033
     assert "catalog blew up" in resp["error"]["message"]
+
+
+def test_async_delegate_sink_emits_and_threads_history():
+    """The async-delegation completion sink (#9) must, on a child result
+    payload: flip the subagent dot, emit a delegate.complete ping with the
+    summary, and thread the result into session history so the main agent has
+    it next turn."""
+    session = _session()
+    sid = "async-sid"
+    emitted = []
+    with patch("tui_gateway.server._emit", side_effect=lambda ev, s, p=None: emitted.append((ev, s, p))), \
+         patch("tui_gateway.server._get_db", return_value=None):
+        sink = server._make_async_delegate_sink(sid, session)
+        sink({
+            "task_id": "dt_abc123",
+            "results": [
+                {
+                    "task_index": 0,
+                    "subagent_id": "sa-0-deadbeef",
+                    "status": "completed",
+                    "summary": "Pulled 6 comps; CMA drafted.",
+                    "goal": "Run the Lewis Creek CMA",
+                    "child_session_id": "child-1",
+                }
+            ],
+            "total_duration_seconds": 12.3,
+        })
+
+    kinds = [e[0] for e in emitted]
+    assert "subagent.complete" in kinds
+    assert "delegate.complete" in kinds
+    # The ping carries the child's summary text.
+    dc = next(p for (ev, _s, p) in emitted if ev == "delegate.complete")
+    assert "CMA drafted" in dc["text"]
+    assert dc["task_id"] == "dt_abc123"
+    # History got a user-role reference message (alternation-safe context).
+    assert len(session["history"]) == 1
+    msg = session["history"][0]
+    assert msg["role"] == "user"
+    assert "CMA drafted" in msg["content"]
+    assert session["history_version"] == 1
+
+
+def test_async_delegate_sink_never_raises():
+    """A malformed payload must not bubble out of the sink (it runs on a
+    daemon thread; an exception there is silent and would drop the ping)."""
+    session = _session()
+    with patch("tui_gateway.server._emit"), patch("tui_gateway.server._get_db", return_value=None):
+        sink = server._make_async_delegate_sink("sid", session)
+        sink(None)            # no payload
+        sink({"results": "not a list"})  # wrong shape
+    # No assertion needed beyond "did not raise".

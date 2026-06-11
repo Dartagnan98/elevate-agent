@@ -55,6 +55,13 @@ def _make_mock_parent(depth=0):
     parent._print_fn = None
     parent.tool_progress_callback = None
     parent.thinking_callback = None
+    # A bare MagicMock auto-vivifies _async_delegate_sink as a *callable*
+    # attribute, which would route every test through the non-blocking async
+    # path (returns {status:"dispatched"} instead of {results:[...]}). Real
+    # AIAgent objects only get this attr when the gateway wires it. Default to
+    # None so the shared fixture exercises the synchronous path; the async
+    # tests set a real sink explicitly.
+    parent._async_delegate_sink = None
     return parent
 
 

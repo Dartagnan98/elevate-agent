@@ -40,6 +40,11 @@ def _make_parent(depth: int = 0, session_id: str = "parent-1"):
     parent.thinking_callback = None
     parent._memory_manager = None
     parent.session_id = session_id
+    # Avoid the MagicMock auto-vivifying a callable _async_delegate_sink, which
+    # would route delegate_task through the non-blocking async path (hooks fire
+    # on a background thread instead of synchronously). These tests assert the
+    # synchronous return + hook ordering.
+    parent._async_delegate_sink = None
     return parent
 
 
