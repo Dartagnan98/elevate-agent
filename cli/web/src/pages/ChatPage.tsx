@@ -5756,23 +5756,17 @@ export default function ChatPage() {
             setStatusText("Steer rejected");
             return;
           }
-          // Visually inject the steer mid-turn: finalize the assistant
-          // chunk written so far, drop the steer in below it, then clear
-          // the streaming ref so the agent's continued output starts a
-          // fresh assistant message UNDER the steer — the conversation
-          // reads in delivery order instead of the steer being stranded
-          // at the bottom while text keeps growing above it.
-          const priorAssistantId = currentAssistantRef.current;
-          if (priorAssistantId) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === priorAssistantId && m.status === "streaming"
-                  ? { ...m, status: "complete" }
-                  : m,
-              ),
-            );
-            currentAssistantRef.current = null;
-          }
+          // The steer is queued server-side (queue_soft_interrupt) and the
+          // agent applies it at its next safe boundary. The CURRENT assistant
+          // message must keep streaming in place until its real
+          // message.complete, and the agent's response to the steer arrives as
+          // its OWN next turn (a fresh message.start → new bubble). Do NOT
+          // finalize the in-flight message or clear currentAssistantRef here:
+          // that truncated the answer mid-sentence and made the continued
+          // deltas spawn a DUPLICATE bubble with the steer stranded between
+          // them (the reported glitch where the steer "stays above the
+          // answer"). Just show the steer bubble (below the streaming answer)
+          // and let the stream finish naturally.
           appendMessage("user", item.text);
           setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
           setStatusText("Steer delivered");
