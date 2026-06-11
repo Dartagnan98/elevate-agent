@@ -16,7 +16,11 @@ from typing import Any, Deque
 
 DEFAULT_RATE_LIMIT_MESSAGES = 20
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
-DEFAULT_DAILY_TOKEN_CAP = 2_000_000
+# 5M/24h (raised from 2M, 2026-06-11): real workflows — a delegated subagent
+# audit, a CMA, a day of heavy outreach — were hitting 2M legitimately and the
+# rolling window meant a power user stayed blocked for hours. Per-conversation
+# spend protection still applies; runaway loops still trip it.
+DEFAULT_DAILY_TOKEN_CAP = 5_000_000
 DEFAULT_DAILY_WINDOW_SECONDS = 24 * 60 * 60
 
 
@@ -200,13 +204,34 @@ def check_gateway_guardrails(
             used_tokens = 0
         if used_tokens >= token_cap:
             hours = max(1, round(token_window / 3600))
+            # Platform-accurate advice. On the desktop a NEW CHAT mints a fresh
+            # session_key, so its budget restarts — "start a new chat" is real
+            # advice there. On messaging platforms (Telegram/WhatsApp/...) the
+            # session key is deterministic per chat identity: a "new chat"
+            # NEVER rotates it, so that advice was a dead end (the cap message
+            # just repeated forever). Tell those users the truth: the window
+            # rolls off on its own, or the cap can be raised in config.
+            if source == "tui":
+                advice = (
+                    "Start a new chat (its budget restarts), raise "
+                    "`guardrails.usage.daily_token_cap` in config.yaml, or "
+                    "wait for usage to roll off."
+                )
+            else:
+                advice = (
+                    "This limit is per conversation over a rolling "
+                    f"{hours}h window and clears on its own as older usage "
+                    "ages out — starting a new chat here won't reset it. To "
+                    "raise the limit, set `guardrails.usage.daily_token_cap` "
+                    "in config.yaml (or the ELEVATE_DAILY_TOKEN_CAP env var) "
+                    "on the machine running Elevate."
+                )
             return GuardrailDecision(
                 allowed=False,
                 reason="token_cap_exceeded",
                 message=(
                     f"Daily token cap reached for this chat: {used_tokens:,}/{token_cap:,} "
-                    f"tokens in the last {hours}h. Start a new chat, raise "
-                    "`guardrails.usage.daily_token_cap` in config.yaml, or wait for usage to roll off."
+                    f"tokens in the last {hours}h. {advice}"
                 ),
                 used_tokens=used_tokens,
                 token_cap=token_cap,

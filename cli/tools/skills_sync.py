@@ -242,6 +242,41 @@ def sync_skills(quiet: bool = False) -> dict:
     except Exception:
         logger.debug("orphaned cortextos cleanup skipped", exc_info=True)
 
+    # One-time follow-up to the rename migration above: it removed the orphaned
+    # folder but LEFT the manifest entries, and the sync loop reads "in manifest
+    # + absent from user dir" as a deliberate user deletion — so the renamed
+    # agent-ops skills were never copied and every agent loadout referencing
+    # them broke ("Skill(s) not found and skipped: tasks, comms, memory, …").
+    # Drop those manifest entries once (sentinel-guarded so a user who later
+    # genuinely deletes an agent-ops skill stays respected) and let the standard
+    # loop re-copy them as new.
+    try:
+        _sentinel = SKILLS_DIR / ".agent-ops-resync-v1"
+        if not _sentinel.exists():
+            _m = _read_manifest()
+            _agent_ops_src = bundled_dir / "agent-ops"
+            _dropped = 0
+            if _agent_ops_src.is_dir():
+                for _p in _agent_ops_src.iterdir():
+                    _n = _p.name
+                    if (
+                        _p.is_dir()
+                        and _n in _m
+                        and not (SKILLS_DIR / "agent-ops" / _n).exists()
+                    ):
+                        _m.pop(_n, None)
+                        _dropped += 1
+            if _dropped:
+                _write_manifest(_m)
+                logger.info(
+                    "skills sync: re-queued %d agent-ops skills whose manifest "
+                    "entries blocked the rename migration",
+                    _dropped,
+                )
+            _sentinel.write_text("done\n")
+    except Exception:
+        logger.debug("agent-ops manifest resync skipped", exc_info=True)
+
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}

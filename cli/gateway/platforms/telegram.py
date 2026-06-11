@@ -540,7 +540,105 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         self._agent_apps[agent_id] = app
         self._agent_bots[agent_id] = app.bot
+        # Register the slash-command menu on THIS bot too. Telegram menus are
+        # per-bot, and only the primary bot's connect path registered one — so
+        # every additional agent bot polled fine but typing "/" showed nothing.
+        try:
+            from telegram import BotCommand
+            from elevate_cli.commands import telegram_menu_commands
+
+            menu_commands, hidden_count = telegram_menu_commands(max_commands=100)
+            await app.bot.set_my_commands(
+                [BotCommand(name, desc) for name, desc in menu_commands]
+            )
+            if hidden_count:
+                logger.info(
+                    "[%s] Telegram menu (%s): %d commands registered, %d hidden.",
+                    self.name, agent_id, len(menu_commands), hidden_count,
+                )
+        except Exception as e:
+            logger.warning(
+                "[%s] Could not register Telegram command menu for agent bot %s: %s",
+                self.name, agent_id, e,
+            )
         logger.info("[%s] Connected Telegram agent bot: %s", self.name, agent_id)
+
+    async def _agent_bot_refresh_loop(self) -> None:
+        """Watch for agent bots added after startup and connect them live.
+
+        A newly created agent's Telegram pairing lands as an
+        ``ELEVATE_AGENT_<X>_TELEGRAM_BOT_TOKEN`` env entry. Without this loop
+        the bot (and its slash-command menu) only appeared after a gateway
+        restart; with it, the new agent pops up within a minute.
+        """
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await self._refresh_agent_bots()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "[%s] agent bot refresh failed", self.name, exc_info=True
+                )
+
+    async def _refresh_agent_bots(self) -> None:
+        """Start any newly-paired agent bots (config extras + env re-scan)."""
+        primary_token = str(self.config.token or "").strip()
+        configs: Dict[str, Dict[str, str]] = {
+            c["agent_id"]: c for c in self._agent_bot_configs()
+        }
+        # Env re-scan: new agents pair via env without a config rewrite.
+        try:
+            from gateway.config import _gateway_env_values
+
+            env_values = _gateway_env_values()
+            for env_name, value in env_values.items():
+                m = re.match(
+                    r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$", env_name
+                )
+                if not m:
+                    continue
+                agent_id = m.group(1).lower().replace("_", "-")
+                token = str(value or "").strip()
+                if token:
+                    configs.setdefault(
+                        agent_id,
+                        {
+                            "agent_id": agent_id,
+                            "agent_name": agent_id,
+                            "token": token,
+                        },
+                    )
+        except Exception:
+            logger.debug(
+                "[%s] env re-scan for agent bots failed", self.name, exc_info=True
+            )
+
+        request_kwargs = dict(getattr(self, "_agent_request_kwargs", None) or {})
+        if not request_kwargs:
+            return
+        for agent_id, cfg in configs.items():
+            token = str(cfg.get("token") or "").strip()
+            if not token or token == primary_token or agent_id in self._agent_apps:
+                continue
+            try:
+                await self._start_agent_polling_app(
+                    agent_id=agent_id,
+                    agent_name=cfg.get("agent_name") or agent_id,
+                    token=token,
+                    request_kwargs=request_kwargs,
+                )
+                logger.info(
+                    "[%s] Hot-added Telegram agent bot: %s", self.name, agent_id
+                )
+            except Exception:
+                logger.warning(
+                    "[%s] Hot-add of Telegram agent bot %s failed",
+                    self.name,
+                    agent_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _is_callback_user_authorized(user_id: str) -> bool:
@@ -1220,6 +1318,18 @@ class TelegramAdapter(BasePlatformAdapter):
                         exc_info=True,
                     )
 
+            # Hot-add loop: agents created AFTER gateway start pair by dropping
+            # ELEVATE_AGENT_<X>_TELEGRAM_BOT_TOKEN into the env — previously
+            # their bots (and slash menus) only appeared after a full gateway
+            # restart. Re-scan periodically and start any new bot live.
+            self._agent_request_kwargs = dict(request_kwargs)
+            try:
+                self._agent_bot_refresh_task = asyncio.get_running_loop().create_task(
+                    self._agent_bot_refresh_loop()
+                )
+            except Exception:
+                logger.debug("[%s] agent bot refresh loop not started", self.name, exc_info=True)
+
             return True
             
         except Exception as e:
@@ -1231,6 +1341,10 @@ class TelegramAdapter(BasePlatformAdapter):
     
     async def disconnect(self) -> None:
         """Stop polling/webhook, cancel pending album flushes, and disconnect."""
+        refresh_task = getattr(self, "_agent_bot_refresh_task", None)
+        if refresh_task and not refresh_task.done():
+            refresh_task.cancel()
+        self._agent_bot_refresh_task = None
         pending_media_group_tasks = list(self._media_group_tasks.values())
         for task in pending_media_group_tasks:
             task.cancel()
