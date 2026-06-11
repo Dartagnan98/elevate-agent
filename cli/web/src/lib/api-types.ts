@@ -2827,6 +2827,8 @@ export interface TelegramPendingEntry {
   code: string;
   user_id: string;
   user_name: string;
+  /** Which agent's bot minted this code (per-agent pairing). "" = legacy/global. */
+  agent_id?: string;
   age_minutes: number;
 }
 

@@ -232,9 +232,18 @@ function RunwayTile({
   );
 }
 
-// Always-accessible channel pairing approver. Lists pending codes from the bot
-// and lets you paste/approve a code directly — no onboarding wizard needed.
-function PairingApprovalBlock() {
+// Channel pairing approver. Lists pending codes from the bot and lets you
+// paste/approve a code directly — no onboarding wizard needed. When `agentId`
+// is passed it scopes to THAT agent's bot (per-agent pairing): only codes minted
+// by that agent's bot are shown. Unscoped (no agentId) it shows every waiting
+// code across all agents.
+function PairingApprovalBlock({
+  agentId,
+  agentName,
+}: {
+  agentId?: string;
+  agentName?: string;
+} = {}) {
   const [pending, setPending] = useState<TelegramPendingEntry[]>([]);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -243,11 +252,16 @@ function PairingApprovalBlock() {
   const refresh = useCallback(async () => {
     try {
       const resp = await api.listTelegramPairings();
-      setPending(resp.pending ?? []);
+      const all = resp.pending ?? [];
+      // Scope to this agent's bot when rendered inside an agent. A legacy code
+      // with no agent_id only shows in the unscoped (global) view.
+      setPending(
+        agentId ? all.filter((p) => (p.agent_id ?? "") === agentId) : all,
+      );
     } catch {
       /* gateway may be down — leave list empty */
     }
-  }, []);
+  }, [agentId]);
 
   useEffect(() => {
     void refresh();
@@ -279,12 +293,14 @@ function PairingApprovalBlock() {
     <div className="hub-block">
       <div className="hub-block-head">
         <div className="hub-block-title">
-          Pair a channel
+          {agentName ? `Pair ${agentName}'s channel` : "Pair a channel"}
           {pending.length > 0 ? (
             <span className="hub-block-meta mono"> · {pending.length} waiting</span>
           ) : null}
         </div>
-        <Link to="/agent-onboarding?run=1" className="hub-link">Setup wizard</Link>
+        {!agentId ? (
+          <Link to="/agent-onboarding?run=1" className="hub-link">Setup wizard</Link>
+        ) : null}
       </div>
 
       {pending.length > 0 ? (
@@ -309,8 +325,9 @@ function PairingApprovalBlock() {
         </div>
       ) : (
         <div className="hub-runway-detail" style={{ marginBottom: 8 }}>
-          No codes waiting. DM <span className="mono">/start</span> to your bot, then
-          paste the code it replies with below.
+          No codes waiting. DM <span className="mono">/start</span> to{" "}
+          {agentName ? `${agentName}'s` : "your"} bot, then paste the code it
+          replies with below.
         </div>
       )}
 
@@ -1968,6 +1985,7 @@ function AgentWorkspaceModal({
                 saving={savingTelegram}
                 defaultOpen
               />
+              <PairingApprovalBlock agentId={agent.id} agentName={agent.name} />
               <div className="hub-detail-actions">
                 <Link className="hub-btn ghost sm" to={`/comms?agent=${encodeURIComponent(agent.id)}`}>Open Comms</Link>
                 <Link className="hub-btn ghost sm" to="/config">Open Gateway Settings</Link>
