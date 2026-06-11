@@ -1324,6 +1324,24 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
 
     run_env = os.environ.copy()
     run_env["ELEVATE_HOME"] = str(_get_elevate_home())
+    # The child runs with cwd=scripts dir (below) and the bundled desktop
+    # runtime does NOT pip-install elevate_cli — the gateway only imports it
+    # via its own launch dir. Without an explicit PYTHONPATH every system
+    # script that does `from elevate_cli... import main` (admin-calendar-sync,
+    # operational-maintenance, freshness-snapshot) dies with
+    # ModuleNotFoundError on customer installs. Point the child at this
+    # process's own cli root so the import always resolves, dev or bundle,
+    # regardless of the gateway's cwd.
+    try:
+        import elevate_cli as _elevate_cli_pkg
+
+        _cli_root = str(Path(_elevate_cli_pkg.__file__).resolve().parent.parent)
+        _prior_pp = run_env.get("PYTHONPATH") or ""
+        run_env["PYTHONPATH"] = (
+            _cli_root + os.pathsep + _prior_pp if _prior_pp else _cli_root
+        )
+    except Exception:
+        pass
     try:
         from elevate_constants import get_subprocess_home
 
