@@ -7676,6 +7676,79 @@ def _validate_heartbeat_surface(surface: str) -> str:
     raise HTTPException(status_code=404, detail=f"No heartbeat surface '{surface_key}'")
 
 
+def _validate_heartbeat_agent(agent_id: str) -> str:
+    """Resolve + validate an agent id for the per-agent heartbeat endpoints."""
+    from cron.jobs import _slug_agent, _HEARTBEAT_CRON_EXCLUDED_AGENTS
+
+    aid = _slug_agent(agent_id)
+    if not aid:
+        raise HTTPException(status_code=400, detail="invalid agent id")
+    if aid in _HEARTBEAT_CRON_EXCLUDED_AGENTS:
+        raise HTTPException(status_code=404, detail=f"agent '{aid}' has no heartbeat")
+    return aid
+
+
+def _agent_heartbeat_job(aid: str) -> Optional[Dict[str, Any]]:
+    """The agent-bound 'heartbeat' cron job, if seeded."""
+    from cron.jobs import load_jobs, _slug_agent
+
+    for j in load_jobs():
+        if (j.get("name") or "").strip().lower() == "heartbeat" and _slug_agent(
+            str(j.get("agent") or "")
+        ) == aid:
+            return j
+    return None
+
+
+class _AgentHeartbeatMdBody(BaseModel):
+    content: str
+
+
+@app.get("/api/agents/{agent_id}/heartbeat-md")
+def get_agent_heartbeat_md(agent_id: str):
+    """Read an agent's HEARTBEAT.md (the 10-step beat it runs each cycle) plus its
+    heartbeat cron state. Seeds the file from the role-aware template if missing."""
+    try:
+        aid = _validate_heartbeat_agent(agent_id)
+        from cron.jobs import ensure_agent_heartbeat_md, agent_heartbeat_md_path
+
+        ensure_agent_heartbeat_md(aid)
+        path = agent_heartbeat_md_path(aid)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        job = _agent_heartbeat_job(aid)
+        enabled = bool(job and job.get("enabled", True) and job.get("state") != "paused")
+        return {
+            "agent": aid,
+            "path": str(path),
+            "content": content,
+            "job_id": (job or {}).get("id"),
+            "enabled": enabled,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("GET /api/agents/%s/heartbeat-md failed", agent_id)
+        raise HTTPException(status_code=500, detail=f"read heartbeat-md failed: {exc}")
+
+
+@app.put("/api/agents/{agent_id}/heartbeat-md")
+def put_agent_heartbeat_md(agent_id: str, body: _AgentHeartbeatMdBody):
+    """Overwrite an agent's HEARTBEAT.md (manual edit from the Agent Hub)."""
+    try:
+        aid = _validate_heartbeat_agent(agent_id)
+        from cron.jobs import agent_heartbeat_md_path
+
+        path = agent_heartbeat_md_path(aid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body.content or "", encoding="utf-8")
+        return {"ok": True, "agent": aid, "path": str(path)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("PUT /api/agents/%s/heartbeat-md failed", agent_id)
+        raise HTTPException(status_code=500, detail=f"write heartbeat-md failed: {exc}")
+
+
 @app.get("/api/heartbeats/surfaces/{surface}/cycles")
 def list_heartbeat_cycles(surface: str):
     """List a surface's experiment cycles (the real ``cycles[]`` array, falling

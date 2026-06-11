@@ -1,96 +1,67 @@
 ---
 name: heartbeat
-description: "Your heartbeat cron has fired and you need to update your status so the dashboard shows you as alive. Or you are checking whether another agent is responsive before sending them work. Or an agent appears offline or stale in the dashboard and you need to investigate whether their session is still running. A dead heartbeat means the system thinks you are down — update it proactively and check fleet health on every heartbeat cycle."
+description: "Your heartbeat cron has fired and you need to run your beat: update your status so the dashboard shows you alive, sweep your inbox, check your tasks and goals, and log what you did. Or you are checking whether another agent is responsive before sending work, or an agent looks offline/stale and you need to investigate. A dead heartbeat means the system thinks you are down — update it proactively and run your full beat every cycle."
 triggers: ["heartbeat", "update heartbeat", "check health", "agent health", "fleet health", "agent status", "is agent alive", "agent offline", "agent stale", "read heartbeats", "heartbeat cron", "i'm alive", "prove alive", "agent not responding", "stale agent", "check fleet", "fleet status", "who is online", "agent last seen"]
 external_calls: []
 category: cortextos
 ---
 
-> Elevate compatibility: This skill was imported from CortextOS. Use Elevate-native Agent Hub, Heartbeats, Cron, Comms, Tasks, Approvals, Activity, memory providers, and agent_handoffs instead of CortextOS daemon, IPC, PM2, PTY injection, or file inbox commands. When a CortextOS command is named below, translate it to the matching Elevate UI/API/store or create a waiting-human item.
+# Heartbeat (Elevate-native)
 
-# Heartbeat
-
-The heartbeat is how the dashboard and other agents know you are alive. If you stop updating it, you appear DEAD.
-
----
-
-## Your Heartbeat Cron
-
-Your heartbeat cron is daemon-managed (default every 4h). It lives in `${CTX_ROOT}/state/${CTX_AGENT_NAME}/crons.json` and fires even after restarts — no manual restoration needed. When it fires:
-
-```bash
-# 1. Update your heartbeat with what you're doing
-cortextos bus update-heartbeat "WORKING ON: <current task summary>"
-
-# 2. Check inbox for messages
-cortextos bus check-inbox
-
-# 3. Log heartbeat event
-cortextos bus log-event heartbeat agent_heartbeat info \
-  --meta "{\"agent\":\"$CTX_AGENT_NAME\",\"status\":\"active\"}"
-
-# 4. Check your task queue for anything stale
-cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
-```
+The heartbeat is how the dashboard and the other agents know you are alive and
+working. If you stop updating it, you appear **DEAD**. Everything here uses your
+**Elevate tools** — the `agent_bus` tool, Tasks, `agent_handoff`/Comms, Approvals,
+memory, and your own workdir files. **Never** call `cortextos bus`, PM2, PTY
+injection, or a file inbox — this is the Elevate app, not the cortextOS daemon.
 
 ---
 
-## Updating Heartbeat
+## When your heartbeat cron fires
 
-```bash
-cortextos bus update-heartbeat "<one sentence: what you are doing right now>"
-```
-
-Call this:
-- On every heartbeat cron fire
-- On session start (before sending online notification)
-- When starting a new significant task
-- Before going into a long-running operation
-
-**Never claim a status you haven't verified.** To confirm your crons are active: `cortextos bus list-crons $CTX_AGENT_NAME` (shows each cron's `next_fire_at`). Crons are daemon-managed and survive restarts — if a cron is missing, add it via `cortextos bus add-cron`.
+Your heartbeat cron (default every 4h) fires with the prompt "Read HEARTBEAT.md and
+follow its instructions." **`HEARTBEAT.md` in your working directory is the source of
+truth** — it lists the full 10-step beat for you specifically. Read it and run every
+step. This skill is the reference for the tool calls those steps use.
 
 ---
 
-## Reading Fleet Heartbeats
+## Core actions (the `agent_bus` tool)
 
-```bash
-# All agents in the org
-cortextos bus read-all-heartbeats
+- **Update your status** (do this FIRST, every beat, and on session start):
+  `agent_bus` action `update_heartbeat`, with a one-sentence summary of what you are
+  doing right now. This refreshes the "alive" status the dashboard reads.
+- **Log a heartbeat event:** `agent_bus` action `log_event`
+  (event_type `heartbeat`, name `agent_heartbeat`, level `info`). This appends to the
+  activity feed — the audit log, separate from the status string above. Aim for ≥ 2
+  events per cycle; invisible work is wasted work.
+- **Read fleet heartbeats:** `agent_bus` action `read_heartbeats` — returns each
+  agent's status, last-update time, and current task. **Stale threshold:** an agent
+  silent > 5h should be investigated. (Fleet health is the Executive Assistant's job
+  every beat; other agents only read this when deciding whether to hand work to a peer.)
 
-# JSON format for parsing
-cortextos bus read-all-heartbeats --format json
-```
+## The rest of the beat (see HEARTBEAT.md for your exact list)
 
-Returns: agent name, status, last update timestamp, current task.
-
-**Stale threshold:** An agent that hasn't updated in >6h should be investigated. Check their status via `cortextos status` or their heartbeat file.
+- **Inbox:** check incoming handoffs/messages addressed to you (`agent_handoff` /
+  Comms) and act on each — nothing should sit unanswered.
+- **Tasks:** `agent_bus` `list_tasks` (yours, pending then in_progress) +
+  `check_stale_tasks`; `update_task` to in_progress, `complete_task` with a result.
+  Anything in_progress > 2h: finish or note it.
+- **Goals:** `agent_bus` `get_goals` (or your `GOALS.md`). Stale > 24h or empty →
+  message the Executive Assistant for fresh goals; don't idle.
+- **Memory:** append your daily block to `memory/<today>.md` (or `agent_bus`
+  `write_memory`); persist cross-session learnings to `MEMORY.md`. Elevate indexes
+  memory into the knowledge base automatically — there is no manual ingest call.
+- **Blocked work:** raise an Approval or a [HUMAN] task rather than stalling. Anything
+  client-facing is drafts-only.
 
 ---
 
-## Checking a Specific Agent
+## Rules
 
-```bash
-# Read their heartbeat file directly
-cat "$CTX_ROOT/state/<agent-name>/heartbeat.json"
-
-# Check agent status via daemon
-cortextos status
-
-# Check PM2 process status
-pm2 list
-```
-
----
-
-## Heartbeat File Schema
-
-```json
-{
-  "agent": "agent-name",
-  "status": "active | idle | crashed",
-  "timestamp": "2026-04-01T12:00:00Z",
-  "current_task": "What I'm doing right now"
-}
-```
-
-Location: `$CTX_ROOT/state/{agent}/heartbeat.json`
+- **Never claim a status you haven't verified.** To confirm your heartbeat cron is
+  active, check the Agent Hub (your Workflows tab) — the `heartbeat` job shows its next
+  fire time. Cron jobs survive restarts.
+- Keep it native: `agent_bus` + Tasks + Comms/`agent_handoff` + Approvals + memory +
+  your files. No daemon, PM2, PTY, or `cortextos bus`.
+- A heartbeat with 0 events logged and 0 memory updates means you did nothing visible.
+  Target ≥ 2 events and ≥ 1 memory update per cycle.

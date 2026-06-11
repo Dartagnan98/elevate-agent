@@ -1145,6 +1145,244 @@ def register_agent_surfaces() -> None:
                 surface_state.upsert_registry(conn, surface, dict(spec))
 
 
+# ─── Per-agent heartbeat (cortextOS model: a HEARTBEAT.md the agent reads each beat
+#     + an agent-bound cron that fires it) ──────────────────────────────────────────
+# Distinct from the theta-wave "surface" above (an experiment loop). This is the
+# operational beat: update status, sweep inbox, (orchestrator) check fleet health,
+# work tasks, surface blockers. Native Elevate only (agent_bus + Tasks/Comms/
+# Approvals) — never `cortextos bus`/PM2/PTY. theta-wave (system-review) is excluded;
+# the executive-assistant IS included (it's the orchestrator and beats like one).
+_HEARTBEAT_CRON_EXCLUDED_AGENTS = {"theta-wave"}
+
+_AGENT_HEARTBEAT_CRON_PROMPT = (
+    "Read HEARTBEAT.md (in your working directory) and follow its instructions "
+    "exactly: update your heartbeat, sweep and ACK your inbox, review agent/fleet "
+    "health, work your assigned tasks (drafts only), and surface any blockers. End "
+    "with one tight summary, or 'all quiet' if nothing changed."
+)
+
+
+def agent_heartbeat_dir(agent_id: str) -> Path:
+    """Per-account, per-agent working directory: <account>/agents/<agent_id>/."""
+    return get_account_data_dir() / "agents" / _slug_agent(agent_id)
+
+
+def agent_heartbeat_md_path(agent_id: str) -> Path:
+    """Absolute path to an agent's HEARTBEAT.md."""
+    return agent_heartbeat_dir(agent_id) / "HEARTBEAT.md"
+
+
+def _agent_heartbeat_md_template(agent_id: str) -> str:
+    """Role-aware, Elevate-native HEARTBEAT.md — the full 10-step beat.
+
+    Faithful port of the cortextOS 10-step heartbeat, translated to Elevate tools:
+    shared state via the agent_bus tool actions (update_heartbeat, read_heartbeats,
+    log_event, list_tasks, update_task/complete_task, create_approval, get_goals,
+    write_memory); inbox via agent_handoff/Comms; the agent's private docs
+    (GOALS.md / MEMORY.md / GUARDRAILS.md / memory/<day>.md) live in its workdir.
+    No `cortextos bus` / PM2 / PTY — this is the Elevate app, not the daemon. There
+    is no manual KB-ingest in Elevate (memory is indexed automatically).
+    """
+    name = agent_id.replace("-", " ").title()
+    role = ""
+    try:
+        from elevate_cli.agent_hub import get_agent_def
+
+        agent = get_agent_def(agent_id) or {}
+        name = str(agent.get("name") or name)
+        role = str(agent.get("role") or "")
+    except Exception:
+        pass
+    is_orchestrator = _slug_agent(agent_id) == "executive-assistant" or role == "main"
+    lane = f"{name}" + (f" ({role})" if role else "")
+
+    orchestrator_block = (
+        "\n## Orchestrator duty (you only)\n"
+        "As the Executive Assistant you ALSO own FLEET HEALTH every beat: agent_bus "
+        "`read_heartbeats` — flag any agent silent > 5h, nudge it, and escalate to the "
+        "realtor if it stays dark. Refresh the fleet's goals each morning so every "
+        "agent's Step 6 finds fresh goals.\n"
+        if is_orchestrator
+        else ""
+    )
+
+    return (
+        f"# Heartbeat — {name}\n\n"
+        "Your heartbeat cron fires ~every 4 hours. Run ALL 10 steps below, in order, "
+        "every cycle. This is how the dashboard and the fleet know you are alive and "
+        "working.\n\n"
+        "NATIVE ELEVATE ONLY — use your tools: the agent_bus tool (actions named below), "
+        "Tasks, agent_handoff/Comms, Approvals, memory, and your own files. NEVER call "
+        "`cortextos bus`, PM2, or PTY; this is the Elevate app, not the cortextOS daemon.\n\n"
+        "## The 10 steps\n"
+        "1. UPDATE HEARTBEAT (first, always) — agent_bus `update_heartbeat` with a "
+        "one-sentence summary of what you're doing. Refreshes your \"alive\" status; skip "
+        "it and you show DEAD. (Distinct from the Step 4 event.)\n"
+        "2. SWEEP YOUR INBOX — check incoming handoffs/messages addressed to you "
+        "(agent_handoff / Comms) and act on each. Nothing should sit unanswered. Target: "
+        "inbox clear.\n"
+        "3. CHECK YOUR TASK QUEUE + STALE — agent_bus `list_tasks` (pending, then "
+        "in_progress) for yourself; `check_stale_tasks`. Pick the highest priority. Any "
+        "task in_progress > 2h: finish it or add a status note (`update_task`). No tasks "
+        "→ go to Step 6.\n"
+        "4. LOG A HEARTBEAT EVENT — agent_bus `log_event` (event_type heartbeat / "
+        "agent_heartbeat / info). Appends to the activity feed — the audit log, separate "
+        "from the Step 1 status string.\n"
+        "5. WRITE DAILY MEMORY — append a block to `memory/<today>.md` in your workdir: "
+        "what you're working on, status (healthy/working/blocked), inbox count, next "
+        "action. (Or agent_bus `write_memory`.)\n"
+        "6. CHECK YOUR GOALS — read `GOALS.md` (the orchestrator refreshes goals each "
+        "morning) or agent_bus `get_goals`. Goals stale > 24h → message the Executive "
+        "Assistant for fresh goals. No goals → message it now; don't idle.\n"
+        "7. RESUME WORK — take the highest-priority task, `update_task` → in_progress, "
+        "work it, `complete_task` with a result. Blocked → raise an Approval / [HUMAN] "
+        "task instead of stalling. Drafts only for anything client-facing.\n"
+        "8. GUARDRAIL SELF-CHECK — ask: \"did I skip a step or rationalize not doing "
+        "something?\" If yes, `log_event` a guardrail_triggered event. A new failure "
+        "pattern → append it to `GUARDRAILS.md`.\n"
+        "9. UPDATE LONG-TERM MEMORY — anything that should persist across sessions "
+        "(patterns that work/don't, user prefs, system behaviors) → append to `MEMORY.md`.\n"
+        "10. RE-INGEST MEMORY — Elevate indexes your memory into the knowledge base "
+        "automatically; there is NO manual ingest call here. Just confirm Steps 5/9 "
+        "actually wrote something this cycle.\n"
+        f"{orchestrator_block}"
+        "\n## Target\n"
+        "A heartbeat with 0 events logged and 0 memory updates means you did nothing "
+        "visible. Target: ≥ 2 events and ≥ 1 memory update per cycle. Invisible work is "
+        "wasted work.\n\n"
+        f"## Your lane\n{lane}. Do only your own work; hand anything that belongs to "
+        "another specialist up via agent_handoff rather than doing it yourself.\n\n"
+        "## Rules\n"
+        "- Never claim a status you haven't verified.\n"
+        "- Native Elevate only: agent_bus + Tasks + Comms + Approvals + memory + your "
+        "files. No daemon / PM2 / PTY / `cortextos bus`.\n"
+        "- Drafts-only for anything client-facing.\n"
+    )
+
+
+# Companion docs the 10-step beat reads/writes, seeded alongside HEARTBEAT.md in the
+# agent's workdir. Mirror cortextOS's per-agent files; seeded only if absent so the
+# agent's edits/accumulated history are never clobbered.
+def _agent_companion_files(agent_id: str) -> Dict[str, str]:
+    name = _slug_agent(agent_id).replace("-", " ").title()
+    return {
+        "GOALS.md": (
+            f"# Goals — {name}\n\n"
+            "The orchestrator (Executive Assistant) refreshes these each morning. If "
+            "this is empty or stale > 24h, message the Executive Assistant for fresh "
+            "goals on your next beat (Step 6) — don't idle.\n\n"
+            "## Current focus\n_(none yet)_\n\n## Goals\n_(none yet)_\n"
+        ),
+        "MEMORY.md": (
+            f"# Long-term memory — {name}\n\n"
+            "Append things that should persist across sessions: patterns that work / "
+            "don't, user preferences, system behaviors (Step 9). Indexed into the "
+            "knowledge base automatically.\n"
+        ),
+        "GUARDRAILS.md": (
+            f"# Guardrails — {name}\n\n"
+            "Append a line whenever you catch yourself skipping a step or rationalizing "
+            "not doing something (Step 8), so the pattern doesn't repeat.\n"
+        ),
+    }
+
+
+def ensure_agent_heartbeat_md(agent_id: str) -> Optional[Path]:
+    """Idempotently seed an agent's HEARTBEAT.md from the role-aware template.
+
+    Never overwrites an edited file — if HEARTBEAT.md already exists it is left
+    exactly as-is (the realtor/agent may have customized it). Returns the path,
+    or None if the agent is excluded/invalid.
+    """
+    aid = _slug_agent(agent_id)
+    if not aid or aid in _HEARTBEAT_CRON_EXCLUDED_AGENTS:
+        return None
+    path = agent_heartbeat_md_path(aid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(_agent_heartbeat_md_template(aid), encoding="utf-8")
+        # Companion docs the 10-step beat reads/writes — seed only if absent so we
+        # never clobber the agent's accumulated goals/memory/guardrails.
+        for fname, body in _agent_companion_files(aid).items():
+            fp = path.parent / fname
+            if not fp.exists():
+                fp.write_text(body, encoding="utf-8")
+        (path.parent / "memory").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.debug("ensure_agent_heartbeat_md: could not write %s", path, exc_info=True)
+        return None
+    return path
+
+
+def ensure_agent_heartbeat_cron(
+    agent_id: str, *, enabled: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Idempotently seed an agent-bound 'heartbeat' cron (4h interval) that fires the
+    agent to read its HEARTBEAT.md and run its beat. Seeded OFF/paused (opt-in) —
+    the realtor enables it per agent from the Agent Hub. An existing heartbeat job
+    for this agent keeps its enabled/paused state; only workdir/prompt are repaired.
+    Returns the job, or None if the agent is excluded.
+    """
+    aid = _slug_agent(agent_id)
+    if not aid or aid in _HEARTBEAT_CRON_EXCLUDED_AGENTS:
+        return None
+    md = ensure_agent_heartbeat_md(aid)
+    workdir = str(md.parent) if md else str(agent_heartbeat_dir(aid))
+
+    existing = next(
+        (
+            j
+            for j in load_jobs()
+            if (j.get("name") or "").strip().lower() == "heartbeat"
+            and _slug_agent(str(j.get("agent") or "")) == aid
+        ),
+        None,
+    )
+    if existing:
+        patch: Dict[str, Any] = {}
+        if str(existing.get("workdir") or "") != workdir:
+            patch["workdir"] = workdir
+        if str(existing.get("prompt") or "") != _AGENT_HEARTBEAT_CRON_PROMPT:
+            patch["prompt"] = _AGENT_HEARTBEAT_CRON_PROMPT
+        if patch:
+            existing = update_job(existing["id"], patch) or existing
+        return existing
+
+    job = create_job(
+        prompt=_AGENT_HEARTBEAT_CRON_PROMPT,
+        schedule="every 4h",
+        name="heartbeat",
+        skill="heartbeat",
+        deliver="local",
+        origin={"type": "system", "source": "agent-heartbeat", "agent": aid},
+        workdir=workdir,
+        agent=aid,
+    )
+    if not enabled:
+        job = pause_job(job["id"], reason="per-agent heartbeat is opt-in (seeded off)") or job
+    return job
+
+
+def ensure_agent_heartbeats(*, enabled: bool = False) -> List[Dict[str, Any]]:
+    """Seed a HEARTBEAT.md + a paused agent-bound heartbeat cron for every installed
+    agent (theta-wave excluded; executive-assistant included). Idempotent."""
+    out: List[Dict[str, Any]] = []
+    for aid in _installed_agent_ids():
+        if not aid or aid in _HEARTBEAT_CRON_EXCLUDED_AGENTS:
+            continue
+        # Per-agent guard: a single bad agent must never break the rest of
+        # ensure_system_jobs() (this runs on every connect/install).
+        try:
+            job = ensure_agent_heartbeat_cron(aid, enabled=enabled)
+        except Exception:
+            logger.debug("ensure_agent_heartbeats: %s failed", aid, exc_info=True)
+            continue
+        if job:
+            out.append(job)
+    return out
+
+
 def ensure_surface_heartbeats() -> List[Dict[str, Any]]:
     """Idempotently seed every REGISTERED surface heartbeat (workspace + cron job) for
     the active account — OFF by default (opt-in). Built-ins (Leads, Admin) come from
@@ -1558,6 +1796,7 @@ def ensure_system_jobs() -> List[Dict[str, Any]]:
         ensure_operational_freshness_job(),
         *ensure_surface_heartbeats(),
         *ensure_surface_automations(),
+        *ensure_agent_heartbeats(),
         ensure_theta_wave(),
         ensure_memory_benchmark_job(),
     ]

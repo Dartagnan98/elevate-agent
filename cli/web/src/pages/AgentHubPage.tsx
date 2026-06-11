@@ -1604,13 +1604,16 @@ function AgentDetailWorkspace({
           <AgentTasksPanel agent={agent} data={detail.data} loading={detail.loading} />
         )}
         {activeTab === "automations" && (
-          <AgentAutomationsPanel
-            agent={agent}
-            data={detail.data}
-            loading={detail.loading}
-            refresh={detail.refresh}
-            surfaceKey={detail.surfaceKey}
-          />
+          <>
+            <AgentAutomationsPanel
+              agent={agent}
+              data={detail.data}
+              loading={detail.loading}
+              refresh={detail.refresh}
+              surfaceKey={detail.surfaceKey}
+            />
+            <AgentHeartbeatDoc agentId={agent.id} />
+          </>
         )}
         {activeTab === "memory" && (
           <AgentMemoryPanel agent={agent} data={detail.data} memory={memory} />
@@ -1627,6 +1630,83 @@ function AgentDetailWorkspace({
         )}
       </div>
     </div>
+  );
+}
+
+// The per-agent HEARTBEAT.md — the 10-step beat the agent reads when its heartbeat
+// cron fires. Lives in the Workflows tab next to the agent's cron jobs (the heartbeat
+// cron itself shows in that list and is enabled/disabled there, opt-in).
+function AgentHeartbeatDoc({ agentId }: { agentId: string }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setContent(null);
+    setErr(null);
+    api
+      .getAgentHeartbeatMd(agentId)
+      .then((r) => {
+        if (cancelled) return;
+        setContent(r.content);
+        setEnabled(r.enabled);
+        setDirty(false);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+  const save = async () => {
+    if (content === null) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      await api.putAgentHeartbeatMd(agentId, content);
+      setDirty(false);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <section className="hub-profile-section">
+      <h4>HEARTBEAT.md</h4>
+      <p className="hub-input-label">
+        The 10-step beat this agent runs each cycle when its heartbeat cron fires.{" "}
+        {enabled === null
+          ? ""
+          : enabled
+            ? "Its heartbeat cron is ON."
+            : "Its heartbeat cron is OFF — turn it on in the cron list above (opt-in)."}
+      </p>
+      {err && <div className="hub-import-error">Heartbeat: {err}</div>}
+      {content === null && !err ? (
+        <p className="hub-input-label">Loading…</p>
+      ) : (
+        <>
+          <textarea
+            className="hub-textarea"
+            style={{ minHeight: 280, width: "100%" }}
+            value={content ?? ""}
+            onChange={(e) => {
+              setContent(e.target.value);
+              setDirty(true);
+            }}
+          />
+          <div style={{ marginTop: 8 }}>
+            <button className="hub-btn" disabled={!dirty || saving} onClick={save}>
+              {saving ? "Saving…" : "Save HEARTBEAT.md"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 

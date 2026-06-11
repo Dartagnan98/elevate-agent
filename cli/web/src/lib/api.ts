@@ -867,6 +867,26 @@ export const api = {
       },
     ),
 
+  // Per-agent heartbeat — the 10-step beat doc (HEARTBEAT.md) each agent reads
+  // when its heartbeat cron fires, plus that cron's enabled state.
+  getAgentHeartbeatMd: (agentId: string) =>
+    fetchJSON<{
+      agent: string;
+      path: string;
+      content: string;
+      job_id?: string | null;
+      enabled: boolean;
+    }>(`/api/agents/${encodeURIComponent(agentId)}/heartbeat-md`),
+  putAgentHeartbeatMd: (agentId: string, content: string) =>
+    fetchJSON<{ ok: boolean; agent: string; path: string }>(
+      `/api/agents/${encodeURIComponent(agentId)}/heartbeat-md`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      },
+    ),
+
   // Surface Tasks — dispatch work to a surface (or 'human'); kanban board.
   listSurfaceTasks: (params?: { status?: string; assignee?: string; priority?: string; project?: string; include_archived?: boolean }) => {
     const qs = new URLSearchParams();
