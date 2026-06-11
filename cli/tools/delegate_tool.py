@@ -680,11 +680,13 @@ def _preserve_parent_mcp_toolsets(
 
 
 DEFAULT_MAX_ITERATIONS = 50
-DEFAULT_CHILD_TIMEOUT = 3600  # 1h hard cap — subagents must be able to run a
-# LONG time (deep research, multi-step builds) without being killed. 600s was
-# killing legitimately-long children. The stale-heartbeat detector below (not
-# this cap) is what catches a genuinely wedged child; this is just the absolute
-# ceiling, overridable via delegation.child_timeout_seconds.
+DEFAULT_CHILD_TIMEOUT = 14400  # 4h hard ceiling. Live data (Justin's box) showed
+# legitimate child subagents running 37-72+ min on real work (CMA listing pulls,
+# multi-step research) — 600s and even 3600s were killing them. The
+# stale-heartbeat detector below (not this cap) is what catches a genuinely
+# wedged child; this is just the absolute backstop, overridable via
+# delegation.child_timeout_seconds. (Async delegation, #9, removes the
+# synchronous parent-side cap entirely.)
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
 # Stale-heartbeat thresholds. A child with no API-call progress is either:
 #   - idle between turns (no current_tool) — probably stuck on a slow API call
