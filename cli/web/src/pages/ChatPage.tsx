@@ -876,8 +876,82 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
     if (clean.startsWith("You've reached the maximum number of tool-calling iterations")) return false;
     if (clean.startsWith("[Elevation Hub interface context]")) return false;
     if (clean.startsWith("User follow-up received while you were already working:")) return false;
+    // Legacy async-delegation marker (pre-1.2.x): older installs persisted the
+    // result as a user-role "[Delegated task result …]" message that wrongly
+    // rendered as if the user typed it. Drop it from display. New installs use
+    // the ⟦subagent-result⟧ marker (kept + rendered as a completion card).
+    if (clean.startsWith("[Delegated task result")) return false;
   }
   return true;
+}
+
+const SUBAGENT_RESULT_PREFIX = "⟦subagent-result";
+
+/** Parse a stored ⟦subagent-result:<status>⟧ <goal>\n\n<summary> marker. */
+function parseSubagentResultMarker(
+  content: string,
+): { status: "completed" | "error"; goal: string; summary: string } | null {
+  const clean = content.trimStart();
+  if (!clean.startsWith(SUBAGENT_RESULT_PREFIX)) return null;
+  const m = clean.match(/^⟦subagent-result:(\w+)⟧[ \t]*(.*?)(?:\n\n([\s\S]*))?$/);
+  if (!m) return null;
+  return {
+    status: m[1] === "error" ? "error" : "completed",
+    goal: (m[2] || "").trim(),
+    summary: (m[3] || "").trim(),
+  };
+}
+
+/** Tool-call-style card for a finished background (async) delegation. Shows a
+ *  status dot + "Sub-agent completed" header; the result summary is collapsible
+ *  (the main agent's own evaluation reply follows as the next message). */
+function SubagentResultCard({
+  status,
+  goal,
+  summary,
+}: {
+  status: "completed" | "error";
+  goal: string;
+  summary: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ok = status !== "error";
+  return (
+    <div className="my-2 w-full">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 rounded-lg border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2 text-left text-[12px] hover:bg-[var(--chat-surface-strong)]"
+      >
+        <span
+          className={cn(
+            "inline-block h-2 w-2 shrink-0 rounded-full",
+            ok
+              ? "bg-[var(--status-sage,#7bbf6a)] shadow-[0_0_6px_-1px_var(--status-sage,#7bbf6a)]"
+              : "bg-[var(--status-coral,#e06c6c)] shadow-[0_0_6px_-1px_var(--status-coral,#e06c6c)]",
+          )}
+        />
+        <Bot className="h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]" />
+        <span className="font-medium text-[var(--chat-muted-strong)]">
+          {ok ? "Sub-agent completed" : "Sub-agent finished with issues"}
+          {goal ? <span className="font-normal text-[var(--fg-faint)]"> · {goal}</span> : null}
+        </span>
+        {summary ? (
+          <ChevronDown
+            className={cn(
+              "ml-auto h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)] transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        ) : null}
+      </button>
+      {open && summary ? (
+        <div className="mt-1 whitespace-pre-wrap rounded-lg border border-[var(--chat-border)] bg-[var(--chat-surface)] px-3 py-2 text-[12px] text-[var(--chat-muted)]">
+          {summary}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function hasActivitySnapshot(message: Partial<ChatMessage>): boolean {
@@ -4889,16 +4963,14 @@ export default function ChatPage() {
     );
     unsubs.push(
       // Async (non-blocking) delegation finished: the child ran on its own
-      // thread after the dispatching turn already returned. Render its result
-      // as a full assistant bubble (the "ping"), and release the sidebar
-      // "working" indicator for this session.
+      // thread after the dispatching turn returned. The result is NOT dumped
+      // here — the server re-wakes the main agent, which evaluates the result
+      // and replies in its own voice (arriving as a normal streamed turn), and
+      // persists the result as a `⟦subagent-result⟧` card message. This handler
+      // only releases any lingering sidebar "working" affordance for the
+      // session; it must NOT append a bubble (the event carries no text).
       gw.on("delegate.complete", (ev) => {
         if (!accepts(ev)) return;
-        appendMessage(
-          "assistant",
-          eventText(ev) || "Background task complete",
-          { createdAt: eventMillis(ev) },
-        );
         if (typeof window !== "undefined") {
           const sidebarSessionId =
             persistedSessionIdRef.current ??
@@ -7082,6 +7154,23 @@ export default function ChatPage() {
               <div className="chat-inner w-full">
                 {visibleMessages.map((message, index) => {
                   const isLatest = index === visibleMessages.length - 1;
+                  // A finished async delegation is stored as a user-role
+                  // ⟦subagent-result⟧ marker (so the agent keeps it in context).
+                  // Render it as a "sub agent completed" card with a status dot,
+                  // never as a user bubble.
+                  if (message.role === "user") {
+                    const sub = parseSubagentResultMarker(message.content);
+                    if (sub) {
+                      return (
+                        <SubagentResultCard
+                          key={message.id}
+                          status={sub.status}
+                          goal={sub.goal}
+                          summary={sub.summary}
+                        />
+                      );
+                    }
+                  }
                   const isAssistant = message.role === "assistant";
                   // Live state first; fall back to the snapshot stored on
                   // the message so resumed turns still show their digest.

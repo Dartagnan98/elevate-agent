@@ -1805,16 +1805,24 @@ def test_model_options_propagates_list_exception(monkeypatch):
     assert "catalog blew up" in resp["error"]["message"]
 
 
-def test_async_delegate_sink_emits_and_threads_history():
-    """The async-delegation completion sink (#9) must, on a child result
-    payload: flip the subagent dot, emit a delegate.complete ping with the
-    summary, and thread the result into session history so the main agent has
-    it next turn."""
+def test_async_delegate_sink_rewakes_main_agent():
+    """The async-delegation completion sink must, on a child result payload:
+    flip the subagent dot, emit a lightweight delegate.complete ping (NO dumped
+    text), and re-wake the main agent via prompt.submit so it evaluates the
+    result and replies. The result must NOT be threaded as a fake user message;
+    it rides into the wake turn as context (full text to the API) and is stored
+    as a ⟦subagent-result⟧ card marker (persist_user_message)."""
     session = _session()
     sid = "async-sid"
     emitted = []
+    submitted = []
+
+    def fake_submit(rid, params):
+        submitted.append((rid, params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
+
     with patch("tui_gateway.server._emit", side_effect=lambda ev, s, p=None: emitted.append((ev, s, p))), \
-         patch("tui_gateway.server._get_db", return_value=None):
+         patch.dict("tui_gateway.server._methods", {"prompt.submit": fake_submit}):
         sink = server._make_async_delegate_sink(sid, session)
         sink({
             "task_id": "dt_abc123",
@@ -1834,16 +1842,22 @@ def test_async_delegate_sink_emits_and_threads_history():
     kinds = [e[0] for e in emitted]
     assert "subagent.complete" in kinds
     assert "delegate.complete" in kinds
-    # The ping carries the child's summary text.
+    # delegate.complete is now a lightweight ping — no dumped result text.
     dc = next(p for (ev, _s, p) in emitted if ev == "delegate.complete")
-    assert "CMA drafted" in dc["text"]
     assert dc["task_id"] == "dt_abc123"
-    # History got a user-role reference message (alternation-safe context).
-    assert len(session["history"]) == 1
-    msg = session["history"][0]
-    assert msg["role"] == "user"
-    assert "CMA drafted" in msg["content"]
-    assert session["history_version"] == 1
+    assert "text" not in dc
+    # The raw result is NOT threaded as a fake user message.
+    assert session["history"] == []
+    assert session["history_version"] == 0
+    # The main agent was re-woken via prompt.submit with the result as context.
+    assert len(submitted) == 1
+    _rid, params = submitted[0]
+    assert params["session_id"] == sid
+    assert "CMA drafted" in params["text"]  # API sees the full result + eval ask
+    # Stored as a status-marked card, never a plain user bubble.
+    assert params["persist_user_message"].startswith("⟦subagent-result:completed⟧")
+    assert "Run the Lewis Creek CMA" in params["persist_user_message"]
+    assert "CMA drafted" in params["persist_user_message"]
 
 
 def test_async_delegate_sink_never_raises():

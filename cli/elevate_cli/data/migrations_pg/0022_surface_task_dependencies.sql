@@ -1,5 +1,5 @@
 -- 0022_surface_task_dependencies.sql
--- Task dependency DAG on Elevate's existing surface_tasks.
+-- CortextOS-style task dependency DAG on Elevate's existing surface_tasks.
 -- `blocked_by` is the authoritative dependency edge; `blocks` is maintained
 -- as the inverse for dashboard visibility and import compatibility.
 

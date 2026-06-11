@@ -3234,6 +3234,16 @@ def _emit_sign_in_nag(sid: str) -> None:
     )
 
 
+# Marker prefix for the stored "user" message that carries a finished async
+# delegation's result back into the main session. It does double duty:
+#   * the agent keeps the result in its context for follow-ups (real content
+#     follows the marker), and
+#   * the dashboard renders this message as a "sub agent completed" card with a
+#     status dot instead of a plain user bubble (ChatPage detects the prefix).
+# `status` is `completed` or `error`. NEVER render this verbatim as a user turn.
+_SUBAGENT_RESULT_MARKER = "⟦subagent-result"  # ⟦subagent-result:<status>⟧
+
+
 def _format_delegate_completion(results: list) -> str:
     """Render an async-delegation result payload as a chat-ready summary.
 
@@ -3258,16 +3268,85 @@ def _format_delegate_completion(results: list) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def _wake_main_agent_with_result(
+    sid: str, session: dict, results: list, summary_text: str
+) -> bool:
+    """Re-wake the main agent so it EVALUATES a finished async delegation and
+    replies to the user in its own voice (instead of dumping the raw result).
+
+    Runs a real follow-up turn on the live session via the existing
+    ``prompt.submit`` machinery (streams + persists + emits like any turn). The
+    API sees the full wake prompt (result + "evaluate & respond"); the STORED
+    user message is rewritten (``persist_user_message``) to a clean
+    ``⟦subagent-result:<status>⟧ …`` marker so (a) the agent keeps the result
+    in context for follow-ups and (b) the dashboard renders it as a "sub agent
+    completed" card, never a fake user bubble.
+
+    The dispatching turn is long done by now, but the user may have started
+    another turn — retry briefly while the session is busy; give up after ~60s
+    so a wedged session never blocks the daemon thread forever.
+    """
+    overall_status = "completed"
+    goals = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("status") or "completed").lower() != "completed":
+            overall_status = "error"
+        g = str(r.get("goal") or "").strip()
+        if g:
+            goals.append(g)
+    goal_label = "; ".join(goals)
+
+    wake_prompt = (
+        "[automated] A background task you delegated has finished"
+        + (f" ({goal_label})" if goal_label else "")
+        + ". Result below.\n\n"
+        + summary_text
+        + "\n\nEvaluate whether this satisfies what was asked, then reply to the "
+        "user with a brief synthesis: what came back, whether it's complete, and "
+        "any next step. Do NOT re-delegate the same work."
+    )
+    stored_marker = (
+        f"{_SUBAGENT_RESULT_MARKER}:{overall_status}⟧"
+        + (f" {goal_label}\n\n" if goal_label else "\n\n")
+        + summary_text
+    )
+    params = {
+        "session_id": sid,
+        "text": wake_prompt,
+        "persist_user_message": stored_marker,
+    }
+
+    submit = _methods.get("prompt.submit")
+    if submit is None:
+        return False
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        if not session.get("running"):
+            try:
+                submit(f"wake_{uuid.uuid4().hex[:8]}", params)
+                return True
+            except Exception:
+                logger.exception("re-wake prompt.submit failed (sid=%s)", sid)
+                return False
+        time.sleep(3.0)
+    logger.warning(
+        "re-wake skipped: session %s busy >60s after delegation finished", sid
+    )
+    return False
+
+
 def _make_async_delegate_sink(sid: str, session: dict):
     """Build the completion callback delegate_task invokes when an async
     (non-blocking) delegation finishes.
 
     The dispatching turn already returned, so this runs later on the
-    delegation's own daemon thread. It (1) emits the child's result as a new
-    assistant ping in the parent dashboard session + flips the sidebar
-    subagent dots, and (2) threads the result into the session history (and DB)
-    as a clearly-marked reference message so the main agent has the answer in
-    context on the user's next turn.
+    delegation's own daemon thread. It (1) flips the sidebar subagent dots to
+    done/error and (2) re-wakes the main agent to evaluate the result and reply
+    in its own voice (see ``_wake_main_agent_with_result``). The result reaches
+    the agent's context + the dashboard via that wake turn — NOT as a raw dump
+    or a fake user message.
     """
 
     def _sink(payload: dict) -> None:
@@ -3277,7 +3356,8 @@ def _make_async_delegate_sink(sid: str, session: dict):
             task_id = str((payload or {}).get("task_id") or "")
             summary_text = _format_delegate_completion(results)
 
-            # 1) Flip any still-running subagent dots to done/error.
+            # 1) Flip any still-running subagent dots to done/error so the
+            #    sidebar chip + inline card show the green/red status.
             for r in results:
                 if not isinstance(r, dict):
                     continue
@@ -3294,39 +3374,15 @@ def _make_async_delegate_sink(sid: str, session: dict):
                     },
                 )
 
-            # 2) Surface the result as its own assistant turn so the user is
-            #    pinged with the full answer (the client renders this as a
-            #    message bubble + clears the "working" sidebar indicator).
-            _emit(
-                "delegate.complete",
-                sid,
-                {"task_id": task_id, "text": summary_text},
-            )
+            # 2) Lightweight ping so the client can release any lingering
+            #    "working" affordance for this delegation (no text — the result
+            #    arrives via the wake turn below, not as a dumped bubble).
+            _emit("delegate.complete", sid, {"task_id": task_id})
 
-            # 3) Thread it into history (+ DB) so the main agent has the result
-            #    in context next turn. User-role keeps role alternation valid
-            #    (the prior message is the agent's "I'll ping you" reply); the
-            #    bracket marker makes the provenance unambiguous.
-            ctx = (
-                "[Delegated task result — the user has already been shown this; "
-                "use it if they follow up]\n" + summary_text
-            )
-            lock = session.get("history_lock")
-            if lock is not None:
-                with lock:
-                    hist = session.get("history")
-                    if isinstance(hist, list):
-                        hist.append({"role": "user", "content": ctx})
-                        session["history_version"] = (
-                            int(session.get("history_version", 0)) + 1
-                        )
-            try:
-                db = _get_db()
-                skey = session.get("session_key")
-                if db is not None and skey:
-                    db.append_message(skey, "user", content=ctx)
-            except Exception:
-                logger.debug("async delegate sink: DB persist failed", exc_info=True)
+            # 3) Re-wake the main agent: it evaluates the result and replies to
+            #    the user. This persists the result (as a clean marker) + the
+            #    agent's synthesis through the normal turn path.
+            _wake_main_agent_with_result(sid, session, results, summary_text)
         except Exception:
             logger.exception("async delegate sink failed (sid=%s)", sid)
 
