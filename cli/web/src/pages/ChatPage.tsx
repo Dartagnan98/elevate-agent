@@ -318,6 +318,8 @@ interface SubagentEntry {
   status: "running" | "done" | "error";
   subagent_id: string;
   toolCount?: number;
+  /** Rough token estimate of relayed child thinking — feeds the live meter. */
+  thinkingTokens?: number;
   /** The subagent's own session id — open + message it via ?resume=. */
   child_session_id?: string;
   /** The parent assistant turn this subagent ran under. */
@@ -4612,9 +4614,15 @@ export default function ChatPage() {
         String(payload.goal || payload.text || payload.summary || "Subagent"),
       );
       const subagentId = String(payload.subagent_id || goal || `subagent-${Date.now()}`);
-      const preview = compactLine(
+      const isThinking = ev.type === "subagent.thinking";
+      const rawPreview = compactLine(
         String(payload.tool_preview || payload.text || payload.summary || ""),
       );
+      // Child reasoning renders as a thought, not a tool line — and its
+      // volume feeds the live token meter so a delegation that is "only"
+      // thinking no longer reads as 0 output.
+      const preview = isThinking && rawPreview ? `💭 ${rawPreview}` : rawPreview;
+      const thinkingDelta = isThinking ? estimateTokens(rawPreview) : 0;
       const statusText = String(payload.status || "").toLowerCase();
       const nextStatus: SubagentEntry["status"] =
         ev.type === "subagent.complete"
@@ -4650,6 +4658,7 @@ export default function ChatPage() {
                       typeof payload.tool_count === "number"
                         ? payload.tool_count
                         : subagent.toolCount,
+                    thinkingTokens: (subagent.thinkingTokens ?? 0) + thinkingDelta,
                     child_session_id: childSessionId ?? subagent.child_session_id,
                     messageId: subagent.messageId ?? parentMessageId,
                     finalSummary: finalSummary ?? subagent.finalSummary,
@@ -4672,6 +4681,7 @@ export default function ChatPage() {
             subagent_id: subagentId,
             toolCount:
               typeof payload.tool_count === "number" ? payload.tool_count : undefined,
+            thinkingTokens: thinkingDelta || undefined,
             child_session_id: childSessionId,
             messageId: parentMessageId,
             finalSummary,
@@ -4901,6 +4911,9 @@ export default function ChatPage() {
     unsubs.push(gw.on("subagent.start", trackSubagent));
     unsubs.push(gw.on("subagent.progress", trackSubagent));
     unsubs.push(gw.on("subagent.tool", trackSubagent));
+    // Child reasoning — without this a delegation that thinks before its
+    // first tool call shows NOTHING in the chat for the whole stretch.
+    unsubs.push(gw.on("subagent.thinking", trackSubagent));
     unsubs.push(gw.on("subagent.complete", trackSubagent));
     unsubs.push(
       gw.on("tool.generating", (ev) => {
@@ -6744,8 +6757,15 @@ export default function ChatPage() {
   // that turn's digest (live/recent turns; resumed turns use the panel).
   const subagentsByMessage = useMemo(() => {
     const grouped = new Map<string, SubagentEntry[]>();
+    const orphans: SubagentEntry[] = [];
     for (const s of subagents) {
-      if (!s.messageId) continue;
+      if (!s.messageId) {
+        // Event landed before the assistant row existed (e.g. delegation as
+        // the turn's first action). Attach to the live streaming turn below
+        // instead of silently never rendering.
+        orphans.push(s);
+        continue;
+      }
       // If this subagent's delegation step was folded into the answer card,
       // attach it to the answer so its summary + drill-in render there.
       const key = messageFold.remap.get(s.messageId) ?? s.messageId;
@@ -6753,8 +6773,17 @@ export default function ChatPage() {
       next.push(s);
       grouped.set(key, next);
     }
+    if (orphans.length) {
+      const liveAssistant = [...messages]
+        .reverse()
+        .find((m) => m.role === "assistant" && m.status === "streaming");
+      if (liveAssistant) {
+        const key = messageFold.remap.get(liveAssistant.id) ?? liveAssistant.id;
+        grouped.set(key, [...(grouped.get(key) ?? []), ...orphans]);
+      }
+    }
     return grouped;
-  }, [subagents, messageFold]);
+  }, [subagents, messageFold, messages]);
   // Join per-turn usage to assistant turns for the footer. turn_usage.message_id
   // is a gateway id that won't match our ids, so pair chronologically from the
   // most-recent end (the turns the user is actually looking at).
@@ -9522,11 +9551,31 @@ function ChatActivityDigest({
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
   const expanded = open ?? true;
-  const tokens = busy
-    ? liveTokens ?? 0
-    : typeof tokenCount === "number"
-      ? tokenCount
-      : 0;
+  // While a delegation runs, the parent streams nothing — without folding in
+  // the children's relayed activity the pill reads "Planning · 0 out" for the
+  // whole wait and looks hung.
+  const runningSubagents = (subagents ?? []).filter(
+    (s) => s.status === "running",
+  );
+  const childThinkingTokens = busy
+    ? (subagents ?? []).reduce((sum, s) => sum + (s.thinkingTokens ?? 0), 0)
+    : 0;
+  const childSteps = (subagents ?? []).reduce(
+    (sum, s) => sum + (s.toolCount ?? 0),
+    0,
+  );
+  const delegatingLabel =
+    busy && runningSubagents.length > 0
+      ? runningSubagents.length === 1
+        ? `Delegating — ${runningSubagents[0].goal || "subagent"}`
+        : `Delegating to ${runningSubagents.length} agents`
+      : null;
+  const tokens =
+    (busy
+      ? liveTokens ?? 0
+      : typeof tokenCount === "number"
+        ? tokenCount
+        : 0) + childThinkingTokens;
 
   return (
     <section className="pt-1 text-[var(--fg-muted)]">
@@ -9577,6 +9626,11 @@ function ChatActivityDigest({
           {busy ? (
             compacting ? (
               "Compacting context"
+            ) : delegatingLabel ? (
+              <>
+                {delegatingLabel}
+                <span className="processing-ellipsis" aria-hidden="true" />
+              </>
             ) : (
               <>
                 {`${rotatingVerb[0].toUpperCase()}${rotatingVerb.slice(1)}`}
@@ -9598,6 +9652,14 @@ function ChatActivityDigest({
             <>
               <span className="dot-sep">·</span>
               <span className="num">{plural(steps.length, "step")}</span>
+            </>
+          )}
+          {busy && childSteps > 0 && (
+            <>
+              <span className="dot-sep">·</span>
+              <span className="num" title="Tool calls made by delegated subagents.">
+                {childSteps.toLocaleString()} agent steps
+              </span>
             </>
           )}
           {busy && typeof liveInput === "number" && liveInput > 0 && (
