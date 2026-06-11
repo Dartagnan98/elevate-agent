@@ -258,9 +258,9 @@ const SKILL_GROUPS: SkillGroupDefinition[] = [
     icon: Code2,
   },
   {
-    key: "cortextos-agent-ops",
-    label: "CortextOS agent ops",
-    description: "Imported CortextOS skills mapped to Elevate-native agent systems.",
+    key: "agent-ops",
+    label: "Agent ops",
+    description: "Fleet operations skills — heartbeats, reviews, approvals, tasks, memory, and agent management.",
     icon: Sparkles,
   },
   {
@@ -313,7 +313,6 @@ function displaySkillCategory(skill: SkillInfo): string {
   const realEstateGroup = realEstateSkillGroupKey(skill);
   if (realEstateGroup) return REAL_ESTATE_GROUP_LABELS[realEstateGroup] ?? "Real Estate";
   const category = normalizeSkillCategory(skill.category);
-  if (category === "cortextos") return "CortextOS Agent Ops";
   if (!category || category === "uncategorized") return "Local";
   return category
     .split("-")
@@ -326,9 +325,6 @@ function skillGroupKey(skill: SkillInfo): string {
   if (realEstateGroup) return realEstateGroup;
 
   const category = normalizeSkillCategory(skill.category);
-  if (category === "cortextos") {
-    return "cortextos-agent-ops";
-  }
   if (["ads", "direct-response", "social-media"].includes(category)) {
     return "marketing-ads";
   }

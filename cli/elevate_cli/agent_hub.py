@@ -37,7 +37,6 @@ SHARED_AGENT_SKILLS: tuple[str, ...] = (
     "knowledge-base",
     "surface-heartbeat",
     "autoresearch",
-    "cortextos-theta-wave",
     "nano-pdf",
     "powerpoint",
     "baoyu-infographic",
@@ -251,7 +250,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "signed code; editing it corrupts the app. manage_agent persists the change to the agent "
             "store; it applies to new/restarted agent sessions.\n\n"
             "Heartbeat — run this every cycle (Elevate-native, via agent_bus + native Tasks/Comms/"
-            "Approvals; never a daemon, PM2, or `cortextos bus`):\n"
+            "Approvals; never a daemon, PM2, or the agent bus):\n"
             "1. Refresh your heartbeat so the dashboard sees you alive, and log a heartbeat event — "
             "invisible work is wasted work.\n"
             "2. Sweep your inbox and ACK every message; un-ACK'd messages re-deliver and pile up.\n"
@@ -719,7 +718,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
             "- Every number carries a source and an as-of date; flag stale or thin data on sight, and "
             "audit each brief against its sources before handing it over.\n\n"
             "Heartbeat — run this every cycle (Elevate-native, via agent_bus; never a daemon or "
-            "`cortextos bus`):\n"
+            "the agent bus):\n"
             "1. Refresh your heartbeat and log a heartbeat event.\n"
             "2. ACK every inbox message.\n"
             "3. System health + liveness: read every agent's heartbeat; flag any silent > 5h and nudge "
@@ -763,7 +762,7 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "platforms": ["local"],
         "session_sources": ["cli", "cron"],
-        "skills": ["theta-wave", "cortextos-theta-wave", "surface-heartbeat", "system-diagnostics", "goal-management", "event-logging", "knowledge-base"],
+        "skills": ["theta-wave", "surface-heartbeat", "system-diagnostics", "goal-management", "event-logging", "knowledge-base"],
         "toolsets": ["agent_bus", "agent_handoff", "memory", "todo"],
         "prompt": (
             "You are Theta Wave — the fleet's self-improvement reviewer for this Elevate workspace. You "

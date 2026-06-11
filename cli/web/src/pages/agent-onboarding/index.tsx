@@ -252,7 +252,7 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
       ? outSlackItem.status === "configured"
       : inboundConfigured("operator_channel_slack"),
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
-    subagentsPack: String(subagentsVal.pack ?? "cortextos_default"),
+    subagentsPack: String(subagentsVal.pack ?? "agent_default"),
     agentChannels: parseAgentChannels(agentChannelsItem?.value),
     primarySecretPresent: Boolean(primaryVal.secretPresent),
     primarySecretPreview: String(primaryVal.secretPreview ?? ""),
@@ -454,7 +454,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
     {
       key: "subagents_pack",
       status: (draft.subagentsEnabled ? "configured" : "skipped") as AdminSetupItemStatus,
-      provider: draft.subagentsEnabled ? draft.subagentsPack || "cortextos_default" : null,
+      provider: draft.subagentsEnabled ? draft.subagentsPack || "agent_default" : null,
       value: {
         pack: draft.subagentsPack,
         enabled: draft.subagentsEnabled,
@@ -1040,8 +1040,8 @@ export function AgentSetupLaunch({
             value={draft.subagentsPack}
             onChange={(v) => updateField("subagentsPack", v)}
             options={[
-              { value: "cortextos_default", label: "Default council (Executive Assistant + 5 specialists)" },
-              { value: "cortextos_minimal", label: "Minimal (Executive Assistant only)" },
+              { value: "agent_default", label: "Default council (Executive Assistant + 5 specialists)" },
+              { value: "agent_minimal", label: "Minimal (Executive Assistant only)" },
             ]}
           />
         )}

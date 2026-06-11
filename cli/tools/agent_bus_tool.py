@@ -1,7 +1,7 @@
 """Native agent bus tool.
 
-This is the in-app replacement for CortextOS' shell-based ``cortextos bus``
-commands. It deliberately writes to Elevate's existing stores only.
+This is the in-app agent state bus. It deliberately writes to Elevate's
+existing stores only.
 
 Surface STATE (heartbeat records, surface config, goals, experiment records,
 activity events, the run index) lives in the account database via
@@ -1175,7 +1175,7 @@ AGENT_BUS_SCHEMA = {
     "function": {
         "name": "agent_bus",
         "description": (
-            "Native Elevate replacement for CortextOS bus commands. Use it for "
+            "Native Elevate agent bus. Use it for "
             "agent-visible tasks, approvals, activity events, heartbeat status, "
             "run records (log_run after every heartbeat run / run_count for the "
             "experiment cadence — the database-backed run index the dashboard "

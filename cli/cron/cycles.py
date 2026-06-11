@@ -1,6 +1,6 @@
 """Experiment-cycle management for surface heartbeats.
 
-Elevate-native port of cortextOS's ``manageCycle`` / ``findCycleDefaults``
+Elevate-native ``manageCycle`` / ``findCycleDefaults``
 (``src/bus/experiment.ts``). A *cycle* is an agent-creatable, recurring
 self-improvement experiment definition that lives as DATA in a surface's
 stored config (``surface_state`` table, migration 0024 — formerly the
@@ -16,7 +16,7 @@ This module is ADDITIVE and TOLERANT:
     surface-heartbeats keep working unchanged.
 
 A Cycle shape (Elevate flavor — carries ``every_n_runs`` + ``approval_required``
-in addition to the cortextOS fields)::
+in addition to the Elevate fields)::
 
     {
       "name": str,

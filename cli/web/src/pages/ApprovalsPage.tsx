@@ -13,7 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
-/*  Approvals = operator decisions plus human-assigned tasks. CortextOS */
+/*  Approvals = operator decisions plus human-assigned tasks. */
 /*  exposes Your Tasks / Approvals / History; Elevate backs those lanes */
 /*  with native surface_tasks and surface_approvals only.               */
 /* ------------------------------------------------------------------ */
@@ -195,6 +195,8 @@ function ApprovalDetail({
   );
 }
 
+const DESCRIPTION_COLLAPSE_THRESHOLD = 160;
+
 function ApprovalCard({
   approval,
   onOpen,
@@ -205,7 +207,10 @@ function ApprovalCard({
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const pending = approval.status === "pending";
+  const longDescription =
+    (approval.description?.length ?? 0) > DESCRIPTION_COLLAPSE_THRESHOLD;
 
   const resolve = async (decision: "approve" | "reject") => {
     setBusy(decision);
@@ -226,9 +231,6 @@ function ApprovalCard({
             <Badge variant={approvalVariant(approval.status)} className="shrink-0">{approval.status}</Badge>
             <Badge variant="secondary" className="shrink-0">{categoryLabel(approval.category)}</Badge>
           </div>
-          {approval.description && (
-            <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{approval.description}</p>
-          )}
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
             <span>{approval.surface || "system"}</span>
             <Clock className="h-3 w-3" />
@@ -236,6 +238,29 @@ function ApprovalCard({
             {approval.resolvedAt && <span>resolved {timeAgo(approval.resolvedAt)}</span>}
           </div>
         </button>
+
+        {approval.description && (
+          <div className="space-y-1">
+            <p
+              className={cn(
+                "whitespace-pre-wrap text-xs leading-5 text-muted-foreground",
+                !expanded && longDescription && "line-clamp-3",
+              )}
+            >
+              {approval.description}
+            </p>
+            {longDescription && (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                className="text-[11px] text-foreground/50 hover:text-foreground/80 transition-colors"
+              >
+                {expanded ? "Show less ↑" : "Show more ↓"}
+              </button>
+            )}
+          </div>
+        )}
+
         {pending && (
           <div className="flex justify-end gap-2 border-t border-border pt-2">
             <Button

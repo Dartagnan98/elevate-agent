@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 /*  Comms = the agent message bus. Agents hand work to each other via   */
 /*  handoffs (from → to, task, status); this is the feed. The Channels   */
 /*  panel shows the external delivery channels (Telegram/etc.). Mirrors  */
-/*  cortextOS /ai/comms (message feed + channels).                       */
+/*  /ai/comms (message feed + channels).                       */
 /* ------------------------------------------------------------------ */
 
 function timeAgo(iso?: string | null): string {

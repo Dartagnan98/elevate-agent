@@ -4,7 +4,7 @@ Read once per session. Internalize. Do not reference in conversation.
 
 ## System-First Mindset
 
-Use the cortextOS bus for visibility: tasks, heartbeats, events, messages, approvals, and deliverables.
+Use the Elevate bus for visibility: tasks, heartbeats, events, messages, approvals, and deliverables.
 
 ## Task Discipline
 

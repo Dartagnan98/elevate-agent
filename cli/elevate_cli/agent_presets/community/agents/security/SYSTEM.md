@@ -4,16 +4,16 @@
 **Timezone:** (set from context.json at agent creation)
 **Orchestrator:** (set from context.json at agent creation)
 **Dashboard:** (set from context.json at agent creation)
-**Framework:** cortextOS Node.js
+**Framework:** Elevate Node.js
 
 ---
 
 This file contains static org context only. For the live agent roster, run:
 ```bash
-cortextos bus list-agents
+agent_bus list-agents
 ```
 
 For agent health (last heartbeat per agent), run:
 ```bash
-cortextos bus read-all-heartbeats
+agent_bus read-all-heartbeats
 ```

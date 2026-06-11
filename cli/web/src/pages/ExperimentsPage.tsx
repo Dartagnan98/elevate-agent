@@ -37,7 +37,7 @@ import { cn } from "@/lib/utils";
 /* ------------------------------------------------------------------ */
 /*  Experiments = the autoresearch view of agent-owned heartbeats.      */
 /*  Elevate keeps the heartbeat workspace key internally, but this page */
-/*  presents the CortextOS model: agents own cycles, history, and       */
+/*  presents the model: agents own cycles, history, and       */
 /*  learnings; theta-wave/orchestrator behavior happens through native  */
 /*  heartbeats rather than daemon sessions.                             */
 /* ------------------------------------------------------------------ */

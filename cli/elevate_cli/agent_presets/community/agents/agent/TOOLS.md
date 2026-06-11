@@ -1,6 +1,6 @@
 # Tools Quick Reference
 
-All cortextOS commands: `cortextos bus <command>`. Full docs in skill files — load the relevant skill when you need details on a workflow.
+All Elevate commands: `agent_bus <command>`. Full docs in skill files — load the relevant skill when you need details on a workflow.
 
 ---
 
@@ -10,7 +10,7 @@ All cortextOS commands: `cortextos bus <command>`. Full docs in skill files — 
 |---|---|---|
 | `CTX_AGENT_NAME` | daemon | Your agent name |
 | `CTX_ORG` | daemon | Org name |
-| `CTX_ROOT` | daemon | `~/.cortextos/{instance}` |
+| `CTX_ROOT` | daemon | `~/.Elevate/{instance}` |
 | `CTX_FRAMEWORK_ROOT` | daemon | Framework repo root |
 | `CTX_TELEGRAM_CHAT_ID` | agent .env | Your Telegram chat ID |
 | `ANTHROPIC_API_KEY` | shell profile | Never stored in a file |
@@ -69,9 +69,9 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 ### Knowledge Base — full docs: `.claude/skills/knowledge-base/SKILL.md`
 | Command | What it does |
 |---|---|
-| `kb-query "<question>" --org $CTX_ORG` | Semantic search |
-| `kb-ingest <path> --org $CTX_ORG --scope private\|shared` | Index files into KB |
-| `kb-collections --org $CTX_ORG` | List available collections |
+| `kb-query "<question>" --org your org` | Semantic search |
+| `kb-ingest <path> --org your org --scope private\|shared` | Index files into KB |
+| `kb-collections --org your org` | List available collections |
 
 ### Discovery & Fleet
 | Command | What it does |
@@ -91,7 +91,7 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 ### Goals
 | Command | What it does |
 |---|---|
-| `cortextos goals generate-md --agent <name> --org <org>` | Rebuild GOALS.md from goals.json |
+| `Elevate goals generate-md --agent <name> --org <org>` | Rebuild GOALS.md from goals.json |
 
 ### Experiments (Theta Wave) — full docs: `.claude/skills/autoresearch/SKILL.md`
 | Command | What it does |
@@ -121,10 +121,10 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 ### Worker Sessions — full docs: `.claude/skills/worker-agents/SKILL.md`
 | Command | What it does |
 |---|---|
-| `cortextos spawn-worker <name> --dir <path> --prompt "<text>"` | Spawn ephemeral Claude Code session |
-| `cortextos list-workers` | Show active/recent worker sessions |
-| `cortextos inject-worker <name> "<text>"` | Inject text into running worker (nudge) |
-| `cortextos terminate-worker <name>` | Stop a worker session |
+| `Elevate spawn-worker <name> --dir <path> --prompt "<text>"` | Spawn ephemeral Claude Code session |
+| `Elevate list-workers` | Show active/recent worker sessions |
+| `Elevate inject-worker <name> "<text>"` | Inject text into running worker (nudge) |
+| `Elevate terminate-worker <name>` | Stop a worker session |
 
 ### Community Ecosystem
 | Command | What it does |

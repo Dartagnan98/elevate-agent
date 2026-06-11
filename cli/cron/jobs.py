@@ -479,7 +479,7 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "approval_required": False,
         },
     },
-    # Orchestrator (Executive Assistant) heartbeat — ported from the cortextOS
+    # Orchestrator (Executive Assistant) heartbeat — modeled on the
     # orchestrator HEARTBEAT cadence (fleet health 4h, approval/human-task escalation
     # 2h, morning + evening review), translated to Elevate-native (agent_bus, native
     # Tasks/Comms/Approvals; approvals escalate on the DASHBOARD, never Telegram).
@@ -545,7 +545,7 @@ SURFACE_HEARTBEAT_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "approval_required": False,
         },
     },
-    # Analyst heartbeat — ported from the cortextOS analyst HEARTBEAT cadence (system
+    # Analyst heartbeat — ported from the analyst HEARTBEAT cadence (system
     # health + agent-liveness 4h, usage/liveness pulse 2h, nightly metrics), Elevate-
     # native (agent_bus + native signals).
     "analyst": {
@@ -712,9 +712,9 @@ def _seed_surface_heartbeat_workspace(
 # Built-in surfaces (leads, admin) are seed specs above; custom surfaces are added
 # at runtime via create_surface() and persisted to the account registry — the
 # ``surface_registry`` table (migration 0024; formerly heartbeats/surfaces.json) —
-# Elevate's analog of cortextOS enabled-agents.json. ensure_surface() seeds ANY
+# Elevate's analog of enabled-agents.json. ensure_surface() seeds ANY
 # surface (built-in or custom) the same way: workspace scaffold + opt-in cron job.
-# SURFACE_TEMPLATE is the default spec a new surface is filled from (cortextOS
+# SURFACE_TEMPLATE is the default spec a new surface is filled from (
 # copyTemplateFiles equivalent).
 SURFACE_TEMPLATE: Dict[str, Any] = {
     "name": "{Title} Heartbeat",
@@ -933,7 +933,7 @@ def create_surface(
     surface: str, spec: Optional[Dict[str, Any]] = None, *, created_by: str = "user"
 ) -> Dict[str, Any]:
     """Create a NEW custom surface from SURFACE_TEMPLATE + caller overrides, persist it
-    to the registry, and seed it (opt-in/off). Mirrors cortextOS add-agent +
+    to the registry, and seed it (opt-in/off). Mirrors add-agent +
     copyTemplateFiles. Returns {surface, spec, job}. Raises ValueError on a bad key or
     a name that already exists.
     """
@@ -1145,12 +1145,12 @@ def register_agent_surfaces() -> None:
                 surface_state.upsert_registry(conn, surface, dict(spec))
 
 
-# ─── Per-agent heartbeat (cortextOS model: a HEARTBEAT.md the agent reads each beat
+# ─── Per-agent heartbeat (model: a HEARTBEAT.md the agent reads each beat
 #     + an agent-bound cron that fires it) ──────────────────────────────────────────
 # Distinct from the theta-wave "surface" above (an experiment loop). This is the
 # operational beat: update status, sweep inbox, (orchestrator) check fleet health,
 # work tasks, surface blockers. Native Elevate only (agent_bus + Tasks/Comms/
-# Approvals) — never `cortextos bus`/PM2/PTY. theta-wave (system-review) is excluded;
+# Approvals) — never external daemons/PM2/PTY. theta-wave (system-review) is excluded;
 # the executive-assistant IS included (it's the orchestrator and beats like one).
 _HEARTBEAT_CRON_EXCLUDED_AGENTS = {"theta-wave"}
 
@@ -1175,13 +1175,13 @@ def agent_heartbeat_md_path(agent_id: str) -> Path:
 def _agent_heartbeat_md_template(agent_id: str) -> str:
     """Role-aware, Elevate-native HEARTBEAT.md — the full 10-step beat.
 
-    Faithful port of the cortextOS 10-step heartbeat, translated to Elevate tools:
+    Faithful port of the 10-step heartbeat, translated to Elevate tools:
     shared state via the agent_bus tool actions (update_heartbeat, read_heartbeats,
     log_event, list_tasks, update_task/complete_task, create_approval, get_goals,
     write_memory); inbox via agent_handoff/Comms; the agent's private docs
     (GOALS.md / MEMORY.md / GUARDRAILS.md / memory/<day>.md) live in its workdir.
-    No `cortextos bus` / PM2 / PTY — this is the Elevate app, not the daemon. There
-    is no manual KB-ingest in Elevate (memory is indexed automatically).
+    No external daemons / PM2 / PTY — this is the Elevate app. There is no manual
+    KB-ingest in Elevate (memory is indexed automatically).
     """
     name = agent_id.replace("-", " ").title()
     role = ""
@@ -1225,7 +1225,7 @@ def _agent_heartbeat_md_template(agent_id: str) -> str:
         "working.\n\n"
         "NATIVE ELEVATE ONLY — use your tools: the agent_bus tool (actions named below), "
         "Tasks, agent_handoff/Comms, Approvals, memory, and your own files. NEVER call "
-        "`cortextos bus`, PM2, or PTY; this is the Elevate app, not the cortextOS daemon.\n\n"
+        "external daemons, PM2, or PTY; this is the Elevate app.\n\n"
         "## The 10 steps\n"
         "1. UPDATE HEARTBEAT (first, always) — agent_bus `update_heartbeat` with a "
         "one-sentence summary of what you're doing. Refreshes your \"alive\" status; skip "
@@ -1267,13 +1267,13 @@ def _agent_heartbeat_md_template(agent_id: str) -> str:
         "## Rules\n"
         "- Never claim a status you haven't verified.\n"
         "- Native Elevate only: agent_bus + Tasks + Comms + Approvals + memory + your "
-        "files. No daemon / PM2 / PTY / `cortextos bus`.\n"
+        "files. No external daemons / PM2 / PTY / shell agent CLIs.\n"
         "- Drafts-only for anything client-facing.\n"
     )
 
 
 # Companion docs the 10-step beat reads/writes, seeded alongside HEARTBEAT.md in the
-# agent's workdir. Mirror cortextOS's per-agent files; seeded only if absent so the
+# agent's workdir. Per-agent files; seeded only if absent so the
 # agent's edits/accumulated history are never clobbered.
 def _agent_companion_files(agent_id: str) -> Dict[str, str]:
     name = _slug_agent(agent_id).replace("-", " ").title()
@@ -1395,10 +1395,10 @@ def ensure_agent_heartbeats(*, enabled: bool = False) -> List[Dict[str, Any]]:
     return out
 
 
-# The Executive Assistant's coordination crons beyond its heartbeat — the cortextOS
+# The Executive Assistant's coordination crons beyond its heartbeat — the
 # orchestrator companion set (approvals watch + daily/weekly reviews + morning brief),
 # translated to Elevate-native (agent_bus + native Tasks/Comms/Approvals + the EA's
-# review skills; no `cortextos bus`). EA-bound, seeded paused/opt-in.
+# review skills; no the agent bus). EA-bound, seeded paused/opt-in.
 _ORCHESTRATOR_AGENT = "executive-assistant"
 _ORCHESTRATOR_CRONS: List[Dict[str, Any]] = [
     {
@@ -1456,7 +1456,7 @@ _ORCHESTRATOR_CRONS: List[Dict[str, Any]] = [
 
 def ensure_orchestrator_crons(*, enabled: bool = False) -> List[Dict[str, Any]]:
     """Seed the Executive Assistant's coordination crons (approvals watch + daily/weekly
-    reviews + morning brief), mirroring the cortextOS orchestrator. EA-bound, seeded
+    reviews + morning brief), mirroring the orchestrator. EA-bound, seeded
     paused/opt-in, idempotent (find by name+agent). No-op if the EA isn't installed."""
     aid = _ORCHESTRATOR_AGENT
     if aid not in _installed_agent_ids():
@@ -1670,7 +1670,7 @@ def ensure_surface_automations() -> List[Dict[str, Any]]:
     return out
 
 
-# ─── Day / night mode (port of cortextOS detectDayNightMode) ──────────────────
+# ─── Day / night mode (port of detectDayNightMode) ──────────────────
 def _parse_hhmm(val: Any, default: tuple) -> tuple:
     """Parse 'HH:MM' → (h, m); fall back to default on anything malformed."""
     try:
@@ -1685,7 +1685,7 @@ def _parse_hhmm(val: Any, default: tuple) -> tuple:
 
 def day_night_mode(config: Dict[str, Any], *, now=None) -> str:
     """Return 'day' or 'night' for a surface config's day window. Defaults 08:00–22:00,
-    honors config.timezone when zoneinfo resolves it. Faithful port of cortextOS
+    honors config.timezone when zoneinfo resolves it. Faithful port of the
     detectDayNightMode, incl. windows that wrap past midnight."""
     start = _parse_hhmm(config.get("day_mode_start"), (8, 0))
     end = _parse_hhmm(config.get("day_mode_end"), (22, 0))
@@ -1714,7 +1714,7 @@ def is_day_mode(config: Dict[str, Any], *, now=None) -> bool:
 # experiment cycles. Runs nightly (quiet window), scans every surface, classifies
 # each (Stale/Converged/Successful/Underperforming), and shapes cycles via the cycle
 # endpoints — gated by auto_create_agent_cycles / auto_modify_agent_cycles (else it
-# only proposes, for dashboard approval). Faithful port of cortextOS theta-wave.
+# only proposes, for dashboard approval). Faithful port of theta-wave.
 THETA_WAVE_SKILL = "real-estate/theta-wave"
 THETA_WAVE_NAME = "Theta Wave"
 THETA_WAVE_SCHEDULE = "0 2 * * *"

@@ -134,7 +134,7 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
     Precedence:
     1. Per-job ``enabled_toolsets`` (set via ``cronjob`` tool on create/update).
        Keeps the agent's job-scoped toolset override intact — #6130.
-    2. Per-platform ``hermes tools`` config for the ``cron`` platform.
+    2. Per-platform ``/tools`` config for the ``cron`` platform.
        Mirrors gateway behavior (``_get_platform_tools(cfg, platform_key)``)
        so users can gate cron toolsets globally without recreating every job.
     3. ``None`` on any lookup failure — AIAgent loads the full default set
@@ -306,7 +306,7 @@ def _cortext_native_cron_skill(skill_name: str) -> dict | None:
         "success": True,
         "name": skill_name,
         "content": content,
-        "description": "Elevate-native compatibility instructions for a CortextOS loop concept.",
+        "description": "Elevate-native compatibility instructions for a loop concept.",
         "_elevate_native": True,
     }
 
@@ -314,7 +314,7 @@ def _cortext_native_cron_skill(skill_name: str) -> dict | None:
 def _load_cron_skill(skill_view, skill_name: str) -> tuple[dict | None, str | None, str | None]:
     """Load a skill for cron prompt assembly.
 
-    Returns ``(payload, usage_name, error)``. Known CortextOS loop concepts are
+    Returns ``(payload, usage_name, error)``. Known loop concepts are
     translated directly into short Elevate-native compatibility instructions.
     """
     native = _cortext_native_cron_skill(skill_name)
@@ -667,14 +667,14 @@ def _heartbeat_report_mode_hint(job: dict) -> str:
     mode = _heartbeat_report_mode(job)
     if mode == "notify":
         return (
-            "HEARTBEAT REPORT MODE: Every run. This is a CortextOS-style heartbeat: "
+            "HEARTBEAT REPORT MODE: Every run. This is a native heartbeat: "
             "run the configured checks, update useful state, and always produce a concise "
             "human-visible final report, even if the report is only that everything is quiet. "
             "This overrides the general SILENT fallback above; for this heartbeat, do not use "
             "[SILENT] on a successful run.\n\n"
         )
     return (
-        "HEARTBEAT REPORT MODE: Only important changes. This is a CortextOS-style heartbeat: "
+        "HEARTBEAT REPORT MODE: Only important changes. This is a native heartbeat: "
         "run the configured checks, update useful state, and notify only when there are new "
         "blockers, approvals, stale agents, tasks, failures, or meaningful changes. If nothing "
         "needs attention, respond with exactly [SILENT] so the run is saved without sending a "

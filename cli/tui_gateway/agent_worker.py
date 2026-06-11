@@ -1,5 +1,5 @@
 """Persistent agent worker — one resident ``ElevateCLI`` per agent, holding WARM
-context across turns (the native equivalent of a cortextOS PTY agent).
+context across turns (the native equivalent of a Elevate PTY agent).
 
 Unlike :mod:`tui_gateway.slash_worker` (which only runs ``/slash`` commands via
 ``process_command``), this worker runs FREE-FORM agent turns via

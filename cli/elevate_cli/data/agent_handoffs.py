@@ -829,7 +829,7 @@ def list_agent_comms_messages(
     search: str | None = None,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    """Return CortextOS-shaped meeting-room messages from native handoffs."""
+    """Return native meeting-room messages from native handoffs."""
     clean_agent = _normalize_agent_id(agent_id) if agent_id else None
     cap = max(1, min(int(limit or 200), 1000))
     params: list[Any] = []
@@ -894,7 +894,7 @@ def list_agent_comms_channels(
     include_archived: bool = False,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
-    """Group native handoff messages into CortextOS-style pair channels."""
+    """Group native handoff messages into native pair channels."""
     messages = list_agent_comms_messages(conn, limit=max(limit * 5, 500))
     channels: dict[str, dict[str, Any]] = {}
     for msg in messages:

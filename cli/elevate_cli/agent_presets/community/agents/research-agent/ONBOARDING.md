@@ -2,7 +2,7 @@
 
 This is your first time running. Before starting normal operations, complete this onboarding protocol via Telegram with your user. Do not skip steps. The more context you gather, the more effective you'll be.
 
-> **Environment variables**: `CTX_ROOT`, `CTX_FRAMEWORK_ROOT`, `CTX_ORG`, `CTX_AGENT_NAME`, and `CTX_INSTANCE_ID` are automatically set by the cortextOS framework. You do not need to set them - they are available in every bash command you run.
+> **Environment variables**: `CTX_ROOT`, `CTX_FRAMEWORK_ROOT`, `CTX_ORG`, `CTX_AGENT_NAME`, and `CTX_INSTANCE_ID` are automatically set by the Elevate framework. You do not need to set them - they are available in every bash command you run.
 
 **IMPORTANT: When this document says "END YOUR TURN", you MUST stop all tool execution and end your response. The user's Telegram reply will arrive as your next conversation turn. Do not keep working - the message will not reach you until your current turn ends.**
 
@@ -12,7 +12,7 @@ This is your first time running. Before starting normal operations, complete thi
    > "Hey! I'm a new specialist agent that just came online. Before I start working, I need to get set up. Can you help me with a few questions?"
 
 2. **Confirm identity from system config** - your name is already set (do not re-ask):
-   > "I'm **{{CTX_AGENT_NAME}}** (set up via cortextos). Let me verify my config is right - can you confirm my role and personality? What's my vibe: formal, casual, technical, creative?"
+   > "I'm **{{CTX_AGENT_NAME}}** (set up via Elevate). Let me verify my config is right - can you confirm my role and personality? What's my vibe: formal, casual, technical, creative?"
 
 3. **Ask for role and responsibilities:**
    > "What kind of work will I be doing? Be specific - the more context you give me, the better I can help. For example: writing code, managing content, doing research, handling operations, etc."
@@ -80,7 +80,7 @@ Then continue from step 8.
 
 8. **Discover your team:**
    ```bash
-   cortextos bus read-all-heartbeats
+   agent_bus read-all-heartbeats
    # Fallback if no heartbeats yet: ls "${CTX_ROOT}/state/" 2>/dev/null
    ```
    List all agents found and ask:
@@ -99,12 +99,12 @@ Then continue from step 8.
    - Determine the prompt (what to do each time)
    - Add it as a persistent cron (survives restarts automatically):
      ```bash
-     cortextos bus add-cron $CTX_AGENT_NAME <workflow-name> <interval> <prompt>
+     agent_bus add-cron your agent name <workflow-name> <interval> <prompt>
      ```
      For example:
      ```bash
-     cortextos bus add-cron $CTX_AGENT_NAME heartbeat 6h Read HEARTBEAT.md and follow its instructions.
-     cortextos bus add-cron $CTX_AGENT_NAME daily-report "0 9 * * 1-5" Generate and send the daily analytics report.
+     agent_bus add-cron your agent name heartbeat 6h Read HEARTBEAT.md and follow its instructions.
+     agent_bus add-cron your agent name daily-report "0 9 * * 1-5" Generate and send the daily analytics report.
      ```
    - Do NOT use `/loop` for persistent scheduling — it is session-only and dies on restart.
    - If the workflow is complex (multi-step procedure), create a skill file at `.claude/skills/<workflow-name>/SKILL.md` with YAML frontmatter and detailed steps
@@ -174,7 +174,7 @@ Before moving on to knowledge base setup, check if the user is migrating from an
     - If they had a knowledge base, re-ingest the key files
     - Note what was migrated in today's memory file
 
-    If migrating from a different workspace (not another cortextOS agent):
+    If migrating from a different workspace (not another Elevate agent):
     - Ask for the key context files (README, docs, previous instructions)
     - Read and summarize them, saving key facts to MEMORY.md
     - Offer to ingest docs into the KB
@@ -188,7 +188,7 @@ After workflows and tools are configured:
 
     If the user wants a different heartbeat interval, update the heartbeat cron interval:
     ```bash
-    cortextos bus add-cron $CTX_AGENT_NAME heartbeat <new_interval> Read HEARTBEAT.md and follow its instructions.
+    agent_bus add-cron your agent name heartbeat <new_interval> Read HEARTBEAT.md and follow its instructions.
     ```
     (This overwrites the existing heartbeat cron entry in `crons.json`.)
     If they want a different stale task window (default 2h), note it in MEMORY.md — the agent applies it judgmentally during HEARTBEAT.md Step 3.
@@ -237,13 +237,13 @@ After workflows and tools are configured:
     Then set up the initial ingestion:
     ```bash
     # Ingest existing memory and key docs
-    cortextos bus kb-ingest \
+    agent_bus kb-ingest \
       "$CTX_AGENT_DIR/MEMORY.md" \
       "$CTX_AGENT_DIR/GOALS.md" \
       "$CTX_AGENT_DIR/IDENTITY.md" \
-      --org $CTX_ORG --scope private \
-      --agent $CTX_AGENT_NAME \
-      --collection "memory-$CTX_AGENT_NAME" --force
+      --org your org --scope private \
+      --agent your agent name \
+      --collection "memory-your agent name" --force
     ```
 
     Ingest any additional files the user specified in their answers.
@@ -291,7 +291,7 @@ Read org context and write full system context:
 
 ```bash
 ORG_CONTEXT=$(cat "${CTX_FRAMEWORK_ROOT}/orgs/${CTX_ORG}/context.json" 2>/dev/null || echo '{}')
-ORG_NAME=$(echo "$ORG_CONTEXT" | jq -r '.name // "'$CTX_ORG'"')
+ORG_NAME=$(echo "$ORG_CONTEXT" | jq -r '.name // "'your org'"')
 TIMEZONE=$(echo "$ORG_CONTEXT" | jq -r '.timezone // "UTC"')
 ORCH=$(echo "$ORG_CONTEXT" | jq -r '.orchestrator // "unknown"')
 DASH_PORT=$(grep -s PORT "${CTX_FRAMEWORK_ROOT}/dashboard/.env.local" | cut -d= -f2 || echo "3000")
@@ -359,16 +359,16 @@ Do NOT rewrite TOOLS.md from memory. The template contains the authoritative ref
 
 ```bash
 ENABLED=$(cat "${CTX_ROOT}/config/enabled-agents.json" 2>/dev/null || echo '[]')
-if ! echo "$ENABLED" | jq -e --arg name "$CTX_AGENT_NAME" '.[] | select(. == $name)' > /dev/null 2>&1; then
-  echo "WARNING: $CTX_AGENT_NAME not found in enabled-agents.json"
-  cortextos bus send-telegram "$CTX_TELEGRAM_CHAT_ID" "Warning: I completed onboarding but I'm not in enabled-agents.json. Run: cortextos start $CTX_AGENT_NAME"
+if ! echo "$ENABLED" | jq -e --arg name "your agent name" '.[] | select(. == $name)' > /dev/null 2>&1; then
+  echo "WARNING: your agent name not found in enabled-agents.json"
+  agent_bus send-telegram "$CTX_TELEGRAM_CHAT_ID" "Warning: I completed onboarding but I'm not in enabled-agents.json. Run: Elevate start your agent name"
 fi
 ```
 
 19. **Mark onboarding complete and signal orchestrator:**
     ```bash
     touch "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.onboarded"
-    cortextos bus log-event action onboarding_complete info --meta '{"agent":"'$CTX_AGENT_NAME'","role":"specialist"}'
+    agent_bus log-event action onboarding_complete info --meta '{"agent":"'your agent name'","role":"specialist"}'
     ```
 
     Signal the orchestrator that this specialist is fully configured and ready:
@@ -376,7 +376,7 @@ fi
     # Find orchestrator from org context
     ORCH_NAME=$(cat "${CTX_FRAMEWORK_ROOT}/orgs/${CTX_ORG}/context.json" 2>/dev/null | jq -r '.orchestrator // empty')
     if [ -n "$ORCH_NAME" ]; then
-      cortextos bus send-message "${ORCH_NAME}" normal "Specialist agent ${CTX_AGENT_NAME} onboarding complete and ready to work."
+      agent_bus send-message "${ORCH_NAME}" normal "Specialist agent ${CTX_AGENT_NAME} onboarding complete and ready to work."
     fi
     ```
 
@@ -407,7 +407,7 @@ fi
 
 if [ -n "$MISSING" ]; then
   echo "BOOTSTRAP CHECK FAILED - missing or incomplete:${MISSING}"
-  cortextos bus log-event error bootstrap_check_failed warning --meta '{"agent":"'$CTX_AGENT_NAME'","missing":"'"${MISSING}"'"}'
+  agent_bus log-event error bootstrap_check_failed warning --meta '{"agent":"'your agent name'","missing":"'"${MISSING}"'"}'
   # Attempt to fix TOOLS.md by copying from template
   if echo "$MISSING" | grep -q "TOOLS.md"; then
     cp "${CTX_FRAMEWORK_ROOT}/templates/agent/TOOLS.md" "${CTX_AGENT_DIR}/TOOLS.md" 2>/dev/null
@@ -453,7 +453,7 @@ fi
     EOF
 
     # Register the cycle
-    cortextos bus manage-cycle create $CTX_AGENT_NAME \
+    agent_bus manage-cycle create your agent name \
       --cycle "<metric_name>" \
       --metric "<metric_name>" \
       --metric-type "<quantitative|qualitative>" \
@@ -467,7 +467,7 @@ fi
 
     Then add the experiment cron as a persistent cron (survives restarts):
     ```bash
-    cortextos bus add-cron $CTX_AGENT_NAME experiment-<metric> <cron_frequency> Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop.
+    agent_bus add-cron your agent name experiment-<metric> <cron_frequency> Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop.
     ```
 
     If user set approval_required to false, update `experiments/config.json`:

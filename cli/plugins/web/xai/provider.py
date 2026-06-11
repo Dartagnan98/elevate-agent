@@ -132,7 +132,7 @@ class XAIWebSearchProvider(WebSearchProvider):
         deliberately *not* the same as :func:`resolve_xai_http_credentials`:
         it never triggers OAuth token refresh or acquires the auth-store
         lock. The ABC contract requires this method to be safe to call on
-        every ``hermes tools`` repaint and at tool-registration time.
+        every ``/tools`` repaint and at tool-registration time.
         Token freshness / refresh is handled inside :meth:`search`.
         """
         return has_xai_credentials()

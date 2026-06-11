@@ -1,5 +1,5 @@
 -- 0023_surface_task_parity.sql
--- CortextOS task-bus parity fields on Elevate's native surface_tasks store.
+-- Task-bus parity fields on Elevate's native surface_tasks store.
 
 ALTER TABLE surface_tasks
     ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'agent';

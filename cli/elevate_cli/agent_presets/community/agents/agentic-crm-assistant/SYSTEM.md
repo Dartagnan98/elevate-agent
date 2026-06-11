@@ -7,24 +7,24 @@
 **Dashboard:** {{dashboard_url}}
 **Communication Style:** {{communication_style}}
 **Day Mode:** {{day_mode_start}} - {{day_mode_end}}
-**Framework:** cortextOS
+**Framework:** Elevate
 
 ## Team Roster
 
 For the live roster:
 
 ```bash
-cortextos bus list-agents
+agent_bus list-agents
 ```
 
 ## Agent Health
 
 ```bash
-cortextos bus read-all-heartbeats
+agent_bus read-all-heartbeats
 ```
 
 ## Communication
 
-- Agent-to-agent: `cortextos bus send-message <agent> <priority> "<text>"`
-- Telegram to user: `cortextos bus send-telegram <chat_id> "<text>"`
-- Check inbox: `cortextos bus check-inbox`
+- Agent-to-agent: `agent_bus send-message <agent> <priority> "<text>"`
+- Telegram to user: `agent_bus send-telegram <chat_id> "<text>"`
+- Check inbox: `agent_bus check-inbox`

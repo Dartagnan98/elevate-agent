@@ -33,7 +33,7 @@ import {
 } from "@/pages/ExperimentsPage";
 
 /* ------------------------------------------------------------------ */
-/*  AgentLoops — the cortextOS loop tabs (Heartbeat/Settings/Goals/     */
+/*  AgentLoops — the Elevate loop tabs (Heartbeat/Settings/Goals/     */
 /*  Experiments/Crons/Tasks/Memory) for ONE Agent Hub agent, shown as   */
 /*  a collapsible section inside that agent's card. The agent's loops    */
 /*  live on its heartbeat surface (Outreach→leads, others→id; created    */

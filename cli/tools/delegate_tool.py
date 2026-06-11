@@ -1124,7 +1124,7 @@ def _build_child_agent(
     # runs AS that specialist: its persona + FULL hub loadout + skills, even if
     # the parent doesn't hold those tools. The explicit, recognized exception to
     # the "child ⊆ parent toolsets" rule — orchestrator + specialist-fleet
-    # model (complements cortextOS). Unknown id → generic subagent.
+    # model. Unknown id → generic subagent.
     agent: Optional[str] = None,
 ):
     """

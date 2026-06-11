@@ -1,7 +1,7 @@
 # Security Agent Tools
 
 ## Core Bus Commands
-All standard cortextOS bus commands apply. See `.claude/skills/bus-reference/SKILL.md` for the full reference.
+All standard Elevate bus commands apply. See `.claude/skills/bus-reference/SKILL.md` for the full reference.
 
 ## Security-Specific Tools
 
@@ -28,7 +28,7 @@ All standard cortextOS bus commands apply. See `.claude/skills/bus-reference/SKI
 | Command | Purpose |
 |---------|---------|
 | `find . -name ".env*" -exec stat {} \;` | Check .env file permissions (should be 0600) |
-| `cortextos bus list-agents --format json` | Audit running agent configurations |
+| `agent_bus list-agents --format json` | Audit running agent configurations |
 | `pm2 list` | Check process management state |
 
 ## Browser-Based Analysis

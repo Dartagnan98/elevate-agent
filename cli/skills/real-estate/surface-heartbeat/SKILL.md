@@ -1,6 +1,6 @@
 ---
 name: surface-heartbeat
-description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. A faithful port of the cortextOS theta-wave autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
+description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. An autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
 version: 0.5.0
 platforms:
   - macos
@@ -225,4 +225,4 @@ autoresearch loop for the cycle.
   `learnings.md`, `history/` run records, playbooks, `results.tsv`, git commits.
 - **0.2.0** — Cycles as data: experiments driven by `cycles[]` (theta-wave authored), per-cycle
   active experiment, keep/ratchet + exploit/explore semantics, approval gating.
-- **0.1.0** — Initial WORK loop + single-experiment autoresearch port from cortextOS.
+- **0.1.0** — Initial WORK loop + single-experiment autoresearch loop.

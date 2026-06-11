@@ -226,6 +226,22 @@ def sync_skills(quiet: bool = False) -> dict:
         }
 
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # One-time migration: the bundled `cortextos/` skill folder was renamed to
+    # `agent-ops/`. The manifest is keyed by NAME, so the moved skills aren't
+    # seen as removed — which would leave the OLD ~/.elevate/skills/cortextos/
+    # copies on disk as stale duplicates (same names, pre-nativization bodies).
+    # Remove the orphaned folder so only the new agent-ops/ copies remain.
+    try:
+        _orphan = SKILLS_DIR / "cortextos"
+        if _orphan.is_dir():
+            import shutil as _shutil
+
+            _shutil.rmtree(_orphan, ignore_errors=True)
+            logger.info("skills sync: removed orphaned legacy cortextos/ skill folder")
+    except Exception:
+        logger.debug("orphaned cortextos cleanup skipped", exc_info=True)
+
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}

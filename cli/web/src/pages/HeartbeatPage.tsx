@@ -28,7 +28,7 @@ import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
-/*  Heartbeat = a scheduled self-prompt (cortextOS-style).            */
+/*  Heartbeat = a scheduled self-prompt.            */
 /*  The realtor sets an interval + instructions; the agent wakes on    */
 /*  that clock, runs the instructions in a fresh session, and reports  */
 /*  back into this feed. Each heartbeat is a cron job tagged as one of */

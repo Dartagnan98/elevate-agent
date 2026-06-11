@@ -34,16 +34,12 @@ def test_heartbeat_md_seeded_with_companions(iso_cron):
     # All 10 numbered steps present.
     for n in range(1, 11):
         assert f"{n}." in body, f"missing step {n}"
-    # Native: references real agent_bus actions, names the cortextOS daemon only
-    # inside the prohibition (exactly once).
+    # Native: references real agent_bus actions, and is fully cortextOS-free
+    # (the whole product was scrubbed of cortextOS naming).
     assert "update_heartbeat" in body and "get_goals" in body and "log_event" in body
-    # `cortextos bus` appears only in prohibitions ("Never call ...", "No daemon ..."),
-    # never as a command the agent is told to run.
     low = body.lower()
-    assert "cortextos bus update" not in low
-    assert "cortextos bus check" not in low
-    assert "cortextos bus log" not in low
-    assert "never call `cortextos bus`" in low
+    assert "cortextos" not in low
+    assert "pm2" not in low or "no external daemons / pm2" in low  # only the prohibition may mention pm2
     # Companion docs + memory dir.
     d = path.parent
     for fname in ("GOALS.md", "MEMORY.md", "GUARDRAILS.md"):

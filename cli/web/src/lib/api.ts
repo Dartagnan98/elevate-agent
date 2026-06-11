@@ -728,7 +728,7 @@ export const api = {
       ? fetchJSON<HeartbeatExperimentsResponse>(url)
       : cachedFetchJSON<HeartbeatExperimentsResponse>(url, 5_000);
   },
-  // Create a NEW custom surface from the template (cortextOS add-agent). Seeds it
+  // Create a NEW custom surface from the template (add-agent). Seeds it
   // opt-in/off; the realtor turns it on from the Heartbeat page.
   createHeartbeatSurface: (body: {
     surface: string;
@@ -758,7 +758,7 @@ export const api = {
     );
   },
   // Create a new experiment cycle on a surface (the analyst's lever — a new
-  // self-improvement track). Mirrors cortextOS manage-cycle create.
+  // self-improvement track). Mirrors manage-cycle create.
   createHeartbeatCycle: (
     surface: string,
     body: {
@@ -1386,7 +1386,7 @@ export const api = {
       }[];
     }>(`/api/activity${q ? `?${q}` : ""}`);
   },
-  // Comms — CortextOS-style meeting room and pair channels, projected from the
+  // Comms — native meeting room and pair channels, projected from the
   // native handoff bus.
   getCommsFeed: (params: { limit?: number; search?: string; agent?: string } = {}) => {
     const qs = new URLSearchParams();

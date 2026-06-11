@@ -1,6 +1,6 @@
 ---
 name: theta-wave
-description: The system-level autoresearch reviewer for the whole surface fleet. On a nightly cadence you scan every dashboard surface (Leads, Admin, and any custom ones), classify how each is doing at self-improvement (Stale / Converged / Successful / Underperforming), and — as the ONLY actor allowed to — create, modify, or remove each surface's experiment cycles to keep the fleet improving. You are itself an autoresearch cycle whose metric is system_effectiveness. A faithful port of the cortextOS theta-wave loop. Your prompt names the Workspace (the system-review dir).
+description: The system-level autoresearch reviewer for the whole surface fleet. On a nightly cadence you scan every dashboard surface (Leads, Admin, and any custom ones), classify how each is doing at self-improvement (Stale / Converged / Successful / Underperforming), and — as the ONLY actor allowed to — create, modify, or remove each surface's experiment cycles to keep the fleet improving. You are itself an autoresearch cycle whose metric is system_effectiveness. The system-level autoresearch reviewer. Your prompt names the Workspace (the system-review dir).
 version: 0.2.0
 platforms:
   - macos
@@ -119,5 +119,5 @@ The next night repeats the loop.
   `get_surface_config` / `get_goals` instead of raw `config.json` / `goals.json` files. Cycle
   reads/writes stay on the `agent_bus` cycle actions. File artifacts unchanged: `learnings.md`,
   `history/`, `reviews/`.
-- **0.1.0** — Initial fleet-review loop port from cortextOS (scan → classify → manage cycles →
+- **0.1.0** — Initial fleet-review loop (scan → classify → manage cycles →
   score `system_effectiveness`).

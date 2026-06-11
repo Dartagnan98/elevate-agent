@@ -7030,7 +7030,7 @@ def _compute_heartbeat_surfaces():
     database (migration 0024); markdown artifacts (learnings.md, history/ run
     records) stay in ``<account_data_dir>/heartbeats/<surface>/``. Surfaces
     enumerate from the DB, unioned with any workspace dirs that exist
-    (back-compat). Mirrors the cortextOS experiments scan but Elevate-native
+    (back-compat). Mirrors the experiments scan but Elevate-native
     and per-account-scoped. Missing rows/files degrade to empty so a surface
     that has never fired still renders.
     """
@@ -7302,7 +7302,7 @@ class _HeartbeatSurfaceCreateBody(BaseModel):
 
 @app.post("/api/heartbeats/surfaces")
 def create_heartbeat_surface(body: _HeartbeatSurfaceCreateBody):
-    """Create a NEW custom surface from the template + overrides (cortextOS add-agent
+    """Create a NEW custom surface from the template + overrides (add-agent
     equivalent). Registers it in the account surface registry, scaffolds its workspace,
     and seeds an opt-in (off) cron job. The realtor turns it on from the Heartbeat page.
     """
@@ -7449,7 +7449,7 @@ def get_heartbeat_experiments():
     and the completed ones — all from the account DB (migration 0024) — normalizes
     each to one shape, folds in learnings.md (still on disk), and computes
     per-surface + fleet stats. Read-only; the surface-heartbeat EXPERIMENT loop owns
-    all writes. Elevate-native port of cortextOS scanExperiments().
+    all writes. Elevate-native port of scanExperiments().
     """
     try:
         from elevate_constants import get_account_data_dir
@@ -7620,7 +7620,7 @@ def get_heartbeat_experiments():
 
 @app.get("/api/experiments")
 def list_experiments_alias(surface: Optional[str] = None):
-    """CortextOS-compatible experiment list backed by native heartbeat experiments."""
+    """native experiment list backed by native heartbeat experiments."""
     try:
         if surface:
             from tools.agent_bus_tool import _list_experiments
@@ -8214,7 +8214,7 @@ def get_comms_feed(
     search: Optional[str] = None,
     agent: Optional[str] = None,
 ):
-    """CortextOS-style Meeting Room feed projected from Elevate handoffs."""
+    """native Meeting Room feed projected from Elevate handoffs."""
     try:
         from elevate_cli.data import connect, list_agent_comms_messages
 
@@ -8235,7 +8235,7 @@ def get_comms_channels(
     include_archived: bool = False,
     limit: int = 200,
 ):
-    """CortextOS-style per-pair conversation list projected from handoffs."""
+    """native per-pair conversation list projected from handoffs."""
     try:
         from elevate_cli.data import connect, list_agent_comms_channels
 
@@ -8252,7 +8252,7 @@ def get_comms_channels(
 
 @app.get("/api/comms/channel/{pair}")
 def get_comms_channel(pair: str, limit: int = 200):
-    """Return one pair transcript in CortextOS channel-view shape."""
+    """Return one pair transcript in channel-view shape."""
     try:
         from elevate_cli.data import connect, get_agent_comms_channel
 

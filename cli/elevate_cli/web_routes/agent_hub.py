@@ -99,7 +99,7 @@ _CORTEXT_AGENT_PACKS = [
         "includes": ["Identity", "Soul", "Heartbeat", "Tasks", "Comms", "Memory"],
     },
     # ── Real-estate-native packs (authored for Elevate, not imported from
-    # cortextOS community). Each ships a complete config.json — no `template`
+    # Elevate community). Each ships a complete config.json — no `template`
     # key on purpose: a template merge would flip runtime_type away from
     # native. Authoring/parser notes: agent_presets/REGISTRATION_STAGING.md.
     # NOTE: there is intentionally NO standalone "Transaction Coordinator" pack.
@@ -183,16 +183,13 @@ def _clean_cortext_time(raw: Any, fallback: Any) -> str:
     return fb if _TIME_RE.match(fb) else ""
 
 
-def _cortext_root() -> Optional[Path]:
+def _agent_presets_root() -> Optional[Path]:
     # Installable-pack content is bundled inside the app (cli/elevate_cli/
-    # agent_presets) so packs resolve on every box — customers have no
-    # ~/cortextos checkout. Resolution order: explicit env override, a live
-    # local cortextos checkout if present (dev), then the bundled copy.
+    # agent_presets) so packs resolve on every box. Resolution order: explicit
+    # env override, then the bundled copy.
     bundled = Path(__file__).resolve().parent.parent / "agent_presets"
     candidates = [
         os.environ.get("ELEVATE_AGENT_PRESETS_ROOT"),
-        os.environ.get("CORTEXTOS_ROOT"),  # legacy alias
-        str(Path.home() / "cortextos"),
         str(bundled),
     ]
     for item in candidates:
@@ -610,7 +607,7 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
         first_schedule = str(first_heartbeat.get("cron") or "").strip() or _interval_to_schedule(str(first_heartbeat.get("interval") or ""))
 
     prompt_parts = [
-        f"# CortextOS Preset: {spec['name']}",
+        f"# Agent Preset: {spec['name']}",
         spec.get("description", ""),
         system and f"# Imported SYSTEM\n{system}",
         user and f"# Imported USER\n{user}",
@@ -646,7 +643,7 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
     )
     memory_content = memory.strip() or "\n".join(
         [
-            f"{spec['name']} installed from CortextOS preset.",
+            f"{spec['name']} installed from agent preset.",
             f"Owns: {', '.join(spec.get('owns') or [])}.",
             f"Escalates to: {spec.get('escalation_target') or 'executive-assistant'}.",
         ]
@@ -660,7 +657,7 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
         "id": spec["id"],
         "name": spec["name"],
         "role": spec.get("role") or "support",
-        "description": spec.get("description") or _first_markdown_paragraph(identity) or f"{spec['name']} CortextOS preset.",
+        "description": spec.get("description") or _first_markdown_paragraph(identity) or f"{spec['name']} agent preset.",
         "enabled": True,
         "platforms": ["local", "telegram"],
         "session_sources": ["cli", "telegram", "cron", "heartbeat", "api_server"],
@@ -768,7 +765,7 @@ def _build_cortext_pack(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "description": "\n\n".join(
                 part
                 for part in [
-                    f"Installed from CortextOS preset {source}.",
+                    f"Installed from agent preset {source}.",
                     "Review runtime/model inheritance, Telegram lane, routing targets, safety rules, day/night soul, memory scopes, and heartbeat cadence.",
                     automation_rules and "Automation rules imported as native Elevate metadata. Use Heartbeat/Cron pages with this agent selected for any active schedule changes.",
                     onboarding[:4000],
@@ -800,14 +797,12 @@ def _bundled_presets_root() -> Path:
 
 
 def _build_cortext_agent_packs() -> dict[str, Any]:
-    root = _cortext_root()
+    root = _agent_presets_root()
     if root is None:
         return {"root": None, "packs": []}
-    # Per-pack root: the Elevate-native packs live only in the bundled
-    # agent_presets/, while a dev box may resolve a ~/cortextos checkout as
-    # the primary root. Fall back to the bundled copy whenever the resolved
-    # root doesn't carry a pack's source dir, so one global root can't hide
-    # bundled packs.
+    # Per-pack root: the Elevate-native packs live in the bundled agent_presets/.
+    # Fall back to the bundled copy whenever the resolved root doesn't carry a
+    # pack's source dir, so an env override can't hide bundled packs.
     bundled = _bundled_presets_root()
     packs = []
     for spec in _CORTEXT_AGENT_PACKS:

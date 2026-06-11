@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 /* ------------------------------------------------------------------ */
 /*  Activity = the fleet feed. Everything the agents did — heartbeat     */
 /*  runs and cron runs — newest first, filterable by agent. Mirrors      */
-/*  cortextOS /ai/activity.                                              */
+/*  Elevate /ai/activity.                                              */
 /* ------------------------------------------------------------------ */
 
 type Item = {
