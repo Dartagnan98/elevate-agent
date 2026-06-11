@@ -796,8 +796,9 @@ const TRANSCRIPT_STORE_ENABLED = (() => {
   try {
     if (typeof window !== "undefined") {
       const w = window as unknown as { __ELEVATE_TRANSCRIPT_STORE__?: boolean };
+      // Either source can enable it (server env injection OR a manual
+      // localStorage override); a `false` global never blocks the override.
       if (w.__ELEVATE_TRANSCRIPT_STORE__ === true) return true;
-      if (w.__ELEVATE_TRANSCRIPT_STORE__ === false) return false;
       const ls = window.localStorage?.getItem("elevate.flags.transcriptStore");
       return ls === "1" || ls === "true";
     }

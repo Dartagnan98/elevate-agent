@@ -11977,6 +11977,15 @@ def mount_spa(application: FastAPI):
         """Return index.html with the session token injected."""
         html = _index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+        # transcriptStore (Phase 4) per-box burn-in switch. OFF unless this box
+        # sets ELEVATE_TRANSCRIPT_STORE=1 — so it's scoped to a tester's machine
+        # and stays inert for every customer until the default is flipped.
+        transcript_store_js = (
+            "true"
+            if os.environ.get("ELEVATE_TRANSCRIPT_STORE", "").strip().lower()
+            in ("1", "true", "yes", "on")
+            else "false"
+        )
         # Force a neutral grey text selection app-wide, injected into <head> so
         # it's always present regardless of which CSS chunk a route loads (some
         # chunks ship their own accent-tinted ::selection; without this the
@@ -11984,7 +11993,8 @@ def mount_spa(application: FastAPI):
         # override).
         token_script = (
             f'<script>window.__ELEVATE_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-            f"window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__={chat_js};</script>"
+            f"window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+            f"window.__ELEVATE_TRANSCRIPT_STORE__={transcript_store_js};</script>"
             "<style>::selection{background:#5d5d5d !important;color:#fff !important}"
             "::-moz-selection{background:#5d5d5d !important;color:#fff !important}</style>"
         )
