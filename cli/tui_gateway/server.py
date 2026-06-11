@@ -3347,8 +3347,23 @@ def _(rid, params: dict) -> dict:
                 return
             try:
                 _ensure_tui_tool_profile(sid, session, _select_tui_tool_profile(text))
-            except Exception:
+            except Exception as _profile_exc:
                 logger.exception("failed to apply tui tool profile")
+                # Don't swallow silently — a failed profile apply is a prime
+                # reason a skill (e.g. /cma) "doesn't run": its toolset never
+                # loads and the turn proceeds with no signal. Surface a
+                # non-fatal status so the user (and logs) see why.
+                try:
+                    _emit("status.update", sid, {
+                        "kind": "warning",
+                        "text": (
+                            "Couldn't load the skill tools for this turn "
+                            f"({type(_profile_exc).__name__}: {_profile_exc}). "
+                            "A skill may not run — see logs."
+                        ),
+                    })
+                except Exception:
+                    pass
             if agent_id:
                 try:
                     _apply_agent_lane(session, agent_id)
