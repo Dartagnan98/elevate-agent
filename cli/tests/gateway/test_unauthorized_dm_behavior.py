@@ -216,7 +216,11 @@ async def test_unauthorized_dm_pairs_by_default(monkeypatch):
     )
 
     assert result is None
-    runner.pairing_store.generate_code.assert_called_once_with(
+    # Per-agent pairing threads a 4th positional arg (agent_id). Assert the
+    # core triple without over-constraining the agent scope.
+    runner.pairing_store.generate_code.assert_called_once()
+    _gc_args = runner.pairing_store.generate_code.call_args.args
+    assert _gc_args[:3] == (
         "whatsapp",
         "15551234567@s.whatsapp.net",
         "tester",

@@ -112,10 +112,28 @@ class PairingStore:
 
     # ----- Approved users -----
 
-    def is_approved(self, platform: str, user_id: str) -> bool:
-        """Check if a user is approved (paired) on a platform."""
+    def is_approved(self, platform: str, user_id: str, agent_id: str = "") -> bool:
+        """Check if a user is approved (paired) on a platform, optionally scoped
+        to a specific agent's bot.
+
+        Per-agent pairing: each agent runs its own bot token, so approval is
+        scoped per agent. An approved entry carries ``agent_ids`` (the agents the
+        user paired with). Scoping rules:
+          - No ``agent_id`` asked → any approval counts (legacy/global callers).
+          - Entry has no ``agent_ids`` → legacy global approval, honored for every
+            agent so pre-upgrade pairings are never locked out.
+          - Otherwise → the asked ``agent_id`` must be in the entry's ``agent_ids``.
+        """
         approved = self._load_json(self._approved_path(platform))
-        return user_id in approved
+        entry = approved.get(user_id)
+        if not entry:
+            return False
+        if not agent_id:
+            return True
+        agent_ids = entry.get("agent_ids") if isinstance(entry, dict) else None
+        if not agent_ids:
+            return True  # legacy global approval — honor across all agents
+        return agent_id in agent_ids
 
     def list_approved(self, platform: str = None) -> list:
         """List approved users, optionally filtered by platform."""
@@ -127,12 +145,24 @@ class PairingStore:
                 results.append({"platform": p, "user_id": uid, **info})
         return results
 
-    def _approve_user(self, platform: str, user_id: str, user_name: str = "") -> None:
-        """Add a user to the approved list. Must be called under self._lock."""
+    def _approve_user(
+        self, platform: str, user_id: str, user_name: str = "", agent_id: str = ""
+    ) -> None:
+        """Add a user to the approved list. Must be called under self._lock.
+
+        Accumulates ``agent_ids`` so a user can be paired with several agents'
+        bots without each approval clobbering the last. A legacy entry (no
+        ``agent_ids``) is upgraded in place when an agent-scoped approval lands.
+        """
         approved = self._load_json(self._approved_path(platform))
+        existing = approved.get(user_id) if isinstance(approved.get(user_id), dict) else {}
+        agent_ids = list(existing.get("agent_ids") or [])
+        if agent_id and agent_id not in agent_ids:
+            agent_ids.append(agent_id)
         approved[user_id] = {
-            "user_name": user_name,
-            "approved_at": time.time(),
+            "user_name": user_name or existing.get("user_name", ""),
+            "approved_at": existing.get("approved_at", time.time()),
+            "agent_ids": agent_ids,
         }
         self._save_json(self._approved_path(platform), approved)
 
@@ -155,7 +185,8 @@ class PairingStore:
         return hashlib.sha256(salt + code.encode("utf-8")).hexdigest()
 
     def generate_code(
-        self, platform: str, user_id: str, user_name: str = ""
+        self, platform: str, user_id: str, user_name: str = "",
+        agent_id: str = "",
     ) -> Optional[str]:
         """
         Generate a pairing code for a new user.
@@ -175,8 +206,8 @@ class PairingStore:
             if self._is_locked_out(platform):
                 return None
 
-            # Check rate limit for this specific user
-            if self._is_rate_limited(platform, user_id):
+            # Check rate limit for this specific user (per-agent)
+            if self._is_rate_limited(platform, user_id, agent_id):
                 return None
 
             # Check max pending
@@ -200,12 +231,13 @@ class PairingStore:
                 "salt": salt.hex(),
                 "user_id": user_id,
                 "user_name": user_name,
+                "agent_id": agent_id or "",
                 "created_at": time.time(),
             }
             self._save_json(self._pending_path(platform), pending)
 
-            # Record rate limit
-            self._record_rate_limit(platform, user_id)
+            # Record rate limit (per-agent)
+            self._record_rate_limit(platform, user_id, agent_id)
 
             return code
 
@@ -268,13 +300,15 @@ class PairingStore:
             del pending[matched_key]
             self._save_json(self._pending_path(platform), pending)
 
-            # Add to approved list
+            # Add to approved list, scoped to the agent the code was minted for.
+            agent_id = matched_entry.get("agent_id", "") or ""
             self._approve_user(platform, matched_entry["user_id"],
-                               matched_entry.get("user_name", ""))
+                               matched_entry.get("user_name", ""), agent_id)
 
             return {
                 "user_id": matched_entry["user_id"],
                 "user_name": matched_entry.get("user_name", ""),
+                "agent_id": agent_id,
             }
 
     def list_pending(self, platform: str = None) -> list:
@@ -305,6 +339,7 @@ class PairingStore:
                     "code": code_display,
                     "user_id": info.get("user_id", ""),
                     "user_name": info.get("user_name", ""),
+                    "agent_id": info.get("agent_id", "") or "",
                     "age_minutes": age_min,
                 })
         return results
@@ -322,17 +357,21 @@ class PairingStore:
 
     # ----- Rate limiting and lockout -----
 
-    def _is_rate_limited(self, platform: str, user_id: str) -> bool:
-        """Check if a user has requested a code too recently."""
+    def _is_rate_limited(self, platform: str, user_id: str, agent_id: str = "") -> bool:
+        """Check if a user has requested a code too recently.
+
+        Keyed per-agent so a user can pair with several agents' bots back to
+        back — each bot rate-limits independently (without this, DMing a second
+        agent's bot right after the first is wrongly throttled)."""
         limits = self._load_json(self._rate_limit_path())
-        key = f"{platform}:{user_id}"
+        key = f"{platform}:{agent_id}:{user_id}"
         last_request = limits.get(key, 0)
         return (time.time() - last_request) < RATE_LIMIT_SECONDS
 
-    def _record_rate_limit(self, platform: str, user_id: str) -> None:
-        """Record the time of a pairing request for rate limiting."""
+    def _record_rate_limit(self, platform: str, user_id: str, agent_id: str = "") -> None:
+        """Record the time of a pairing request for rate limiting (per-agent)."""
         limits = self._load_json(self._rate_limit_path())
-        key = f"{platform}:{user_id}"
+        key = f"{platform}:{agent_id}:{user_id}"
         limits[key] = time.time()
         self._save_json(self._rate_limit_path(), limits)
 

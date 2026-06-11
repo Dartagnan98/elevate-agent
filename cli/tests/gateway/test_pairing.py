@@ -25,6 +25,48 @@ def _make_store(tmp_path):
         return PairingStore()
 
 
+class TestPerAgentPairing:
+    """Per-agent pairing: codes/approvals are scoped to the agent's bot."""
+
+    def test_approval_is_scoped_to_the_agent(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            code = store.generate_code("telegram", "u1", "User One", agent_id="admin")
+            result = store.approve_code("telegram", code)
+            assert result and result["agent_id"] == "admin"
+            # Approved for the agent it paired with...
+            assert store.is_approved("telegram", "u1", "admin") is True
+            # ...but NOT for a different agent's bot.
+            assert store.is_approved("telegram", "u1", "inside-sales") is False
+            # Unscoped check (legacy callers) still sees the approval.
+            assert store.is_approved("telegram", "u1") is True
+
+    def test_pairing_with_multiple_agents_accumulates(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            store.approve_code("telegram", store.generate_code("telegram", "u1", "U", agent_id="admin"))
+            store.approve_code("telegram", store.generate_code("telegram", "u1", "U", agent_id="outreach"))
+            assert store.is_approved("telegram", "u1", "admin") is True
+            assert store.is_approved("telegram", "u1", "outreach") is True
+            assert store.is_approved("telegram", "u1", "social-media") is False
+
+    def test_legacy_global_approval_honored_for_all_agents(self, tmp_path):
+        # An approved entry with no agent_ids (pre-upgrade) must not lock anyone out.
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            path = store._approved_path("telegram")
+            store._save_json(path, {"u1": {"user_name": "Legacy", "approved_at": time.time()}})
+            assert store.is_approved("telegram", "u1", "admin") is True
+            assert store.is_approved("telegram", "u1", "any-agent") is True
+
+    def test_pending_list_carries_agent_id(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            store.generate_code("telegram", "u1", "U", agent_id="admin")
+            pend = store.list_pending("telegram")
+            assert len(pend) == 1 and pend[0]["agent_id"] == "admin"
+
+
 # ---------------------------------------------------------------------------
 # _secure_write
 # ---------------------------------------------------------------------------
@@ -296,9 +338,10 @@ class TestRateLimiting:
             code1 = store.generate_code("telegram", "user1")
             assert isinstance(code1, str) and len(code1) == CODE_LENGTH
 
-            # Simulate rate limit expiry
+            # Simulate rate limit expiry. Key is per-agent now:
+            # "{platform}:{agent_id}:{user_id}" (empty agent_id -> "telegram::user1").
             limits = store._load_json(store._rate_limit_path())
-            limits["telegram:user1"] = time.time() - RATE_LIMIT_SECONDS - 1
+            limits["telegram::user1"] = time.time() - RATE_LIMIT_SECONDS - 1
             store._save_json(store._rate_limit_path(), limits)
 
             code2 = store.generate_code("telegram", "user1")

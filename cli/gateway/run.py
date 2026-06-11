@@ -4564,9 +4564,14 @@ class GatewayRunner:
         ):
             return True
 
-        # Check pairing store (always checked, regardless of allowlists)
+        # Check pairing store (always checked, regardless of allowlists).
+        # Per-agent: each agent runs its own bot token, so authorization is
+        # scoped to the agent the message hit (legacy global approvals still
+        # honored for every agent).
         platform_name = source.platform.value if source.platform else ""
-        if self.pairing_store.is_approved(platform_name, user_id):
+        if self.pairing_store.is_approved(
+            platform_name, user_id, getattr(source, "agent_id", "") or ""
+        ):
             return True
 
         # Check platform-specific and global allowlists
@@ -4757,10 +4762,13 @@ class GatewayRunner:
                 # Rate-limit ALL pairing responses (code or rejection) to
                 # prevent spamming the user with repeated messages when
                 # multiple DMs arrive in quick succession.
-                if self.pairing_store._is_rate_limited(platform_name, source.user_id):
+                if self.pairing_store._is_rate_limited(
+                    platform_name, source.user_id, getattr(source, "agent_id", "") or ""
+                ):
                     return None
                 code = self.pairing_store.generate_code(
-                    platform_name, source.user_id, source.user_name or ""
+                    platform_name, source.user_id, source.user_name or "",
+                    getattr(source, "agent_id", "") or "",
                 )
                 if code:
                     adapter = self.adapters.get(source.platform)
@@ -4769,8 +4777,9 @@ class GatewayRunner:
                             source.chat_id,
                             f"Hi~ I don't recognize you yet!\n\n"
                             f"Here's your pairing code: `{code}`\n\n"
-                            f"Ask the bot owner to run:\n"
-                            f"`elevate pairing approve {platform_name} {code}`"
+                            f"Open Elevate, go to the Agent Hub, and enter this "
+                            f"code under “Pair a channel” for this agent to "
+                            f"connect us."
                         )
                 else:
                     adapter = self.adapters.get(source.platform)
