@@ -1503,6 +1503,13 @@ class GatewayRunner:
         # standalone follow-up message). Exactly one speaker per result.
         self._pending_platform_delegates: Dict[str, list] = {}
         self._pending_platform_delegates_lock = threading.Lock()
+        # Cron/automation results delivered to a chat while its agent sat in
+        # the in-memory cache: the delivery is persisted to the transcript at
+        # delivery time (durable), but a CACHED agent never reloads history —
+        # so the note also parks here and rides the next user turn (API-only),
+        # keeping the live context aware of what the user just read.
+        self._pending_cron_context: Dict[str, list] = {}
+        self._pending_cron_context_lock = threading.Lock()
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -2589,6 +2596,94 @@ class GatewayRunner:
         with self._pending_platform_delegates_lock:
             drained = self._pending_platform_delegates.pop(session_key, [])
         return [e for e in drained if isinstance(e, dict)]
+
+    # ------------------------------------------------------------------
+    # Cron delivery → chat context. A cron/heartbeat result lands in the
+    # user's chat as a normal message, but the cron run lives in its own
+    # session — without this hook the chat agent has no record of what the
+    # user is looking at and can't answer "tell me more about that".
+    # ------------------------------------------------------------------
+
+    def record_cron_delivery(self, target: dict, content: str, job: dict) -> None:
+        """Record a successfully delivered cron result into the target chat's
+        session so follow-up questions land in a conversation that contains it.
+
+        Two layers, both best-effort:
+        1. PERSIST — append an assistant message to the existing session
+           transcript (skipped when no session exists for that chat yet; a
+           future first message starts clean and ``session_search`` still
+           finds the cron run itself).
+        2. PARK — when an agent for that session sits in the in-memory cache
+           (so it will NOT reload history from the DB), park a note that the
+           next user turn folds into the prompt API-only. Without a cached
+           agent the persisted row is enough; parking too would duplicate it.
+        """
+        try:
+            from gateway.config import Platform
+            from gateway.session import SessionSource
+
+            platform_name = str(target.get("platform") or "").strip().lower()
+            chat_id = str(target.get("chat_id") or "").strip()
+            if not platform_name or not chat_id:
+                return
+            try:
+                platform = Platform(platform_name)
+            except ValueError:
+                return  # plugin platform without enum — no session keying
+
+            origin = job.get("origin") if isinstance(job.get("origin"), dict) else {}
+            same_chat = (
+                str(origin.get("platform") or "").strip().lower() == platform_name
+                and str(origin.get("chat_id") or "").strip() == chat_id
+            )
+            source = SessionSource(
+                platform=platform,
+                chat_id=chat_id,
+                chat_type=str((origin.get("chat_type") if same_chat else None) or "dm"),
+                user_id=(str(origin.get("user_id")) if same_chat and origin.get("user_id") else None),
+                thread_id=(str(target.get("thread_id")) if target.get("thread_id") else None),
+                agent_id=(str(target.get("agent_id")) if target.get("agent_id") else None),
+            )
+            entry = self.session_store.peek_session(source)
+            if entry is None:
+                return
+
+            job_name = str(job.get("name") or job.get("id") or "automation").strip()
+            self.session_store.append_to_transcript(
+                entry.session_id,
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "timestamp": datetime.now().isoformat(),
+                    "cron_delivery": True,
+                    "cron_job_id": job.get("id"),
+                    "cron_job_name": job_name,
+                },
+            )
+
+            session_key = entry.session_key
+            with self._agent_cache_lock:
+                agent_is_cached = session_key in self._agent_cache
+            if agent_is_cached:
+                note = f"“{job_name}” delivered:\n{content}"
+                with self._pending_cron_context_lock:
+                    parked = self._pending_cron_context.setdefault(session_key, [])
+                    parked.append(note)
+                    # A chatty automation must not balloon the next turn.
+                    if len(parked) > 10:
+                        del parked[: len(parked) - 10]
+            logger.debug(
+                "Cron delivery recorded into session %s (parked=%s)",
+                entry.session_id, agent_is_cached,
+            )
+        except Exception:
+            logger.exception("record_cron_delivery failed (job %s)", job.get("id", "?"))
+
+    def _drain_cron_context_notes(self, session_key: str) -> list:
+        if not session_key:
+            return []
+        with self._pending_cron_context_lock:
+            return self._pending_cron_context.pop(session_key, [])
 
     def _make_platform_delegate_sink(self, *, session_key, session_id, source, loop):
         """Build the completion callback delegate_task fires for an async
@@ -12871,6 +12966,24 @@ class GatewayRunner:
                         + "\n\n---\n\n"
                         + message
                     )
+                # Cron/automation results delivered to this chat while its
+                # agent sat cached in memory: fold them in API-only so the
+                # agent knows what the user is looking at. The delivery is
+                # already persisted to the transcript, so the stored user
+                # message stays clean.
+                _cron_notes = self._drain_cron_context_notes(session_key or "")
+                if _cron_notes:
+                    if _persist_override is None:
+                        _persist_override = message
+                    message = (
+                        "[automated context] The following automation result(s) "
+                        "were delivered to this chat since your last turn — the "
+                        "user can already see them, so do not repeat them; just "
+                        "be aware of them when replying.\n\n"
+                        + "\n\n---\n\n".join(_cron_notes)
+                        + "\n\n---\n\n"
+                        + message
+                    )
                 result = agent.run_conversation(
                     message,
                     conversation_history=agent_history,
@@ -13860,7 +13973,7 @@ class GatewayRunner:
         agent._api_call_count = 0
 
 
-def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, on_delivered=None):
     """
     Background thread that ticks the cron scheduler at a regular interval.
     
@@ -13903,7 +14016,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             logger.debug("Agent worker tick error: %s", e)
 
         try:
-            cron_tick(verbose=False, adapters=adapters, loop=loop)
+            cron_tick(verbose=False, adapters=adapters, loop=loop, on_delivered=on_delivered)
         except Exception as e:
             logger.debug("Cron tick error: %s", e)
 
@@ -14250,7 +14363,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 return
             from cron.scheduler import tick as cron_tick
 
-            cron_tick(verbose=False, adapters=runner.adapters, loop=gateway_loop)
+            cron_tick(
+                verbose=False,
+                adapters=runner.adapters,
+                loop=gateway_loop,
+                on_delivered=runner.record_cron_delivery,
+            )
         except Exception as exc:
             logger.debug("Agent worker wake cron tick error: %s", exc)
 
@@ -14268,7 +14386,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     cron_thread = threading.Thread(
         target=_start_cron_ticker,
         args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+        kwargs={
+            "adapters": runner.adapters,
+            "loop": asyncio.get_running_loop(),
+            "on_delivered": runner.record_cron_delivery,
+        },
         daemon=True,
         name="cron-ticker",
     )

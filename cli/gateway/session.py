@@ -662,7 +662,26 @@ class SessionStore:
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
-    
+
+    def session_key_for(self, source: SessionSource) -> str:
+        """Public form of :meth:`_generate_session_key` for callers outside the
+        store (e.g. cron delivery recording) that must match its keying exactly."""
+        return self._generate_session_key(source)
+
+    def peek_session(self, source: SessionSource) -> Optional[SessionEntry]:
+        """Return the existing live session entry for a source, or None.
+
+        Unlike :meth:`get_or_create_session` this never creates a session and
+        never evaluates reset policy — it is a read-only lookup used to attach
+        out-of-band events (cron deliveries) to a conversation only when one
+        already exists.
+        """
+        session_key = self._generate_session_key(source)
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
+
+
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
         
@@ -1198,8 +1217,8 @@ class SessionStore:
         Used by /retry, /undo, and /compress to persist modified conversation history.
         Rewrites both SQLite and legacy JSONL storage.
         """
-        # DB: replace atomically.  Under the PG-primary cutover, clear_messages()
-        # is a SQLite no-op, so the old clear-then-append loop duplicated rows.
+        # DB: replace atomically. The old clear-then-append loop duplicated
+        # rows when transcript rewrites raced with shadow/session sync.
         if self._db:
             try:
                 self._db.replace_messages(session_id, messages)

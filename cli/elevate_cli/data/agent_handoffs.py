@@ -1375,15 +1375,24 @@ def dispatch_agent_handoff_to_cron(
             if startup_delay > 0
             else now_iso()
         )
+        # Handoff step jobs NEVER deliver their own output to the chat:
+        # each chain step used to message the user's Telegram on completion,
+        # so a decomposed workflow produced a wall of internal micro-step
+        # spam. Steps run deliver="local" (output still lands in
+        # cron/output/ + last_summary + the Comms handoff thread); the
+        # scheduler delivers ONE rollup to the origin chat when the whole
+        # handoff chain reaches a terminal state (see
+        # claim_agent_handoff_chain_rollup + cron.scheduler).
         job = cron_jobs.create_job(
             prompt=_handoff_prompt(handoff),
             schedule=schedule_at,
             name=f"handoff:{to_agent_id}:{handoff['id'][:8]}",
             repeat=1,
-            deliver=delivery_target or "local",
+            deliver="local",
             skills=_agent_skill_names(to_agent_id),
             enabled_toolsets=_agent_toolset_names(to_agent_id) or None,
             agent=to_agent_id,
+            metadata={"source": "handoff"},
             origin={
                 "source": "agent_handoff",
                 "actor": actor,
@@ -1777,6 +1786,146 @@ def record_agent_handoff_cron_delivery(
         status="completed",
         result={**base_result, "summary": summary, "silent": silent},
     )
+
+
+_ROLLUP_CLAIM_KEY = "rollupDeliveredAt"
+
+
+def _agent_handoff_chain_root_id(conn: sqlite3.Connection, handoff_id: str) -> str:
+    """Walk parent_handoff_id links up to the chain root."""
+    current = str(handoff_id)
+    seen: set[str] = set()
+    while current not in seen:
+        seen.add(current)
+        row = conn.execute(
+            "SELECT parent_handoff_id FROM agent_handoffs WHERE id = ?",
+            (current,),
+        ).fetchone()
+        if not row:
+            break
+        parent = row["parent_handoff_id"]
+        if not parent or str(parent) in seen:
+            break
+        current = str(parent)
+    return current
+
+
+def _agent_handoff_chain_members(conn: sqlite3.Connection, root_id: str) -> list[dict[str, Any]]:
+    """Return the root handoff plus every (recursive) follow-up handoff."""
+    members: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    frontier = [str(root_id)]
+    while frontier:
+        placeholders = ",".join("?" for _ in frontier)
+        rows = conn.execute(
+            f"SELECT * FROM agent_handoffs WHERE id IN ({placeholders})",
+            frontier,
+        ).fetchall()
+        for row in rows:
+            if row["id"] in seen:
+                continue
+            seen.add(row["id"])
+            members.append(_row_to_handoff(row))
+        child_rows = conn.execute(
+            f"SELECT id FROM agent_handoffs WHERE parent_handoff_id IN ({placeholders})",
+            frontier,
+        ).fetchall()
+        frontier = [r["id"] for r in child_rows if r["id"] not in seen]
+    members.sort(key=lambda item: str(item.get("createdAt") or ""))
+    return members
+
+
+def claim_agent_handoff_chain_rollup(
+    conn: sqlite3.Connection,
+    handoff_id: str,
+) -> dict[str, Any] | None:
+    """Detect chain end and claim the single rollup delivery.
+
+    A handoff chain is the root handoff (no parent) plus every recursive
+    follow-up linked via ``parent_handoff_id``. Called after a handoff
+    reaches a terminal status: returns the rollup payload exactly ONCE —
+    when every chain member is terminal and this caller wins the atomic
+    claim (a ``rollupDeliveredAt`` marker on the root's result_json,
+    guarded by the UPDATE's WHERE clause so concurrent step completions
+    cannot double-deliver). Returns None while the chain is still open or
+    when another caller already claimed the rollup.
+    """
+    handoff = get_agent_handoff(conn, handoff_id, include_messages=False)
+    if not handoff or handoff.get("status") not in _TERMINAL_STATUSES:
+        return None
+
+    root_id = _agent_handoff_chain_root_id(conn, handoff_id)
+    members = _agent_handoff_chain_members(conn, root_id)
+    if not members:
+        return None
+    if any(member.get("status") in _OPEN_STATUSES for member in members):
+        return None
+
+    # Atomic claim on the root row: only the first writer's UPDATE matches.
+    root = next((m for m in members if m["id"] == root_id), members[0])
+    prior_result = root.get("result")
+    if isinstance(prior_result, Mapping):
+        claimed_result = {**dict(prior_result), _ROLLUP_CLAIM_KEY: now_iso()}
+    elif prior_result is None:
+        claimed_result = {_ROLLUP_CLAIM_KEY: now_iso()}
+    else:
+        claimed_result = {"result": prior_result, _ROLLUP_CLAIM_KEY: now_iso()}
+    cursor = conn.execute(
+        """
+        UPDATE agent_handoffs
+        SET result_json = ?, updated_at = ?
+        WHERE id = ?
+          AND (result_json IS NULL OR result_json NOT LIKE ?)
+        """,
+        (
+            _json_dumps(claimed_result),
+            now_iso(),
+            root["id"],
+            f'%"{_ROLLUP_CLAIM_KEY}"%',
+        ),
+    )
+    if cursor.rowcount != 1:
+        return None
+
+    def _summary_of(item: Mapping[str, Any]) -> str:
+        result = item.get("result")
+        if isinstance(result, Mapping):
+            text = str(result.get("summary") or result.get("message") or "").strip()
+            if text:
+                return text
+        return str(item.get("errorMessage") or "").strip()
+
+    trigger = next((m for m in members if m["id"] == handoff_id), None)
+    final_summary = ""
+    if trigger is not None:
+        final_summary = _summary_of(trigger)
+    if not final_summary:
+        for member in reversed(members):
+            final_summary = _summary_of(member)
+            if final_summary:
+                break
+
+    status_counts: dict[str, int] = {}
+    for member in members:
+        key = str(member.get("status") or "unknown")
+        status_counts[key] = status_counts.get(key, 0) + 1
+
+    return {
+        "rootId": root["id"],
+        "rootTitle": str(root.get("title") or root.get("task") or "agent handoff").strip(),
+        "total": len(members),
+        "statusCounts": status_counts,
+        "steps": [
+            {
+                "id": member["id"],
+                "title": str(member.get("title") or member.get("task") or member["id"]).strip(),
+                "status": member.get("status"),
+                "toAgentId": member.get("toAgentId"),
+            }
+            for member in members
+        ],
+        "finalSummary": final_summary,
+    }
 
 
 def mark_stale_agent_handoffs(

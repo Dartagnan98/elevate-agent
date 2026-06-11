@@ -372,6 +372,58 @@ def _extract_cron_status(text: str):
     return status, cleaned
 
 
+def _format_handoff_rollup(rollup: dict) -> str:
+    """Render the single end-of-chain summary message for the origin chat."""
+    total = int(rollup.get("total") or 0)
+    final_summary = str(rollup.get("finalSummary") or "").strip()
+    if len(final_summary) > 800:
+        final_summary = final_summary[:797].rstrip() + "..."
+    if total <= 1:
+        return final_summary or "Agent work finished."
+
+    counts = rollup.get("statusCounts") or {}
+    count_bits = ", ".join(
+        f"{counts[key]} {key}" for key in ("completed", "failed", "cancelled") if counts.get(key)
+    )
+    lines = [f"Finished all {total} steps" + (f" ({count_bits})." if count_bits else ".")]
+    steps = rollup.get("steps") or []
+    for step in steps[:12]:
+        lines.append(f"• {step.get('title')} — {step.get('status')}")
+    if len(steps) > 12:
+        lines.append(f"• … and {len(steps) - 12} more")
+    if final_summary:
+        lines.extend(["", final_summary])
+    return "\n".join(lines)
+
+
+def _resolve_handoff_rollup_target(job: dict, origin: dict) -> str:
+    """Resolve where the one rollup message should go for a handoff chain.
+
+    Prefers the delivery target captured at dispatch time
+    (origin.optional_delivery_target); falls back to the receiving agent's
+    Telegram lane resolved now. Empty string = no external delivery (the
+    Comms handoff thread + cron output already carry the results).
+    """
+    target = str(origin.get("optional_delivery_target") or "").strip()
+    if target:
+        return target
+    try:
+        from gateway.agent_lanes import (
+            agent_telegram_delivery_target,
+            agent_telegram_lane_ready,
+        )
+
+        agent_id = str(origin.get("to_agent_id") or job.get("agent") or "").strip()
+        if not agent_id:
+            return ""
+        candidate = agent_telegram_delivery_target(agent_id, default="")
+        if candidate and agent_telegram_lane_ready(agent_id):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
 def _record_agent_handoff_delivery(
     job: dict,
     *,
@@ -379,17 +431,31 @@ def _record_agent_handoff_delivery(
     final_response: str | None,
     error: str | None,
     cron_outcome: str | None,
+    adapters=None,
+    loop=None,
 ) -> Optional[str]:
-    """Mirror agent-handoff cron results into the in-app Comms thread."""
+    """Mirror agent-handoff cron results into the in-app Comms thread.
+
+    Handoff step jobs run deliver="local" (no per-step chat spam — see
+    dispatch_agent_handoff_to_cron). After recording the step result, this
+    checks whether the whole handoff chain just reached a terminal state
+    and, if so, delivers ONE rollup summary to the origin chat. The claim
+    in claim_agent_handoff_chain_rollup is atomic, so exactly one step
+    completion wins the delivery even with parallel cron workers.
+    """
     origin = job.get("origin")
     if not isinstance(origin, dict) or origin.get("source") != "agent_handoff":
         return None
     handoff_id = str(origin.get("handoff_id") or "").strip()
     if not handoff_id:
         return None
+    rollup = None
     try:
         from elevate_cli.data.connection import connect
-        from elevate_cli.data.agent_handoffs import record_agent_handoff_cron_delivery
+        from elevate_cli.data.agent_handoffs import (
+            claim_agent_handoff_chain_rollup,
+            record_agent_handoff_cron_delivery,
+        )
 
         with connect() as conn:
             record_agent_handoff_cron_delivery(
@@ -402,9 +468,29 @@ def _record_agent_handoff_delivery(
                 actor=str(origin.get("to_agent_id") or job.get("agent") or ""),
                 cron_job_id=str(job.get("id") or ""),
             )
-        return None
+            rollup = claim_agent_handoff_chain_rollup(conn, handoff_id)
     except Exception as exc:
         msg = f"failed to record agent handoff result: {exc}"
+        logger.error("Job '%s': %s", job.get("id", "?"), msg)
+        return msg
+
+    if not rollup:
+        return None
+    try:
+        target = _resolve_handoff_rollup_target(job, origin)
+        if not target:
+            return None  # no chat lane configured — Comms thread has the results
+        content = _format_handoff_rollup(rollup)
+        if not content.strip():
+            return None
+        rollup_job = {
+            **job,
+            "deliver": target,
+            "name": rollup.get("rootTitle") or job.get("name") or job.get("id"),
+        }
+        return _deliver_result(rollup_job, content, adapters=adapters, loop=loop)
+    except Exception as exc:
+        msg = f"failed to deliver handoff rollup: {exc}"
         logger.error("Job '%s': %s", job.get("id", "?"), msg)
         return msg
 
@@ -1000,7 +1086,7 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
-def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delivered=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
@@ -1008,6 +1094,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
+
+    ``on_delivered`` (gateway only) is invoked once per successfully delivered
+    target with ``(target: dict, delivered_text: str, job: dict)`` so the
+    gateway can record the delivery into that chat's session context — without
+    it, the chat agent has no memory of the automation results the user is
+    looking at and can't answer follow-up questions about them.
 
     Returns None on success, or an error string on failure.
     """
@@ -1163,6 +1255,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
+                    _notify_delivered(on_delivered, target, cleaned_delivery_content, job)
             except Exception as e:
                 logger.warning(
                     "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
@@ -1202,10 +1295,21 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            _notify_delivered(on_delivered, target, cleaned_delivery_content, job)
 
     if delivery_errors:
         return "; ".join(delivery_errors)
     return None
+
+
+def _notify_delivered(on_delivered, target: dict, delivered_text: str, job: dict) -> None:
+    """Fire the gateway's delivery-recorded callback, never letting it break delivery."""
+    if on_delivered is None:
+        return
+    try:
+        on_delivered(target, delivered_text, job)
+    except Exception as exc:
+        logger.debug("Job '%s': on_delivered callback failed: %s", job.get("id", "?"), exc)
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
@@ -2502,7 +2606,7 @@ def _maybe_reap_idle_sessions() -> None:
         logger.debug("idle-session reap skipped: %s", exc)
 
 
-def tick(verbose: bool = True, adapters=None, loop=None) -> int:
+def tick(verbose: bool = True, adapters=None, loop=None, on_delivered=None) -> int:
     """
     Check and run all due jobs.
     
@@ -2513,6 +2617,9 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         verbose: Whether to print status messages
         adapters: Optional dict mapping Platform → live adapter (from gateway)
         loop: Optional asyncio event loop (from gateway) for live adapter sends
+        on_delivered: Optional callback ``(target, delivered_text, job)`` fired
+            per successfully delivered target so the gateway can record the
+            delivery into the origin chat's session context
     
     Returns:
         Number of jobs executed (0 if another tick is already running)
@@ -2638,13 +2745,15 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     final_response=final_response,
                     error=error,
                     cron_outcome=cron_outcome,
+                    adapters=adapters,
+                    loop=loop,
                 )
                 if handoff_delivery_error:
                     delivery_errors.append(handoff_delivery_error)
 
                 if should_deliver:
                     try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop, on_delivered=on_delivered)
                         if delivery_error:
                             delivery_errors.append(delivery_error)
                     except Exception as de:
@@ -2681,6 +2790,8 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     final_response="",
                     error=str(e),
                     cron_outcome="error",
+                    adapters=adapters,
+                    loop=loop,
                 )
                 mark_job_run(
                     job["id"], False, str(e),

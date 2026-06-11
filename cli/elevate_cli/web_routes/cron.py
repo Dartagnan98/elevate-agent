@@ -78,10 +78,27 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
             compact["prompt"] = prompt[:517].rstrip() + "..."
         return compact
 
+    def _is_handoff_job(job: dict) -> bool:
+        """Agent-handoff step jobs are internal plumbing, not user automations.
+
+        The handoff drain (dispatch_agent_handoff_to_cron) tags its one-shot
+        jobs with metadata.source == "handoff"; older jobs are caught via
+        origin.source == "agent_handoff". They are hidden from the default
+        Automations listing so a decomposed workflow's micro-steps don't mix
+        with the user's real recurring automations.
+        """
+        metadata = job.get("metadata")
+        if isinstance(metadata, dict) and str(metadata.get("source") or "") == "handoff":
+            return True
+        origin = job.get("origin")
+        return isinstance(origin, dict) and str(origin.get("source") or "") == "agent_handoff"
+
     @router.get("/api/cron/jobs")
-    async def list_cron_jobs(compact: bool = False):
+    async def list_cron_jobs(compact: bool = False, include_system: bool = False):
         from cron.jobs import list_jobs
         jobs = list_jobs(include_disabled=True)
+        if not include_system:
+            jobs = [job for job in jobs if not _is_handoff_job(job)]
         return [_compact_job(job) for job in jobs] if compact else jobs
 
 

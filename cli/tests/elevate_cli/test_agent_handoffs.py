@@ -141,7 +141,10 @@ def test_agent_handoff_create_dispatch_and_idempotency(monkeypatch):
     assert same["id"] == handoff["id"]
     assert len(created_jobs) == 1
     assert created_jobs[0]["agent"] == "admin"
-    assert created_jobs[0]["deliver"] == "telegram:admin-chat-123"
+    # Step jobs never deliver directly — the chain rollup owns chat delivery.
+    assert created_jobs[0]["deliver"] == "local"
+    assert created_jobs[0]["origin"]["optional_delivery_target"] == "telegram:admin-chat-123"
+    assert created_jobs[0]["metadata"] == {"source": "handoff"}
     assert created_jobs[0]["origin"]["source"] == "agent_handoff"
     assert "Use agent_handoff with action='complete'" in created_jobs[0]["prompt"]
 
@@ -585,6 +588,205 @@ def test_scheduler_agent_handoff_delivery_records_comms_result():
     assert updated["status"] == "waiting_human"
     assert updated["result"]["humanPrompt"]["message"] == "Please approve the launch."
     assert updated["messages"][-1]["kind"] == "human_prompt"
+
+
+def test_agent_handoff_chain_rollup_claims_once_at_chain_end():
+    from elevate_cli.data.agent_handoffs import claim_agent_handoff_chain_rollup
+
+    with connect() as conn:
+        root = create_agent_handoff(
+            conn,
+            from_agent_id="executive-assistant",
+            to_agent_id="admin",
+            title="Pre-CMA workflow",
+            task="Decompose and run the CMA prep.",
+            create_cron_job=False,
+        )
+        steps = [
+            create_agent_handoff(
+                conn,
+                from_agent_id="executive-assistant",
+                to_agent_id="admin",
+                title=f"S{i} CMA step",
+                task=f"Run CMA micro-step {i}.",
+                parent_handoff_id=root["id"],
+                create_cron_job=False,
+                actor="executive-assistant",
+            )
+            for i in range(3)
+        ]
+
+        # Root finishes first; children still open → no rollup yet.
+        record_agent_handoff_result(
+            conn,
+            root["id"],
+            status="completed",
+            result={"summary": "Workflow decomposed into 3 steps."},
+            idempotency_key="root-done",
+            actor="admin",
+        )
+        assert claim_agent_handoff_chain_rollup(conn, root["id"]) is None
+
+        for index, step in enumerate(steps[:-1]):
+            record_agent_handoff_result(
+                conn,
+                step["id"],
+                status="completed",
+                result={"summary": f"Step {index} done."},
+                idempotency_key=f"step-{index}-done",
+                actor="admin",
+            )
+            assert claim_agent_handoff_chain_rollup(conn, step["id"]) is None
+
+        record_agent_handoff_result(
+            conn,
+            steps[-1]["id"],
+            status="completed",
+            result={"summary": "Final CMA package assembled."},
+            idempotency_key="step-final-done",
+            actor="admin",
+        )
+        rollup = claim_agent_handoff_chain_rollup(conn, steps[-1]["id"])
+        assert rollup is not None
+        assert rollup["rootId"] == root["id"]
+        assert rollup["rootTitle"] == "Pre-CMA workflow"
+        assert rollup["total"] == 4
+        assert rollup["statusCounts"] == {"completed": 4}
+        assert rollup["finalSummary"] == "Final CMA package assembled."
+        assert len(rollup["steps"]) == 4
+
+        # The claim is one-shot: nothing re-delivers for the same chain.
+        assert claim_agent_handoff_chain_rollup(conn, steps[-1]["id"]) is None
+        assert claim_agent_handoff_chain_rollup(conn, root["id"]) is None
+
+
+def test_scheduler_handoff_steps_silent_and_single_rollup_delivery(monkeypatch):
+    """A multi-step handoff chain produces exactly ONE chat message."""
+    import cron.scheduler as scheduler
+    from cron.scheduler import _record_agent_handoff_delivery
+
+    deliveries: list[tuple[str, str]] = []
+
+    def fake_deliver_result(job, content, adapters=None, loop=None, **kwargs):
+        deliveries.append((job["deliver"], content))
+        return None
+
+    monkeypatch.setattr(scheduler, "_deliver_result", fake_deliver_result)
+
+    with connect() as conn:
+        root = create_agent_handoff(
+            conn,
+            from_agent_id="executive-assistant",
+            to_agent_id="admin",
+            title="CMA prep",
+            task="Pull comps and build the CMA.",
+            create_cron_job=False,
+        )
+        child = create_agent_handoff(
+            conn,
+            from_agent_id="executive-assistant",
+            to_agent_id="admin",
+            title="S1 Pull sold comps",
+            task="Pull 5-month sold properties.",
+            parent_handoff_id=root["id"],
+            create_cron_job=False,
+            actor="executive-assistant",
+        )
+
+    def step_job(handoff_id: str, job_id: str) -> dict:
+        return {
+            "id": job_id,
+            "agent": "admin",
+            "deliver": "local",
+            "origin": {
+                "source": "agent_handoff",
+                "handoff_id": handoff_id,
+                "to_agent_id": "admin",
+                "optional_delivery_target": "telegram:admin-chat-123",
+            },
+        }
+
+    # Root step completes — child still queued → silent.
+    error = _record_agent_handoff_delivery(
+        step_job(root["id"], "cron-root"),
+        success=True,
+        final_response="Decomposed the workflow.",
+        error=None,
+        cron_outcome="ok",
+    )
+    assert error is None
+    assert deliveries == []
+
+    # Last step completes → exactly one rollup to the origin chat.
+    error = _record_agent_handoff_delivery(
+        step_job(child["id"], "cron-child"),
+        success=True,
+        final_response="CMA package ready for review.",
+        error=None,
+        cron_outcome="ok",
+    )
+    assert error is None
+    assert len(deliveries) == 1
+    target, content = deliveries[0]
+    assert target == "telegram:admin-chat-123"
+    assert "Finished all 2 steps" in content
+    assert "S1 Pull sold comps" in content
+    assert "CMA package ready for review." in content
+
+    # Re-running the hook (idempotent cron retry) never re-delivers.
+    error = _record_agent_handoff_delivery(
+        step_job(child["id"], "cron-child"),
+        success=True,
+        final_response="CMA package ready for review.",
+        error=None,
+        cron_outcome="ok",
+    )
+    assert error is None
+    assert len(deliveries) == 1
+
+
+def test_cron_jobs_listing_hides_handoff_jobs_by_default(client, monkeypatch):
+    from cron import jobs as cron_jobs
+
+    handoff_job = {
+        "id": "job-handoff",
+        "name": "handoff:admin:a0403a60",
+        "prompt": "internal step",
+        "schedule_display": "once",
+        "enabled": False,
+        "state": "completed",
+        "metadata": {"source": "handoff"},
+        "origin": {"source": "agent_handoff", "handoff_id": "a0403a60"},
+    }
+    legacy_handoff_job = {
+        "id": "job-handoff-legacy",
+        "name": "handoff:admin:b1514b71",
+        "prompt": "internal step (pre-tag)",
+        "schedule_display": "once",
+        "enabled": False,
+        "state": "completed",
+        "origin": {"source": "agent_handoff", "handoff_id": "b1514b71"},
+    }
+    user_job = {
+        "id": "job-user",
+        "name": "remind me at 3pm",
+        "prompt": "remind me",
+        "schedule_display": "once",
+        "enabled": True,
+        "state": "scheduled",
+        "origin": {"platform": "telegram", "chat_id": "123"},
+    }
+    monkeypatch.setattr(
+        cron_jobs,
+        "list_jobs",
+        lambda include_disabled=False: [handoff_job, legacy_handoff_job, user_job],
+    )
+
+    default_listing = client.get("/api/cron/jobs").json()
+    assert [job["id"] for job in default_listing] == ["job-user"]
+
+    full_listing = client.get("/api/cron/jobs?include_system=true").json()
+    assert {job["id"] for job in full_listing} == {"job-handoff", "job-handoff-legacy", "job-user"}
 
 
 def test_agent_handoff_terminal_result_is_idempotent_not_overwritable():
@@ -1797,7 +1999,9 @@ def test_handoff_dependencies_block_until_human_approval(monkeypatch):
     assert approved["status"] == "running"
     assert approved["cronJobId"] == "approval-cron-1"
     assert created_jobs[0]["agent"] == "social-media"
-    assert created_jobs[0]["deliver"] == "telegram:social-chat-123"
+    # Step jobs never deliver directly — the chain rollup owns chat delivery.
+    assert created_jobs[0]["deliver"] == "local"
+    assert created_jobs[0]["origin"]["optional_delivery_target"] == "telegram:social-chat-123"
 
 
 def test_handoff_admin_setup_dependency_accepts_configured_status(monkeypatch):
