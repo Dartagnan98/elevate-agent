@@ -3154,24 +3154,33 @@ class SessionDB:
     # Utility
     # =========================================================================
 
-    def session_count(self, source: str = None) -> int:
+    def session_count(self, source: str = None, exclude_sources: List[str] = None) -> int:
         """Count sessions, optionally filtered by source.
 
         PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1.
+        ``exclude_sources`` mirrors list_sessions_rich so filtered listings
+        can show an agreeing total.
         """
         if _read_from_pg():
             try:
                 from elevate_cli.data.chat_sessions import session_count as _pg_session_count
-                return _pg_session_count(source)
+                return _pg_session_count(source, exclude_sources=exclude_sources)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("session_count PG read failed, falling back: %s", exc)
+        clauses = []
+        params: list = []
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+        if exclude_sources:
+            placeholders = ",".join("?" for _ in exclude_sources)
+            clauses.append(f"source NOT IN ({placeholders})")
+            params.extend(exclude_sources)
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
-            if source:
-                cursor = self._conn.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE source = ?", (source,)
-                )
-            else:
-                cursor = self._conn.execute("SELECT COUNT(*) FROM sessions")
+            cursor = self._conn.execute(
+                f"SELECT COUNT(*) FROM sessions{where_sql}", tuple(params)
+            )
             return cursor.fetchone()[0]
 
     def message_count(self, session_id: str = None) -> int:

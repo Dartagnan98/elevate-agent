@@ -3135,6 +3135,28 @@ def _store_status_payload(payload: dict[str, Any]) -> None:
         _status_cache_expires_at = time.monotonic() + _STATUS_CACHE_TTL_SEC
 
 
+def _platform_chat_sources() -> list[str]:
+    """Gateway chat-platform sources hidden from the app's session sidebar.
+
+    Telegram/Discord/etc. conversations live on the messenger — surfacing
+    their gateway sessions in the desktop app duplicates them as fake
+    "chats" the user never started there. ``local`` is the gateway's own
+    terminal mode and stays visible.
+    """
+    try:
+        from gateway.config import Platform
+
+        return [p.value for p in Platform if p.value != "local"]
+    except Exception:
+        return [
+            "telegram", "discord", "whatsapp", "slack", "signal",
+            "mattermost", "matrix", "homeassistant", "email", "sms",
+            "dingtalk", "api_server", "webhook", "feishu", "wecom",
+            "wecom_callback", "weixin", "bluebubbles", "qqbot", "yuanbao",
+            "msgraph_webhook",
+        ]
+
+
 @app.get("/api/sessions")
 async def get_sessions(
     limit: int = 20,
@@ -3152,8 +3174,15 @@ async def get_sessions(
                     session_count as pg_session_count,
                 )
 
-                sessions = list_session_summaries(limit=limit, offset=offset)
-                total = pg_session_count() if include_total else offset + len(sessions)
+                _hidden = _platform_chat_sources()
+                sessions = list_session_summaries(
+                    limit=limit, offset=offset, exclude_sources=_hidden
+                )
+                total = (
+                    pg_session_count(exclude_sources=_hidden)
+                    if include_total
+                    else offset + len(sessions)
+                )
                 now = time.time()
                 _running = _live_running_session_keys()
                 for s in sessions:
@@ -3169,8 +3198,15 @@ async def get_sessions(
         from elevate_state import SessionDB
         db = _get_session_db()
         try:
-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
-            total = db.session_count() if include_total else offset + len(sessions)
+            _hidden = _platform_chat_sources()
+            sessions = db.list_sessions_rich(
+                limit=limit, offset=offset, exclude_sources=_hidden
+            )
+            total = (
+                db.session_count(exclude_sources=_hidden)
+                if include_total
+                else offset + len(sessions)
+            )
             now = time.time()
             _running = _live_running_session_keys()
             for s in sessions:
@@ -3211,8 +3247,11 @@ async def search_sessions(q: str = "", limit: int = 20):
             prefix_query = " ".join(terms)
             matches = db.search_messages(query=prefix_query, limit=limit)
             # Group by session_id — return unique sessions with their best snippet
+            _hidden = set(_platform_chat_sources())
             seen: dict = {}
             for m in matches:
+                if str(m.get("source") or "") in _hidden:
+                    continue  # platform-chat sessions are hidden from the app
                 sid = m["session_id"]
                 if sid not in seen:
                     seen[sid] = {

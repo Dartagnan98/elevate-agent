@@ -613,19 +613,30 @@ def message_count(session_id: str | None = None) -> int:
     return int(row[0]) if row else 0
 
 
-def session_count(source: str | None = None) -> int:
+def session_count(
+    source: str | None = None,
+    exclude_sources: List[str] | None = None,
+) -> int:
     """Count sessions, optionally filtered by source.
 
     Mirrors SessionDB.session_count so the cutover is a drop-in swap.
+    ``exclude_sources`` matches the list readers so the sidebar total agrees
+    with a filtered list (e.g. platform-chat sessions hidden from the app).
     """
+    clauses: List[str] = []
+    params: List[Any] = []
+    if source:
+        clauses.append("source = ?")
+        params.append(source)
+    if exclude_sources:
+        placeholders = ",".join("?" for _ in exclude_sources)
+        clauses.append(f"source NOT IN ({placeholders})")
+        params.extend(exclude_sources)
+    where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect() as conn:
-        if source:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM chat_sessions WHERE source = ?",
-                (source,),
-            ).fetchone()
-        else:
-            row = conn.execute("SELECT COUNT(*) FROM chat_sessions").fetchone()
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM chat_sessions{where_sql}", tuple(params)
+        ).fetchone()
     return int(row[0]) if row else 0
 
 
