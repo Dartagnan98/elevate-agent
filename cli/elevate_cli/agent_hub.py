@@ -53,16 +53,25 @@ AGENT_ARTIFACT_SKILLS: tuple[str, ...] = (
     "photo-cleanup",
 )
 
-# Capability toolsets EVERY agent gets by default (unioned into each agent def
-# the same way SHARED_AGENT_SKILLS is). This is the "full working composition" —
-# browser + computer use, web, file/terminal, skills, vision/image-gen, code
-# execution, cron, delegation, and the comms/memory/bus baseline. Before this,
-# the per-agent `toolsets` only declared data/coordination sets (leads_overview,
-# deals_overview, …) so agents had no browser_use / computer / terminal at all
-# and reported the tool "not available." Specialist DATA scope (elevate_db,
-# admin_deal, leads/deals_overview) stays per-agent — only capability is shared.
-# The run_agent loadout union (run_agent.py) never strips, so these always
-# survive the gateway tool-profile filter.
+# Every agent gets the FULL usable toolset by default (unioned into each agent
+# def the same way SHARED_AGENT_SKILLS is). Per the directive "all agents should
+# have access to all the tools": capability (browser + computer, web/search,
+# file/terminal, skills, vision/image-gen, video, tts, code execution, cron,
+# delegation, comms/memory/bus) AND the data toolsets (full pipeline read +
+# deal/profile writes + raw operational SQL). The run_agent loadout union
+# (run_agent.py) never strips, so these survive the gateway tool-profile filter.
+#
+# DELIBERATELY EXCLUDED (would be wrong to ship to a real-estate agent):
+#   - framework internals: moa, rl, debugging, safe (safe even contradicts
+#     terminal access)
+#   - platform presets, not per-agent toolsets: the elevate-* family
+#   - infra integrations no realtor agent needs: homeassistant, spotify,
+#     feishu_doc, feishu_drive
+#
+# NOTE: elevate_db (raw operational SQL) + admin_deal (writes deal files) are
+# now on EVERY agent, not just Admin. They are still gated by the per-agent
+# safety rules (always_ask: destructive_action / financial / data_deletion),
+# but the specialist write-scope boundary is intentionally removed here.
 SHARED_AGENT_TOOLSETS: tuple[str, ...] = (
     "agent_bus",
     "agent_handoff",
@@ -81,8 +90,17 @@ SHARED_AGENT_TOOLSETS: tuple[str, ...] = (
     "terminal",
     "vision",
     "image_gen",
+    "video",
+    "tts",
     "code_execution",
     "cronjob",
+    # Data toolsets — full pipeline visibility + deal/profile writes for all.
+    "leads_overview",
+    "deals_overview",
+    "lead_status",
+    "elevate_db",
+    "admin_deal",
+    "admin_profile",
 )
 
 
