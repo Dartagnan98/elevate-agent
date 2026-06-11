@@ -1161,6 +1161,40 @@ class SessionDB:
 
         return self._execute_write(_do) or 0
 
+    def reap_idle_sessions(
+        self, idle_seconds: float = 7200.0, draft_idle_seconds: float = 1200.0
+    ) -> int:
+        """Close sessions left OPEN (ended_at NULL) past an inactivity window.
+
+        Interactive/gateway turns never call end_session (only cron/cli/compression
+        do), so abandoned chats and never-used prewarmed drafts pile up with no
+        end_reason — on a live box, main sessions sat open 6-7.5 HOURS. This is the
+        backstop: a session with NO activity (max message timestamp, else
+        started_at) older than the window is marked ended. Real multi-turn chats
+        get the long window (idle_seconds, default 2h); low-activity prewarmed
+        drafts (<=1 message) get the tight one (draft_idle_seconds, default 20min).
+        Non-destructive — only sets ended_at + end_reason='idle_reaped'; messages
+        are preserved and a later message would just create a fresh session row.
+        """
+        def _do(conn):
+            now = time.time()
+            result = conn.execute(
+                """
+                UPDATE sessions
+                SET ended_at = ?, end_reason = 'idle_reaped'
+                WHERE ended_at IS NULL
+                  AND COALESCE(
+                        (SELECT MAX(m.timestamp) FROM messages m
+                           WHERE m.session_id = sessions.id),
+                        started_at, 0
+                      ) < (? - CASE WHEN message_count > 1 THEN ? ELSE ? END)
+                """,
+                (now, now, float(idle_seconds), float(draft_idle_seconds)),
+            )
+            return result.rowcount
+
+        return self._execute_write(_do) or 0
+
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Get a session by ID. PG-first when the cutover flag is on."""
         if _read_from_pg():

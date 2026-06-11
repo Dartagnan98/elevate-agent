@@ -2470,6 +2470,36 @@ def _should_ensure_system_jobs() -> bool:
     return False
 
 
+_last_session_reap = [0.0]
+_SESSION_REAP_INTERVAL = 1800.0  # reap idle/abandoned sessions at most every 30 min
+
+
+def _maybe_reap_idle_sessions() -> None:
+    """Throttled close of sessions left open forever (interactive turns never
+    call end_session). Runs at most every 30 min from the cron tick. Also drains
+    the previously-dead orphaned-compression reaper."""
+    import time as _t
+    now = _t.monotonic()
+    if now - _last_session_reap[0] < _SESSION_REAP_INTERVAL:
+        return
+    _last_session_reap[0] = now
+    try:
+        from elevate_state import SessionDB
+        db = SessionDB()
+        try:
+            reaped = db.reap_idle_sessions()
+            orphaned = db.finalize_orphaned_compression_sessions()
+            if reaped or orphaned:
+                logger.info(
+                    "Session reaper: closed %d idle + %d orphaned-compression sessions",
+                    reaped, orphaned,
+                )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("idle-session reap skipped: %s", exc)
+
+
 def tick(verbose: bool = True, adapters=None, loop=None) -> int:
     """
     Check and run all due jobs.
@@ -2508,6 +2538,9 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 ensure_system_jobs()
             except Exception as exc:
                 logger.warning("Failed to ensure system cron jobs: %s", exc)
+
+        # Close abandoned/idle sessions so they don't pile up open forever.
+        _maybe_reap_idle_sessions()
 
         due_jobs = get_due_jobs()
 
