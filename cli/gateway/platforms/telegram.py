@@ -2760,10 +2760,16 @@ class TelegramAdapter(BasePlatformAdapter):
         agent_id, agent_name = self._context_agent(context)
         if not self._should_process_message(update.message, is_command=True, bot=bot):
             return
-        initialized = await self._maybe_initialize_agent_lane(update.message, agent_id, agent_name, bot)
-        if initialized and update.message.text.strip().lower().split(maxsplit=1)[0].split("@", 1)[0] == "/start":
-            return
-        
+        # Bind the per-agent lane on first contact — saves the chat target and
+        # sends its own "connected" note (side effect; return value unused).
+        # This used to RETURN on /start, which left the chat bound but never
+        # routed to the authorization/pairing path: no pairing code was minted
+        # and the next message got denied (the "I texted it and nothing
+        # happens" dead-end). Now /start falls through to handle_message so an
+        # unauthorized chat receives a pairing code and an authorized one gets
+        # the normal welcome.
+        await self._maybe_initialize_agent_lane(update.message, agent_id, agent_name, bot)
+
         event = self._build_message_event(
             update.message,
             MessageType.COMMAND,
