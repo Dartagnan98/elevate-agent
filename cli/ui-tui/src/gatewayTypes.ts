@@ -17,6 +17,9 @@ export interface GatewayCompletionItem {
 
 export interface GatewayTranscriptMessage {
   context?: string
+  // Stable per-message id (gateway client_message_id). Additive: the dashboard
+  // uses it for transcript reconciliation; the TUI may ignore it.
+  message_id?: string
   name?: string
   role: 'assistant' | 'system' | 'tool' | 'user'
   text?: string
@@ -373,7 +376,7 @@ export type GatewayEvent =
   | { payload?: GatewaySkin; session_id?: string; type: 'skin.changed' }
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
-  | { payload?: undefined; session_id?: string; type: 'message.start' }
+  | { payload?: { message_id?: string; user_message_id?: string }; session_id?: string; type: 'message.start' }
   | { payload?: { kind?: string; text?: string }; session_id?: string; type: 'status.update' }
   | { payload?: { state?: 'idle' | 'listening' | 'transcribing' }; session_id?: string; type: 'voice.status' }
   | { payload?: { no_speech_limit?: boolean; text?: string }; session_id?: string; type: 'voice.transcript' }
@@ -405,9 +408,9 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.tool' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
-  | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
+  | { payload: { message_id?: string; rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {
-      payload?: { reasoning?: string; rendered?: string; text?: string; usage?: Usage }
+      payload?: { message_id?: string; reasoning?: string; rendered?: string; text?: string; usage?: Usage }
       session_id?: string
       type: 'message.complete'
     }
