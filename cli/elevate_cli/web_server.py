@@ -1726,6 +1726,18 @@ async def configure_telegram(request: Request):
     if allowed is not None and body.get("allowed_users") is not None:
         save_env_value("TELEGRAM_ALLOWED_USERS", allowed.replace(" ", ""))
     if body.get("home_channel") is not None:
+        # Validate: a Telegram chat target is a numeric id (incl. -100… groups)
+        # or an @username — never a pairing code. Storing a code here is what
+        # crashed cron→Telegram delivery (int('8RWK85SD') ValueError loop).
+        _hc = (home or "").strip()
+        if _hc and not (_hc.lstrip("-").isdigit() or _hc.startswith("@")):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "home_channel must be a numeric chat id or an @username — "
+                    f"got {home!r} (looks like a pairing code, not a chat id)."
+                ),
+            )
         save_env_value("TELEGRAM_HOME_CHANNEL", home)
     if dm_behavior:
         if dm_behavior not in {"pair", "ignore", "open"}:
