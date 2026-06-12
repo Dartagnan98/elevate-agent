@@ -13,3 +13,15 @@ The cause was the stopped turn finishing a moment late and its completion
 landing on the new turn, clearing it. The chat now tags each completion to
 the exact turn it belongs to, so a stopped turn's late wrap-up can no longer
 interrupt the turn that's actually streaming.
+
+## /compress now shows progress, marks done, and sticks
+
+Running `/compress` had three rough edges: no "Compacting context" indicator
+while it worked (the chat just sat silent for ~30s), no clear "Session
+compacted" at the end, and — most importantly — it didn't survive leaving and
+returning to the chat. Compression rotates to a fresh session under the hood,
+but the manual command never saved the compressed history into it, so a
+reload reverted to the full conversation and compacted it a second time (with
+totally different numbers). All three are fixed: the pill shows during, the
+session is marked compacted at the end, and the compression is now saved so
+it holds across a resume.
