@@ -3110,6 +3110,12 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const currentAssistantRef = useRef<string | null>(null);
+  // Gateway message_id of the turn currently streaming. message.complete
+  // events are matched against this so a LATE completion from a superseded
+  // turn (classic after an accidental stop: the interrupted turn emits its
+  // message.complete a beat after the next turn already started) can't tear
+  // down the live turn's thinking/tools — it settles the old bubble instead.
+  const liveGatewayMsgIdRef = useRef<string | null>(null);
   const stoppedAssistantIdsRef = useRef<Set<string>>(new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
@@ -5049,6 +5055,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const at = eventMillis(ev);
         lastToolActivityAtRef.current = 0;
+        liveGatewayMsgIdRef.current = eventString(ev, "message_id") || null;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant(at, eventString(ev, "message_id") || undefined);
         // Snapshot cumulative output tokens so message.complete can diff
@@ -5081,9 +5088,35 @@ export default function ChatPage() {
       gw.on("message.complete", (ev) => {
         if (!accepts(ev)) return;
         const at = eventMillis(ev);
+        const status = eventString(ev, "status") || "complete";
+        // Reject a LATE completion that belongs to a superseded turn. After an
+        // accidental stop, the interrupted turn emits its message.complete a
+        // beat AFTER the next turn has already started streaming — settling on
+        // currentAssistantRef would clear the LIVE turn's thinking/tools (the
+        // "shows for 2s then glitches out" bug). When the event's gateway
+        // message_id doesn't match the turn currently streaming, settle that
+        // old bubble in place and leave the live turn untouched.
+        const evMsgId = eventString(ev, "message_id");
+        const liveMsgId = liveGatewayMsgIdRef.current;
+        if (evMsgId && liveMsgId && evMsgId !== liveMsgId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === evMsgId
+                ? {
+                    ...m,
+                    status:
+                      status === "interrupted"
+                        ? ("interrupted" as const)
+                        : ("complete" as const),
+                  }
+                : m,
+            ),
+          );
+          return;
+        }
+        liveGatewayMsgIdRef.current = null;
         updateUsageFromPayload(ev);
         const text = eventText(ev);
-        const status = eventString(ev, "status") || "complete";
         const warning = eventString(ev, "warning");
         const messageId = currentAssistantRef.current ?? ensureAssistant(at);
         const stopForced = stoppedAssistantIdsRef.current.has(messageId);
