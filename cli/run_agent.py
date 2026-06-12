@@ -4577,6 +4577,14 @@ class AIAgent:
         """
         if not getattr(self, "_steer_cut_requested", False):
             return False
+        if getattr(self, "_stream_phase", "idle") == "resolving":
+            # RACE GUARD: the cut was requested mid-think, but the final
+            # answer began streaming before the flag was consumed. Cutting
+            # now would sever a response the user is already reading — drop
+            # the cut and let the after-text drain deliver the steer the
+            # moment the response completes.
+            self._steer_cut_requested = False
+            return False
         if getattr(self, "_pending_steer", None) or getattr(
             self, "_pending_soft_interrupts", None
         ):
@@ -10292,6 +10300,10 @@ class AIAgent:
 
         # Initialize conversation (copy to avoid mutating the caller's list)
         messages = list(conversation_history) if conversation_history else []
+        # Index of the first message belonging to THIS turn — everything the
+        # run appends (user prompt, assistant iterations, tool results, steer
+        # folds) sits after it. Used to persist the WHOLE turn's reasoning.
+        _turn_start_idx = len(messages)
 
         # ── Repair in-flight tool calls from a crashed prior run ──────────
         # If the previous process died between persisting an assistant
@@ -14109,12 +14121,19 @@ class AIAgent:
             except Exception as exc:
                 logger.debug("turn attribution hook failed: %s", exc)
 
-        # Extract reasoning from the last assistant message (if any)
+        # Persist the WHOLE turn's reasoning, in order. The old "last
+        # assistant message only" lost every iteration before the final tool
+        # call — a session re-opened after the turn completed rebuilt its
+        # thinking from this field and showed a truncated stub of what
+        # actually streamed.
         last_reasoning = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("reasoning"):
-                last_reasoning = msg["reasoning"]
-                break
+        _turn_reasoning = [
+            str(m.get("reasoning") or "")
+            for m in messages[_turn_start_idx:]
+            if m.get("role") == "assistant" and m.get("reasoning")
+        ]
+        if _turn_reasoning:
+            last_reasoning = "\n\n".join(_turn_reasoning)[-200_000:]
 
         # Build result with interrupt info if applicable
         result = {

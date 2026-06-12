@@ -155,3 +155,27 @@ class TestSteerCutInterruptType:
         # the call) from a hard interrupt (end the turn).
         assert not issubclass(SteerCutInterrupt, InterruptedError)
         assert issubclass(SteerCutInterrupt, Exception)
+
+
+def test_cut_request_dropped_once_answer_is_resolving():
+    """A cut requested mid-think must NOT fire if the final answer started
+    streaming before the flag was consumed — cutting then severs a response
+    the user is already reading. The steer drains after the text instead."""
+    agent = object.__new__(AIAgent)
+    agent._steer_cut_requested = False
+    agent._stream_phase = "thinking"
+    agent._pending_steer = "use composio"
+    agent._pending_soft_interrupts = []
+
+    AIAgent._request_steer_cut_if_thinking(agent)
+    assert agent._steer_cut_requested is True
+
+    # The model starts writing the answer before the poll loop consumes it.
+    agent._stream_phase = "resolving"
+    assert AIAgent._consume_steer_cut_request(agent) is False
+    assert agent._steer_cut_requested is False
+
+    # Back in a thinking phase a fresh request still cuts normally.
+    agent._stream_phase = "thinking"
+    AIAgent._request_steer_cut_if_thinking(agent)
+    assert AIAgent._consume_steer_cut_request(agent) is True
