@@ -319,7 +319,9 @@ function attachmentIconFor(mediaType: string, name: string): LucideIcon {
 interface ActivityTrace {
   createdAt: number;
   id: string;
-  kind: "reasoning" | "status" | "thinking";
+  // "marker" = an injected run event (e.g. "Conversation steered") that gets
+  // its own labelled row in the step timeline, like a tool call.
+  kind: "reasoning" | "status" | "thinking" | "marker";
   text: string;
   messageId?: string;
 }
@@ -1351,7 +1353,8 @@ function normalizeActiveTurnSnapshot(raw: unknown): ActiveTurnSnapshot | null {
       typeof trace.text === "string" &&
       (trace.kind === "reasoning" ||
         trace.kind === "status" ||
-        trace.kind === "thinking"),
+        trace.kind === "thinking" ||
+        trace.kind === "marker"),
     )
     .slice(-80)
     .map((trace) => ({ ...trace, messageId: trace.messageId ?? messageId }));
@@ -3124,6 +3127,10 @@ export default function ChatPage() {
   // message.complete a beat after the next turn already started) can't tear
   // down the live turn's thinking/tools — it settles the old bubble instead.
   const liveGatewayMsgIdRef = useRef<string | null>(null);
+  // True while the open bubble is a multi-round steered run: its content is
+  // the accumulated rounds, so the final message.complete must keep the
+  // merged content instead of replacing it with only the last round's text.
+  const steeredRunRef = useRef(false);
   const stoppedAssistantIdsRef = useRef<Set<string>>(new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
@@ -4038,13 +4045,14 @@ export default function ChatPage() {
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
       const isReasoning = kind === "thinking" || kind === "reasoning";
+      const isMarker = kind === "marker";
       // Reasoning content keeps its RAW text: displayStatusText collapses any
       // chunk mentioning "thinking"/"reasoning"/"computing" into "Working...",
       // which (combined with the filter below) shreds real reasoning into
       // sentence-start fragments. And we do NOT filter reasoning per-delta —
       // deltas are sentence fragments, so judging each as "generic" is wrong.
       // Transient pills are dropped later, at the whole-trace level.
-      const clean = isReasoning
+      const clean = isReasoning || isMarker
         ? text // raw token-stream text — tokens carry their own spacing and are
                 // appended verbatim below. Collapsing \s+ and trimming here is what
                 // shredded words into "embell ishment" / "Let 's" / "non -manager".
@@ -4058,6 +4066,20 @@ export default function ChatPage() {
       const at = timestampMillis(createdAt, Date.now());
       const toolBoundaryAt = lastToolActivityAtRef.current;
       setActivityTrace((prev) => {
+        if (isMarker) {
+          // A run event ("Conversation steered") always gets its own row —
+          // never deduped, never merged into reasoning prose.
+          return [
+            ...prev,
+            {
+              createdAt: at,
+              id: id(`activity-${kind}`),
+              kind,
+              text: clean.trim(),
+              messageId,
+            },
+          ].slice(-200);
+        }
         const last = prev[prev.length - 1];
         if (last?.kind === kind && last.text === clean && last.messageId === messageId) {
           return prev;
@@ -5067,8 +5089,24 @@ export default function ChatPage() {
       gw.on("message.start", (ev) => {
         if (!accepts(ev)) return;
         const at = eventMillis(ev);
-        lastToolActivityAtRef.current = 0;
+        // A continuation round (queued steer re-running inside the same
+        // logical run): keep the existing bubble, digest and token baseline
+        // ticking, adopt the new wire id, and mark where the steer landed.
+        // Settling + restarting here is what made a steer "cancel the
+        // working" and render the continuation as a disconnected turn.
+        const isContinuation =
+          compactToolPayload(ev.payload).continuation === true &&
+          currentAssistantRef.current !== null;
         liveGatewayMsgIdRef.current = eventString(ev, "message_id") || null;
+        if (isContinuation) {
+          setBusy(true);
+          setCompacting(false);
+          setStatusText("Working...");
+          addActivityTrace("marker", "Conversation steered", at);
+          return;
+        }
+        lastToolActivityAtRef.current = 0;
+        steeredRunRef.current = false;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant(at, eventString(ev, "message_id") || undefined);
         // Snapshot cumulative output tokens so message.complete can diff
@@ -5109,6 +5147,35 @@ export default function ChatPage() {
         // "shows for 2s then glitches out" bug). When the event's gateway
         // message_id doesn't match the turn currently streaming, settle that
         // old bubble in place and leave the live turn untouched.
+        // A followup-flagged complete means a queued steer is about to
+        // re-run as a continuation round of the SAME visual run. Fold the
+        // round's text into the open bubble and keep everything live —
+        // settling here is what flipped the digest to "Worked for Ns" and
+        // made the steer look like it killed the turn.
+        if (compactToolPayload(ev.payload).followup === true) {
+          steeredRunRef.current = true;
+          updateUsageFromPayload(ev);
+          const followupText = eventText(ev);
+          flushAssistantDelta();
+          if (followupText) {
+            updateAssistant((message) => ({
+              ...message,
+              // Settle this round's text and open a paragraph break so the
+              // continuation round streams as a new paragraph, not glued to
+              // the previous sentence.
+              content: `${followupText}\n\n`,
+            }));
+            addArtifacts(
+              artifactsFromText(
+                followupText,
+                "assistant",
+                currentAssistantRef.current ?? undefined,
+              ),
+            );
+          }
+          setStatusText("Working...");
+          return;
+        }
         const evMsgId = eventString(ev, "message_id");
         const liveMsgId = liveGatewayMsgIdRef.current;
         if (evMsgId && liveMsgId && evMsgId !== liveMsgId) {
@@ -5173,7 +5240,9 @@ export default function ChatPage() {
         const turnTraces = activityTraceRef.current.filter(
           (trace) =>
             trace.messageId === messageId &&
-            (trace.kind === "reasoning" || trace.kind === "thinking"),
+            (trace.kind === "reasoning" ||
+              trace.kind === "thinking" ||
+              trace.kind === "marker"),
         );
         // Freeze this turn's token count. Prefer the real per-turn output
         // (cumulative-now minus the baseline captured at message.start);
@@ -5188,8 +5257,15 @@ export default function ChatPage() {
             : undefined;
         turnOutputBaselineRef.current = null;
 
+        const wasSteeredRun = steeredRunRef.current;
+        steeredRunRef.current = false;
         updateAssistant((message) => {
-          const finalContent = text || message.content;
+          // A steered multi-round run accumulated every round in the bubble;
+          // the complete payload only carries the LAST round's text, so the
+          // accumulated content is the authoritative final.
+          const finalContent = wasSteeredRun
+            ? message.content || text
+            : text || message.content;
           const estimatedTurnTokens =
             estimateTokens(finalContent) +
             turnTraces.reduce(
@@ -5497,6 +5573,10 @@ export default function ChatPage() {
           ),
         );
         addActivityTrace("status", "Mid-run steer applied", eventMillis(ev));
+        // Drop a labelled marker into the run's step timeline so the steer
+        // shows up exactly where it landed — like a tool call row — instead
+        // of the steered bubble silently sitting below until the run ends.
+        addActivityTrace("marker", "Conversation steered", eventMillis(ev));
       }),
     );
     unsubs.push(
@@ -9787,6 +9867,7 @@ type ToolStep = {
 type BreakdownStep =
   | ToolStep
   | { type: "trace"; id: string; at: number; text: string }
+  | { type: "marker"; id: string; at: number; text: string }
   | { type: "group"; id: string; at: number; tools: ToolStep[]; label: string };
 
 type ToolCategory = "command" | "search" | "edit" | "read" | "skill" | "other";
@@ -9956,6 +10037,15 @@ function buildBreakdownSteps(
   }
 
   for (const trace of activityTrace) {
+    if (trace.kind === "marker") {
+      raw.push({
+        type: "marker",
+        id: trace.id,
+        at: trace.createdAt || 0,
+        text: compactLine(trace.text) || trace.text,
+      });
+      continue;
+    }
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
     const text = compactLine(trace.text);
     if (!text) continue;
@@ -10073,8 +10163,33 @@ function GroupToolDetail({ tool }: { tool: ToolStep }) {
 }
 
 /** A single tool/trace line inside the expanded breakdown. */
-function BreakdownRow({ step }: { step: BreakdownStep }) {
+function BreakdownRow({
+  step,
+  turnStartAt,
+}: {
+  step: BreakdownStep;
+  turnStartAt?: number;
+}) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
+
+  if (step.type === "marker") {
+    // A run event (steer injection) rendered like a tool row: labelled,
+    // timestamped relative to the start of the run, visually distinct from
+    // reasoning prose.
+    const offset =
+      turnStartAt && step.at > turnStartAt
+        ? formatDuration(step.at - turnStartAt)
+        : null;
+    return (
+      <div className="flex items-center gap-1.5 py-0.5 text-[0.78rem] text-[var(--status-sage,#7bbf6a)]">
+        <CornerDownLeft className="h-3.5 w-3.5 shrink-0" />
+        <span className="font-medium">{step.text}</span>
+        {offset && (
+          <span className="text-[var(--fg-faint)]">· +{offset}</span>
+        )}
+      </div>
+    );
+  }
 
   if (step.type === "trace") {
     // Render reasoning as muted, always-visible thinking prose — no bold
@@ -10564,8 +10679,23 @@ function ChatActivityDigest({
       {expanded && steps.length > 0 && (
         <div className="processing-body mt-1.5 space-y-1">
           {steps.map((step) => (
-            <BreakdownRow key={step.id} step={step} />
+            <BreakdownRow key={step.id} step={step} turnStartAt={start} />
           ))}
+        </div>
+      )}
+      {busy && steps.length === 0 && (
+        <div className="processing-body mt-1.5">
+          {/* Nothing has streamed yet (big prompt, model still ingesting) —
+              show a live thinking row immediately so the wait reads as
+              progress, not a frozen turn. Replaced by real reasoning the
+              moment the first delta lands. */}
+          <div className="reasoning-message flex items-center gap-1.5 animate-pulse">
+            <Sparkles className="h-3.5 w-3.5 shrink-0" />
+            <span>
+              Thinking
+              <span className="processing-ellipsis" aria-hidden="true" />
+            </span>
+          </div>
         </div>
       )}
     </section>

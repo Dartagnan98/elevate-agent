@@ -4132,6 +4132,13 @@ def _(rid, params: dict) -> dict:
                 rendered = render_message(raw, cols)
                 if rendered:
                     payload["rendered"] = rendered
+                if has_followup:
+                    # A queued steer is about to re-run as a continuation
+                    # round. Tell the client this complete is NOT the end of
+                    # the visual run — without the flag the dashboard settles
+                    # the digest to "Worked for Ns" and the steered
+                    # continuation renders as a disconnected new turn.
+                    payload["followup"] = True
                 if not has_followup:
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
@@ -4187,6 +4194,11 @@ def _(rid, params: dict) -> dict:
                     {
                         "message_id": turn_ids["assistant"],
                         "user_message_id": turn_ids["user"],
+                        # This round continues the same visual run under the
+                        # injected steer — the dashboard keeps the existing
+                        # digest ticking and drops a "Conversation steered"
+                        # marker instead of starting a fresh bubble.
+                        "continuation": True,
                     },
                 )
 
