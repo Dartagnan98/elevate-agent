@@ -396,6 +396,33 @@ def _bind_session_transport(session: dict, transport) -> None:
         del tlist[:-8]
 
 
+def _ring_append(ring, params: dict, event_type) -> None:
+    """Append an event to the session replay ring, coalescing deltas.
+
+    Reasoning/thinking stream as token fragments — appended raw they blow
+    through the ring cap mid-think and a reattach rebuilds only the TAIL of
+    the thinking ("truncated reasoning" after leaving a running session).
+    Consecutive deltas of the same type merge into one ring entry (a private
+    copy, never the dict live transports already serialized), so the ring
+    holds one entry per thinking STRETCH and replay reconstructs the live
+    view exactly: same text, same interleaving with tool cards.
+    """
+    if event_type in ("reasoning.delta", "thinking.delta"):
+        last = ring[-1] if ring else None
+        if (
+            isinstance(last, dict)
+            and last.get("type") == event_type
+            and last.get("_coalesced") is True
+        ):
+            last["text"] = (str(last.get("text") or "") + str(params.get("text") or ""))[-200_000:]
+            return
+        copy = dict(params)
+        copy["_coalesced"] = True
+        ring.append(copy)
+        return
+    ring.append(params)
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
@@ -427,17 +454,20 @@ def write_json(obj: dict) -> bool:
                 if lock is not None:
                     with lock:
                         sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
-                        ring.append(params)
-                        # Once a turn completes the server transcript holds
-                        # everything visible from that turn; drop the ring
-                        # so a later resume doesn't replay (and double up)
-                        # already-committed messages and tool cards.
-                        if event_type == "message.complete":
+                        _ring_append(ring, params, event_type)
+                        # Once a turn TRULY completes the server transcript
+                        # holds everything visible from it; drop the ring so
+                        # a later resume doesn't replay (and double up)
+                        # already-committed messages and tool cards. A
+                        # followup-flagged complete is a steer continuation
+                        # of the same visual run — keep the ring so a
+                        # reattach mid-steer replays the whole run.
+                        if event_type == "message.complete" and not params.get("followup"):
                             ring.clear()
                 else:
                     sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
-                    ring.append(params)
-                    if event_type == "message.complete":
+                    _ring_append(ring, params, event_type)
+                    if event_type == "message.complete" and not params.get("followup"):
                         ring.clear()
         if sess is not None:
             transports = sess.get("transports")
@@ -3368,6 +3398,23 @@ def _(rid, params: dict) -> dict:
         status = "steering_delegation" if forwarded else "queued_delegation"
     else:
         status = "queued"
+    if status == "queued":
+        # The steered message renders INLINE in the run's timeline. Emitting
+        # it as an event (instead of the sender drawing it locally) makes it
+        # part of the replay ring — a reattach mid-run rebuilds the timeline
+        # exactly as it looked live, steer bubble included, and every other
+        # viewer of the session sees it too. Resolve the GATEWAY sid of the
+        # (possibly re-targeted) session so the ring capture lands on the
+        # session that is actually running.
+        steer_sid = next(
+            (k for k, v in _sessions.items() if v is target_session), None
+        )
+        if steer_sid:
+            # Show what the user TYPED — `text` can carry the hub routing
+            # envelope ("[Elevation Hub interface context]…"), which is for
+            # the model, never for the screen.
+            display = str(params.get("display_text") or "").strip() or text
+            _emit("steer.queued", steer_sid, {"text": display})
     return _ok(
         rid,
         {"status": status, "text": text, "forwarded_children": forwarded},
@@ -4186,7 +4233,13 @@ def _(rid, params: dict) -> dict:
                 # (server-minted) user message and the reply a fresh assistant
                 # message. The _stream closure + complete payload read the
                 # holder, so re-minting here re-binds the whole round.
-                turn_ids["user"] = _wire_message_id()
+                # The "steer." prefix is the DURABLE marker that this user
+                # message was injected mid-run: it persists as the row's
+                # client_message_id, and the transcript hydrator merges the
+                # surrounding rounds back into one visual run (inline steer
+                # bubble + marker) — matching exactly what the live view
+                # showed.
+                turn_ids["user"] = f"steer.{_wire_message_id()}"
                 turn_ids["assistant"] = _wire_message_id()
                 _emit(
                     "message.start",
