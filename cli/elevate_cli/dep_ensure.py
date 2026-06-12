@@ -26,9 +26,15 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 _DEP_CHECKS = {
     "node": lambda: shutil.which("node") is not None,
+    # "browser" means the agent-browser CLI — the thing browser_* tools
+    # actually dispatch through. A system Chrome alone must NOT satisfy this
+    # check: it used to short-circuit ensure_dependency("browser") to True on
+    # boxes with Chrome but no CLI, so the lazy install never ran and the
+    # browser toolset stayed dead (agents then hand-rolled Selenium via the
+    # terminal). Chrome/Chromium presence is an engine concern handled inside
+    # browser_tool after the CLI exists.
     "browser": lambda: (
         shutil.which("agent-browser") is not None
-        or _has_system_browser()
         or _has_elevate_agent_browser()
     ),
     "ripgrep": lambda: shutil.which("rg") is not None,

@@ -31,6 +31,28 @@ If form code, role, address, or MLS number is missing for a create/import task, 
 - If MFA appears, use the available human-approved email-code flow or pause for the user.
 - Treat login/MFA as a human blocker, not as a failed forms workflow.
 
+## Browser Rules (read before opening anything)
+
+- Drive WEBForms with the built-in `browser_*` tools ONLY (`browser_navigate`,
+  `browser_snapshot`, `browser_click`, `browser_type`, ...). On a desktop they
+  automatically provision a VISIBLE Chrome window cloned from the user's real
+  profile over CDP — it is already persistent (cookies and "remember this
+  browser" survive across sessions) and already logged into whatever the user
+  is logged into. You do not need to build persistence yourself.
+- NEVER hand-roll browser automation through the terminal: no Selenium, no
+  chromedriver, no raw CDP websocket scripts, no launching Chrome binaries
+  with `--remote-debugging-port`, no custom `--user-data-dir` profiles. That
+  path burns the session fighting ports/profiles and bypasses the managed
+  logged-in window that already solves MFA persistence.
+- If the `browser_*` tools are NOT available in this session, STOP. Report
+  that the browser engine is not installed on this machine (fix:
+  `elevate doctor`, or `npm install -g agent-browser && agent-browser
+  install`). That is an environment blocker to surface to the user, not
+  something to work around with terminal scripts.
+- MFA "remember this browser" checkboxes: tick them inside the managed
+  window — the managed profile persists, so the code prompt should not
+  return on the next run.
+
 ## Pull Editable Form PDF
 
 1. Match the deal.
