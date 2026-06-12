@@ -2140,6 +2140,53 @@ def test_stale_running_handoffs_fail_and_surface_to_summary():
     assert summary["failed"] == 1
 
 
+def test_stale_handoffs_reconcile_existing_cron_result_instead_of_erroring():
+    stale_at = (datetime.now(timezone.utc) - timedelta(minutes=180)).isoformat()
+    with connect() as conn:
+        handoff = create_agent_handoff(
+            conn,
+            from_agent_id="theta-wave",
+            to_agent_id="analyst",
+            title="Approval recovery handoff",
+            task="Draft recovery plan and request approval.",
+            create_cron_job=False,
+        )
+        conn.execute(
+            """
+            UPDATE agent_handoffs
+            SET status = 'running', claimed_at = ?, updated_at = ?,
+                result_idempotency_key = ?,
+                result_json = ?
+            WHERE id = ?
+            """,
+            (
+                stale_at,
+                stale_at,
+                f"cron-final:cron-1:{handoff['id']}",
+                json.dumps(
+                    {
+                        "result": {
+                            "source": "cron_final_response",
+                            "cronJobId": "cron-1",
+                            "outcome": "waiting_human",
+                            "summary": "Approval needed before resuming jobs.",
+                        },
+                        "humanPrompt": {"title": "Review recovery plan"},
+                    }
+                ),
+                handoff["id"],
+            ),
+        )
+        recovered = mark_stale_agent_handoffs(conn, max_running_minutes=120, actor="test-worker")
+        updated = get_agent_handoff(conn, handoff["id"], include_messages=True)
+
+    assert len(recovered) == 1
+    assert updated is not None
+    assert recovered[0]["status"] == "waiting_human"
+    assert updated["status"] == "waiting_human"
+    assert updated["resultIdempotencyKey"] == f"cron-final:cron-1:{handoff['id']}"
+
+
 def test_mark_stale_handoffs_can_filter_to_agent():
     stale_at = (datetime.now(timezone.utc) - timedelta(minutes=180)).isoformat()
     with connect() as conn:

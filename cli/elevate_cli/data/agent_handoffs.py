@@ -1572,6 +1572,19 @@ def record_agent_handoff_result(
     prior_key = handoff.get("resultIdempotencyKey")
     if prior_key:
         if clean_key and prior_key == clean_key:
+            if handoff.get("status") != status:
+                now = now_iso()
+                completed_at = now if status in _TERMINAL_STATUSES else None
+                conn.execute(
+                    """
+                    UPDATE agent_handoffs
+                    SET status = ?, error_message = COALESCE(?, error_message),
+                        updated_at = ?, completed_at = ?
+                    WHERE id = ? AND result_idempotency_key = ?
+                    """,
+                    (status, error_message, now, completed_at, handoff_id, clean_key),
+                )
+                return get_agent_handoff(conn, handoff_id, include_messages=True) or handoff
             return handoff
         raise ValueError("agent handoff result has already been recorded")
     if handoff.get("status") in _TERMINAL_STATUSES:
@@ -1950,7 +1963,7 @@ def mark_stale_agent_handoffs(
     params.append(max(1, min(int(limit or 100), 500)))
     rows = conn.execute(
         f"""
-        SELECT id FROM agent_handoffs
+        SELECT id, result_idempotency_key, result_json FROM agent_handoffs
         WHERE {' AND '.join(clauses)}
         ORDER BY claimed_at ASC
         LIMIT ?
@@ -1959,6 +1972,35 @@ def mark_stale_agent_handoffs(
     ).fetchall()
     recovered: list[dict[str, Any]] = []
     for row in rows:
+        prior_key = row["result_idempotency_key"]
+        prior_result = _json_loads(row["result_json"])
+        if prior_key or prior_result is not None:
+            outcome = ""
+            if isinstance(prior_result, Mapping):
+                result_payload = prior_result.get("result")
+                if isinstance(result_payload, Mapping):
+                    outcome = str(result_payload.get("outcome") or "").strip().lower()
+                if not outcome:
+                    outcome = str(prior_result.get("outcome") or "").strip().lower()
+            if isinstance(prior_result, Mapping) and prior_result.get("humanPrompt"):
+                reconciled_status = "waiting_human"
+            elif outcome in {"waiting_human", "needs_operator"}:
+                reconciled_status = "waiting_human"
+            elif outcome == "error":
+                reconciled_status = "failed"
+            else:
+                reconciled_status = "completed"
+            recovered.append(
+                record_agent_handoff_result(
+                    conn,
+                    row["id"],
+                    status=reconciled_status,
+                    result=prior_result,
+                    idempotency_key=prior_key,
+                    actor=actor,
+                )
+            )
+            continue
         recovered.append(
             record_agent_handoff_result(
                 conn,
