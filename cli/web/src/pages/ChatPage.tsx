@@ -9564,7 +9564,7 @@ function MessageRow({
                 ? "Steering the running delegation"
                 : message.steer === "delegation-wait"
                   ? "Queued — applies when the delegation returns"
-                  : "Steering — applies at the next tool result"}
+                  : "Steering — cuts in mid-think, or right after the current answer"}
           </div>
         ) : null}
         {isAssistant && message.content ? (

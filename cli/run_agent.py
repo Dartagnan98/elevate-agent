@@ -235,6 +235,17 @@ def _install_safe_stdio() -> None:
             setattr(sys, stream_name, _SafeWriter(stream))
 
 
+class SteerCutInterrupt(Exception):
+    """A /steer cut the in-flight API call mid-think.
+
+    Raised from the interruptible-call poll loops when a steer arrives while
+    the model is still reasoning (no final answer text streamed yet). Unlike
+    ``InterruptedError`` this does NOT end the turn — the conversation loop
+    catches it, discards the partial call, folds the steer into the message
+    tail, and re-issues the API call immediately.
+    """
+
+
 class IterationBudget:
     """Thread-safe iteration counter for an agent.
 
@@ -1138,6 +1149,18 @@ class AIAgent:
         self._pending_steer_lock = threading.Lock()
         self._pending_soft_interrupts: list[dict[str, Any]] = []
         self._pending_soft_interrupts_lock = threading.Lock()
+        # Steer-cut: a steer that arrives while the model is still THINKING
+        # (reasoning deltas streaming, no final answer text yet) aborts the
+        # in-flight call so it applies immediately, instead of waiting out a
+        # long reasoning pass. Once the final answer is streaming
+        # ("resolving") the call is left to finish — the after-text drain
+        # delivers the steer the moment it completes. _stream_phase is the
+        # per-API-call signal: "idle" → "waiting_stream"/"nonstream" at
+        # dispatch → "thinking" on reasoning deltas → "resolving" on answer
+        # text deltas. Non-streaming calls are never cut (no phase signal —
+        # aborting could discard an already-complete response).
+        self._steer_cut_requested = False
+        self._stream_phase = "idle"
 
         # Concurrent-tool worker thread tracking.  `_execute_tool_calls_concurrent`
         # runs each tool on its own ThreadPoolExecutor worker — those worker
@@ -4442,6 +4465,7 @@ class AIAgent:
         if _soft_lock is not None:
             with _soft_lock:
                 self._pending_soft_interrupts = []
+        self._steer_cut_requested = False
 
     def steer(self, text: str) -> bool:
         """
@@ -4477,7 +4501,38 @@ class AIAgent:
                 self._pending_steer = self._pending_steer + "\n" + cleaned
             else:
                 self._pending_steer = cleaned
+        self._request_steer_cut_if_thinking()
         return True
+
+    def _request_steer_cut_if_thinking(self) -> None:
+        """Ask the in-flight STREAMING call to abort so the steer applies now.
+
+        Mid-think (reasoning streaming, or the stream opened but no answer
+        text yet) the partial work is cheap — cut the call and re-issue it
+        with the steer folded in. Once the final answer is streaming
+        ("resolving") the call is left to finish: the after-text drain
+        delivers the steer the moment the text completes. Non-streaming
+        calls and idle/tool-execution windows are never cut — the existing
+        tool-result / pre-API drains cover those boundaries.
+        """
+        if getattr(self, "_stream_phase", "idle") in ("waiting_stream", "thinking"):
+            self._steer_cut_requested = True
+
+    def _consume_steer_cut_request(self) -> bool:
+        """True when a steer-cut is requested AND a steer is still pending.
+
+        Self-heals a stale flag: if every pending steer/soft-interrupt was
+        already delivered through another drain point, there is nothing to
+        cut for — clear the flag instead of aborting a fresh call.
+        """
+        if not getattr(self, "_steer_cut_requested", False):
+            return False
+        if getattr(self, "_pending_steer", None) or getattr(
+            self, "_pending_soft_interrupts", None
+        ):
+            return True
+        self._steer_cut_requested = False
+        return False
 
     def queue_soft_interrupt(
         self,
@@ -4507,6 +4562,7 @@ class AIAgent:
             return True
         with _lock:
             self._pending_soft_interrupts.append(item)
+        self._request_steer_cut_if_thinking()
         if not self.quiet_mode:
             preview = item["content"][:60] + ("..." if len(item["content"]) > 60 else "")
             self._vprint(f"{self.log_prefix}⏩ Soft follow-up queued: {preview}")
@@ -6616,6 +6672,23 @@ class AIAgent:
                 except Exception:
                     pass
                 raise InterruptedError("Agent interrupted during API call")
+
+            if self._consume_steer_cut_request():
+                # A steer landed mid-think (codex reasoning streams through
+                # this path). Close the worker-local connection to stop token
+                # generation and hand control back to the conversation loop,
+                # which re-issues the call with the steer folded in.
+                try:
+                    if self.api_mode == "anthropic_messages":
+                        self._anthropic_client.close()
+                        self._rebuild_anthropic_client()
+                    else:
+                        request_client = request_client_holder.get("client")
+                        if request_client is not None:
+                            self._close_request_openai_client(request_client, reason="steer_cut_abort")
+                except Exception:
+                    pass
+                raise SteerCutInterrupt("Steer cut the in-flight API call")
         if result["error"] is not None:
             raise result["error"]
         return result["response"]
@@ -6667,6 +6740,10 @@ class AIAgent:
 
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
+        # Final answer text is flowing — the model is resolving. A steer that
+        # lands from here on waits for the text to finish (after-text drain)
+        # instead of cutting the call.
+        self._stream_phase = "resolving"
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
@@ -6687,6 +6764,9 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
+        # Reasoning is streaming — mid-think, cheap to cut for a steer.
+        if getattr(self, "_stream_phase", "idle") != "resolving":
+            self._stream_phase = "thinking"
         cb = self.reasoning_callback
         if cb is not None:
             try:
@@ -6809,6 +6889,8 @@ class AIAgent:
                 t.join(timeout=0.3)
                 if self._interrupt_requested:
                     raise InterruptedError("Agent interrupted during Bedrock API call")
+                if self._consume_steer_cut_request():
+                    raise SteerCutInterrupt("Steer cut the in-flight Bedrock API call")
             if result["error"] is not None:
                 raise result["error"]
             return result["response"]
@@ -7467,6 +7549,23 @@ class AIAgent:
                 except Exception:
                     pass
                 raise InterruptedError("Agent interrupted during streaming API call")
+
+            if self._consume_steer_cut_request():
+                # Steer landed mid-think — stop generation and let the
+                # conversation loop re-issue the call with the steer applied.
+                # Only reachable pre-"resolving": once answer text streams,
+                # _request_steer_cut_if_thinking never sets the flag.
+                try:
+                    if self.api_mode == "anthropic_messages":
+                        self._anthropic_client.close()
+                        self._rebuild_anthropic_client()
+                    else:
+                        request_client = request_client_holder.get("client")
+                        if request_client is not None:
+                            self._close_request_openai_client(request_client, reason="stream_steer_cut_abort")
+                except Exception:
+                    pass
+                raise SteerCutInterrupt("Steer cut the in-flight streaming API call")
         if result["error"] is not None:
             if deltas_were_sent["yes"]:
                 # Streaming failed AFTER some tokens were already delivered to
@@ -10495,6 +10594,7 @@ class AIAgent:
         api_call_count = 0
         final_response = None
         interrupted = False
+        steer_cut = False
         codex_ack_continuations = 0
         length_continue_retries = 0
         truncated_tool_call_retries = 0
@@ -11168,13 +11268,26 @@ class AIAgent:
                     except Exception:
                         pass
 
-                    if _use_streaming:
-                        response = self._interruptible_streaming_api_call(
-                            api_kwargs, on_first_delta=_stop_spinner
-                        )
-                    else:
-                        response = self._interruptible_api_call(api_kwargs)
-                    
+                    # Arm the steer-cut phase signal for this attempt. Codex
+                    # streams internally even on the non-streaming branch, so
+                    # its reasoning deltas will upgrade "nonstream" →
+                    # "thinking" through the delta funnels.
+                    self._stream_phase = (
+                        "waiting_stream" if _use_streaming else "nonstream"
+                    )
+                    try:
+                        if _use_streaming:
+                            response = self._interruptible_streaming_api_call(
+                                api_kwargs, on_first_delta=_stop_spinner
+                            )
+                        else:
+                            response = self._interruptible_api_call(api_kwargs)
+                    finally:
+                        # Out of the call (returned, interrupted, or errored)
+                        # — a steer landing now goes through the normal
+                        # tool-result / pre-API drains, never a cut.
+                        self._stream_phase = "idle"
+
                     api_duration = time.time() - api_start_time
 
                     # Reset the per-response output-token tally. The usage block
@@ -11796,6 +11909,23 @@ class AIAgent:
                     self._persist_session(messages, conversation_history)
                     interrupted = True
                     final_response = f"Operation interrupted: waiting for model response ({api_elapsed:.1f}s elapsed)."
+                    break
+
+                except SteerCutInterrupt:
+                    # A steer cut this call mid-think. NOT an interrupt and
+                    # NOT an error: discard the partial call, hand control to
+                    # the steer-cut seam below the retry loop, which folds the
+                    # steer into the message tail and re-issues immediately.
+                    if thinking_spinner:
+                        thinking_spinner.stop("")
+                        thinking_spinner = None
+                    if self.thinking_callback:
+                        self.thinking_callback("")
+                    self._vprint(
+                        f"{self.log_prefix}✂️ Steer received mid-think — cutting this call to apply it now.",
+                        force=True,
+                    )
+                    steer_cut = True
                     break
 
                 except Exception as api_error:
@@ -12854,6 +12984,44 @@ class AIAgent:
             if interrupted:
                 _turn_exit_reason = "interrupted_during_api_call"
                 break
+
+            if steer_cut:
+                # The in-flight call was cut mid-think for a /steer. Refund
+                # the iteration, fold the steer into the message tail (the
+                # partial reasoning is discarded — that's the point), and
+                # re-issue the API call so the model redirects immediately.
+                steer_cut = False
+                self._steer_cut_requested = False
+                _cut_steer = self._drain_pending_steer()
+                _cut_items = self._drain_pending_soft_interrupts()
+                api_call_count -= 1
+                self.iteration_budget.refund()
+                _cut_parts: list = []
+                if _cut_steer:
+                    _cut_parts.append(f"User guidance: {_cut_steer}")
+                if _cut_items:
+                    _cut_parts.append(self._soft_interrupt_text(_cut_items))
+                if _cut_parts:
+                    _cut_text = "\n\n".join(_cut_parts)
+                    _tail = messages[-1] if messages else None
+                    if (
+                        isinstance(_tail, dict)
+                        and _tail.get("role") in ("tool", "user")
+                        and isinstance(_tail.get("content"), str)
+                    ):
+                        # Fold into the existing tail message so role
+                        # alternation is untouched (strict-alternation
+                        # providers reject a fresh user turn right after
+                        # tool results).
+                        _tail["content"] = (
+                            (_tail["content"] or "") + "\n\n" + _cut_text
+                        )
+                    else:
+                        messages.append({"role": "user", "content": _cut_text})
+                    self._notify_steer_applied(_cut_items, via="stream_cut")
+                    self._session_messages = messages
+                    self._save_session_log(messages)
+                continue
 
             if restart_with_compressed_messages:
                 api_call_count -= 1
