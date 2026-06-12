@@ -3984,10 +3984,19 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
+                # A session-id rotation means the turn COMPACTED (compress
+                # ends the old session, opens a fresh tip). Its compressed
+                # message list is authoritative and the pre-turn full history
+                # is now stale — so the write-back below must accept it even
+                # if the history_version moved, or session["history"] keeps
+                # the full pre-compaction history and the NEXT turn compacts
+                # all over again ("compacted twice" — Justin's report).
+                _turn_compacted = False
                 agent_session_id = getattr(agent, "session_id", None)
                 if isinstance(agent_session_id, str) and agent_session_id:
                     old_session_key = str(session.get("session_key") or "")
                     if agent_session_id != old_session_key:
+                        _turn_compacted = True
                         logger.info(
                             "prompt.submit: agent session rotated %s -> %s",
                             old_session_key,
@@ -4008,10 +4017,14 @@ def _(rid, params: dict) -> dict:
                     if isinstance(result.get("messages"), list):
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
-                            if current_version == current_history_version:
+                            if current_version == current_history_version or _turn_compacted:
                                 session["history"] = result["messages"]
-                                session["history_version"] = current_history_version + 1
-                                current_history_version += 1
+                                # Advance past whatever the latest version is —
+                                # on the compacted-override path current_version
+                                # may be ahead of our captured baseline.
+                                _next_ver = max(current_version, current_history_version) + 1
+                                session["history_version"] = _next_ver
+                                current_history_version = _next_ver
                             else:
                                 # History mutated externally during the turn
                                 # (undo/compress/retry/rollback now guard on
