@@ -3472,6 +3472,23 @@ export default function ChatPage() {
   const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
+  // Per-send routing choice for messages typed during a running turn:
+  // "steer" injects mid-run, "queue" waits for the turn to finish. null =
+  // follow the config default (display.busy_input_mode). Shown as the
+  // steer/queue bar above the composer while a turn is busy; cleared when
+  // the turn ends so the next turn starts back at the default.
+  const [busySendChoice, setBusySendChoice] = useState<"steer" | "queue" | null>(null);
+  const busySendChoiceRef = useRef<"steer" | "queue" | null>(null);
+  const chooseBusySendMode = useCallback((m: "steer" | "queue") => {
+    busySendChoiceRef.current = m;
+    setBusySendChoice(m);
+  }, []);
+  useEffect(() => {
+    if (!busy) {
+      busySendChoiceRef.current = null;
+      setBusySendChoice(null);
+    }
+  }, [busy]);
   const [busy, setBusy] = useState(false);
   // Mirror of `busy` for the unmount cleanup (a cleanup closure would capture a
   // stale `busy`). The sidebar's "working" dots are cleared by the
@@ -7119,7 +7136,9 @@ export default function ChatPage() {
         // soft steer here too. "queue"/"block"/unknown → queued chip (waits
         // for the current turn), exactly as before. Steer failures fall back
         // to the queue so the message is never lost.
-        const mode = busyInputModeRef.current;
+        // The steer/queue bar's explicit choice wins over the config
+        // default for this send.
+        const mode = busySendChoiceRef.current ?? busyInputModeRef.current;
         if (
           (mode === "interrupt" || mode === "steer") &&
           targetSessionId &&
@@ -8436,6 +8455,47 @@ export default function ChatPage() {
                 />
               )}
 
+              {busy && (
+                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-[var(--chat-muted)]">
+                  <CornerDownLeft className="h-3 w-3 shrink-0" />
+                  <span className="shrink-0">While it&rsquo;s working, send as</span>
+                  {(() => {
+                    const effective =
+                      busySendChoice ??
+                      (busyInputModeRef.current === "steer" ||
+                      busyInputModeRef.current === "interrupt"
+                        ? "steer"
+                        : "queue");
+                    const chip = (active: boolean) =>
+                      cn(
+                        "rounded-full border px-2 py-0.5 transition-colors",
+                        active
+                          ? "border-[color-mix(in_srgb,var(--status-sage,#7bbf6a)_55%,transparent)] bg-[color-mix(in_srgb,var(--status-sage,#7bbf6a)_12%,transparent)] text-[var(--status-sage,#7bbf6a)]"
+                          : "border-[var(--chat-border-strong)] text-[var(--chat-muted)] hover:text-[var(--chat-text)]",
+                      );
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          className={chip(effective === "steer")}
+                          onClick={() => chooseBusySendMode("steer")}
+                          title="Inject this message into the running turn — cuts in mid-think, or right after the current answer."
+                        >
+                          Steer mid-run
+                        </button>
+                        <button
+                          type="button"
+                          className={chip(effective === "queue")}
+                          onClick={() => chooseBusySendMode("queue")}
+                          title="Hold this message until the current turn finishes, then send it as the next message."
+                        >
+                          Queue for after
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
               <div className="composer relative">
                 <AttachmentChipStrip
                   attachments={attachments}
