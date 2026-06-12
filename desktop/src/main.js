@@ -1678,12 +1678,15 @@ app.whenReady().then(async () => {
   // show as a live app. Force regular-app registration + focus on every
   // launch — a no-op for a normal Finder/Dock launch.
   if (process.platform === "darwin" && app.dock) {
-    try {
-      await app.dock.show();
-      app.focus({ steal: false });
-    } catch (err) {
-      log.warn(`[startup] dock registration failed: ${err && err.message ? err.message : err}`);
-    }
+    // Fire-and-forget: dock.show()'s promise can take SECONDS to resolve
+    // (it waits on macOS activation) — awaiting it here held window
+    // creation hostage for ~11s of blank app on every launch. The Dock
+    // tile registration doesn't need to precede anything.
+    Promise.resolve(app.dock.show())
+      .then(() => app.focus({ steal: false }))
+      .catch((err) =>
+        log.warn(`[startup] dock registration failed: ${err && err.message ? err.message : err}`),
+      );
   }
   await startDesktop();
   startSmsOutboxWatcher();
