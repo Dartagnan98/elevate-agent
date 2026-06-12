@@ -191,6 +191,13 @@ interface ChatMessage {
   // real per-turn count from gateway usage; falls back to the live
   // estimate when usage deltas aren't available.
   tokenCount?: number;
+  // Origin session id stamped at creation (persisted id preferred, gateway id
+  // fallback). The session this message BELONGS to — not the session that
+  // happened to be on screen when a cache write ran. Used to (a) refuse
+  // persisting a message under a foreign session's cache key and (b) drop
+  // cross-chat pollution during server reconciliation. Absent on messages
+  // minted before a draft chat's session exists and on pre-fix cached rows.
+  sessionKey?: string;
 }
 
 type ArtifactKind = "diff" | "file" | "output";
@@ -1213,6 +1220,12 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
       attachments: Array.isArray(entry.attachments)
         ? entry.attachments
         : undefined,
+      // Preserve the origin-session tag across cache round-trips — it is what
+      // lets reconciliation/persist tell this chat's rows from a leak.
+      sessionKey:
+        typeof entry.sessionKey === "string" && entry.sessionKey
+          ? entry.sessionKey
+          : undefined,
     });
   });
   return normalized.length ? normalized : null;
@@ -1735,6 +1748,100 @@ function mergeServerWithCache(
   }
   blankTraceIfDropped(cached, out, fp, serverMessages.length);
   return out;
+}
+
+// Shared whitespace-normalized fingerprint (same shape mergeServerWithCache
+// uses internally) for the server-truth reconciliation below.
+function messageFingerprint(m: ChatMessage): string {
+  const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
+  return `${m.role}:${c}`;
+}
+
+// Tolerance window for optimistic/in-flight messages the server hasn't acked
+// yet (a just-sent user bubble, a queued follow-up). Anything older that the
+// server disowns is cross-chat cache pollution, not an unsynced send.
+const RECONCILE_RECENT_MS = 120_000;
+
+/**
+ * SELF-HEALING HYDRATION (layer 1 of the cross-chat bleed fix). When the
+ * server transcript for a session arrives, the server is CANONICAL for which
+ * user/assistant messages belong to this chat. The on-screen/cached list can
+ * carry messages leaked from ANOTHER chat (a late async write repainted old
+ * state after a chat switch, then the polluted view was persisted into this
+ * session's localStorage cache — surviving reload forever). Drop every
+ * user/assistant message the server does not contain, tolerating:
+ *  - the CURRENT streaming turn (status "streaming" / currentAssistantId),
+ *  - very recent messages (optimistic sends the server hasn't acked yet),
+ *  - messages TAGGED as belonging to one of this view's own session ids
+ *    (an unsynced turn the throttled persist saved but a dropped WS never
+ *    flushed server-side — legitimate content, keep it).
+ * Count-aware: a fingerprint the server holds N times justifies at most N
+ * non-streaming copies here, so an identical message duplicated by pollution
+ * collapses back to the server's count. System/tool rows are client-local
+ * and pass through untouched. Heals past AND future pollution on re-entry.
+ */
+function reconcileWithServerTruth(
+  merged: ChatMessage[],
+  serverMessages: ChatMessage[],
+  ownedSessionIds: Set<string>,
+  currentAssistantId: string | null,
+): ChatMessage[] {
+  if (!merged.length || !serverMessages.length) return merged;
+  const counts = new Map<string, number>();
+  for (const sm of serverMessages) {
+    if (sm.role !== "user" && sm.role !== "assistant") continue;
+    const key = messageFingerprint(sm);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const now = Date.now();
+  const keep = new Array<boolean>(merged.length).fill(true);
+  // Walk newest-first so the latest copy of a duplicated bubble claims the
+  // server slot and the stale older duplicate is the one that drops.
+  for (let i = merged.length - 1; i >= 0; i--) {
+    const m = merged[i];
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    if (m.status === "streaming" || (currentAssistantId && m.id === currentAssistantId)) {
+      continue;
+    }
+    const key = messageFingerprint(m);
+    const remaining = counts.get(key) ?? 0;
+    if (remaining > 0) {
+      counts.set(key, remaining - 1);
+      continue;
+    }
+    if (m.sessionKey) {
+      keep[i] = ownedSessionIds.has(m.sessionKey);
+      continue;
+    }
+    keep[i] = now - (m.createdAt ?? 0) < RECONCILE_RECENT_MS;
+  }
+  if (keep.every(Boolean)) return merged;
+  const out = merged.filter((_, i) => keep[i]);
+  blankTrace("reconciled transcript against server truth", {
+    droppedCount: merged.length - out.length,
+    mergedLen: merged.length,
+    serverLen: serverMessages.length,
+  });
+  return out;
+}
+
+/**
+ * Layer-2 guard for every transcript-cache WRITE: a message tagged with a
+ * foreign session id must never be persisted under this session's cache key
+ * (that write is exactly how one chat's bubbles became permanent residents of
+ * another chat's transcript). Untagged messages (pre-mint optimistic sends,
+ * pre-fix cached rows) pass through — the hydrate reconciliation above owns
+ * those.
+ */
+function dropForeignMessages(
+  messages: ChatMessage[],
+  ownedSessionIds: Set<string>,
+): ChatMessage[] {
+  if (!messages.length || !ownedSessionIds.size) return messages;
+  const out = messages.filter(
+    (m) => !m.sessionKey || ownedSessionIds.has(m.sessionKey),
+  );
+  return out.length === messages.length ? messages : out;
 }
 
 // Debug tracer: forwarded to the gateway (debug.trace -> blank-trace.log) and
@@ -3016,6 +3123,25 @@ export default function ChatPage() {
   // ?resume=. It is NOT a user resume: it has no saved REST transcript yet
   // (so getSessionMessages 404s) and should read as "New chat", not "Resumed".
   const mintedSessionIdRef = useRef<string | null>(null);
+  // Every session id the CURRENTLY-VIEWED chat legitimately owns (resume id,
+  // minted id, gateway id, canonical/lineage ids learned from hydrate). Reset
+  // each connect-effect run; consulted by cache writes (dropForeignMessages)
+  // and server reconciliation so another chat's messages can neither persist
+  // under this chat's key nor survive a hydrate.
+  const ownedSessionIdsRef = useRef<Set<string>>(new Set());
+  // Generation counter, bumped at the top of every connect-effect run. Async
+  // continuations created OUTSIDE the effect (createSessionForSend's mint)
+  // capture it and bail on view-binding work when the user has since switched
+  // chats — a late mint must not rebind the new chat's view to the old chat's
+  // session (the "consecutive new chats takeover").
+  const connectGenRef = useRef(0);
+  // True only across the connect effect's own intentional clear when ENTERING
+  // a different chat that has no cached transcript. The blanket wipe guard in
+  // setMessages otherwise blocks that legitimate populated→empty transition
+  // (no ?new= in the URL on a sidebar switch), leaving the previous chat on
+  // screen — which the server-load merge then unioned into the NEW chat and
+  // persisted into its cache. That was the cross-chat bleed's main ingress.
+  const chatSwitchWipeRef = useRef(false);
   const chatStickToBottomRef = useRef(true);
   const pendingInitialBottomScrollRef = useRef(true);
   const scrollSessionKeyRef = useRef<string | null>(null);
@@ -3111,7 +3237,7 @@ export default function ChatPage() {
           : updater;
       if (!Array.isArray(next)) return;
       if (prev.length >= 1 && next.length === 0) {
-        if (!newChatPresentRef.current) {
+        if (!newChatPresentRef.current && !chatSwitchWipeRef.current) {
           blankTrace("blocked spurious list wipe (store)", {
             prevCount: prev.length,
             key,
@@ -3143,6 +3269,10 @@ export default function ChatPage() {
         );
         return;
       }
+      // Captured at CALL time, not at updater-run time: the connect effect
+      // opens chatSwitchWipeRef synchronously around its intentional clear,
+      // and React may run the queued updater after the flag has closed.
+      const wipeAllowed = newChatPresentRef.current || chatSwitchWipeRef.current;
       setMessagesRaw((prev) => {
         const next =
           typeof updater === "function"
@@ -3153,14 +3283,15 @@ export default function ChatPage() {
         // transcript deserves the same protection as a long one.
         if (prev.length >= 1 && (next?.length ?? 0) === 0) {
           // INVARIANT: a populated transcript clears to empty ONLY for a
-          // deliberate new chat (URL carries ?new=). Every other populated ->
-          // empty transition is the spurious render-then-vanish blank — resume
-          // re-hydrate, draft->session mint, compaction session rotation,
-          // reconnect/liveness-watchdog re-run. Block them all and keep what's
-          // on screen; the next hydrate under the correct id repopulates from
-          // cache/DB. This one rule replaced four per-window guards that each
-          // only caught a single trigger.
-          if (!newChatPresentRef.current) {
+          // deliberate chat NAVIGATION — a new chat (URL carries ?new=) or a
+          // genuine switch to a different chat (chatSwitchWipeRef, opened by
+          // the connect effect when the entered chat has no cache). Every
+          // other populated -> empty transition is the spurious
+          // render-then-vanish blank — resume re-hydrate, draft->session
+          // mint, compaction session rotation, reconnect/liveness-watchdog
+          // re-run. Block them all and keep what's on screen; the next
+          // hydrate under the correct id repopulates from cache/DB.
+          if (!wipeAllowed) {
             blankTrace("blocked spurious list wipe", {
               prevCount: prev.length,
               reconnect: reconnectRunRef.current,
@@ -3367,6 +3498,14 @@ export default function ChatPage() {
         createdAt: Date.now(),
         id: id(role),
         role,
+        // Stamp the message with the session it was created under so cache
+        // writes/reconciliation can tell it apart from another chat's leak.
+        // Pre-mint draft sends have no session yet → untagged; the mint path
+        // retro-tags them once the session id exists.
+        sessionKey:
+          persistedSessionIdRef.current ??
+          activeSessionRef.current ??
+          undefined,
         ...extras,
       };
       setMessages((prev) => [...prev, message]);
@@ -3408,6 +3547,10 @@ export default function ChatPage() {
         id: messageId,
         role: "assistant",
         status: "streaming",
+        sessionKey:
+          persistedSessionIdRef.current ??
+          activeSessionRef.current ??
+          undefined,
       },
     ]);
     return messageId;
@@ -4144,13 +4287,18 @@ export default function ChatPage() {
     const PERSIST_THROTTLE_MS = 1500;
     if (busy && Date.now() - lastPersistAtRef.current < PERSIST_THROTTLE_MS) return;
     lastPersistAtRef.current = Date.now();
-    if (messages.length) {
+    // CACHE WRITES ARE KEYED BY OWNERSHIP, not by whatever is on screen: a
+    // message tagged with a session this view doesn't own must never be
+    // snapshotted under this session's cache key — that wholesale write was
+    // what made a transient cross-chat repaint PERMANENT.
+    const ownMessages = dropForeignMessages(messages, ownedSessionIdsRef.current);
+    if (ownMessages.length) {
       rememberTranscript(
         persisted,
-        attachLiveActivitySnapshots(messages, tools, activityTrace),
+        attachLiveActivitySnapshots(ownMessages, tools, activityTrace),
       );
     }
-    const active = activeAssistantMessage(messages, currentAssistantRef.current);
+    const active = activeAssistantMessage(ownMessages, currentAssistantRef.current);
     if (active) {
       writeActiveTurnSnapshot(persisted, active, tools, activityTrace);
     } else if (!busy) {
@@ -4224,6 +4372,20 @@ export default function ChatPage() {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
 
+    // New view generation: late continuations from a previous chat's async
+    // work (a draft mint resolving after the user moved on) compare against
+    // this and skip their view-binding writes.
+    connectGenRef.current += 1;
+    // The session ids this view owns. Seeded with the resume target; mint /
+    // hydrate / session.info add the rest as they're learned.
+    ownedSessionIdsRef.current = new Set(resumeId ? [resumeId] : []);
+    // A minted-session pin only describes the chat it minted. Navigating to
+    // any OTHER chat retires it — otherwise its same-chat guards keep
+    // matching later runs and block legitimate switches/wipes.
+    if (mintedSessionIdRef.current && resumeId !== mintedSessionIdRef.current) {
+      mintedSessionIdRef.current = null;
+    }
+
     clearPendingAssistantDelta();
     activeSessionRef.current = null;
     currentAssistantRef.current = null;
@@ -4279,11 +4441,26 @@ export default function ChatPage() {
         }
       } else {
         // No cache for THIS session (e.g. drilling into a subagent that was
-        // never opened before). Clear whatever messages belonged to the
-        // PREVIOUS session — the server-load merge below uses the on-screen
-        // `prev` as its base, so without this the parent chat's messages
-        // (your original prompt) leak into the subagent's thread.
-        setMessages([]);
+        // never opened before, or a sidebar switch to a chat that never
+        // cached locally). Clear whatever messages belonged to the PREVIOUS
+        // session — the server-load merge below uses the on-screen `prev` as
+        // its base, so without this the previous chat's messages leak into
+        // this one's thread AND get persisted into its cache. This clear is a
+        // deliberate navigation: open the switch-wipe window so the blanket
+        // populated→empty guard (which only knows about ?new=) lets it
+        // through. The flag is captured synchronously at the setMessages
+        // call, then closed.
+        chatSwitchWipeRef.current = true;
+        try {
+          setMessages([]);
+        } finally {
+          chatSwitchWipeRef.current = false;
+        }
+        // Stamp the rendered key NOW: the messages on screen (none) belong to
+        // THIS chat. Leaving it pointing at the previous chat made the
+        // same-chat guards misfire on the next re-run.
+        renderedChatKeyRef.current =
+          resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
       }
 
       // A freshly minted + pinned session (mintedSessionIdRef) has no saved
@@ -4303,6 +4480,17 @@ export default function ChatPage() {
           );
           const canonicalSessionId =
             response.active_session_id || response.session_id || resumeId;
+          // Register every identity the server reports for this chat so cache
+          // writes / reconciliation accept messages tagged with any of them
+          // (compaction rotations, lineage roots, gateway vs persisted ids).
+          for (const owned of [
+            canonicalSessionId,
+            response.session_id,
+            (response as { lineage_root_id?: string }).lineage_root_id,
+            resumeId,
+          ]) {
+            if (owned) ownedSessionIdsRef.current.add(owned);
+          }
           if (canonicalSessionId) {
             persistedSessionIdRef.current = canonicalSessionId;
             const canonicalArtifacts = readSessionArtifacts(canonicalSessionId);
@@ -4350,9 +4538,20 @@ export default function ChatPage() {
             // before gateway replay. Otherwise a slow DB hydrate can erase the
             // in-flight assistant turn that session.resume just replayed.
             const base = isSubagentView ? [] : (prev.length ? prev : restoredCached);
-            const merged = mergeActiveTurnSnapshot(
-              mergeServerWithCache(hydrated, base, compactionGuardRef.current),
-              latestActiveSnapshot,
+            // SERVER TRUTH IS CANONICAL: the no-shrink union above never
+            // drops anything, so a polluted base (another chat's bubbles that
+            // leaked into this view or its localStorage cache) would survive
+            // and immediately re-persist below. Reconcile the union against
+            // the server transcript — foreign/duplicated user+assistant rows
+            // drop; the in-flight turn and just-sent optimistic messages stay.
+            const merged = reconcileWithServerTruth(
+              mergeActiveTurnSnapshot(
+                mergeServerWithCache(hydrated, base, compactionGuardRef.current),
+                latestActiveSnapshot,
+              ),
+              hydrated,
+              ownedSessionIdsRef.current,
+              currentAssistantRef.current,
             );
             rememberTranscript(canonicalSessionId, merged);
             if (response.lineage_root_id) {
@@ -4708,6 +4907,7 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         if (ev.session_id) {
           activeSessionRef.current = ev.session_id;
+          ownedSessionIdsRef.current.add(ev.session_id);
           setSessionId(ev.session_id);
         }
         if (ev.payload) {
@@ -5110,6 +5310,30 @@ export default function ChatPage() {
           created.resumed ??
           resumeId ??
           null;
+        for (const owned of [
+          created.session_id,
+          created.active_session_id,
+          created.persisted_session_id,
+          created.resumed,
+          created.lineage_root_id,
+        ]) {
+          if (owned) ownedSessionIdsRef.current.add(owned);
+        }
+        {
+          // Retro-tag optimistic messages created before this session id
+          // existed so ownership filters recognize them as this chat's.
+          const ownedPid =
+            persistedSessionIdRef.current ?? created.session_id;
+          if (ownedPid) {
+            setMessages((prev) =>
+              prev.some((m) => !m.sessionKey)
+                ? prev.map((m) =>
+                    m.sessionKey ? m : { ...m, sessionKey: ownedPid },
+                  )
+                : prev,
+            );
+          }
+        }
         // Pin a freshly-created (?new=) chat to its persisted id by
         // rewriting the URL to ?resume=<id>. Re-entering the route later
         // (browser back, tab switch, sidebar) then reattaches to the live
@@ -5614,6 +5838,13 @@ export default function ChatPage() {
   const pinCreatedSessionInUrl = useCallback(() => {
     const pinnedId = persistedSessionIdRef.current;
     if (!pinnedId || resumeId) return;
+    // Record the mint identity (mirrors the connect-effect mint path): the
+    // ?resume=<pinnedId> re-run below must read as the SAME conversation —
+    // skip the (404) REST hydrate, keep the on-screen optimistic turn, and
+    // keep the same-chat guards scoped to this chat only.
+    mintedSessionIdRef.current = pinnedId;
+    renderedChatKeyRef.current = pinnedId;
+    ownedSessionIdsRef.current.add(pinnedId);
     // Open the mint guard: the URL rewrite below re-runs the connect effect
     // under the minted id, which can wipe the live transcript before
     // renderedChatKeyRef catches up. Hold the guard a few seconds so the
@@ -5640,6 +5871,15 @@ export default function ChatPage() {
     if (sessionId && state === "open") return sessionId;
     if (createSessionPromiseRef.current) return createSessionPromiseRef.current;
 
+    // Capture the view generation BEFORE the awaits. If the user navigates to
+    // another chat while the mint is in flight, this continuation must not
+    // rebind the now-different view (sessionId / persistedSessionIdRef /
+    // activeSessionRef) to the session it minted for the PREVIOUS chat —
+    // doing so made a new chat "take over" an older one's identity and routed
+    // its events, URL pin, and cache writes into the wrong conversation. The
+    // minted id is still returned so the in-flight send reaches the session
+    // it was typed into.
+    const gen = connectGenRef.current;
     const promise = (async () => {
       try {
         setStatusText(options?.prewarm ? "Preparing chat..." : "Starting chat...");
@@ -5647,9 +5887,32 @@ export default function ChatPage() {
         const created = await gw.request<SessionCreateResponse>("session.create", {
           cols: 100,
         });
+        if (gen !== connectGenRef.current) {
+          return created.session_id;
+        }
         activeSessionRef.current = created.session_id;
         persistedSessionIdRef.current =
           created.active_session_id ?? created.persisted_session_id ?? null;
+        const ownedPid = persistedSessionIdRef.current ?? created.session_id;
+        for (const owned of [
+          created.session_id,
+          created.active_session_id,
+          created.persisted_session_id,
+        ]) {
+          if (owned) ownedSessionIdsRef.current.add(owned);
+        }
+        // Retro-tag the optimistic messages appended before the session
+        // existed (the draft chat's first user bubble + assistant stub) so
+        // they're owned by this session for cache writes/reconciliation.
+        if (ownedPid) {
+          setMessages((prev) =>
+            prev.some((m) => !m.sessionKey)
+              ? prev.map((m) =>
+                  m.sessionKey ? m : { ...m, sessionKey: ownedPid },
+                )
+              : prev,
+          );
+        }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
         if (created.info?.credential_warning || created.info?.config_warning) {
@@ -5870,7 +6133,14 @@ export default function ChatPage() {
         );
         const persisted = persistedSessionIdRef.current ?? sessionId;
         if (persisted) {
-          rememberTranscript(persisted, attachLiveActivitySnapshots(next, [], []));
+          rememberTranscript(
+            persisted,
+            attachLiveActivitySnapshots(
+              dropForeignMessages(next, ownedSessionIdsRef.current),
+              [],
+              [],
+            ),
+          );
         }
         return next;
       });
@@ -5880,7 +6150,14 @@ export default function ChatPage() {
         const next = markStreamingTurnsInterrupted(prev, stoppedAt);
         const persisted = persistedSessionIdRef.current ?? sessionId;
         if (persisted && next !== prev) {
-          rememberTranscript(persisted, attachLiveActivitySnapshots(next, [], []));
+          rememberTranscript(
+            persisted,
+            attachLiveActivitySnapshots(
+              dropForeignMessages(next, ownedSessionIdsRef.current),
+              [],
+              [],
+            ),
+          );
         }
         return next;
       });
@@ -6057,14 +6334,29 @@ export default function ChatPage() {
     const iv = window.setInterval(() => {
       const pid = persistedSessionIdRef.current;
       if (!pid) return;
+      const gen = connectGenRef.current;
       void api
         .getSessionMessages(pid)
         .then((resp) => {
           if (cancelled) return;
+          // The view may have re-bound (chat switch / reconnect / mint)
+          // while this fetch was in flight — painting another session's
+          // transcript into the open chat is exactly the cross-chat bleed.
+          if (
+            gen !== connectGenRef.current ||
+            persistedSessionIdRef.current !== pid
+          ) {
+            return;
+          }
           const hydrated = normalizeStoredTranscript(resp.messages);
           if (!hydrated.length) return;
           setMessages((prev) =>
-            mergeServerWithCache(hydrated, prev.length ? prev : hydrated, false),
+            reconcileWithServerTruth(
+              mergeServerWithCache(hydrated, prev.length ? prev : hydrated, false),
+              hydrated,
+              ownedSessionIdsRef.current,
+              currentAssistantRef.current,
+            ),
           );
         })
         .catch(() => {

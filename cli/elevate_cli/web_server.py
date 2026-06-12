@@ -3057,8 +3057,8 @@ _SESSION_ACTIVE_WINDOW_SEC = 25
 _STATUS_CACHE_TTL_SEC = 1.5
 
 
-def _live_running_session_keys() -> set[str]:
-    """DB session keys the in-process gateway is ACTIVELY running a turn for.
+def _gateway_session_run_states() -> tuple[set[str], set[str]]:
+    """(running_keys, known_keys) for sessions the in-process gateway hosts.
 
     A long interactive turn persists nothing until it finishes, so its
     ``last_active`` freezes at the user-message time and the 25s active-window
@@ -3066,21 +3066,60 @@ def _live_running_session_keys() -> set[str]:
     drop its "working" dots while the agent is genuinely still working. The
     gateway tracks ``session["running"]`` in-process (dashboard --tui hosts both),
     so consult it as the source of truth for "running right now". Best-effort:
-    returns empty if the gateway module isn't loaded (e.g. headless dashboard).
+    returns empty sets if the gateway module isn't loaded (headless dashboard).
+
+    ``known_keys`` covers every hosted session regardless of run state. A
+    session that is KNOWN but not RUNNING is authoritatively idle — e.g. the
+    user hit Stop and the turn ended ``interrupted_by_user``. The recency
+    window must not keep showing it as working for another 25 seconds.
     """
-    keys: set[str] = set()
+    running: set[str] = set()
+    known: set[str] = set()
     try:
         from tui_gateway import server as _gw
 
         for sess in list(getattr(_gw, "_sessions", {}).values()):
-            if not isinstance(sess, dict) or not sess.get("running"):
+            if not isinstance(sess, dict):
                 continue
-            for k in (sess.get("session_key"), sess.get("session_id")):
-                if k:
-                    keys.add(str(k))
+            keys = [
+                str(k)
+                for k in (sess.get("session_key"), sess.get("session_id"))
+                if k
+            ]
+            known.update(keys)
+            if sess.get("running"):
+                running.update(keys)
     except Exception:
         pass
-    return keys
+    return running, known
+
+
+def _live_running_session_keys() -> set[str]:
+    """DB session keys the in-process gateway is ACTIVELY running a turn for."""
+    return _gateway_session_run_states()[0]
+
+
+def _mark_session_activity(sessions: list[dict[str, Any]], now: float) -> None:
+    """Stamp ``is_active`` on session list rows.
+
+    Priority: gateway-running (True) > gateway-known-but-idle (False — a
+    stopped/interrupted session is NOT active no matter how fresh its last
+    message is) > recency window (covers turns run outside this process,
+    e.g. cron jobs, where the gateway has no entry to consult).
+    """
+    running, known = _gateway_session_run_states()
+    for s in sessions:
+        sid = str(s.get("id") or "")
+        if sid in running:
+            s["is_active"] = True
+        elif sid in known:
+            s["is_active"] = False
+        else:
+            s["is_active"] = (
+                s.get("ended_at") is None
+                and (now - s.get("last_active", s.get("started_at", 0)))
+                < _SESSION_ACTIVE_WINDOW_SEC
+            )
 _status_cache_payload: dict[str, Any] | None = None
 _status_cache_expires_at = 0.0
 _status_cache_lock = threading.Lock()
@@ -3184,13 +3223,7 @@ async def get_sessions(
                     else offset + len(sessions)
                 )
                 now = time.time()
-                _running = _live_running_session_keys()
-                for s in sessions:
-                    s["is_active"] = (
-                        s.get("ended_at") is None
-                        and (now - s.get("last_active", s.get("started_at", 0)))
-                        < _SESSION_ACTIVE_WINDOW_SEC
-                    ) or (str(s.get("id") or "") in _running)
+                _mark_session_activity(sessions, now)
                 return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
             except Exception:
                 _log.debug("PG slim session list failed, falling back to SessionDB", exc_info=True)
@@ -3208,13 +3241,7 @@ async def get_sessions(
                 else offset + len(sessions)
             )
             now = time.time()
-            _running = _live_running_session_keys()
-            for s in sessions:
-                s["is_active"] = (
-                    s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0)))
-                    < _SESSION_ACTIVE_WINDOW_SEC
-                ) or (str(s.get("id") or "") in _running)
+            _mark_session_activity(sessions, now)
             if not include_details:
                 sessions = [_session_list_payload(s) for s in sessions]
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
