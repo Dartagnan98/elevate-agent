@@ -318,6 +318,11 @@ function attachmentIconFor(mediaType: string, name: string): LucideIcon {
 
 interface ActivityTrace {
   createdAt: number;
+  /** Last time content was appended (arrival time). createdAt can be
+   *  anchored EARLIER than arrival for ordering — the tool-boundary
+   *  coalesce guard must compare against arrival, or any tool heartbeat
+   *  between buffered chunks splits the stretch into one-word rows. */
+  updatedAt?: number;
   id: string;
   // "marker" = an injected run event (e.g. "Conversation steered") that gets
   // its own labelled row in the step timeline, like a tool call.
@@ -1198,12 +1203,27 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       continue;
     }
     const steerAt = U.createdAt || A.completedAt || A.createdAt;
+    const interimTrace = A.content
+      ? [
+          {
+            createdAt: Math.max(A.createdAt, steerAt - 2),
+            id: `${A.id}-interim-${k}`,
+            kind: "interim" as const,
+            text: A.content,
+            messageId: A.id,
+          },
+        ]
+      : [];
     const merged: ChatMessage = {
       ...A,
-      content: [A.content, B.content].filter(Boolean).join("\n\n"),
+      // The continuation/final answer owns the message body. Any answer text
+      // that streamed before the steer becomes an interim timeline row, which
+      // matches the live steer.applied path.
+      content: B.content,
       completedAt: B.completedAt ?? A.completedAt,
       traces: [
         ...(A.traces ?? []),
+        ...interimTrace,
         {
           createdAt: steerAt,
           id: `${A.id}-steer-${k}`,
@@ -1234,6 +1254,10 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 
   return out;
 }
+
+export const __chatPageTestables = {
+  normalizeStoredTranscript,
+};
 
 function readStoredTranscriptCache(): StoredTranscriptCache {
   if (typeof window === "undefined") return {};
@@ -4164,12 +4188,14 @@ export default function ChatPage() {
       }
 
       const messageId = currentAssistantRef.current ?? undefined;
-      let at = timestampMillis(createdAt, Date.now());
+      const arrivedAt = timestampMillis(createdAt, Date.now());
+      let at = arrivedAt;
       if (isReasoning) {
         // Buffered prose flushes LATE (often at the next boundary). Anchor
         // the row to when its stretch actually began so a steer bubble or
         // marker inserted mid-stretch never sorts above thinking the user
-        // was already watching.
+        // was already watching. Ordering only — the coalesce guard below
+        // compares ARRIVAL times.
         const anchor = Math.max(stretchStartRef.current, lastToolActivityAtRef.current) + 1;
         if (anchor > 1 && anchor < at) at = anchor;
       }
@@ -4201,7 +4227,7 @@ export default function ChatPage() {
           (kind === "thinking" || kind === "reasoning") &&
           last?.kind === kind &&
           last.messageId === messageId &&
-          last.createdAt >= toolBoundaryAt
+          (last.updatedAt ?? last.createdAt) >= toolBoundaryAt
         ) {
           // Append the token stream verbatim — its own whitespace IS the
           // formatting. (Previously joined with a " " separator, which inserted
@@ -4213,13 +4239,14 @@ export default function ChatPage() {
           // output-token budget and stays well under it.
           const merged = (last.text + clean).slice(-100000);
           const next = prev.slice(0, -1);
-          next.push({ ...last, text: merged });
+          next.push({ ...last, text: merged, updatedAt: arrivedAt });
           return next;
         }
         return [
           ...prev,
           {
             createdAt: at,
+            updatedAt: arrivedAt,
             id: id(`activity-${kind}`),
             kind,
             text: clean,

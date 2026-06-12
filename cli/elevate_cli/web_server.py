@@ -4841,6 +4841,37 @@ async def get_session_messages(session_id: str):
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         messages = db.get_messages(active_id)
+        # Hide MODEL-CONTEXT rows from the displayed transcript. A compaction
+        # rotation persists the compressed history into the tip session —
+        # correct for model resume, but the compaction summary, preserved
+        # plan/todo snapshots, and autonomous-activity digests are internal
+        # scaffolding, not things anyone said. Rendering them painted a 20KB+
+        # "user message" wall after every compaction. Rows stay in the DB
+        # untouched; this is display-only. Envelope-wrapped user rows keep
+        # only the words the user typed.
+        _INTERNAL_ROW_PREFIXES = (
+            "[CONTEXT COMPACTION",
+            "[Your latest Plan panel plan was preserved",
+            "[Your active task list was preserved",
+            "[RECENT AUTONOMOUS ACTIVITY",
+        )
+        _display: list = []
+        for msg in messages:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                _display.append(msg)
+                continue
+            content = msg.get("content")
+            text = content if isinstance(content, str) else ""
+            stripped = text.lstrip()
+            if stripped.startswith(_INTERNAL_ROW_PREFIXES):
+                continue
+            if stripped.startswith("[Elevation Hub interface context]"):
+                marker = "User request:"
+                idx = stripped.find(marker)
+                if idx != -1:
+                    msg = {**msg, "content": stripped[idx + len(marker):].strip()}
+            _display.append(msg)
+        messages = _display
         # Decorate each row with the stable wire id used for transcript
         # reconciliation. Pre-upgrade rows (NULL client_message_id) get the
         # deterministic weak fallback `legacy.{session}.{ordinal}` — ordinal =
