@@ -21,7 +21,16 @@ const log = require("electron-log");
 log.transports.file.level = "info";
 autoUpdater.logger = log;
 autoUpdater.autoDownload = true; // download in background as soon as available
-autoUpdater.autoInstallOnAppQuit = true; // safety net if user ignores the toast
+// Install-on-quit safety net — NOT on macOS. On mac this hands the staged
+// update to Squirrel's ShipIt when the user quits, and ShipIt ALWAYS
+// relaunches the app after swapping the bundle: the user quits Elevate and a
+// "different app" pops right back open (it's the updated bundle), sometimes
+// without a Dock tile because the ShipIt respawn skips normal LaunchServices
+// activation. With daily releases nearly every quit had an update staged, so
+// quitting looked broken (Justin live repro, 2026-06-12). On mac, quit means
+// quit — the in-app "Restart to update" card is the install path, and the
+// next launch re-offers a downloaded update from cache within seconds.
+autoUpdater.autoInstallOnAppQuit = process.platform !== "darwin";
 // Always pull the full, notarized zip — never a differential reconstruction.
 // Differential updates rebuild the new .app from the *currently installed* app's
 // blocks. Older builds (before PYTHONPYCACHEPREFIX/PYTHONDONTWRITEBYTECODE) let
@@ -1664,6 +1673,18 @@ app.whenReady().then(async () => {
   // Secondary instance already handed off to the primary and is quitting.
   if (!isPrimaryInstance) return;
   markStartup("electron:ready");
+  // A ShipIt-relaunched instance (post-update) can spawn without normal
+  // LaunchServices activation: the app runs with no Dock tile and doesn't
+  // show as a live app. Force regular-app registration + focus on every
+  // launch — a no-op for a normal Finder/Dock launch.
+  if (process.platform === "darwin" && app.dock) {
+    try {
+      await app.dock.show();
+      app.focus({ steal: false });
+    } catch (err) {
+      log.warn(`[startup] dock registration failed: ${err && err.message ? err.message : err}`);
+    }
+  }
   await startDesktop();
   startSmsOutboxWatcher();
   kickoffUpdates();
