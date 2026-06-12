@@ -5900,14 +5900,39 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         from agent.model_metadata import estimate_messages_tokens_rough
 
         approx_tokens = estimate_messages_tokens_rough(original_history)
-        compressed, _ = agent._compress_context(
-            original_history,
-            getattr(agent, "_cached_system_prompt", "") or "",
-            approx_tokens=approx_tokens,
-            focus_topic=focus_topic or None,
-        )
+        # Surface the pill during the ~24-36s summary call. Manual /compress
+        # runs OUTSIDE run_conversation, so the agent's status callbacks never
+        # reach the client — without this the chat sits silent (no "Compacting
+        # context" pill) until the result card pops. Client maps this text to
+        # setCompacting(true); the "Session compacted" status below clears it.
+        # try/finally guarantees the pill is released even on error.
+        _emit("status", sid, {"text": "Compacting context"})
+        try:
+            compressed, _ = agent._compress_context(
+                original_history,
+                getattr(agent, "_cached_system_prompt", "") or "",
+                approx_tokens=approx_tokens,
+                focus_topic=focus_topic or None,
+            )
+        except Exception:
+            _emit("status", sid, {"text": "Session compacted"})  # release the pill
+            raise
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
+
+        # Durably write the compressed history. _compress_context ROTATES to a
+        # fresh session (ends the old, creates an empty tip, resets the flush
+        # cursor) but does NOT flush — inside run_conversation the turn's normal
+        # _persist_session does that. Manual /compress runs outside a turn, so
+        # without this the rotated session stays EMPTY in the DB: leaving and
+        # returning resumes the OLD 177-message session and re-compacts it (the
+        # "compressed twice with different numbers" bug). Flushing here makes
+        # the compress survive a resume. _last_flushed_db_idx was reset to 0 by
+        # the rotation, so this writes the full compressed list into the tip.
+        try:
+            agent._persist_session(compressed, None)
+        except Exception:
+            logger.exception("manual /compress: failed to persist compressed history")
 
         if (
             getattr(agent, "session_id", None)
@@ -5927,6 +5952,8 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
             new_tokens,
         )
 
+    # Clear the pill and mark the moment done (client maps "compacted" → off).
+    _emit("status", sid, {"text": "Session compacted"})
     _emit("session.info", sid, _session_info(agent))
     icon = "🗜️" if summary["noop"] else "✅"
     lines = [

@@ -5234,8 +5234,12 @@ export default function ChatPage() {
           setStatusText(displayStatusText(text));
           addActivityTrace("status", text, at);
           // Compaction is the one status that maps to a long blocking stall.
-          // Latch the banner on; resume signals (below) clear it.
+          // Latch the banner on; "Session compacted" (manual /compress end) or
+          // a resume signal clears it. \bcompacted\b only matches the done
+          // status, never the in-progress "Compacting context".
           if (/compacting context/i.test(text)) setCompacting(true);
+          else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text))
+            setCompacting(false);
         }
       }),
     );

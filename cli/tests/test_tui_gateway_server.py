@@ -473,6 +473,59 @@ def test_config_set_personality_resets_history_and_returns_info(monkeypatch):
     assert ("session.info", "sid", {"model": "x"}) in emits
 
 
+def test_direct_compress_persists_and_emits_pill(monkeypatch):
+    """Manual /compress must (1) emit the 'Compacting context' pill before the
+    blocking summary and 'Session compacted' after, and (2) PERSIST the
+    compressed history — _compress_context rotates to a fresh empty session, so
+    without an explicit flush the compress is lost on resume (the "compressed
+    twice" bug)."""
+    original = [{"role": "user", "content": f"m{i}"} for i in range(8)]
+    compressed = [
+        {"role": "user", "content": "summary"},
+        {"role": "user", "content": "m7"},
+    ]
+    persisted = []
+
+    agent = types.SimpleNamespace(
+        compression_enabled=True,
+        _cached_system_prompt="sys",
+        session_id="rotated-session",  # differs from session_key → rotation path
+        _compress_context=lambda *a, **k: (compressed, "sys"),
+        _persist_session=lambda msgs, hist: persisted.append(list(msgs)),
+    )
+    session = _session(agent=agent, session_key="old-session")
+    session["history"] = list(original)
+    server._sessions["dsid"] = session
+
+    monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda _s: None)
+    emitted = []
+    try:
+        with patch(
+            "tui_gateway.server._emit",
+            side_effect=lambda ev, s, p=None: emitted.append((ev, p)),
+        ):
+            out = server._run_direct_compress_slash("dsid", session, "")
+    finally:
+        server._sessions.pop("dsid", None)
+
+    # Compressed history was persisted into the rotated session.
+    assert persisted == [compressed]
+    # In-memory history + session_key both moved to the compressed/rotated state.
+    assert session["history"] == compressed
+    assert session["session_key"] == "rotated-session"
+    # Pill on before, off after.
+    status_texts = [p.get("text") for (ev, p) in emitted if ev == "status"]
+    assert "Compacting context" in status_texts
+    assert "Session compacted" in status_texts
+    assert status_texts.index("Compacting context") < status_texts.index(
+        "Session compacted"
+    )
+    # Result card still reports the numbers.
+    assert "Compressed" in out or "messages" in out
+
+
 def test_session_compress_uses_compress_helper(monkeypatch):
     agent = types.SimpleNamespace()
     server._sessions["sid"] = _session(agent=agent)
