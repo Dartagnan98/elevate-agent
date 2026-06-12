@@ -191,6 +191,38 @@ def _make_agent_cls(error_cls, recover_after=None):
     return _Agent
 
 
+def _stub_runner():
+    """Bare GatewayRunner for _run_agent tests, skipping __init__.
+
+    Keep this list in sync with the attributes _run_agent actually touches.
+    When __init__ grows new state (e.g. the async-delegation /cron parking
+    dicts), add it HERE once instead of per-test — 8 tests broke with
+    AttributeError when _pending_platform_delegates_lock shipped without a
+    stub update.
+    """
+    import threading
+
+    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
+    runner.adapters = {}
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._running_agents = {}
+    runner.hooks = MagicMock()
+    runner.hooks.emit = AsyncMock()
+    runner.hooks.loaded_hooks = []
+    runner._session_db = None
+    # Async-delegation result parking (platform mirror of dashboard parking).
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    # Cron/automation deliveries parked for cached agents.
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
+    return runner
+
+
 def _run_with_agent(monkeypatch, agent_cls):
     """Run _run_agent through the gateway with the given agent class."""
     _patch_agent_bootstrap(monkeypatch)
@@ -210,18 +242,7 @@ def _run_with_agent(monkeypatch, agent_cls):
     )
     monkeypatch.setenv("ELEVATE_TOOL_PROGRESS", "false")
 
-    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
-    runner.adapters = {}
-    runner._ephemeral_system_prompt = ""
-    runner._prefill_messages = []
-    runner._reasoning_config = None
-    runner._provider_routing = {}
-    runner._fallback_model = None
-    runner._running_agents = {}
-    runner.hooks = MagicMock()
-    runner.hooks.emit = AsyncMock()
-    runner.hooks.loaded_hooks = []
-    runner._session_db = None
+    runner = _stub_runner()
 
     source = SessionSource(
         platform=Platform.LOCAL,
@@ -345,18 +366,7 @@ def test_401_credential_refresh_recovers(monkeypatch):
         },
     )
 
-    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
-    runner.adapters = {}
-    runner._ephemeral_system_prompt = ""
-    runner._prefill_messages = []
-    runner._reasoning_config = None
-    runner._provider_routing = {}
-    runner._fallback_model = None
-    runner._running_agents = {}
-    runner.hooks = MagicMock()
-    runner.hooks.emit = AsyncMock()
-    runner.hooks.loaded_hooks = []
-    runner._session_db = None
+    runner = _stub_runner()
 
     source = SessionSource(
         platform=Platform.LOCAL, chat_id="cli", chat_name="CLI",
@@ -419,18 +429,7 @@ def test_401_refresh_fails_is_non_retryable(monkeypatch):
         },
     )
 
-    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
-    runner.adapters = {}
-    runner._ephemeral_system_prompt = ""
-    runner._prefill_messages = []
-    runner._reasoning_config = None
-    runner._provider_routing = {}
-    runner._fallback_model = None
-    runner._running_agents = {}
-    runner.hooks = MagicMock()
-    runner.hooks.emit = AsyncMock()
-    runner.hooks.loaded_hooks = []
-    runner._session_db = None
+    runner = _stub_runner()
 
     source = SessionSource(
         platform=Platform.LOCAL, chat_id="cli", chat_name="CLI",
@@ -508,18 +507,7 @@ def test_prompt_too_long_triggers_compression(monkeypatch):
         },
     )
 
-    runner = gateway_run.GatewayRunner.__new__(gateway_run.GatewayRunner)
-    runner.adapters = {}
-    runner._ephemeral_system_prompt = ""
-    runner._prefill_messages = []
-    runner._reasoning_config = None
-    runner._provider_routing = {}
-    runner._fallback_model = None
-    runner._running_agents = {}
-    runner.hooks = MagicMock()
-    runner.hooks.emit = AsyncMock()
-    runner.hooks.loaded_hooks = []
-    runner._session_db = None
+    runner = _stub_runner()
 
     source = SessionSource(
         platform=Platform.LOCAL, chat_id="cli", chat_name="CLI",
