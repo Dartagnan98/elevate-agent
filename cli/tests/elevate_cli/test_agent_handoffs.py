@@ -343,9 +343,13 @@ def test_agent_handoff_dispatch_includes_agent_policy_thread_and_toolsets(monkey
     assert dispatched["status"] == "running"
     assert len(created_jobs) == 1
     assert created_jobs[0]["agent"] == "reviewer"
-    # Shared agent baseline skills ("memory", "tasks") map onto the memory and
-    # todo native toolsets for every agent.
-    assert set(created_jobs[0]["enabled_toolsets"]) == {"deal", "agent_handoff", "memory", "todo"}
+    # The agent's OWN toolsets must ride the dispatch, and the shared agent
+    # baseline (memory/todo + the full SHARED_AGENT_TOOLSETS union) comes
+    # along for every agent. Subset assert, NOT exact equality — the shared
+    # baseline grows over time (e.g. composio) and an exact set breaks on
+    # every addition without testing anything new.
+    dispatched_toolsets = set(created_jobs[0]["enabled_toolsets"])
+    assert {"deal", "agent_handoff", "memory", "todo"} <= dispatched_toolsets
     prompt = created_jobs[0]["prompt"]
     assert "Receiving agent policy:" in prompt
     assert "Review listing packets and escalate missing context." in prompt
@@ -1024,12 +1028,23 @@ def test_agent_hub_requires_specific_telegram_lane_before_online(monkeypatch):
     env_values: dict[str, str] = {}
     monkeypatch.setattr(agent_hub, "get_env_value", lambda key: env_values.get(key))
 
+    # Untouched lane (no token, no target) = a healthy agent with no
+    # dedicated bot. Defaults ship "telegram" in platforms for every
+    # customer-facing agent — flagging untouched lanes painted whole
+    # rosters as "disconnected" after an update with nothing broken.
     missing = agent_hub.build_agent_hub_snapshot(include_profiles=False)
     admin = next(agent for agent in missing["agents"] if agent["id"] == "admin")
-    assert admin["status"] == "needs_telegram"
+    assert admin["status"] == "online"
     assert admin["telegramLane"]["configured"] is False
 
+    # HALF-configured (token without target) = the user started wiring a
+    # dedicated bot and it cannot work yet — that IS a problem state.
     env_values["ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"] = "123456789:abcdefghijklmnopqrstuvwxyz"
+    half = agent_hub.build_agent_hub_snapshot(include_profiles=False)
+    admin_half = next(agent for agent in half["agents"] if agent["id"] == "admin")
+    assert admin_half["status"] == "needs_telegram"
+    assert admin_half["telegramLane"]["configured"] is False
+
     env_values["ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL"] = "12345"
     ready = agent_hub.build_agent_hub_snapshot(include_profiles=False)
     admin_ready = next(agent for agent in ready["agents"] if agent["id"] == "admin")
@@ -1126,7 +1141,9 @@ def test_agent_hub_upgrades_stale_local_only_agent_config(monkeypatch):
     assert "admin-agent" in admin["skills"]
     assert admin["telegramLane"]["tokenEnv"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"
     assert admin["telegramLane"]["targetEnv"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL"
-    assert admin["status"] == "needs_telegram"
+    # No lane envs configured at all → untouched lane → healthy "online",
+    # not a needs_telegram warning (see the half-configured test above).
+    assert admin["status"] == "online"
     assert {"executive-assistant", "admin"}.issubset(agent_ids)
     # EA-only base seed: other native agents are installable from the Agent
     # Library, never auto-seeded into the roster.

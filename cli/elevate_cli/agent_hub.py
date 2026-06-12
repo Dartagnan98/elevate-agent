@@ -1632,24 +1632,66 @@ def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any
 # an existing agent. Reconcile tombstones these so a stale install disappears.
 # "transaction-coordinator" merged into the built-in Admin agent (which already
 # owns the full contract-to-close transaction-coordination role).
-_RETIRED_AGENT_IDS: frozenset[str] = frozenset(
-    {
-        # Merged into the built-in Admin agent (contract-to-close TC role).
-        "transaction-coordinator",
-        # "ads" merged into the Marketing agent (now "Marketing & Ads") — paid
-        # and organic are one agent.
-        "ads",
-        # "isa-lead-nurture" merged into the built-in Outreach agent (now the
-        # "ISA Agent") — lead-lane mechanics and the relationship are one agent.
-        "isa-lead-nurture",
-        # "listing-marketing" merged into the Marketing & Ads agent — listing
-        # launch / MLS copy / open-house promo is core marketing work.
-        "listing-marketing",
-        # "market-analyst" merged into the built-in Analyst — external market
-        # intelligence + CMA prep now live alongside pipeline analytics.
-        "market-analyst",
-    }
-)
+# retired agent id -> the core agent that absorbed its role. Used both to
+# tombstone the retired def AND to migrate its per-agent surfaces (Telegram
+# bot token) to the absorber so the consolidation doesn't read as "my agents
+# disconnected" on customer boxes.
+_RETIRED_AGENT_ABSORBERS: dict[str, str] = {
+    # Merged into the built-in Admin agent (contract-to-close TC role).
+    "transaction-coordinator": "admin",
+    # "ads" merged into the Marketing agent (now "Marketing & Ads") — paid
+    # and organic are one agent.
+    "ads": "marketing",
+    # "isa-lead-nurture" merged into the built-in Outreach agent (now the
+    # "ISA Agent") — lead-lane mechanics and the relationship are one agent.
+    "isa-lead-nurture": "outreach",
+    # "listing-marketing" merged into the Marketing & Ads agent — listing
+    # launch / MLS copy / open-house promo is core marketing work.
+    "listing-marketing": "marketing",
+    # "market-analyst" merged into the built-in Analyst — external market
+    # intelligence + CMA prep now live alongside pipeline analytics.
+    "market-analyst": "analyst",
+}
+
+_RETIRED_AGENT_IDS: frozenset[str] = frozenset(_RETIRED_AGENT_ABSORBERS)
+
+
+def _agent_bot_token_env(agent_id: str) -> str:
+    """Env key carrying an agent's per-agent Telegram bot token."""
+    return (
+        "ELEVATE_AGENT_"
+        + _slug(str(agent_id or "")).replace("-", "_").upper()
+        + "_TELEGRAM_BOT_TOKEN"
+    )
+
+
+def _migrate_retired_agent_bot_token(retired_id: str, absorber_id: str | None) -> bool:
+    """Re-point a retired agent's Telegram bot to the agent that absorbed it.
+
+    Consolidation tombstones the retired def, but its bot-token env simply
+    stops loading — the customer's bot goes silent with no explanation
+    ("my Leads/TC agent disconnected"). If the absorber has no bot of its
+    own, carry the token over so the SAME bot keeps answering, now as the
+    absorbing agent. Idempotent: no-ops once the absorber key is set, and
+    runs on every reconcile so boxes retired BEFORE this shipped still
+    heal. The retired key is left in place as history.
+    """
+    if not absorber_id:
+        return False
+    try:
+        from elevate_cli.config import load_env, save_env_value
+
+        env = load_env()
+        token = (env.get(_agent_bot_token_env(retired_id)) or "").strip()
+        if not token:
+            return False
+        new_key = _agent_bot_token_env(absorber_id)
+        if (env.get(new_key) or "").strip():
+            return False  # absorber already has its own bot
+        save_env_value(new_key, token)
+        return True
+    except Exception:
+        return False
 
 
 def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: bool = True) -> dict[str, Any]:
@@ -1701,6 +1743,16 @@ def reconcile_agent_hub_defaults(config: dict[str, Any] | None = None, *, save: 
         # user-deleted default (which tombstones itself), these must be cleaned
         # up proactively for anyone who installed them before the merge.
         for retired_id in _RETIRED_AGENT_IDS:
+            # Bot-token migration runs every reconcile, NOT just at the
+            # moment of retirement — boxes that tombstoned the agent before
+            # the migration existed still need their bot re-pointed.
+            if save and _migrate_retired_agent_bot_token(
+                retired_id, _RETIRED_AGENT_ABSORBERS.get(retired_id)
+            ):
+                updated.append({
+                    "id": retired_id,
+                    "botTokenMigratedTo": _RETIRED_AGENT_ABSORBERS.get(retired_id),
+                })
             if retired_id in by_id:
                 if save:
                     ss.remove_hub_agent(conn, retired_id, tombstone=True)
@@ -2672,6 +2724,30 @@ def _env_value(name: str) -> str:
         return ""
 
 
+def _telegram_lane_needs_attention(lane: dict[str, Any]) -> bool:
+    """True only when a dedicated Telegram lane is HALF-configured.
+
+    States and verdicts:
+    - fully configured (token + target, own bot) → fine
+    - riding the shared bot → intentional, fine
+    - untouched (no token, no target) → fine — the agent has no dedicated
+      bot; it is still fully usable from the dashboard and via delegation
+    - token without target, or target without token → the user started
+      wiring a dedicated bot and it cannot work yet → flag it
+    """
+    if lane.get("configured"):
+        return False
+    if lane.get("duplicateSharedBot"):
+        # A specialist reusing the SHARED bot token is a real conflict
+        # (two pollers on one bot) — always surface it.
+        return True
+    if lane.get("usesSharedBot"):
+        return False
+    token = bool(lane.get("tokenConfigured"))
+    target = bool(lane.get("targetConfigured"))
+    return token != target
+
+
 def _agent_telegram_lane(agent: dict[str, Any]) -> dict[str, Any]:
     """Return redacted readiness for one agent's Telegram lane."""
     try:
@@ -3602,7 +3678,17 @@ def _agent_summaries(
             status = "disabled"
         elif not model.get("configured"):
             status = "needs_model"
-        elif gateway_running and telegram_lane is not None and not telegram_lane.get("configured"):
+        elif (
+            gateway_running
+            and telegram_lane is not None
+            and _telegram_lane_needs_attention(telegram_lane)
+        ):
+            # Only a HALF-configured dedicated lane is a problem state. An
+            # untouched lane (no token, no target) is a healthy agent that
+            # simply has no dedicated bot — defaults now ship "telegram" in
+            # platforms for every customer-facing agent, and flagging all of
+            # them painted whole rosters as "disconnected" after an update
+            # even though nothing was broken.
             status = "needs_telegram"
         elif gateway_running and any(platform != "local" for platform in agent["platforms"]):
             status = "online"
