@@ -1100,10 +1100,13 @@ DEFAULT_CONFIG = {
         "inherit_mcp_toolsets": True,
         "max_iterations": 50,  # per-subagent iteration cap (each subagent gets its own budget,
                                # independent of the parent's max_iterations)
-        "child_timeout_seconds": 600,  # wall-clock timeout for each child agent (floor 30s,
-                                       # no ceiling). High-reasoning models on large tasks
-                                       # (e.g. gpt-5.5 xhigh, opus-4.6) need generous budgets;
-                                       # raise if children time out before producing output.
+        "child_timeout_seconds": 14400,  # 4h wall-clock ceiling per child agent (floor 30s).
+                                         # Long real work — bulk WEBForms/PDF downloads,
+                                         # multi-step research, browser automation — legitimately
+                                         # runs 30-70+ min; the old 600s (10 min) default killed
+                                         # those mid-task. The stale-heartbeat detector (NOT this
+                                         # cap, delegation.stale_*_seconds) catches a genuinely
+                                         # wedged child; this is just the absolute backstop.
         "reasoning_effort": "",  # reasoning effort for subagents: "xhigh", "high", "medium",
                                  # "low", "minimal", "none" (empty = inherit parent's level)
         "max_concurrent_children": 3,  # max parallel children per batch; floor of 1 enforced, no ceiling
@@ -1421,7 +1424,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 23,
+    "_config_version": 24,
 }
 
 # =============================================================================
@@ -3395,6 +3398,28 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                         "  ✓ Plugins now opt-in: no existing plugins to grandfather. "
                         "Use `elevate plugins enable <name>` to activate."
                     )
+
+    # ── Version 23 → 24: bump the stale 600s delegation child timeout ──
+    # The old default capped every delegated subagent at 10 min, killing long
+    # legitimate work (bulk WEBForms/PDF downloads, multi-step research,
+    # browser automation) mid-task. Only bump configs still on the exact old
+    # default (600) — a user who deliberately set a different value is left
+    # alone.
+    if current_ver < 24:
+        config = read_raw_config()
+        deleg = config.get("delegation")
+        if isinstance(deleg, dict) and deleg.get("child_timeout_seconds") == 600:
+            deleg["child_timeout_seconds"] = 14400
+            config["delegation"] = deleg
+            save_config(config)
+            results["config_added"].append(
+                "delegation.child_timeout_seconds 600→14400 (long subagent jobs)"
+            )
+            if not quiet:
+                print(
+                    "  ✓ Raised delegation child timeout 10min → 4h "
+                    "(long subagent jobs no longer killed mid-task)"
+                )
 
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")

@@ -688,3 +688,43 @@ class TestUserMessagePreviewConfig:
         preview = DEFAULT_CONFIG["display"]["user_message_preview"]
         assert preview["first_lines"] == 2
         assert preview["last_lines"] == 2
+
+
+class TestDelegationChildTimeoutMigration:
+    def test_default_child_timeout_is_4h(self):
+        from elevate_cli.config import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["delegation"]["child_timeout_seconds"] == 14400
+
+    def test_migrate_bumps_stale_600_default(self, tmp_path):
+        import yaml, os
+        from unittest.mock import patch
+        from elevate_cli.config import migrate_config, DEFAULT_CONFIG
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": 23, "delegation": {"child_timeout_seconds": 600}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        assert raw["delegation"]["child_timeout_seconds"] == 14400
+
+    def test_migrate_leaves_custom_value_alone(self, tmp_path):
+        import yaml, os
+        from unittest.mock import patch
+        from elevate_cli.config import migrate_config
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": 23, "delegation": {"child_timeout_seconds": 1800}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # A deliberately-set value is preserved.
+        assert raw["delegation"]["child_timeout_seconds"] == 1800

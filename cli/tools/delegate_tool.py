@@ -647,6 +647,37 @@ def _get_child_timeout() -> float:
     return float(DEFAULT_CHILD_TIMEOUT)
 
 
+def _get_stale_seconds(key: str, default_seconds: float) -> float:
+    """Read a delegation stale-heartbeat threshold (seconds) from config/env.
+
+    The stale-heartbeat detector — NOT child_timeout_seconds — is what kills a
+    long-running SYNCHRONOUS child that looks idle: a browser/download job that
+    sits between turns with no advancing api_call_count or current_tool gets
+    declared stale at `stale_idle_seconds` (default 450s) and the parent turn
+    times out. For genuinely long processes (bulk WEBForms downloads), raise
+    these — or set 0 to disable the stale kill entirely and let the work run
+    until done, bounded only by child_timeout_seconds (4h default).
+
+    config.yaml: delegation.stale_idle_seconds / delegation.stale_in_tool_seconds
+    env:         DELEGATION_STALE_IDLE_SECONDS / DELEGATION_STALE_IN_TOOL_SECONDS
+    0 → disabled (no stale kill; the hard cap is the only backstop).
+    """
+    cfg = _load_config()
+    raw = cfg.get(key)
+    if raw is None:
+        raw = os.getenv("DELEGATION_" + key.upper())
+    if raw is not None:
+        try:
+            val = float(raw)
+            return val if val == 0 else max(60.0, val)
+        except (TypeError, ValueError):
+            logger.warning(
+                "delegation.%s=%r is not a valid number; using default %s",
+                key, raw, default_seconds,
+            )
+    return float(default_seconds)
+
+
 def _get_max_spawn_depth() -> int:
     """Read delegation.max_spawn_depth from config, clamped to [1, 3].
 
@@ -1831,12 +1862,16 @@ def _run_single_child(
                 # inside a tool call. In-tool threshold is high enough to
                 # cover legitimately slow tools; idle threshold stays
                 # tight so the gateway timeout can fire on a truly wedged
-                # child.
-                stale_limit = (
-                    _HEARTBEAT_STALE_CYCLES_IN_TOOL
-                    if child_tool
-                    else _HEARTBEAT_STALE_CYCLES_IDLE
-                )
+                # child. Both are config-tunable (delegation.stale_*_seconds);
+                # a long bulk job (WEBForms download) can raise them or set 0
+                # to disable the stale kill and run until child_timeout_seconds.
+                _idle_s = _get_stale_seconds("stale_idle_seconds", 450.0)
+                _in_tool_s = _get_stale_seconds("stale_in_tool_seconds", 1200.0)
+                _limit_s = _in_tool_s if child_tool else _idle_s
+                if _limit_s <= 0:
+                    stale_limit = float("inf")  # stale kill disabled by config
+                else:
+                    stale_limit = max(1, round(_limit_s / _HEARTBEAT_INTERVAL))
                 if _stale_count[0] >= stale_limit:
                     logger.warning(
                         "Subagent %d appears stale (no progress for %d "
