@@ -3483,13 +3483,13 @@ export default function ChatPage() {
     busySendChoiceRef.current = m;
     setBusySendChoice(m);
   }, []);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!busy) {
       busySendChoiceRef.current = null;
       setBusySendChoice(null);
     }
   }, [busy]);
-  const [busy, setBusy] = useState(false);
   // Mirror of `busy` for the unmount cleanup (a cleanup closure would capture a
   // stale `busy`). The sidebar's "working" dots are cleared by the
   // agent-turn-complete window event — which only fires from message.complete
