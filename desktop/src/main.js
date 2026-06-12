@@ -665,8 +665,91 @@ async function dashboardChatEnabled(port = backendPort) {
   return html.includes("window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__=true");
 }
 
+// Hashed asset references (assets/<name>-<hash>.js|css) declared in an
+// index.html. Vite re-hashes these on every build, so the SET of entry-chunk
+// references uniquely identifies a bundle. Comparing the served set to the
+// bundled set is how we detect a stale dashboard — a process left running by
+// the pre-update app serves the OLD index.html, whose asset hashes the new
+// app expects but the old server can 404 (blank dashboard, broken
+// search/collapse icons — Justin's box after the 1.2.33 auto-update). A plain
+// version-string check does NOT work: the cli __version__ (0.12.x) is a
+// different scheme from the desktop app version (1.2.x).
+function assetRefs(html) {
+  const set = new Set();
+  const re = /assets\/[A-Za-z0-9_.-]+\.(?:js|css)/g;
+  let m;
+  while ((m = re.exec(html || "")) !== null) set.add(m[0]);
+  return set;
+}
+
+function bundledIndexHtml() {
+  const candidates = [];
+  if (app.isPackaged) {
+    candidates.push(
+      path.join(process.resourcesPath, "cli", "elevate_cli", "web_dist", "index.html"),
+    );
+  }
+  try {
+    candidates.push(path.join(repoRoot(), "cli", "elevate_cli", "web_dist", "index.html"));
+  } catch {
+    /* repoRoot may throw when packaged */
+  }
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
+    } catch {
+      /* try next */
+    }
+  }
+  return "";
+}
+
+async function backendBundleMatches(port = backendPort) {
+  const bundledHtml = bundledIndexHtml();
+  const expected = assetRefs(bundledHtml);
+  // No bundled reference to compare against → can't judge, don't block startup.
+  if (expected.size === 0) return true;
+  const servedHtml = await requestText("/", 2500, port);
+  if (!servedHtml) return true; // unreachable handled elsewhere
+  const served = assetRefs(servedHtml);
+  if (served.size === 0) return true; // non-bundle response (e.g. login gate)
+  // Stale if any entry chunk the new app expects is absent from what the
+  // running server serves.
+  for (const ref of expected) {
+    if (!served.has(ref)) return false;
+  }
+  return true;
+}
+
+// Kill whatever process is listening on a dashboard port — used to evict a
+// stale-version dashboard so a fresh one can bind the preferred port. Scoped
+// to the port via lsof, so it never touches the gateway (different port) or
+// unrelated processes. Best-effort.
+function killProcessOnPort(port) {
+  try {
+    const out = execFileSync(
+      "/usr/sbin/lsof",
+      ["-ti", `tcp:${port}`, "-sTCP:LISTEN"],
+      { encoding: "utf8", timeout: 4000 },
+    );
+    const pids = out.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+    for (const pid of pids) {
+      try {
+        execFileSync("/bin/kill", ["-TERM", pid], { timeout: 2000 });
+        log.info(`[elevate-backend] killed stale dashboard pid ${pid} on port ${port}`);
+      } catch (e) {
+        log.warn(`[elevate-backend] failed to kill pid ${pid}: ${e}`);
+      }
+    }
+    return pids.length > 0;
+  } catch {
+    return false; // lsof found nothing / not available
+  }
+}
+
 async function backendMatchesDesktopMode(port = backendPort) {
   if (!(await backendIsReady(port))) return false;
+  if (!(await backendBundleMatches(port))) return false;
   if (!EMBEDDED_CHAT) return true;
   return dashboardChatEnabled(port);
 }
@@ -684,6 +767,26 @@ async function waitForBackend(timeoutMs = 180000) {
 
 async function chooseBackendPort() {
   if (await backendMatchesDesktopMode(PREFERRED_PORT)) {
+    backendPort = PREFERRED_PORT;
+    backendUrl = `http://${HOST}:${backendPort}`;
+    return;
+  }
+
+  // A ready-but-WRONG-VERSION backend on the preferred port = a stale
+  // dashboard the pre-update app left running. Adopting a higher port would
+  // leave it serving the old bundle on 9120 AND confuse anything that probes
+  // the default port. Evict it so the fresh spawn (new bundle) binds 9120.
+  if (
+    (await backendIsReady(PREFERRED_PORT)) &&
+    !(await backendBundleMatches(PREFERRED_PORT))
+  ) {
+    log.info("[elevate-backend] stale-bundle dashboard on preferred port — evicting");
+    killProcessOnPort(PREFERRED_PORT);
+    // Give the socket a moment to free up before the caller spawns fresh.
+    for (let i = 0; i < 20; i += 1) {
+      if (!(await backendIsReady(PREFERRED_PORT))) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
     backendPort = PREFERRED_PORT;
     backendUrl = `http://${HOST}:${backendPort}`;
     return;
