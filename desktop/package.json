@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "1.2.27",
+  "version": "1.2.28",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
