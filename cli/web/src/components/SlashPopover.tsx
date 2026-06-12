@@ -479,7 +479,12 @@ export const SlashPopover = forwardRef<SlashPopoverHandle, Props>(
     const slashCommandsCacheRef = useRef<{ items: CompletionItem[]; replaceFrom: number } | null>(null);
 
     useEffect(() => {
-      if (!trigger || trigger.mode !== "mention" || catalogLoadedRef.current) return;
+      // BOTH trigger modes need the catalog: mentions list skills/toolsets/
+      // plugins, and the slash menu builds its skill rows from catalog.skills
+      // (slashSkillItems/skillCommandMap). Gating this on mention-mode left
+      // catalog.skills empty for users who only ever type "/" — no skills in
+      // the slash menu.
+      if (!trigger || catalogLoadedRef.current) return;
       catalogLoadedRef.current = true;
       void Promise.allSettled([
         api.getSkills(),
