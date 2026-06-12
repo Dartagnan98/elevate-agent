@@ -93,6 +93,12 @@ SHARED_AGENT_TOOLSETS: tuple[str, ...] = (
     "tts",
     "code_execution",
     "cronjob",
+    # Composio integration hub (Gmail/Calendar/Drive/socials introspection).
+    # Runtime-gated on COMPOSIO_API_KEY by its check_fn, so listing it here is
+    # free on un-keyed installs — but WITHOUT it here no hub agent could see
+    # Composio even when the key WAS configured (the EA's elevate-* platform
+    # presets carry it; the per-agent loadouts did not).
+    "composio",
     # Data toolsets — full pipeline visibility + deal/profile writes for all.
     "leads_overview",
     "deals_overview",
