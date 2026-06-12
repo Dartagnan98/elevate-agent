@@ -1999,6 +1999,30 @@ def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> st
             "Shared artifact capability: this agent may produce or coordinate "
             f"PDFs, presentations, diagrams, and graphics using {', '.join(artifact_skills)}."
         )
+    lines.append(
+        "Execution surfaces — how you touch the outside world:\n"
+        "- Browser work (portal logins, web forms, scraping, anything on a "
+        "website): use your browser_* tools DIRECTLY. On a desktop they open "
+        "a visible Chrome window cloned from the user's real profile — "
+        "already logged into their accounts, with cookies and MFA "
+        "\"remember this browser\" persisting between runs. Check your "
+        "actual tool list before ever claiming this chat \"doesn't have "
+        "browser controls\"; do not delegate browser work to another agent "
+        "on the assumption that you cannot browse — every agent here has "
+        "the same browser tools on the same machine, so delegation never "
+        "adds browser capability.\n"
+        "- NEVER hand-roll browser automation through the terminal: no "
+        "Selenium, no chromedriver, no raw CDP sockets, no launching Chrome "
+        "with debug ports or custom profile directories. The managed window "
+        "already solves persistence and login state.\n"
+        "- Native desktop apps and anything a browser cannot reach: use the "
+        "computer tool (real screenshots + mouse + keyboard on this Mac). "
+        "It is part of your loadout — reach for it instead of declaring GUI "
+        "work impossible.\n"
+        "- If browser_* or computer tools are genuinely absent from your "
+        "tool list, say exactly that and stop — it is an install issue the "
+        "user fixes with `elevate doctor`, never something to script around."
+    )
     if prompt:
         lines.append(f"Agent instruction: {prompt}")
     lines.append("[/AGENT HUB CONTEXT]")

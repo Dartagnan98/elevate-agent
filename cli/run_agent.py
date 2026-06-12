@@ -4467,6 +4467,47 @@ class AIAgent:
                 self._pending_soft_interrupts = []
         self._steer_cut_requested = False
 
+    def widen_toolsets(self, extra_toolsets) -> bool:
+        """Union extra toolsets into the LIVE tool surface (never strips).
+
+        ``self.tools`` is frozen at __init__ from the local enabled_toolsets,
+        so mutating ``self.enabled_toolsets`` on a running agent changes
+        nothing. The gateway's agent-lane switch uses this to bind a hub
+        agent's real loadout onto an already-constructed session agent.
+
+        Preserves post-init additions (memory-provider schemas, plugin
+        tools) by carrying over any current tool whose name is absent from
+        the rebuilt base. Returns True when the surface actually changed.
+        """
+        extras = [t for t in (extra_toolsets or []) if t]
+        if not extras:
+            return False
+        current = self.enabled_toolsets
+        if current is None:
+            return False  # already "all tools" — nothing to widen
+        merged = list(dict.fromkeys([*current, *extras]))
+        if merged == list(current):
+            return False
+        new_tools = get_tool_definitions(
+            enabled_toolsets=merged,
+            disabled_toolsets=self.disabled_toolsets,
+            quiet_mode=True,
+        ) or []
+        new_names = {
+            t.get("function", {}).get("name")
+            for t in new_tools
+            if isinstance(t, dict)
+        }
+        for t in self.tools or []:
+            name = t.get("function", {}).get("name") if isinstance(t, dict) else None
+            if name and name not in new_names:
+                new_tools.append(t)
+                new_names.add(name)
+        self.enabled_toolsets = merged
+        self.tools = new_tools
+        self.valid_tool_names = {n for n in new_names if n}
+        return True
+
     def steer(self, text: str) -> bool:
         """
         Inject a user message into the next tool result without interrupting.

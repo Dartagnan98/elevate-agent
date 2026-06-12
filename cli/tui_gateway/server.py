@@ -794,19 +794,26 @@ def _load_configured_toolsets() -> list[str] | None:
 
 
 def _load_tui_tool_profile_mode() -> str:
+    """Per-message keyword tool-profile narrowing: explicit opt-in ONLY.
+
+    This is the dashboard twin of the platform gateway's retired 'auto' tool
+    profile (same failure mode: the classifier routes "what deals are
+    pending in webforms" to skill-runner, which has terminal but NO browser
+    — the agent then truthfully reports it "doesn't have browser controls"
+    and hand-rolls Selenium through the terminal it does have).
+
+    Previously this defaulted to "auto" AND read agent.gateway_tool_profile
+    as a fallback — where the platform fix writes "configured", which isn't
+    in the off-list and so mapped BACK to auto here. The platform knob no
+    longer feeds this at all. Narrowing now requires a literal
+    tui_tool_profile: auto; anything else (unset included) = full toolset.
+    """
     cfg = _load_cfg()
     agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
     display_cfg = cfg.get("display") if isinstance(cfg.get("display"), dict) else {}
-    raw = (
-        agent_cfg.get("tui_tool_profile")
-        or display_cfg.get("tui_tool_profile")
-        or agent_cfg.get("gateway_tool_profile")
-        or "auto"
-    )
-    mode = str(raw or "auto").strip().lower()
-    if mode in {"off", "full", "legacy", "all", "false", "0"}:
-        return "full"
-    return "auto"
+    raw = agent_cfg.get("tui_tool_profile") or display_cfg.get("tui_tool_profile")
+    mode = str(raw or "").strip().lower()
+    return "auto" if mode == "auto" else "full"
 
 
 def _load_enabled_toolsets(profile: str | None = None) -> list[str] | None:
@@ -1589,6 +1596,25 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
         new_prompt = base
     agent.ephemeral_system_prompt = new_prompt or None
     agent._cached_system_prompt = None
+    # Bind the lane's REAL loadout, not just its persona. The overlay alone
+    # gave the session the agent's voice while its hub toolsets stayed
+    # unbound — but a DELEGATED specialist gets the full loadout via the
+    # AIAgent agent_id union, so the in-chat lane was strictly weaker than
+    # delegating to the same agent. Models learned that asymmetry and
+    # routed work to "their own" subagent lane instead of doing it here.
+    # Union only (never strip); None enabled_toolsets means "all tools",
+    # which needs no widening.
+    try:
+        agent._agent_id = wanted
+        from elevate_cli.agent_hub import get_agent_def as _lane_def
+
+        _ldef = _lane_def(wanted)
+        _lts = _ldef.get("toolsets") if isinstance(_ldef, dict) else None
+        if _lts and hasattr(agent, "widen_toolsets"):
+            if agent.widen_toolsets(_lts):
+                logger.info("agent lane %s: hub loadout bound onto session agent", wanted)
+    except Exception:
+        logger.debug("agent lane loadout bind failed for %s", wanted, exc_info=True)
     session["agent_lane_id"] = wanted
 
 
