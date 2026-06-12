@@ -599,7 +599,13 @@ def compress_context(
                 session_id=agent.session_id,
                 source=agent.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
                 model=agent.model,
-                model_config=agent._session_init_model_config,
+                # getattr guard: a missing attribute here once aborted the whole
+                # rotation block AFTER end_session(old) — the continuation row
+                # was then backfilled by the message flush with NO parent link
+                # and NO title, surfacing as an unrelated new chat holding just
+                # the post-compaction turn and breaking the compression-tip
+                # walk (resume reloaded full history → re-compaction loop).
+                model_config=getattr(agent, "_session_init_model_config", None),
                 parent_session_id=old_session_id,
             )
             agent._session_db_created = True

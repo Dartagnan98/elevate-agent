@@ -1648,21 +1648,30 @@ class AIAgent:
         self._session_db = session_db
         self._parent_session_id = parent_session_id
         self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+        # Captured so compression-driven session rotation can recreate the
+        # continuation row with the same config. conversation_compression
+        # reads this attribute; before it existed the rotation block crashed
+        # (AttributeError) AFTER end_session(old) but BEFORE
+        # create_session(new, parent=old) — every compaction orphaned its
+        # continuation (no parent link, no title), which surfaced as "new
+        # sessions appear containing just the latest response" and broke
+        # get_compression_tip's chain walk (re-compaction loops on resume).
+        self._session_init_model_config = {
+            "max_iterations": self.max_iterations,
+            "reasoning_config": reasoning_config,
+            "max_tokens": max_tokens,
+            # Persist which agent this session ran as so the UI can
+            # name a subagent ("In subagent · Admin") instead of a
+            # generic badge. Dynamic — whatever agent was selected.
+            "agent_id": self._agent_id or None,
+        }
         if self._session_db:
             try:
                 self._session_db.create_session(
                     session_id=self.session_id,
                     source=self.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
                     model=self.model,
-                    model_config={
-                        "max_iterations": self.max_iterations,
-                        "reasoning_config": reasoning_config,
-                        "max_tokens": max_tokens,
-                        # Persist which agent this session ran as so the UI can
-                        # name a subagent ("In subagent · Admin") instead of a
-                        # generic badge. Dynamic — whatever agent was selected.
-                        "agent_id": self._agent_id or None,
-                    },
+                    model_config=self._session_init_model_config,
                     user_id=None,
                     parent_session_id=self._parent_session_id,
                 )

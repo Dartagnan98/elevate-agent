@@ -80,6 +80,17 @@ def insert_session_if_missing(
                 system_prompt, parent_session_id, started_at,
             ),
         )
+        # Self-heal a missing lineage link: if the row already existed
+        # (created parentless by a flush-time ensure_session that raced or
+        # outran the compression-rotation create), attach the parent now.
+        # A parentless continuation otherwise surfaces as an unrelated new
+        # chat and breaks the compression-tip walk.
+        if parent_session_id:
+            conn.execute(
+                "UPDATE chat_sessions SET parent_session_id = ? "
+                "WHERE id = ? AND parent_session_id IS NULL",
+                (parent_session_id, session_id),
+            )
         conn.commit()
 
 
