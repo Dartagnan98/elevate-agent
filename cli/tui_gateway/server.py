@@ -373,14 +373,38 @@ def _session_identity_for(db, session_id: str) -> dict:
     }
 
 
+def _bind_session_transport(session: dict, transport) -> None:
+    """Attach *transport* as a live event sink for *session* (multicast).
+
+    A session can have several live viewers at once — the main chat, the
+    desktop sidebar, a second window, a reattaching client. Events fan out
+    to every attached transport; binding must therefore ADD, never replace.
+    The old replace-on-resume behaviour silently starved every previous
+    viewer: the open chat went deaf mid-turn the moment anything else
+    resumed the same session, and only re-attaching (stealing the stream
+    back) recovered it. Dead peers are pruned lazily by write_json when a
+    write fails, so the list never accumulates closed sockets.
+    """
+    session["transport"] = transport
+    tlist = session.get("transports")
+    if not isinstance(tlist, list):
+        tlist = []
+        session["transports"] = tlist
+    if not any(existing is transport for existing in tlist):
+        tlist.append(transport)
+        # Bound the fan-out: keep the 8 most recently attached peers.
+        del tlist[:-8]
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
     Precedence:
 
-    1. Event frames with a session id → the transport stored on that session,
-       so async events land with the client that owns the session even if
-       the emitting thread has no contextvar binding.
+    1. Event frames with a session id → every live transport attached to
+       that session (multicast), so async events land with ALL clients
+       viewing the session even if the emitting thread has no contextvar
+       binding. Peers whose write fails are pruned.
     2. Otherwise the transport bound on the current context (set by
        :func:`dispatch` for the lifetime of a request).
     3. Otherwise the module-level stdio transport, matching the historical
@@ -415,8 +439,30 @@ def write_json(obj: dict) -> bool:
                     ring.append(params)
                     if event_type == "message.complete":
                         ring.clear()
-        if sess is not None and (t := sess.get("transport")) is not None:
-            return t.write(obj)
+        if sess is not None:
+            transports = sess.get("transports")
+            if isinstance(transports, list) and transports:
+                delivered = False
+                for t in list(transports):
+                    try:
+                        ok = t.write(obj)
+                    except Exception:
+                        ok = False
+                    if ok:
+                        delivered = True
+                    else:
+                        # Peer is gone — prune so the list never accumulates
+                        # closed sockets across reattaches.
+                        try:
+                            transports.remove(t)
+                        except ValueError:
+                            pass
+                if delivered:
+                    return True
+                # Every attached peer is gone — fall through to the
+                # context/stdio transport like a session-less frame.
+            elif (t := sess.get("transport")) is not None:
+                return t.write(obj)
 
     return (current_transport() or _stdio_transport).write(obj)
 
@@ -1766,10 +1812,10 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "events": collections.deque(maxlen=_EVENT_RING_MAXLEN),
         "events_lock": threading.Lock(),
         "events_seq": 0,
-        # Pin async event emissions to whichever transport created the
-        # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
-        "transport": current_transport() or _stdio_transport,
     }
+    # Pin async event emissions to whichever transport created the
+    # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
+    _bind_session_transport(_sessions[sid], current_transport() or _stdio_transport)
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
@@ -2285,8 +2331,8 @@ def _(rid, params: dict) -> dict:
         "slash_worker": None,
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
-        "transport": current_transport() or _stdio_transport,
     }
+    _bind_session_transport(_sessions[sid], current_transport() or _stdio_transport)
 
     def _build() -> None:
         session = _sessions.get(sid)
@@ -2496,13 +2542,17 @@ def _(rid, params: dict) -> dict:
         existing_key = existing_session.get("session_key")
         if existing_key not in {target, active_target}:
             continue
-        # Snapshot the event ring AND bind the new transport under the
+        # Snapshot the event ring AND attach the new transport under the
         # same lock that write_json takes. This is the no-duplicate
         # contract: while we hold events_lock, no concurrent emit can
         # both append-to-ring and write-to-transport. After we release,
         # every new emit goes to the new transport AND is excluded from
-        # the snapshot — so the client gets each event exactly once,
-        # via replay or live, never both.
+        # the snapshot — so the resuming client gets each event exactly
+        # once, via replay or live, never both. Attaching ADDS to the
+        # session's transport fan-out — previously this REPLACED the
+        # transport, which starved every other live viewer of the same
+        # session (the open chat went deaf mid-turn whenever a second
+        # surface resumed it; only re-attaching stole the stream back).
         new_transport = current_transport() or _stdio_transport
         replay_events: list[dict] = []
         replay_seq = 0
@@ -2511,7 +2561,7 @@ def _(rid, params: dict) -> dict:
         events_lock = existing_session.get("events_lock")
         if ring is not None and events_lock is not None:
             with events_lock:
-                existing_session["transport"] = new_transport
+                _bind_session_transport(existing_session, new_transport)
                 replay_events = list(ring)
                 replay_seq = int(existing_session.get("events_seq", 0))
                 rt = existing_session.get("running_tools")
@@ -2520,7 +2570,7 @@ def _(rid, params: dict) -> dict:
         else:
             # Legacy sessions created before the ring existed — bind
             # transport without the snapshot; replay just stays empty.
-            existing_session["transport"] = new_transport
+            _bind_session_transport(existing_session, new_transport)
         with existing_session.get("history_lock", threading.Lock()):
             history = list(existing_session.get("history", []))
         messages = _history_to_messages(history) if include_messages else None
@@ -2592,8 +2642,8 @@ def _(rid, params: dict) -> dict:
         "slash_worker": None,
         "tool_progress_mode": _load_tool_progress_mode(),
         "tool_started_at": {},
-        "transport": current_transport() or _stdio_transport,
     }
+    _bind_session_transport(session, current_transport() or _stdio_transport)
     _sessions[sid] = session
 
     def _build() -> None:
@@ -6048,7 +6098,7 @@ def _(rid, params: dict) -> dict:
 
     try:
         output = worker.run(cmd)
-        warning = _mirror_slash_side_effects(params.get("session_id", ""), session, cmd)
+        warning = _mirror_slash_side_effects(sid, session, cmd)
         payload = {"output": output or "(no output)"}
         if warning:
             payload["warning"] = warning
@@ -6060,6 +6110,22 @@ def _(rid, params: dict) -> dict:
             pass
         session["slash_worker"] = None
         return _err(rid, 5030, str(e))
+    finally:
+        # Orphan check: session.close pops _sessions[sid] and closes the
+        # slash_worker it finds there.  If close raced this handler while
+        # the worker was being lazily created, close saw slash_worker=None
+        # — the subprocess we just installed lives on an unreachable dict
+        # and would leak until process exit.  Close it ourselves.
+        if (
+            created
+            and _sessions.get(sid) is not session
+            and session.get("slash_worker") is worker
+        ):
+            try:
+                worker.close()
+            except Exception:
+                pass
+            session["slash_worker"] = None
 
 
 # ── Methods: voice ───────────────────────────────────────────────────

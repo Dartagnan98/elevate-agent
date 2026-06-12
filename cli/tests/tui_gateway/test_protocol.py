@@ -275,6 +275,90 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
     assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
 
 
+def test_session_resume_multicasts_events_to_all_attached_transports(server, monkeypatch):
+    """Regression guard: a second client resuming a live session must ADD
+    its transport to the fan-out, not replace the first client's. The old
+    replace-on-resume behaviour starved every prior viewer — the open chat
+    went deaf mid-turn the moment any other surface (sidebar, second
+    window, reattach) resumed the same session, and only re-attaching
+    stole the stream back (Justin's "nothing shows until I leave and come
+    back")."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class _T:
+        def __init__(self):
+            self.frames = []
+            self.dead = False
+
+        def write(self, obj):
+            if self.dead:
+                return False
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, _sid):
+            return {"id": "20260612_010101_abc123"}
+
+        def get_session_by_title(self, _title):
+            return None
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+
+    t_a, t_b = _T(), _T()
+    lock = threading.Lock()
+    session = {
+        "agent": object(),
+        "events": [],
+        "events_lock": lock,
+        "events_seq": 0,
+        "history": [],
+        "history_lock": lock,
+        "running": True,
+        "session_key": "20260612_010101_abc123",
+    }
+    server._sessions["live5678"] = session
+    server._bind_session_transport(session, t_a)
+
+    # Client B resumes the same live session on its own transport.
+    token = bind_transport(t_b)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r-multi",
+                "method": "session.resume",
+                "params": {
+                    "session_id": "20260612_010101_abc123",
+                    "include_messages": False,
+                },
+            }
+        )
+    finally:
+        reset_transport(token)
+    assert "error" not in resp
+    assert resp["result"]["session_id"] == "live5678"
+
+    # A live event now reaches BOTH viewers.
+    server._emit("message.delta", "live5678", {"text": "hi"})
+    assert [f["params"]["type"] for f in t_a.frames] == ["message.delta"]
+    assert [f["params"]["type"] for f in t_b.frames] == ["message.delta"]
+
+    # A's peer goes away — it gets pruned, B keeps receiving.
+    t_a.dead = True
+    server._emit("message.delta", "live5678", {"text": "again"})
+    assert len(t_a.frames) == 1
+    assert len(t_b.frames) == 2
+    assert t_a not in session["transports"]
+
+    server._sessions.pop("live5678", None)
+
+
 def test_session_close_detaches_running_session(server):
     server._sessions["live1234"] = {
         "running": True,
