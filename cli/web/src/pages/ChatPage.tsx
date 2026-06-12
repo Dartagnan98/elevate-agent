@@ -8456,7 +8456,7 @@ export default function ChatPage() {
               )}
 
               {busy && (
-                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] text-[var(--chat-muted)]">
+                <div className="composer-stage !min-h-[38px] flex items-center gap-1.5 text-[11px] text-[var(--chat-muted)]">
                   <CornerDownLeft className="h-3 w-3 shrink-0" />
                   <span className="shrink-0">While it&rsquo;s working, send as</span>
                   {(() => {
