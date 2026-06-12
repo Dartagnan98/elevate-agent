@@ -1295,7 +1295,15 @@ function slimTracesForStorage(
     id: trace.id,
     kind: trace.kind,
     messageId: trace.messageId,
-    text: trace.text.length > 500 ? `${trace.text.slice(0, 500)}…` : trace.text,
+    // Keep reasoning/thinking FULL — the finished turn must show the complete
+    // thought, not a 500-char stub, on reload/resume. Only non-reasoning
+    // traces (tool/status rows) stay capped to bound localStorage size.
+    text:
+      trace.kind === "reasoning" || trace.kind === "thinking"
+        ? trace.text
+        : trace.text.length > 500
+          ? `${trace.text.slice(0, 500)}…`
+          : trace.text,
   }));
 }
 
@@ -4067,7 +4075,12 @@ export default function ChatPage() {
           // Append the token stream verbatim — its own whitespace IS the
           // formatting. (Previously joined with a " " separator, which inserted
           // spaces mid-word: "non -manager", "SQL -like", "over doing".)
-          const merged = (last.text + clean).slice(-2000);
+          // Keep the WHOLE reasoning block — a prior -2000 char tail-cap threw
+          // away the head of long reasoning, so the finished turn showed a
+          // truncated/"not right" thought. The high bound only guards a
+          // pathological runaway; real per-turn reasoning is bounded by the
+          // output-token budget and stays well under it.
+          const merged = (last.text + clean).slice(-100000);
           const next = prev.slice(0, -1);
           next.push({ ...last, text: merged });
           return next;
