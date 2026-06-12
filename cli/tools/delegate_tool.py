@@ -227,6 +227,88 @@ def interrupt_subagent(subagent_id: str) -> bool:
     return True
 
 
+def interrupt_subagent_by_session(child_session_id: str) -> bool:
+    """Interrupt the running subagent whose own session id matches.
+
+    The dashboard's background-task cards know the child's SESSION id (it's
+    how drill-in works), not the registry's subagent_id — this resolver lets
+    the panel's kill switch target by what it has. Reads the session id off
+    the live agent at call time (it may not exist at registration time).
+    """
+    if not child_session_id:
+        return False
+    with _active_subagents_lock:
+        records = list(_active_subagents.values())
+    for record in records:
+        agent = record.get("agent")
+        if agent is None:
+            continue
+        if getattr(agent, "session_id", None) == child_session_id:
+            try:
+                agent.interrupt(f"Stopped from the dashboard ({child_session_id})")
+                return True
+            except Exception as exc:
+                logger.debug(
+                    "interrupt_subagent_by_session(%s) failed: %s",
+                    child_session_id, exc,
+                )
+                return False
+    return False
+
+
+# Async (dispatched) delegations cancelled by the user. A cancelled task's
+# children are interrupted AND any late result is suppressed at the delivery
+# sink — "treat it as cancelled" must mean no ghost completion message
+# landing minutes later.
+_cancelled_async_tasks_lock = threading.Lock()
+_cancelled_async_tasks: set = set()
+
+
+def is_async_task_cancelled(task_id: Optional[str]) -> bool:
+    if not task_id:
+        return False
+    with _cancelled_async_tasks_lock:
+        return task_id in _cancelled_async_tasks
+
+
+def cancel_dispatched_delegation(task_id: str) -> Dict[str, Any]:
+    """Cancel a dispatched (async) delegation by its dt_ task id.
+
+    Marks the task cancelled (suppressing any pending result delivery) and
+    interrupts every running child registered under it. Safe to call for a
+    task that already finished — the mark still prevents a late result from
+    being delivered, and interrupted=0 tells the caller it was too late to
+    stop the work itself.
+    """
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return {"cancelled": False, "interrupted": 0, "error": "task_id required"}
+    with _cancelled_async_tasks_lock:
+        _cancelled_async_tasks.add(task_id)
+    with _active_subagents_lock:
+        records = list(_active_subagents.values())
+    interrupted = 0
+    for record in records:
+        if record.get("async_task_id") != task_id:
+            continue
+        agent = record.get("agent")
+        if agent is None:
+            continue
+        try:
+            agent.interrupt(f"Delegation {task_id} cancelled by the user")
+            interrupted += 1
+        except Exception as exc:
+            logger.debug(
+                "cancel_dispatched_delegation(%s): interrupt failed: %s",
+                task_id, exc,
+            )
+    logger.info(
+        "Dispatched delegation %s cancelled (%d running child(ren) interrupted)",
+        task_id, interrupted,
+    )
+    return {"cancelled": True, "task_id": task_id, "interrupted": interrupted}
+
+
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
 
@@ -1304,17 +1386,45 @@ def _build_child_agent(
     # max_iterations.  The user controls the per-subagent cap in config.yaml.
 
     child_thinking_cb = None
+    child_reasoning_cb = None
     if child_progress_cb:
 
         def _child_thinking(text: str) -> None:
+            # Spinner status faces ("(◔_◔) pondering…"), NOT real reasoning.
+            # Routed as progress so they can't concatenate into the child's
+            # actual reasoning stream below (both used to share "_thinking",
+            # which painted faces as the child's thoughts).
             if not text:
                 return
             try:
-                child_progress_cb("_thinking", text)
+                child_progress_cb("subagent_progress", text)
             except Exception as e:
                 logger.debug("Child thinking callback relay failed: %s", e)
 
         child_thinking_cb = _child_thinking
+
+        # The REAL reasoning stream. thinking_callback above is the spinner
+        # hook (kawaii status faces) — without this, a drill-in into the
+        # child shows "(◔_◔) reflecting…" instead of the model's actual
+        # reasoning the way the main chat does. Deltas arrive token-sized;
+        # buffer to phrase-level flushes so the relay (websocket frames +
+        # the 💭 preview row) gets readable text, not fragments.
+        _reasoning_buf: list = []
+
+        def _child_reasoning(text: str) -> None:
+            if not text:
+                return
+            _reasoning_buf.append(text)
+            joined = "".join(_reasoning_buf)
+            if len(joined) < 60 and "\n" not in joined:
+                return
+            _reasoning_buf.clear()
+            try:
+                child_progress_cb("_thinking", joined)
+            except Exception as e:
+                logger.debug("Child reasoning callback relay failed: %s", e)
+
+        child_reasoning_cb = _child_reasoning
 
     # Resolve effective credentials: config override > parent inherit
     effective_model = model or parent_agent.model
@@ -1427,6 +1537,7 @@ def _build_child_agent(
         skip_memory=True,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
+        reasoning_callback=child_reasoning_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
         providers_allowed=child_providers_allowed,
@@ -1771,6 +1882,7 @@ def _run_single_child(
             {
                 "subagent_id": _subagent_id,
                 "parent_id": _parent_sid if isinstance(_parent_sid, str) else None,
+                "async_task_id": getattr(child, "_async_task_id", None),
                 "depth": _tui_depth,
                 "goal": goal,
                 "model": (
@@ -2337,6 +2449,10 @@ def delegate_task(
     priority: Optional[str] = None,
     artifacts: Optional[Any] = None,
     parent_run_id: Optional[str] = None,
+    # Kill switch for a dispatched background delegation: pass the dt_ id
+    # returned at dispatch time to interrupt its children and suppress the
+    # pending result. No new subagents are spawned on a cancel call.
+    cancel_task_id: Optional[str] = None,
     **_extra: Any,
 ) -> str:
     """
@@ -2353,6 +2469,25 @@ def delegate_task(
 
     Returns JSON with results array, one entry per task.
     """
+    # Cancel path first: works regardless of spawn pause / depth limits, and
+    # must never spawn anything.
+    if cancel_task_id:
+        _cancel_result = cancel_dispatched_delegation(cancel_task_id)
+        if _cancel_result.get("cancelled"):
+            _n = _cancel_result.get("interrupted", 0)
+            _cancel_result["note"] = (
+                f"Background delegation {cancel_task_id} cancelled. "
+                + (
+                    f"{_n} running subagent(s) were interrupted and will stop "
+                    "at their next boundary. "
+                    if _n
+                    else "No child was still running (it may have already "
+                    "finished), but "
+                )
+                + "any pending result from it will NOT be delivered."
+            )
+        return json.dumps(_cancel_result, ensure_ascii=False)
+
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 
@@ -2515,6 +2650,13 @@ def delegate_task(
         import uuid as _uuid_async
 
         task_id = f"dt_{_uuid_async.uuid4().hex[:8]}"
+        # Stamp the dispatch id on every child so the registry record carries
+        # it — cancel_dispatched_delegation() resolves children by this.
+        for _ci, _ct, _child_agent in children:
+            try:
+                _child_agent._async_task_id = task_id
+            except Exception:
+                pass
         dispatched = [
             {
                 "task_index": i,
@@ -2538,6 +2680,14 @@ def delegate_task(
                 if isinstance(_ti, int) and 0 <= _ti < len(task_list):
                     e.setdefault("goal", (task_list[_ti].get("goal") or "")[:120])
                     delivered.add(_ti)
+                if is_async_task_cancelled(task_id):
+                    # User cancelled this dispatch — the (likely interrupted)
+                    # result must not surface as a ghost completion.
+                    logger.info(
+                        "async delegation %s: suppressing result delivery "
+                        "(task cancelled by user)", task_id,
+                    )
+                    return
                 try:
                     async_sink({"task_id": task_id, "results": [e]})
                 except Exception:
@@ -2586,7 +2736,8 @@ def delegate_task(
                     "you'll ping them with the result when it's done, and ask if "
                     "there's anything else — then end your turn. The result arrives "
                     "as a new message on its own; do not call delegate_task again "
-                    "for the same work."
+                    "for the same work. If the user asks to stop/cancel this work, "
+                    f"call delegate_task with cancel_task_id='{task_id}'."
                 ),
             },
             ensure_ascii=False,
@@ -3256,6 +3407,18 @@ DELEGATE_TASK_SCHEMA = {
                     "What the subagent should accomplish. Be specific and "
                     "self-contained -- the subagent knows nothing about your "
                     "conversation history."
+                ),
+            },
+            "cancel_task_id": {
+                "type": "string",
+                "description": (
+                    "KILL SWITCH: cancel a previously dispatched background "
+                    "delegation by the dt_xxxxxxxx task_id returned when it "
+                    "was dispatched. Interrupts its running subagent(s) and "
+                    "suppresses any pending result delivery. When set, no "
+                    "new subagents are spawned and all other parameters are "
+                    "ignored. Use this when the user asks to stop/kill/cancel "
+                    "delegated background work."
                 ),
             },
             "context": {

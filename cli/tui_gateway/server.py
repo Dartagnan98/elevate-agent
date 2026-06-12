@@ -2954,13 +2954,42 @@ def _(rid, params: dict) -> dict:
 
 @method("subagent.interrupt")
 def _(rid, params: dict) -> dict:
-    from tools.delegate_tool import interrupt_subagent
+    """Kill switch for running background work.
+
+    Accepts any of: subagent_id (registry id, from live events),
+    child_session_id (what the dashboard's task cards hold), or task_id
+    (dt_ dispatch id — cancels the whole async delegation AND suppresses
+    its pending result delivery). First match wins.
+    """
+    from tools.delegate_tool import (
+        cancel_dispatched_delegation,
+        interrupt_subagent,
+        interrupt_subagent_by_session,
+    )
 
     subagent_id = str(params.get("subagent_id") or "").strip()
-    if not subagent_id:
-        return _err(rid, 4000, "subagent_id required")
-    ok = interrupt_subagent(subagent_id)
-    return _ok(rid, {"found": ok, "subagent_id": subagent_id})
+    child_session_id = str(params.get("child_session_id") or "").strip()
+    task_id = str(params.get("task_id") or "").strip()
+    if not subagent_id and not child_session_id and not task_id:
+        return _err(rid, 4000, "subagent_id, child_session_id, or task_id required")
+
+    ok = False
+    if subagent_id:
+        ok = interrupt_subagent(subagent_id)
+    if not ok and child_session_id:
+        ok = interrupt_subagent_by_session(child_session_id)
+    if task_id:
+        result = cancel_dispatched_delegation(task_id)
+        ok = ok or bool(result.get("interrupted"))
+    return _ok(
+        rid,
+        {
+            "found": ok,
+            "subagent_id": subagent_id or None,
+            "child_session_id": child_session_id or None,
+            "task_id": task_id or None,
+        },
+    )
 
 
 # ── Spawn-tree snapshots: TUI-written, disk-persisted ────────────────

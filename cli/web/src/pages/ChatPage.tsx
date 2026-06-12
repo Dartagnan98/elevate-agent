@@ -3842,6 +3842,33 @@ export default function ChatPage() {
     [closeSidePanel, setSearchParams],
   );
 
+  // Kill switch for a running background task: interrupts the subagent (by
+  // registry id when we have it from live events, else by its session id)
+  // and marks it errored locally so the card settles immediately — the
+  // subagent.complete event then confirms with the real terminal state.
+  const handleStopBackgroundTask = useCallback(
+    async (task: { subagent_id?: string; child_session_id?: string }) => {
+      if (!task.subagent_id && !task.child_session_id) return;
+      try {
+        const response = await gw.request("subagent.interrupt", {
+          subagent_id: task.subagent_id ?? "",
+          child_session_id: task.child_session_id ?? "",
+        });
+        const found =
+          response && typeof response === "object" && "found" in response
+            ? Boolean((response as Record<string, unknown>).found)
+            : false;
+        if (!found) {
+          setBanner("Could not find that background task — it may have already finished.");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setBanner(`Stop failed: ${message}`);
+      }
+    },
+    [gw],
+  );
+
   const handleSelectPanel = useCallback(
     (mode: SidePanelMode) => {
       // Selecting the active panel toggles it closed.
@@ -5262,8 +5289,11 @@ export default function ChatPage() {
       gw.on("subagent.thinking", (ev) => {
         const payload = childPayloadFor(ev);
         if (!payload) return;
-        const text = compactLine(String(payload.text ?? ""));
-        if (!text) return;
+        // Raw, NOT compactLine'd — these are the child's real reasoning
+        // deltas (phrase-buffered by the relay) and must accumulate into
+        // flowing paragraphs exactly like the main chat's reasoning.delta.
+        const text = String(payload.text ?? "");
+        if (!text.trim()) return;
         const at = eventMillis(ev);
         ensureChildTurn(at);
         setStatusText("Thinking...");
@@ -7584,6 +7614,7 @@ export default function ChatPage() {
         startedAt: s.startedAt,
         completedAt: s.completedAt,
         child_session_id: s.child_session_id,
+        subagent_id: s.subagent_id,
       });
     }
     const haveSubagents = subagents.length > 0;
@@ -7908,6 +7939,7 @@ export default function ChatPage() {
             tasks={backgroundTasks}
             onClose={closeSidePanel}
             onDrillIn={handleOpenSubagent}
+            onStop={handleStopBackgroundTask}
           />
         );
       case "files":

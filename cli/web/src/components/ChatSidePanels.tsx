@@ -16,6 +16,7 @@ import {
   ListChecks,
   Loader2,
   PanelRight,
+  Square,
   X,
   XCircle,
 } from "lucide-react";
@@ -461,6 +462,8 @@ export interface BackgroundTaskItem {
   completedAt?: number;
   /** The subagent's own session id — when present the card opens its thread. */
   child_session_id?: string;
+  /** Registry id from live subagent.* events — the kill switch targets this. */
+  subagent_id?: string;
 }
 
 function relativeTime(ts?: number): string {
@@ -509,12 +512,19 @@ const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
 function TaskCard({
   task,
   onOpen,
+  onStop,
 }: {
   task: BackgroundTaskItem;
   onOpen?: (childSessionId: string) => void;
+  onStop?: (task: BackgroundTaskItem) => void;
 }) {
   const canOpen = !!task.child_session_id && !!onOpen;
   const open = () => task.child_session_id && onOpen?.(task.child_session_id);
+  const [stopping, setStopping] = useState(false);
+  const canStop =
+    task.status === "running" &&
+    !!onStop &&
+    !!(task.subagent_id || task.child_session_id);
   return (
     <div
       className={cn(
@@ -546,6 +556,27 @@ function TaskCard({
             <ExternalLink className="h-3 w-3" />
             Open
           </span>
+        ) : null}
+        {canStop ? (
+          <button
+            type="button"
+            disabled={stopping}
+            onClick={(e) => {
+              e.stopPropagation();
+              setStopping(true);
+              onStop?.(task);
+            }}
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium transition-colors",
+              stopping
+                ? "bg-[var(--chat-surface-strong)] text-[var(--chat-muted)]"
+                : "bg-[color-mix(in_srgb,var(--chat-danger)_12%,transparent)] text-[var(--chat-danger)] hover:bg-[color-mix(in_srgb,var(--chat-danger)_20%,transparent)]",
+            )}
+            title="Stop this background task — interrupts the subagent and suppresses its result."
+          >
+            <Square className="h-3 w-3" />
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
         ) : null}
         <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--chat-muted)]">
           {relativeTime(task.completedAt ?? task.startedAt)}
@@ -583,10 +614,12 @@ export function BackgroundTasksPanel({
   tasks,
   onClose,
   onDrillIn,
+  onStop,
 }: {
   tasks: BackgroundTaskItem[];
   onClose: () => void;
   onDrillIn?: (childSessionId: string) => void;
+  onStop?: (task: BackgroundTaskItem) => void;
 }) {
   const running = tasks.filter((task) => task.status === "running");
   const finished = tasks.filter((task) => task.status !== "running");
@@ -611,7 +644,7 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Running</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {running.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} />
+                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
                 ))}
               </div>
             </div>
@@ -621,7 +654,7 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Finished</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {finished.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} />
+                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
                 ))}
               </div>
             </div>
