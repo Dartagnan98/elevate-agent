@@ -3142,6 +3142,20 @@ export default function ChatPage() {
   // screen — which the server-load merge then unioned into the NEW chat and
   // persisted into its cache. That was the cross-chat bleed's main ingress.
   const chatSwitchWipeRef = useRef(false);
+  // Live binding stashed by the connect effect's CLEANUP (which must null the
+  // refs for genuine teardowns). The very next run reads it: when that run is
+  // the mint URL pin's re-run for the SAME conversation (?new → ?resume of the
+  // session this view just minted and is actively streaming), it restores the
+  // binding instead of tearing the view down — no state reset, no
+  // session.resume round-trip on a session we're already attached to, no
+  // deaf-to-own-events gap, and no race against the turn's first DB persist
+  // (session.resume 404s a just-minted session whose row hasn't landed yet).
+  const lastBindingStashRef = useRef<{
+    gw: GatewayClient;
+    persistedId: string | null;
+    gatewaySid: string | null;
+    assistantId: string | null;
+  } | null>(null);
   const chatStickToBottomRef = useRef(true);
   const pendingInitialBottomScrollRef = useRef(true);
   const scrollSessionKeyRef = useRef<string | null>(null);
@@ -4372,266 +4386,299 @@ export default function ChatPage() {
     let cancelled = false;
     const unsubs: Array<() => void> = [];
 
-    // New view generation: late continuations from a previous chat's async
-    // work (a draft mint resolving after the user moved on) compare against
-    // this and skip their view-binding writes.
-    connectGenRef.current += 1;
-    // The session ids this view owns. Seeded with the resume target; mint /
-    // hydrate / session.info add the rest as they're learned.
-    ownedSessionIdsRef.current = new Set(resumeId ? [resumeId] : []);
-    // A minted-session pin only describes the chat it minted. Navigating to
-    // any OTHER chat retires it — otherwise its same-chat guards keep
-    // matching later runs and block legitimate switches/wipes.
-    if (mintedSessionIdRef.current && resumeId !== mintedSessionIdRef.current) {
-      mintedSessionIdRef.current = null;
-    }
+    // FAST PATH — mint URL pin re-run. When a draft chat's first send mints a
+    // session, pinCreatedSessionInUrl rewrites ?new= → ?resume=<minted>, which
+    // re-runs this effect for the conversation that is ALREADY live and
+    // streaming on screen. The full teardown below (null binding, clear
+    // tools/status, session.resume round-trip) made the just-sent chat go
+    // momentarily deaf+dark mid-turn, and raced the turn's first DB persist
+    // (session.resume on a row that hasn't landed yet fails and falls back to
+    // minting a THIRD session). Restore the binding the cleanup just stashed
+    // and keep everything painted; listeners below re-register as usual.
+    const bindingStash = lastBindingStashRef.current;
+    lastBindingStashRef.current = null; // single-shot: only the very next run may use it
+    const mintRerun = Boolean(
+      resumeId &&
+        resumeId === mintedSessionIdRef.current &&
+        bindingStash &&
+        bindingStash.gw === gw &&
+        bindingStash.persistedId === resumeId &&
+        bindingStash.gatewaySid,
+    );
 
-    clearPendingAssistantDelta();
-    activeSessionRef.current = null;
-    currentAssistantRef.current = null;
-    historyHydratedRef.current = false;
-    persistedSessionIdRef.current = resumeId;
-    setSessionId(null);
-    setInfo({});
-    setUsage(null);
-    setArtifacts([]);
-    setPreviewArtifact(null);
-    const activeTurnSnapshot = resumeId ? readActiveTurnSnapshot(resumeId) : null;
-    dismissedArtifactsRef.current = readDismissedArtifactKeys(resumeId);
-    previewAutoOpenDisabledRef.current =
-      readPreviewAutoOpenDisabled(resumeId);
-    if (activeTurnSnapshot) {
-      currentAssistantRef.current = activeTurnSnapshot.message.id;
-    }
-    setTools(activeTurnSnapshot?.tools ?? []);
-    setSubagents([]);
-    setSubagentParentId(null);
-    setSubagentAgentName(null);
-    setActivityTrace(activeTurnSnapshot?.traces ?? []);
-    lastToolActivityAtRef.current = 0;
-    setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
-    setPendingPrompt(null);
-    setPromptValue("");
-    setBusy(false);
-    setBanner(null);
-    setResumeFallback(false);
-    setStatusText(resumeId ? "Loading chat..." : draftChat ? "Ready" : "Connecting...");
-
-    if (resumeId) {
-      // Restore the artifacts captured during earlier turns of this
-      // session. Tool messages (which carry the full file paths) are
-      // stripped from the persisted transcript, so without this the
-      // right-side panel re-derives nothing and goes empty on reattach.
-      const cachedArtifacts = readSessionArtifacts(resumeId);
-      if (cachedArtifacts.length) setArtifacts(cachedArtifacts);
-
-      const cached = restoreTranscript(resumeId);
-      const restoredCached = mergeActiveTurnSnapshot(cached ?? [], activeTurnSnapshot);
-      if (restoredCached.length) {
-        historyHydratedRef.current = true;
-        renderedChatKeyRef.current =
-          resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
-        setMessages(restoredCached);
-        hydrateArtifactsFromMessages(restoredCached);
-        if (activeTurnSnapshot || hasPendingTurn(restoredCached)) {
-          setBusy(true);
-          setStatusText("Resuming work...");
-        } else {
-          setStatusText("Ready");
-        }
-      } else {
-        // No cache for THIS session (e.g. drilling into a subagent that was
-        // never opened before, or a sidebar switch to a chat that never
-        // cached locally). Clear whatever messages belonged to the PREVIOUS
-        // session — the server-load merge below uses the on-screen `prev` as
-        // its base, so without this the previous chat's messages leak into
-        // this one's thread AND get persisted into its cache. This clear is a
-        // deliberate navigation: open the switch-wipe window so the blanket
-        // populated→empty guard (which only knows about ?new=) lets it
-        // through. The flag is captured synchronously at the setMessages
-        // call, then closed.
-        chatSwitchWipeRef.current = true;
-        try {
-          setMessages([]);
-        } finally {
-          chatSwitchWipeRef.current = false;
-        }
-        // Stamp the rendered key NOW: the messages on screen (none) belong to
-        // THIS chat. Leaving it pointing at the previous chat made the
-        // same-chat guards misfire on the next re-run.
-        renderedChatKeyRef.current =
-          resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+    if (mintRerun && bindingStash) {
+      activeSessionRef.current = bindingStash.gatewaySid;
+      currentAssistantRef.current = bindingStash.assistantId;
+      persistedSessionIdRef.current = resumeId;
+      if (resumeId) ownedSessionIdsRef.current.add(resumeId);
+      // No REST transcript exists yet for a just-minted session; the live
+      // state on screen IS the transcript. Gen is NOT bumped: in-flight
+      // continuations from this same conversation stay valid.
+      historyHydratedRef.current = true;
+      renderedChatKeyRef.current = resumeId;
+    } else {
+      // New view generation: late continuations from a previous chat's async
+      // work (a draft mint resolving after the user moved on) compare against
+      // this and skip their view-binding writes.
+      connectGenRef.current += 1;
+      // The session ids this view owns. Seeded with the resume target; mint /
+      // hydrate / session.info add the rest as they're learned.
+      ownedSessionIdsRef.current = new Set(resumeId ? [resumeId] : []);
+      // A minted-session pin only describes the chat it minted. Navigating to
+      // any OTHER chat retires it — otherwise its same-chat guards keep
+      // matching later runs and block legitimate switches/wipes.
+      if (mintedSessionIdRef.current && resumeId !== mintedSessionIdRef.current) {
+        mintedSessionIdRef.current = null;
       }
 
-      // A freshly minted + pinned session (mintedSessionIdRef) has no saved
-      // REST transcript yet — skip the hydrate so its expected 404 never
-      // surfaces as a "could not load saved messages" error.
-      if (resumeId === mintedSessionIdRef.current) {
-        historyHydratedRef.current = true;
-      } else void api.getSessionMessages(resumeId)
-        .then((response) => {
-          if (cancelled) return;
-          setSessionKind(response.session_kind ?? null);
-          setSubagentParentId(
-            (response as { parent_session_id?: string }).parent_session_id ?? null,
-          );
-          setSubagentAgentName(
-            (response as { agent_name?: string }).agent_name ?? null,
-          );
-          const canonicalSessionId =
-            response.active_session_id || response.session_id || resumeId;
-          // Register every identity the server reports for this chat so cache
-          // writes / reconciliation accept messages tagged with any of them
-          // (compaction rotations, lineage roots, gateway vs persisted ids).
-          for (const owned of [
-            canonicalSessionId,
-            response.session_id,
-            (response as { lineage_root_id?: string }).lineage_root_id,
-            resumeId,
-          ]) {
-            if (owned) ownedSessionIdsRef.current.add(owned);
-          }
-          if (canonicalSessionId) {
-            persistedSessionIdRef.current = canonicalSessionId;
-            const canonicalArtifacts = readSessionArtifacts(canonicalSessionId);
-            if (canonicalArtifacts.length) addArtifacts(canonicalArtifacts);
-            void api.getSessionArtifacts(canonicalSessionId)
-              .then((artifactResponse) => {
-                if (cancelled) return;
-                addArtifacts(artifactsFromServer(artifactResponse.artifacts));
-              })
-              .catch(() => {
-                // Artifact hydration is additive; transcript hydration already
-                // carries the user-visible failure state for this resume.
-              });
-            void api.getSessionTurnUsage(canonicalSessionId)
-              .then((usageResponse) => {
-                if (cancelled) return;
-                setTurnUsage(usageResponse.turn_usage ?? []);
-              })
-              .catch(() => {
-                // Per-turn footer is additive; absence just hides model/cost.
-              });
-            void api.getSessionChildren(canonicalSessionId)
-              .then((childResponse) => {
-                if (cancelled) return;
-                setChildSessions(
-                  (childResponse.children ?? []).filter(
-                    (c) => c.session_kind === "subagent",
-                  ),
-                );
-              })
-              .catch(() => {
-                // Subagent drill-in is additive; absence just hides Open links.
-              });
-          }
-          const hydrated = normalizeStoredTranscript(response.messages);
-          const latestActiveSnapshot = readActiveTurnSnapshot(resumeId);
+      clearPendingAssistantDelta();
+      activeSessionRef.current = null;
+      currentAssistantRef.current = null;
+      historyHydratedRef.current = false;
+      persistedSessionIdRef.current = resumeId;
+      setSessionId(null);
+      setInfo({});
+      setUsage(null);
+      setArtifacts([]);
+      setPreviewArtifact(null);
+      const activeTurnSnapshot = resumeId ? readActiveTurnSnapshot(resumeId) : null;
+      dismissedArtifactsRef.current = readDismissedArtifactKeys(resumeId);
+      previewAutoOpenDisabledRef.current =
+        readPreviewAutoOpenDisabled(resumeId);
+      if (activeTurnSnapshot) {
+        currentAssistantRef.current = activeTurnSnapshot.message.id;
+      }
+      setTools(activeTurnSnapshot?.tools ?? []);
+      setSubagents([]);
+      setSubagentParentId(null);
+      setSubagentAgentName(null);
+      setActivityTrace(activeTurnSnapshot?.traces ?? []);
+      lastToolActivityAtRef.current = 0;
+      setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
+      setPendingPrompt(null);
+      setPromptValue("");
+      setBusy(false);
+      setBanner(null);
+      setResumeFallback(false);
+      setStatusText(resumeId ? "Loading chat..." : draftChat ? "Ready" : "Connecting...");
+
+      if (resumeId) {
+        // Restore the artifacts captured during earlier turns of this
+        // session. Tool messages (which carry the full file paths) are
+        // stripped from the persisted transcript, so without this the
+        // right-side panel re-derives nothing and goes empty on reattach.
+        const cachedArtifacts = readSessionArtifacts(resumeId);
+        if (cachedArtifacts.length) setArtifacts(cachedArtifacts);
+
+        const cached = restoreTranscript(resumeId);
+        const restoredCached = mergeActiveTurnSnapshot(cached ?? [], activeTurnSnapshot);
+        if (restoredCached.length) {
           historyHydratedRef.current = true;
-          // A subagent thread is short-lived and server-authoritative. NEVER
-          // merge it with prev/cache — the parent chat's messages (your raw
-          // prompt) bleed in through the merge base, and an early polluted
-          // cache write would persist it. Render straight from the server.
-          const isSubagentView = response.session_kind === "subagent";
-          setMessages((prev) => {
-            // Merge against the current UI state, not only the cache captured
-            // before gateway replay. Otherwise a slow DB hydrate can erase the
-            // in-flight assistant turn that session.resume just replayed.
-            const base = isSubagentView ? [] : (prev.length ? prev : restoredCached);
-            // SERVER TRUTH IS CANONICAL: the no-shrink union above never
-            // drops anything, so a polluted base (another chat's bubbles that
-            // leaked into this view or its localStorage cache) would survive
-            // and immediately re-persist below. Reconcile the union against
-            // the server transcript — foreign/duplicated user+assistant rows
-            // drop; the in-flight turn and just-sent optimistic messages stay.
-            const merged = reconcileWithServerTruth(
-              mergeActiveTurnSnapshot(
-                mergeServerWithCache(hydrated, base, compactionGuardRef.current),
-                latestActiveSnapshot,
-              ),
-              hydrated,
-              ownedSessionIdsRef.current,
-              currentAssistantRef.current,
+          renderedChatKeyRef.current =
+            resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+          setMessages(restoredCached);
+          hydrateArtifactsFromMessages(restoredCached);
+          if (activeTurnSnapshot || hasPendingTurn(restoredCached)) {
+            setBusy(true);
+            setStatusText("Resuming work...");
+          } else {
+            setStatusText("Ready");
+          }
+        } else {
+          // No cache for THIS session (e.g. drilling into a subagent that was
+          // never opened before, or a sidebar switch to a chat that never
+          // cached locally). Clear whatever messages belonged to the PREVIOUS
+          // session — the server-load merge below uses the on-screen `prev` as
+          // its base, so without this the previous chat's messages leak into
+          // this one's thread AND get persisted into its cache. This clear is a
+          // deliberate navigation: open the switch-wipe window so the blanket
+          // populated→empty guard (which only knows about ?new=) lets it
+          // through. The flag is captured synchronously at the setMessages
+          // call, then closed.
+          chatSwitchWipeRef.current = true;
+          try {
+            setMessages([]);
+          } finally {
+            chatSwitchWipeRef.current = false;
+          }
+          // Stamp the rendered key NOW: the messages on screen (none) belong to
+          // THIS chat. Leaving it pointing at the previous chat made the
+          // same-chat guards misfire on the next re-run.
+          renderedChatKeyRef.current =
+            resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+        }
+
+        // A freshly minted + pinned session (mintedSessionIdRef) has no saved
+        // REST transcript yet — skip the hydrate so its expected 404 never
+        // surfaces as a "could not load saved messages" error.
+        if (resumeId === mintedSessionIdRef.current) {
+          historyHydratedRef.current = true;
+        } else void api.getSessionMessages(resumeId)
+          .then((response) => {
+            if (cancelled) return;
+            setSessionKind(response.session_kind ?? null);
+            setSubagentParentId(
+              (response as { parent_session_id?: string }).parent_session_id ?? null,
             );
-            rememberTranscript(canonicalSessionId, merged);
-            if (response.lineage_root_id) {
-              rememberTranscript(response.lineage_root_id, merged);
+            setSubagentAgentName(
+              (response as { agent_name?: string }).agent_name ?? null,
+            );
+            const canonicalSessionId =
+              response.active_session_id || response.session_id || resumeId;
+            // Register every identity the server reports for this chat so cache
+            // writes / reconciliation accept messages tagged with any of them
+            // (compaction rotations, lineage roots, gateway vs persisted ids).
+            for (const owned of [
+              canonicalSessionId,
+              response.session_id,
+              (response as { lineage_root_id?: string }).lineage_root_id,
+              resumeId,
+            ]) {
+              if (owned) ownedSessionIdsRef.current.add(owned);
             }
-            rememberTranscript(resumeId, merged);
-            hydrateArtifactsFromMessages(merged);
-            // Cold-load path (no warm cache): the IF-branch above only set
-            // renderedChatKeyRef when restoredCached was non-empty. A chat
-            // hydrated purely from the DB fetch would otherwise render with
-            // renderedChatKeyRef still null, leaving the fresh-mount guard in
-            // the connect else-branch unable to recognize this as a real chat
-            // -> a transient-null re-run would wipe it. Stamp the key here too.
-            if (merged.length) {
-              renderedChatKeyRef.current =
-                canonicalSessionId ?? resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+            if (canonicalSessionId) {
+              persistedSessionIdRef.current = canonicalSessionId;
+              const canonicalArtifacts = readSessionArtifacts(canonicalSessionId);
+              if (canonicalArtifacts.length) addArtifacts(canonicalArtifacts);
+              void api.getSessionArtifacts(canonicalSessionId)
+                .then((artifactResponse) => {
+                  if (cancelled) return;
+                  addArtifacts(artifactsFromServer(artifactResponse.artifacts));
+                })
+                .catch(() => {
+                  // Artifact hydration is additive; transcript hydration already
+                  // carries the user-visible failure state for this resume.
+                });
+              void api.getSessionTurnUsage(canonicalSessionId)
+                .then((usageResponse) => {
+                  if (cancelled) return;
+                  setTurnUsage(usageResponse.turn_usage ?? []);
+                })
+                .catch(() => {
+                  // Per-turn footer is additive; absence just hides model/cost.
+                });
+              void api.getSessionChildren(canonicalSessionId)
+                .then((childResponse) => {
+                  if (cancelled) return;
+                  setChildSessions(
+                    (childResponse.children ?? []).filter(
+                      (c) => c.session_kind === "subagent",
+                    ),
+                  );
+                })
+                .catch(() => {
+                  // Subagent drill-in is additive; absence just hides Open links.
+                });
             }
-            if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
-              // The merged transcript shows no live turn remaining — clear busy.
-              // For a subagent this means it's DONE (its last message is the
-              // result), so it renders settled. A still-running subagent's
-              // server transcript ends at the goal (last msg = user), so
-              // hasPendingTurn stays true and it keeps the working indicator.
-              setBusy(false);
-              setStatusText("Ready");
-            } else {
-              setBusy(true);
-              setStatusText(isSubagentView ? "Subagent working…" : "Resuming work...");
-            }
-            return merged;
+            const hydrated = normalizeStoredTranscript(response.messages);
+            const latestActiveSnapshot = readActiveTurnSnapshot(resumeId);
+            historyHydratedRef.current = true;
+            // A subagent thread is short-lived and server-authoritative. NEVER
+            // merge it with prev/cache — the parent chat's messages (your raw
+            // prompt) bleed in through the merge base, and an early polluted
+            // cache write would persist it. Render straight from the server.
+            const isSubagentView = response.session_kind === "subagent";
+            setMessages((prev) => {
+              // Merge against the current UI state, not only the cache captured
+              // before gateway replay. Otherwise a slow DB hydrate can erase the
+              // in-flight assistant turn that session.resume just replayed.
+              const base = isSubagentView ? [] : (prev.length ? prev : restoredCached);
+              // SERVER TRUTH IS CANONICAL: the no-shrink union above never
+              // drops anything, so a polluted base (another chat's bubbles that
+              // leaked into this view or its localStorage cache) would survive
+              // and immediately re-persist below. Reconcile the union against
+              // the server transcript — foreign/duplicated user+assistant rows
+              // drop; the in-flight turn and just-sent optimistic messages stay.
+              const merged = reconcileWithServerTruth(
+                mergeActiveTurnSnapshot(
+                  mergeServerWithCache(hydrated, base, compactionGuardRef.current),
+                  latestActiveSnapshot,
+                ),
+                hydrated,
+                ownedSessionIdsRef.current,
+                currentAssistantRef.current,
+              );
+              rememberTranscript(canonicalSessionId, merged);
+              if (response.lineage_root_id) {
+                rememberTranscript(response.lineage_root_id, merged);
+              }
+              rememberTranscript(resumeId, merged);
+              hydrateArtifactsFromMessages(merged);
+              // Cold-load path (no warm cache): the IF-branch above only set
+              // renderedChatKeyRef when restoredCached was non-empty. A chat
+              // hydrated purely from the DB fetch would otherwise render with
+              // renderedChatKeyRef still null, leaving the fresh-mount guard in
+              // the connect else-branch unable to recognize this as a real chat
+              // -> a transient-null re-run would wipe it. Stamp the key here too.
+              if (merged.length) {
+                renderedChatKeyRef.current =
+                  canonicalSessionId ?? resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+              }
+              if (!latestActiveSnapshot && !hasPendingTurn(merged)) {
+                // The merged transcript shows no live turn remaining — clear busy.
+                // For a subagent this means it's DONE (its last message is the
+                // result), so it renders settled. A still-running subagent's
+                // server transcript ends at the goal (last msg = user), so
+                // hasPendingTurn stays true and it keeps the working indicator.
+                setBusy(false);
+                setStatusText("Ready");
+              } else {
+                setBusy(true);
+                setStatusText(isSubagentView ? "Subagent working…" : "Resuming work...");
+              }
+              return merged;
+            });
+          })
+          .catch((error: Error) => {
+            if (cancelled || restoredCached.length) return;
+            setBanner(`Could not load saved messages yet: ${error.message}`);
           });
-        })
-        .catch((error: Error) => {
-          if (cancelled || restoredCached.length) return;
-          setBanner(`Could not load saved messages yet: ${error.message}`);
+      } else {
+        persistedSessionIdRef.current = null;
+        const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
+        setMessages((prev) => {
+          // A reconnect / liveness-watchdog re-run for THIS same chat must not
+          // wipe the conversation it already rendered. Only blank when the chat
+          // key actually changed (genuinely a different chat).
+          if (
+            prev.length &&
+            (renderedChatKeyRef.current === _chatKey ||
+              (mintedSessionIdRef.current != null &&
+                mintedSessionIdRef.current === resumeId))
+          ) {
+            blankTrace("blocked same-chat list wipe (connect else)", {
+              count: prev.length,
+              chatKey: _chatKey,
+            });
+            return prev;
+          }
+          // Fresh-mount transient-null race (the open gap from 1.1.2->1.1.8).
+          // On app relaunch / page reload the connect effect can re-run with
+          // resumeId momentarily null BEFORE the cache restore settles. With
+          // every URL param null, _chatKey collapses to "__fresh_chat__" while
+          // renderedChatKeyRef still points at the real chat we just rendered,
+          // so the same-chat guard above misses and we'd wipe a live transcript.
+          // A deliberate new chat ALWAYS carries ?new= (App.tsx startNewChat +
+          // hub/config seeds), so _chatKey is never "__fresh_chat__" there.
+          // Keep what's on screen; the next run with the real resumeId re-hydrates.
+          if (
+            prev.length >= 2 &&
+            _chatKey === "__fresh_chat__" &&
+            renderedChatKeyRef.current != null &&
+            renderedChatKeyRef.current !== "__fresh_chat__"
+          ) {
+            blankTrace("blocked fresh-mount transient-null wipe (connect else)", {
+              count: prev.length,
+              renderedKey: renderedChatKeyRef.current,
+            });
+            return prev;
+          }
+          renderedChatKeyRef.current = _chatKey;
+          return [];
         });
-    } else {
-      persistedSessionIdRef.current = null;
-      const _chatKey = resumeId ?? newChatId ?? seedKey ?? "__fresh_chat__";
-      setMessages((prev) => {
-        // A reconnect / liveness-watchdog re-run for THIS same chat must not
-        // wipe the conversation it already rendered. Only blank when the chat
-        // key actually changed (genuinely a different chat).
-        if (
-          prev.length &&
-          (renderedChatKeyRef.current === _chatKey ||
-            (mintedSessionIdRef.current != null &&
-              mintedSessionIdRef.current === resumeId))
-        ) {
-          blankTrace("blocked same-chat list wipe (connect else)", {
-            count: prev.length,
-            chatKey: _chatKey,
-          });
-          return prev;
-        }
-        // Fresh-mount transient-null race (the open gap from 1.1.2->1.1.8).
-        // On app relaunch / page reload the connect effect can re-run with
-        // resumeId momentarily null BEFORE the cache restore settles. With
-        // every URL param null, _chatKey collapses to "__fresh_chat__" while
-        // renderedChatKeyRef still points at the real chat we just rendered,
-        // so the same-chat guard above misses and we'd wipe a live transcript.
-        // A deliberate new chat ALWAYS carries ?new= (App.tsx startNewChat +
-        // hub/config seeds), so _chatKey is never "__fresh_chat__" there.
-        // Keep what's on screen; the next run with the real resumeId re-hydrates.
-        if (
-          prev.length >= 2 &&
-          _chatKey === "__fresh_chat__" &&
-          renderedChatKeyRef.current != null &&
-          renderedChatKeyRef.current !== "__fresh_chat__"
-        ) {
-          blankTrace("blocked fresh-mount transient-null wipe (connect else)", {
-            count: prev.length,
-            renderedKey: renderedChatKeyRef.current,
-          });
-          return prev;
-        }
-        renderedChatKeyRef.current = _chatKey;
-        return [];
-      });
+      }
     }
+
 
     const accepts = (ev: GatewayEvent) => {
       const active = activeSessionRef.current;
@@ -5274,6 +5321,12 @@ export default function ChatPage() {
     gw.connect()
       .then(async () => {
         if (cancelled) return;
+        if (mintRerun) {
+          // Already attached to the live gateway session this view minted —
+          // no session.resume/create round-trip, no state to rebuild. The
+          // restored binding + re-registered listeners carry the stream.
+          return;
+        }
         if (draftChat) {
           setStatusText("Ready");
           return;
@@ -5600,6 +5653,15 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
       clearPendingAssistantDelta();
+      // Stash the live binding before nulling it: if the very next run is the
+      // mint URL pin's re-run for this same conversation, it restores these
+      // instead of tearing the streaming view down (see mintRerun above).
+      lastBindingStashRef.current = {
+        gw,
+        persistedId: persistedSessionIdRef.current,
+        gatewaySid: activeSessionRef.current,
+        assistantId: currentAssistantRef.current,
+      };
       activeSessionRef.current = null;
       currentAssistantRef.current = null;
       unsubs.forEach((unsub) => unsub());
@@ -6417,6 +6479,11 @@ export default function ChatPage() {
       const trimmed = text.trim();
       // An attachment-only message (image with no caption) is a valid send.
       if (!trimmed && !hasReadyAttachment) return;
+      // View generation at send time. The URL pin after the awaited send must
+      // only fire if the user is still ON this chat — a late pin from a chat
+      // they've already left would hijack the new draft's URL back to the old
+      // conversation (the "consecutive new chats takeover").
+      const submitGen = connectGenRef.current;
 
       const resetComposerForSend = () => {
         setInput("");
@@ -6517,7 +6584,7 @@ export default function ChatPage() {
           gw,
           sessionId: targetSessionId,
         });
-        pinCreatedSessionInUrl();
+        if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
         return;
       }
 
@@ -6607,7 +6674,7 @@ export default function ChatPage() {
         showedUserMessage,
         optimisticUserMessageId || undefined,
       );
-      pinCreatedSessionInUrl();
+      if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
     },
     [addArtifacts, appendMessage, artifacts, attachments, busy, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
