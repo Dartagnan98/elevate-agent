@@ -1318,6 +1318,21 @@ def _on_tool_progress(
     if event_type == "reasoning.available" and preview:
         _emit("reasoning.available", sid, {"text": str(preview)})
         return
+    if event_type == "steer.applied":
+        # A queued mid-run follow-up was actually injected (folded into a
+        # tool result / appended after the text response — possibly inside a
+        # running delegation, in which case child_session_id is set). The
+        # dashboard flips the steered bubble's chip on this.
+        payload = {
+            "count": int(_kwargs.get("count") or 1),
+            "via": str(_kwargs.get("via") or ""),
+        }
+        if _kwargs.get("sources"):
+            payload["sources"] = [str(s) for s in _kwargs["sources"]]
+        if _kwargs.get("child_session_id"):
+            payload["child_session_id"] = str(_kwargs["child_session_id"])
+        _emit("steer.applied", sid, payload)
+        return
     if event_type.startswith("subagent."):
         payload = {
             "goal": str(_kwargs.get("goal") or ""),
@@ -3129,6 +3144,50 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, payload)
 
 
+def _forward_steer_to_children(parent_keys: set[str], text: str) -> int:
+    """queue_soft_interrupt on live subagents spawned by this session's turn.
+
+    A parent blocked inside delegate_task only drains its own soft-interrupt
+    queue when the delegate tool RESULT returns — minutes away on a long
+    delegation. Forwarding into the running child agent(s) makes the steer
+    take effect mid-delegation (the child folds it into ITS next tool
+    result, and its relay emits steer.applied with child_session_id).
+    Best-effort: returns how many children accepted it.
+    """
+    keys = {str(k) for k in parent_keys if k}
+    if not keys or not text:
+        return 0
+    try:
+        from tools import delegate_tool as _dt
+    except Exception:
+        return 0
+    count = 0
+    try:
+        with _dt._active_subagents_lock:
+            records = list(_dt._active_subagents.values())
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if record.get("status") not in (None, "running"):
+                continue
+            child = record.get("agent")
+            if child is None:
+                continue
+            child_parent = str(getattr(child, "_parent_session_id", "") or "")
+            if child_parent not in keys:
+                continue
+            try:
+                if hasattr(child, "queue_soft_interrupt") and child.queue_soft_interrupt(
+                    text, source="dashboard_steer"
+                ):
+                    count += 1
+            except Exception:
+                continue
+    except Exception:
+        return count
+    return count
+
+
 @method("session.steer")
 def _(rid, params: dict) -> dict:
     """Inject a user message into the running turn without interrupting.
@@ -3138,6 +3197,18 @@ def _(rid, params: dict) -> dict:
     assistant text response so the steer is never silently lost when the
     agent finishes before a tool batch lands. Falls back to AIAgent.steer()
     for older agent instances that lack soft-interrupt support.
+
+    Two failure modes this also covers (both made "Steer now" a button that
+    silently did nothing):
+    - The addressed sid can be a stale/duplicate binding (a cold re-resume
+      built a second idle session for a conversation whose ORIGINAL session
+      is the one actually running). Queueing there meant the steer never
+      drained. Re-target the running twin by session_key.
+    - Mid-delegation, the parent drains its queue only when delegate_task
+      returns. Forward the steer into the live child agent(s) too, and tell
+      the client which case it got ("steering_delegation" — applied inside
+      the child mid-run — vs "queued_delegation" — applies when the
+      delegation returns).
     """
     text = (params.get("text") or "").strip()
     if not text:
@@ -3145,9 +3216,38 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+
+    target_session = session
     agent = session.get("agent")
+    if agent is None or not session.get("running"):
+        key = session.get("session_key")
+        for other in list(_sessions.values()):
+            if other is session or not isinstance(other, dict):
+                continue
+            if (
+                other.get("session_key") == key
+                and other.get("running")
+                and other.get("agent") is not None
+            ):
+                target_session = other
+                agent = other.get("agent")
+                break
     if agent is None:
         return _err(rid, 4010, "agent does not support steer")
+
+    running_tools = target_session.get("running_tools")
+    in_delegation = isinstance(running_tools, dict) and any(
+        str((entry or {}).get("name") or "") in ("delegate", "delegate_task")
+        for entry in running_tools.values()
+    )
+    forwarded = 0
+    if in_delegation:
+        parent_keys = {
+            str(target_session.get("session_key") or ""),
+            str(getattr(agent, "session_id", "") or ""),
+        }
+        forwarded = _forward_steer_to_children(parent_keys, text)
+
     try:
         if hasattr(agent, "queue_soft_interrupt"):
             accepted = agent.queue_soft_interrupt(text, source="dashboard_steer")
@@ -3157,7 +3257,16 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4010, "agent does not support steer")
     except Exception as exc:
         return _err(rid, 5000, f"steer failed: {exc}")
-    return _ok(rid, {"status": "queued" if accepted else "rejected", "text": text})
+    if not accepted:
+        status = "rejected"
+    elif in_delegation:
+        status = "steering_delegation" if forwarded else "queued_delegation"
+    else:
+        status = "queued"
+    return _ok(
+        rid,
+        {"status": status, "text": text, "forwarded_children": forwarded},
+    )
 
 
 @method("terminal.resize")

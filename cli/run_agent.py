@@ -4555,6 +4555,31 @@ class AIAgent:
         lines.append("Fold this into the current task before continuing. Do not restart work that is already complete.")
         return "\n".join(lines)
 
+
+    def _notify_steer_applied(self, items: list[dict[str, Any]] | None, *, via: str) -> None:
+        """Tell the host UI a queued mid-run follow-up was actually injected.
+
+        Emitted through tool_progress_callback so the gateway can relay a
+        ``steer.applied`` event — the dashboard flips the steered bubble's
+        chip from "steering…" to "applied". Best-effort: a missing or
+        raising callback never disturbs the turn.
+        """
+        cb = getattr(self, "tool_progress_callback", None)
+        if not cb:
+            return
+        try:
+            cb(
+                "steer.applied",
+                None,
+                None,
+                None,
+                count=len(items or []) or 1,
+                via=via,
+                sources=[str(i.get("source") or "user") for i in (items or [])],
+            )
+        except Exception:
+            pass
+
     def _apply_pending_soft_interrupts_to_tool_results(self, messages: list, num_tool_msgs: int | None = None) -> bool:
         """Append queued follow-ups to the latest tool result when possible."""
         if not messages:
@@ -4597,6 +4622,7 @@ class AIAgent:
             except Exception:
                 self._requeue_soft_interrupts(items)
                 return False
+        self._notify_steer_applied(items, via="tool_result")
         logger.debug(
             "Delivered %d soft interrupt(s) through tool result at index %d",
             len(items),
@@ -13662,6 +13688,7 @@ class AIAgent:
                     _soft_items = self._drain_pending_soft_interrupts()
                     _steer_after_text = self._drain_pending_steer()
                     if _soft_items or _steer_after_text:
+                        self._notify_steer_applied(_soft_items, via="after_text")
                         messages.append(final_msg)
                         _continuation_parts = []
                         if _steer_after_text:

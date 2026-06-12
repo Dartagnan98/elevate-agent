@@ -1016,6 +1016,14 @@ def _build_child_progress_callback(
             _relay("subagent.complete", preview=preview, **kwargs)
             return
 
+        # A steer forwarded into this child (session.steer mid-delegation)
+        # was actually injected into its run. Relay upward verbatim — the
+        # identity kwargs carry child_session_id, so the dashboard can flip
+        # the steered bubble's chip to "applied".
+        if event_type == "steer.applied":
+            _relay("steer.applied", **kwargs)
+            return
+
         # Normalise legacy strings, new-style "delegate.*" strings, and
         # DelegateEvent enum values all to a single DelegateEvent.  The
         # original implementation only accepted the five legacy strings;

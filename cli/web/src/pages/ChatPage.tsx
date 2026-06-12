@@ -198,6 +198,15 @@ interface ChatMessage {
   // cross-chat pollution during server reconciliation. Absent on messages
   // minted before a draft chat's session exists and on pre-fix cached rows.
   sessionKey?: string;
+  // Mid-run steering state for a user message sent while a turn was busy.
+  // "pending"          → soft-queued; the agent folds it into its next tool
+  //                      result (or right after the current text response).
+  // "delegation"       → also forwarded INTO the running subagent(s).
+  // "delegation-wait"  → parent is blocked in delegate_task and no child
+  //                      could be reached; applies when the delegation
+  //                      returns.
+  // "applied"          → the agent confirmed the injection (steer.applied).
+  steer?: "pending" | "delegation" | "delegation-wait" | "applied";
 }
 
 type ArtifactKind = "diff" | "file" | "output";
@@ -3156,6 +3165,13 @@ export default function ChatPage() {
     gatewaySid: string | null;
     assistantId: string | null;
   } | null>(null);
+  // Message ids of user bubbles steered into the running turn and not yet
+  // confirmed; the steer.applied event flips them to "applied".
+  const pendingSteerIdsRef = useRef<string[]>([]);
+  // display.busy_input_mode from config — what a plain send does while a turn
+  // is busy: "queue" (chip, waits for next turn) or "interrupt"/"steer"
+  // (soft mid-run injection via session.steer). Loaded once; default queue.
+  const busyInputModeRef = useRef<string>("queue");
   const chatStickToBottomRef = useRef(true);
   const pendingInitialBottomScrollRef = useRef(true);
   const scrollSessionKeyRef = useRef<string | null>(null);
@@ -3213,6 +3229,25 @@ export default function ChatPage() {
   // legacy-cache purge + localStorage write-through).
   useEffect(() => {
     if (TRANSCRIPT_STORE_ENABLED) activateTranscriptStore();
+  }, []);
+
+  // Resolve display.busy_input_mode once so busy sends can honor it. The
+  // config endpoint returns the nested config; tolerate a flat dotted key too.
+  useEffect(() => {
+    void api
+      .getConfig()
+      .then((cfg) => {
+        const nested = (cfg as { display?: { busy_input_mode?: unknown } })
+          ?.display?.busy_input_mode;
+        const flat = (cfg as Record<string, unknown>)?.[
+          "display.busy_input_mode"
+        ];
+        const mode = String(nested ?? flat ?? "").trim().toLowerCase();
+        if (mode) busyInputModeRef.current = mode;
+      })
+      .catch(() => {
+        /* default "queue" stands */
+      });
   }, []);
 
   // Draft→session mint moves the key (?new=<draft> → ?resume=<minted>); carry
@@ -4424,6 +4459,7 @@ export default function ChatPage() {
       // The session ids this view owns. Seeded with the resume target; mint /
       // hydrate / session.info add the rest as they're learned.
       ownedSessionIdsRef.current = new Set(resumeId ? [resumeId] : []);
+      pendingSteerIdsRef.current = [];
       // A minted-session pin only describes the chat it minted. Navigating to
       // any OTHER chat retires it — otherwise its same-chat guards keep
       // matching later runs and block legitimate switches/wipes.
@@ -4582,7 +4618,24 @@ export default function ChatPage() {
               // Merge against the current UI state, not only the cache captured
               // before gateway replay. Otherwise a slow DB hydrate can erase the
               // in-flight assistant turn that session.resume just replayed.
-              const base = isSubagentView ? [] : (prev.length ? prev : restoredCached);
+              // A subagent drill-in renders straight from the server (no
+              // prev/cache base — the parent's prompt bled in through it),
+              // but the LIVE child turn stub (created by the relayed
+              // subagent.* events while this fetch was in flight) must
+              // survive, or its activity digest detaches and the live feed
+              // goes dark.
+              const liveChildStub = isSubagentView
+                ? prev.filter(
+                    (m) =>
+                      m.status === "streaming" &&
+                      m.id === currentAssistantRef.current,
+                  )
+                : [];
+              const base = isSubagentView
+                ? liveChildStub
+                : prev.length
+                  ? prev
+                  : restoredCached;
               // SERVER TRUTH IS CANONICAL: the no-shrink union above never
               // drops anything, so a polluted base (another chat's bubbles that
               // leaked into this view or its localStorage cache) would survive
@@ -5162,6 +5215,210 @@ export default function ChatPage() {
     // first tool call shows NOTHING in the chat for the whole stretch.
     unsubs.push(gw.on("subagent.thinking", trackSubagent));
     unsubs.push(gw.on("subagent.complete", trackSubagent));
+
+    // ── Subagent DRILL-IN live feed ─────────────────────────────────────
+    // A running subagent's progress is relayed through its PARENT's
+    // tool_progress_callback and emitted under the PARENT's gateway sid
+    // (tui_gateway _on_tool_progress) — the child's own session id rides
+    // only in payload.child_session_id. This view, bound to the CHILD id,
+    // rejects every one of those frames via accepts(), so the drill-in sat
+    // blank (goal prompt only) until the child's messages persisted at turn
+    // end. Accept the relayed frames by payload identity instead: when the
+    // viewed session IS the event's child, map the stream into the live
+    // surfaces — thinking → activity trace, tool calls → tool rows,
+    // lifecycle → busy + status pill — over the hydrated transcript. The
+    // parent view never matches this filter (its resumeId is the parent id),
+    // so nothing double-paints there; trackSubagent above keeps owning the
+    // parent's digest.
+    const childPayloadFor = (
+      ev: GatewayEvent,
+    ): Record<string, unknown> | null => {
+      if (!resumeId) return null;
+      const payload = compactToolPayload(ev.payload);
+      const childId =
+        typeof payload.child_session_id === "string"
+          ? payload.child_session_id
+          : "";
+      return childId && childId === resumeId ? payload : null;
+    };
+    // The live child turn renders exactly like a normal streaming turn: an
+    // assistant stub carries the activity digest (traces + tool rows hang
+    // off its messageId). subagent.complete settles it; the 3s drill-in
+    // poll hydrates the persisted transcript beneath.
+    const ensureChildTurn = (at: number): string => {
+      setSessionKind((prev) => prev ?? "subagent");
+      setBusy(true);
+      return ensureAssistant(at);
+    };
+    unsubs.push(
+      gw.on("subagent.start", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        ensureChildTurn(eventMillis(ev));
+        setStatusText("Subagent working…");
+      }),
+    );
+    unsubs.push(
+      gw.on("subagent.thinking", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        const text = compactLine(String(payload.text ?? ""));
+        if (!text) return;
+        const at = eventMillis(ev);
+        ensureChildTurn(at);
+        setStatusText("Thinking...");
+        addActivityTrace("thinking", text, at);
+      }),
+    );
+    unsubs.push(
+      gw.on("subagent.progress", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        const at = eventMillis(ev);
+        ensureChildTurn(at);
+        const text = compactLine(String(payload.text ?? payload.summary ?? ""));
+        if (text) {
+          setStatusText(displayStatusText(text));
+          addActivityTrace("status", text, at);
+        }
+      }),
+    );
+    unsubs.push(
+      gw.on("subagent.tool", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        const name = String(payload.tool_name ?? "tool");
+        const preview = compactLine(
+          String(payload.tool_preview ?? payload.text ?? ""),
+        );
+        const at = eventMillis(ev);
+        const turnMessageId = ensureChildTurn(at);
+        lastToolActivityAtRef.current = Math.max(
+          lastToolActivityAtRef.current,
+          at,
+        );
+        setStatusText(`Running ${name}`);
+        setTools((prev) => {
+          // The relay carries no per-call completion event, so a new call
+          // settles the previous relayed row.
+          const settled = prev.map((tool) =>
+            tool.status === "running" && tool.tool_id.startsWith("child-tool:")
+              ? {
+                  ...tool,
+                  completedAt: tool.completedAt ?? at,
+                  status: "done" as const,
+                }
+              : tool,
+          );
+          return [
+            ...settled,
+            {
+              context: preview || undefined,
+              id: id(`child-tool-${name}`),
+              kind: "tool" as const,
+              messageId: turnMessageId,
+              name,
+              preview: preview || undefined,
+              startedAt: at,
+              status: "running" as const,
+              tool_id: `child-tool:${name}:${at}`,
+            },
+          ].slice(-TOOL_LIMIT);
+        });
+      }),
+    );
+    unsubs.push(
+      gw.on("subagent.complete", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        const at = eventMillis(ev);
+        const summary = compactLine(String(payload.summary ?? ""));
+        const failed = /error|fail/i.test(String(payload.status ?? ""));
+        setTools((prev) =>
+          prev.map((tool) =>
+            tool.status === "running"
+              ? {
+                  ...tool,
+                  completedAt: tool.completedAt ?? at,
+                  status: failed ? ("error" as const) : ("done" as const),
+                }
+              : tool,
+          ),
+        );
+        const stubId = currentAssistantRef.current;
+        if (stubId) {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === stubId && message.status === "streaming"
+                ? {
+                    ...message,
+                    completedAt: at,
+                    content: message.content || summary,
+                    status: failed
+                      ? ("error" as const)
+                      : ("complete" as const),
+                  }
+                : message,
+            ),
+          );
+          currentAssistantRef.current = null;
+        }
+        setBusy(false);
+        setStatusText(failed ? "Subagent finished with issues" : "Ready");
+        // The child's full answer persisted at its turn end (just before
+        // this event) — hydrate it NOW instead of waiting for the next 3s
+        // poll tick, and drop the live stub in favor of the real assistant
+        // message so the summary line isn't duplicated under it.
+        if (resumeId) {
+          void api
+            .getSessionMessages(resumeId)
+            .then((resp) => {
+              if (cancelled) return;
+              const hydrated = normalizeStoredTranscript(resp.messages);
+              if (!hydrated.length) return;
+              const hasServerAnswer = hydrated.some(
+                (m) => m.role === "assistant",
+              );
+              setMessages((prev) => {
+                const base =
+                  hasServerAnswer && stubId
+                    ? prev.filter((m) => m.id !== stubId)
+                    : prev;
+                return mergeServerWithCache(
+                  hydrated,
+                  base.length ? base : hydrated,
+                  false,
+                );
+              });
+            })
+            .catch(() => {
+              /* the 3s drill-in poll remains the fallback */
+            });
+        }
+      }),
+    );
+    unsubs.push(
+      // The agent confirmed a queued mid-run steer was actually injected
+      // (folded into a tool result / appended after the text response, or
+      // relayed from inside a running delegation). Flip the chip on the
+      // steered bubble(s) from "steering…" to "applied".
+      gw.on("steer.applied", (ev) => {
+        if (!accepts(ev)) return;
+        const ids = pendingSteerIdsRef.current;
+        if (!ids.length) return;
+        pendingSteerIdsRef.current = [];
+        setMessages((prev) =>
+          prev.map((message) =>
+            ids.includes(message.id) &&
+            message.steer &&
+            message.steer !== "applied"
+              ? { ...message, steer: "applied" as const }
+              : message,
+          ),
+        );
+        addActivityTrace("status", "Mid-run steer applied", eventMillis(ev));
+      }),
+    );
     unsubs.push(
       gw.on("tool.generating", (ev) => {
         if (!accepts(ev)) return;
@@ -6265,7 +6522,15 @@ export default function ChatPage() {
 
   const steerQueuedInput = useCallback(
     (queuedId: string) => {
-      if (!sessionId || state !== "open") return;
+      if (!sessionId || state !== "open") {
+        // The old silent return made "Steer now" a button that did NOTHING
+        // when the binding/socket was stale — the worst state. Say so.
+        setBanner(
+          "Can't steer right now — the chat isn't connected to a live session. The message stays queued.",
+        );
+        setStatusText("Steer unavailable");
+        return;
+      }
       const item = queuedInputs.find((q) => q.id === queuedId);
       if (!item) return;
       const text = item.routedText || item.text;
@@ -6287,6 +6552,9 @@ export default function ChatPage() {
               ),
             );
             setStatusText("Steer rejected");
+            setBanner(
+              "The agent rejected the steer — it will go out as the next turn instead.",
+            );
             return;
           }
           // The steer is queued server-side (queue_soft_interrupt) and the
@@ -6300,9 +6568,24 @@ export default function ChatPage() {
           // them (the reported glitch where the steer "stays above the
           // answer"). Just show the steer bubble (below the streaming answer)
           // and let the stream finish naturally.
-          appendMessage("user", item.text);
+          const steerState: ChatMessage["steer"] =
+            status === "steering_delegation"
+              ? "delegation"
+              : status === "queued_delegation"
+                ? "delegation-wait"
+                : "pending";
+          const steeredId = appendMessage("user", item.text, {
+            steer: steerState,
+          });
+          if (steeredId) pendingSteerIdsRef.current.push(steeredId);
           setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
-          setStatusText("Steer delivered");
+          setStatusText(
+            steerState === "delegation"
+              ? "Steering the running delegation..."
+              : steerState === "delegation-wait"
+                ? "Queued — applies when the delegation returns"
+                : "Steering current turn...",
+          );
         })
         .catch((error) => {
           const message = error instanceof Error ? error.message : String(error);
@@ -6372,8 +6655,21 @@ export default function ChatPage() {
             misses = 0;
           }
         })
-        .catch(() => {
-          /* transient (gateway busy/race) — keep polling */
+        .catch((error) => {
+          // "session not found" is AUTHORITATIVE, not transient: the gateway
+          // restarted and the in-memory session died with it — nothing is
+          // running. Treating it as a retryable error left busy stuck true
+          // (and queued sends stranded) forever after a daemon restart.
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (/session not found/i.test(message)) {
+            misses += 1;
+            if (misses >= 2) {
+              setBusy(false);
+              setStatusText("Ready");
+            }
+          }
+          /* other errors: transient (gateway busy/race) — keep polling */
         });
     }, 4000);
     return () => {
@@ -6601,7 +6897,23 @@ export default function ChatPage() {
       }
 
       if (!targetSessionId || (state !== "open" && !draftChat)) {
-        if (showedUserMessage) setBusy(false);
+        if (showedUserMessage) {
+          setBusy(false);
+          // The optimistic bubble + thinking stub were already painted, and
+          // the queued chip below renders the SAME text — remove the bubble
+          // so the message isn't shown twice (the drain re-appends it when
+          // it actually sends). This was the bubble+chip double-render after
+          // a websocket drop.
+          const stubId = currentAssistantRef.current;
+          currentAssistantRef.current = null;
+          setMessages((prev) =>
+            prev.filter(
+              (m) =>
+                m.id !== optimisticUserMessageId &&
+                (stubId ? m.id !== stubId : true),
+            ),
+          );
+        }
         const queued: QueuedInput = {
           agentId: selectedAgent.id,
           createdAt: Date.now(),
@@ -6612,6 +6924,10 @@ export default function ChatPage() {
         };
         setQueuedInputs((prev) => [...prev, queued].slice(-5));
         setStatusText("Queued until connected");
+        // Kick the transport now instead of waiting for a watchdog window —
+        // the reconnect re-runs the connect effect, reconciles busy with
+        // gateway truth, and the queue drain then auto-sends this in order.
+        if (state === "closed" || state === "error") reconnect();
         return;
       }
 
@@ -6634,6 +6950,54 @@ export default function ChatPage() {
       }
 
       if (busy) {
+        // Honor display.busy_input_mode for plain sends during a busy turn:
+        // "interrupt"/"steer" → soft mid-run injection (session.steer →
+        // queue_soft_interrupt: folds into the next tool result, or right
+        // after the current text response) with an immediate, honest chip on
+        // the bubble. Hard-interrupting the turn from the dashboard would
+        // destroy in-flight work on a misclick, so "interrupt" maps to the
+        // soft steer here too. "queue"/"block"/unknown → queued chip (waits
+        // for the current turn), exactly as before. Steer failures fall back
+        // to the queue so the message is never lost.
+        const mode = busyInputModeRef.current;
+        if (
+          (mode === "interrupt" || mode === "steer") &&
+          targetSessionId &&
+          state === "open"
+        ) {
+          try {
+            const response = await gw.request("session.steer", {
+              session_id: targetSessionId,
+              text: routedText,
+            });
+            const status =
+              response && typeof response === "object" && "status" in response
+                ? String((response as Record<string, unknown>).status)
+                : "queued";
+            if (status !== "rejected") {
+              const steerState: ChatMessage["steer"] =
+                status === "steering_delegation"
+                  ? "delegation"
+                  : status === "queued_delegation"
+                    ? "delegation-wait"
+                    : "pending";
+              const steeredId = appendMessage("user", trimmed, {
+                steer: steerState,
+              });
+              if (steeredId) pendingSteerIdsRef.current.push(steeredId);
+              setStatusText(
+                steerState === "delegation"
+                  ? "Steering the running delegation..."
+                  : steerState === "delegation-wait"
+                    ? "Queued — applies when the delegation returns"
+                    : "Steering current turn...",
+              );
+              return;
+            }
+          } catch {
+            /* fall through to the queue chip below */
+          }
+        }
         const queued: QueuedInput = {
           agentId: selectedAgent.id,
           createdAt: Date.now(),
@@ -6760,23 +7124,30 @@ export default function ChatPage() {
   }, [gw]);
 
   useEffect(() => {
-    if (!busy) return;
     const STALL_MS = 45_000;
+    // A dropped socket reconnects fast even when idle: the old busy-only
+    // gate left an idle chat wedged after a drop — the next send rendered a
+    // "Queued until connected" chip that could never drain because nothing
+    // ever reconnected (the gateway session's transport also still pointed
+    // at the dead socket, so a bare re-open wouldn't stream anyway; the
+    // version bump re-runs the connect effect -> session.resume, which
+    // rebinds the transport AND reconciles busy with gateway truth).
+    const DROP_COOLDOWN_MS = 10_000;
     const timer = window.setInterval(() => {
       const now = Date.now();
-      if (now - stallReconnectAtRef.current < STALL_MS) return; // cooldown
-      const droppedMidTurn = state === "closed" || state === "error";
+      const dropped = state === "closed" || state === "error";
       const stalledMidTurn =
-        state === "open" && now - lastFrameAtRef.current > STALL_MS;
-      if (droppedMidTurn || stalledMidTurn) {
-        stallReconnectAtRef.current = now;
-        lastFrameAtRef.current = now;
-        reconnectRunRef.current = true;
-        window.setTimeout(() => {
-          reconnectRunRef.current = false;
-        }, 6000);
-        setVersion((value) => value + 1); // reconnect -> session.resume
-      }
+        busy && state === "open" && now - lastFrameAtRef.current > STALL_MS;
+      if (!dropped && !stalledMidTurn) return;
+      const cooldown = dropped ? DROP_COOLDOWN_MS : STALL_MS;
+      if (now - stallReconnectAtRef.current < cooldown) return;
+      stallReconnectAtRef.current = now;
+      lastFrameAtRef.current = now;
+      reconnectRunRef.current = true;
+      window.setTimeout(() => {
+        reconnectRunRef.current = false;
+      }, 6000);
+      setVersion((value) => value + 1); // reconnect -> session.resume
     }, 5_000);
     return () => window.clearInterval(timer);
   }, [busy, state]);
@@ -9157,6 +9528,32 @@ function MessageRow({
               diff section); generated documents/files live in the grouped
               Artifacts panel. Nothing persists here once the turn is done. */}
         </div>
+        {isUser && message.steer ? (
+          <div
+            className={cn(
+              "mt-1 inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.68rem]",
+              message.steer === "applied"
+                ? "border-[color-mix(in_srgb,var(--status-sage,#7bbf6a)_45%,transparent)] text-[var(--status-sage,#7bbf6a)]"
+                : "border-[var(--chat-border-strong)] text-[var(--chat-muted)]",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block h-1.5 w-1.5 rounded-full",
+                message.steer === "applied"
+                  ? "bg-[var(--status-sage,#7bbf6a)]"
+                  : "bg-[var(--chat-muted)] animate-pulse",
+              )}
+            />
+            {message.steer === "applied"
+              ? "Applied mid-run"
+              : message.steer === "delegation"
+                ? "Steering the running delegation"
+                : message.steer === "delegation-wait"
+                  ? "Queued — applies when the delegation returns"
+                  : "Steering — applies at the next tool result"}
+          </div>
+        ) : null}
         {isAssistant && message.content ? (
           <TurnFooter
             usage={turnUsage}
