@@ -14022,6 +14022,15 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     SENDER_TICK_EVERY = 2    # ticks — every 2 minutes at default 60s interval
     INBOUND_TICK_EVERY = 10  # ticks — every 10 minutes; matches composio_capabilities.json default_poll_interval_minutes
     STALE_CODE_EVERY = 5     # ticks — every 5 minutes
+    # A busy box (heartbeat crons back-to-back) can defer the stale-code
+    # restart forever — agents are never idle at the exact check tick, so
+    # the gateway keeps running last week's code until a reboot (Justin,
+    # 2026-06-12: bundle on 1.2.41, gateway still on 1.2.38 in memory).
+    # After this many minutes stale, restart even with agents running:
+    # cron runs are short-lived and durable (handoff reaper + next tick
+    # re-fire), while indefinitely-stale code is the worse failure.
+    STALE_CODE_FORCE_MINUTES = 30
+    stale_code_since: Optional[float] = None
 
     boot_code_fp = _bundled_code_fingerprint()
     logger.info("Cron ticker started (interval=%ds)", interval)
@@ -14064,6 +14073,9 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             try:
                 current_fp = _bundled_code_fingerprint()
                 if current_fp and current_fp != boot_code_fp:
+                    if stale_code_since is None:
+                        stale_code_since = time.time()
+                    stale_minutes = (time.time() - stale_code_since) / 60
                     if runner._running_agent_count() == 0:
                         logger.info(
                             "Bundled code changed on disk (desktop update) — "
@@ -14072,11 +14084,24 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
                         loop.call_soon_threadsafe(
                             lambda: runner.request_restart(via_service=True)
                         )
-                    else:
-                        logger.debug(
-                            "Code update detected on disk; deferring gateway "
-                            "restart until agents are idle"
+                    elif stale_minutes >= STALE_CODE_FORCE_MINUTES:
+                        logger.warning(
+                            "Bundled code stale for %.0f min and agents never "
+                            "idle — forcing gateway restart to load the update",
+                            stale_minutes,
                         )
+                        loop.call_soon_threadsafe(
+                            lambda: runner.request_restart(via_service=True)
+                        )
+                    else:
+                        logger.info(
+                            "Code update detected on disk; deferring gateway "
+                            "restart until agents are idle (%.0f/%d min)",
+                            stale_minutes,
+                            STALE_CODE_FORCE_MINUTES,
+                        )
+                else:
+                    stale_code_since = None
             except Exception as exc:
                 logger.debug("Stale-code check error: %s", exc)
 
