@@ -3127,10 +3127,6 @@ export default function ChatPage() {
   // message.complete a beat after the next turn already started) can't tear
   // down the live turn's thinking/tools — it settles the old bubble instead.
   const liveGatewayMsgIdRef = useRef<string | null>(null);
-  // True while the open bubble is a multi-round steered run: its content is
-  // the accumulated rounds, so the final message.complete must keep the
-  // merged content instead of replacing it with only the last round's text.
-  const steeredRunRef = useRef(false);
   const stoppedAssistantIdsRef = useRef<Set<string>>(new Set());
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const commandPopoverRef = useRef<SlashPopoverHandle | null>(null);
@@ -5095,18 +5091,31 @@ export default function ChatPage() {
         // Settling + restarting here is what made a steer "cancel the
         // working" and render the continuation as a disconnected turn.
         const isContinuation =
-          compactToolPayload(ev.payload).continuation === true &&
-          currentAssistantRef.current !== null;
+          compactToolPayload(ev.payload).continuation === true;
         liveGatewayMsgIdRef.current = eventString(ev, "message_id") || null;
         if (isContinuation) {
+          // The split (at the followup-flagged complete) already froze round
+          // 1 and opened the continuation bubble below the steered message —
+          // adopt the new wire id into it and keep the run alive. The steer
+          // marker lives at the end of round 1's timeline; no duplicate here.
+          const ids = pendingSteerIdsRef.current;
+          if (ids.length) {
+            pendingSteerIdsRef.current = [];
+            setMessages((prev) =>
+              prev.map((message) =>
+                ids.includes(message.id) && message.steer && message.steer !== "applied"
+                  ? { ...message, steer: "applied" as const }
+                  : message,
+              ),
+            );
+          }
+          ensureAssistant(at);
           setBusy(true);
           setCompacting(false);
           setStatusText("Working...");
-          addActivityTrace("marker", "Conversation steered", at);
           return;
         }
         lastToolActivityAtRef.current = 0;
-        steeredRunRef.current = false;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant(at, eventString(ev, "message_id") || undefined);
         // Snapshot cumulative output tokens so message.complete can diff
@@ -5153,17 +5162,13 @@ export default function ChatPage() {
         // settling here is what flipped the digest to "Worked for Ns" and
         // made the steer look like it killed the turn.
         if (compactToolPayload(ev.payload).followup === true) {
-          steeredRunRef.current = true;
           updateUsageFromPayload(ev);
           const followupText = eventText(ev);
           flushAssistantDelta();
           if (followupText) {
             updateAssistant((message) => ({
               ...message,
-              // Settle this round's text and open a paragraph break so the
-              // continuation round streams as a new paragraph, not glued to
-              // the previous sentence.
-              content: `${followupText}\n\n`,
+              content: followupText,
             }));
             addArtifacts(
               artifactsFromText(
@@ -5173,6 +5178,10 @@ export default function ChatPage() {
               ),
             );
           }
+          // Freeze round 1 (its timeline ends with the steer marker) and
+          // open the continuation bubble BELOW the steered user message;
+          // the next round streams there and answers the steer in place.
+          splitRunAtSteer(at);
           setStatusText("Working...");
           return;
         }
@@ -5257,15 +5266,8 @@ export default function ChatPage() {
             : undefined;
         turnOutputBaselineRef.current = null;
 
-        const wasSteeredRun = steeredRunRef.current;
-        steeredRunRef.current = false;
         updateAssistant((message) => {
-          // A steered multi-round run accumulated every round in the bubble;
-          // the complete payload only carries the LAST round's text, so the
-          // accumulated content is the authoritative final.
-          const finalContent = wasSteeredRun
-            ? message.content || text
-            : text || message.content;
+          const finalContent = text || message.content;
           const estimatedTurnTokens =
             estimateTokens(finalContent) +
             turnTraces.reduce(
@@ -5573,10 +5575,11 @@ export default function ChatPage() {
           ),
         );
         addActivityTrace("status", "Mid-run steer applied", eventMillis(ev));
-        // Drop a labelled marker into the run's step timeline so the steer
-        // shows up exactly where it landed — like a tool call row — instead
-        // of the steered bubble silently sitting below until the run ends.
-        addActivityTrace("marker", "Conversation steered", eventMillis(ev));
+        // Freeze the work-so-far (timeline ends with the steer marker) and
+        // continue the run in a fresh bubble below the steered message, so
+        // the response visibly flows PAST the steer instead of the steer
+        // dangling under a still-streaming bubble.
+        splitRunAtSteer(eventMillis(ev));
       }),
     );
     unsubs.push(
@@ -6679,6 +6682,54 @@ export default function ChatPage() {
   const removeQueuedInput = useCallback((queuedId: string) => {
     setQueuedInputs((prev) => prev.filter((item) => item.id !== queuedId));
   }, []);
+
+  // Split the visual run at the moment a steer is injected: freeze the
+  // work-so-far onto the current assistant bubble (its timeline ends with
+  // the "Conversation steered" marker), then continue the run in a FRESH
+  // bubble that renders BELOW the steered user message — so the chat reads
+  // user → work → steer → work continues → answer, instead of the steer
+  // dangling under a still-streaming bubble looking unanswered. Deltas,
+  // traces and tools after the split follow currentAssistantRef into the
+  // new bubble; the turn's final message.complete settles that bubble.
+  const splitRunAtSteer = useCallback(
+    (at: number) => {
+      const prevId = currentAssistantRef.current;
+      if (!prevId) return;
+      addActivityTrace("marker", "Conversation steered", at);
+      const turnTools = toolsRef.current
+        .filter((tool) => tool.messageId === prevId)
+        .map((tool) =>
+          tool.status === "running"
+            ? { ...tool, status: "done" as const, completedAt: tool.completedAt ?? at }
+            : tool,
+        );
+      const turnTraces = activityTraceRef.current.filter(
+        (trace) =>
+          trace.messageId === prevId &&
+          (trace.kind === "reasoning" ||
+            trace.kind === "thinking" ||
+            trace.kind === "marker"),
+      );
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === prevId
+            ? {
+                ...m,
+                completedAt: at,
+                status: "complete" as const,
+                tools: turnTools.length ? turnTools : m.tools,
+                traces: turnTraces.length ? turnTraces : m.traces,
+              }
+            : m,
+        ),
+      );
+      setTools((prev) => prev.filter((tool) => tool.messageId !== prevId));
+      setActivityTrace((prev) => prev.filter((trace) => trace.messageId !== prevId));
+      currentAssistantRef.current = null;
+      ensureAssistant(at);
+    },
+    [addActivityTrace, ensureAssistant],
+  );
 
   const steerQueuedInput = useCallback(
     (queuedId: string) => {
