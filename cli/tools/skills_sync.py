@@ -192,6 +192,18 @@ _STALE_CONTENT_MARKERS: tuple = (
     "SQLite closure",
     "Deal source: SQLite",
     "Board rows persist in SQLite",
+    # Hand-rolled browser automation baked in by the post-task skill review:
+    # an agent that fought through a login with terminal-scripted Selenium /
+    # raw CDP can "learn" that approach into its local copy of a bundled
+    # skill, which then shadows the bundled fix that forbids it (the
+    # user-modified guard sees a divergent hash and skips). These are CODE
+    # strings only — the bundled prose forbids Selenium/chromedriver in
+    # words, never in code, so the both-sides check at the call site stays
+    # false for clean bundled copies.
+    "from selenium",
+    "webdriver.Chrome",
+    "debuggerAddress",
+    "remote-allow-origins",
 )
 
 
