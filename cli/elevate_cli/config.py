@@ -1346,6 +1346,19 @@ DEFAULT_CONFIG = {
         # Wrap delivered cron responses with a header (task name) and footer
         # ("The agent cannot see this message").  Set to false for clean output.
         "wrap_response": True,
+        # Free-text formatting rules appended to every cron job's prompt for
+        # this account ("3 bullets max, no headers, lead with anything that
+        # needs me, skip routine all-clear detail"). Per-job override:
+        # job.response_style.
+        "response_style": "",
+        # Repeat suppression: if a job delivered substantially the same
+        # content within this window, the new delivery falls silent (the run
+        # still happens and is logged). 0 disables. Per-job overrides:
+        # job.dedupe_window_hours / job.dedupe_similarity.
+        "dedupe_window_hours": 4,
+        # 0..1 token-overlap similarity at/above which a delivery counts as
+        # a repeat of the previous one.
+        "dedupe_similarity": 0.85,
         # Maximum number of due jobs to run in parallel per tick.
         # null/0 = unbounded (limited only by thread count).
         # 1 = serial (pre-v0.9 behaviour).

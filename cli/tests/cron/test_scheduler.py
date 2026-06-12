@@ -578,6 +578,120 @@ class TestDeliverResultWrapping:
         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
         assert "I ran “abc 123” — here’s what I found:" in sent_content
 
+    def test_delivery_skips_wrapper_when_content_already_announces_the_run(self):
+        """Cron prose that opens with its own "Just ran X" line must not get a
+        second header stacked on top (the double-title bug)."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        prose = 'Just ran heartbeat "Executive Assistant" — here\'s what happened:\n\nAll healthy.'
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "test-job",
+                "name": "heartbeat-executive-assistant",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, prose)
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert "here’s what I found" not in sent_content
+        assert sent_content.startswith("Just ran heartbeat")
+
+    def test_repeat_delivery_within_window_falls_silent(self):
+        """A job that just said substantially the same thing stays quiet."""
+        import time as _time
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        prose = "Still blocked on the same items: Karen Khan and Helen Montoya approvals, 21 drafts waiting."
+        job = {
+            "id": "test-job",
+            "name": "leads-heartbeat",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+            "last_delivery": {"at": _time.time() - 600, "text": prose},
+        }
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            err = _deliver_result(
+                job,
+                "Still blocked on the same items: Karen Khan and Helen Montoya approvals, 21 drafts waiting.",
+            )
+
+        assert err is None
+        send_mock.assert_not_called()
+
+    def test_different_content_still_delivers_within_window(self):
+        import time as _time
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        job = {
+            "id": "test-job",
+            "name": "leads-heartbeat",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+            "last_delivery": {"at": _time.time() - 600, "text": "Routine all-clear, nothing pending."},
+        }
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.update_job", create=True):
+            err = _deliver_result(job, "Hot lead just came in: Sarah Connor wants a showing today at 4pm.")
+
+        assert err is None
+        send_mock.assert_called_once()
+
+    def test_repeat_outside_window_still_delivers(self):
+        import time as _time
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        prose = "Still blocked on the same items: approvals pending."
+        job = {
+            "id": "test-job",
+            "name": "leads-heartbeat",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+            "last_delivery": {"at": _time.time() - 5 * 3600, "text": prose},
+        }
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            err = _deliver_result(job, prose)
+
+        assert err is None
+        send_mock.assert_called_once()
+
+    def test_response_style_injected_into_prompt(self):
+        from cron.scheduler import _build_job_prompt
+
+        job = {
+            "id": "j1",
+            "name": "leads-heartbeat",
+            "prompt": "Check the leads.",
+            "response_style": "3 bullets max, lead with anything that needs me.",
+        }
+        prompt = _build_job_prompt(job)
+        assert "DELIVERY STYLE" in prompt
+        assert "3 bullets max" in prompt
+
     def test_delivery_skips_wrapping_when_config_disabled(self):
         """When cron.wrap_response is false, deliver raw content without header/footer."""
         from gateway.config import Platform

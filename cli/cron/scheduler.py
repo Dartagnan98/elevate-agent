@@ -1086,6 +1086,80 @@ def _send_media_via_adapter(
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
 
 
+def _delivery_similarity(a: str, b: str) -> float:
+    """Token-overlap (Jaccard) similarity of two delivery texts, 0..1.
+
+    Cheap and explainable: lowercase alphanumeric tokens, set overlap. Good
+    enough to catch a heartbeat re-reporting the same blocked-items list,
+    while genuinely new content (different names/numbers/topics) scores low.
+    """
+    ta = set(re.findall(r"[a-z0-9]+", str(a or "").lower()))
+    tb = set(re.findall(r"[a-z0-9]+", str(b or "").lower()))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _suppress_repeat_delivery(job: dict, content: str) -> bool:
+    """True when this delivery should fall silent as a repeat.
+
+    A job that delivered substantially the same content within the dedupe
+    window stays quiet (the run itself still happens and is logged). Window
+    and threshold come from config cron.dedupe_window_hours /
+    cron.dedupe_similarity, overridable per job.
+    """
+    try:
+        cron_cfg = load_config().get("cron", {}) or {}
+    except Exception:
+        cron_cfg = {}
+
+    def _num(job_key: str, cfg_key: str, default: float) -> float:
+        raw = job.get(job_key, cron_cfg.get(cfg_key, default))
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    window_hours = _num("dedupe_window_hours", "dedupe_window_hours", 4.0)
+    if window_hours <= 0:
+        return False
+    threshold = min(1.0, max(0.0, _num("dedupe_similarity", "dedupe_similarity", 0.85)))
+    prev = job.get("last_delivery")
+    if not isinstance(prev, dict):
+        return False
+    try:
+        prev_at = float(prev.get("at") or 0)
+    except (TypeError, ValueError):
+        return False
+    if prev_at <= 0 or (time.time() - prev_at) > window_hours * 3600:
+        return False
+    similarity = _delivery_similarity(str(prev.get("text") or ""), content)
+    if similarity < threshold:
+        return False
+    logger.info(
+        "Job '%s': delivery suppressed as a repeat (similarity %.2f >= %.2f, "
+        "last delivery %.0f min ago)",
+        job.get("name", job.get("id")),
+        similarity,
+        threshold,
+        (time.time() - prev_at) / 60,
+    )
+    return True
+
+
+def _record_delivery(job: dict, content: str) -> None:
+    """Persist what this job just delivered so the repeat gate can compare."""
+    try:
+        from cron.jobs import update_job
+
+        snapshot = {"at": time.time(), "text": str(content or "")[:6000]}
+        job["last_delivery"] = snapshot
+        if job.get("id"):
+            update_job(str(job["id"]), {"last_delivery": snapshot})
+    except Exception:
+        logger.debug("Job '%s': failed to record delivery snapshot", job.get("id"), exc_info=True)
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delivered=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -1111,6 +1185,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delive
             return msg
         return None  # local-only jobs don't deliver — not a failure
 
+    # Repeat gate: same job said substantially the same thing inside the
+    # dedupe window -> fall silent instead of re-pinging the user.
+    if _suppress_repeat_delivery(job, content):
+        return None
+
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
@@ -1131,9 +1210,24 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delive
         # instructions live in the dashboard, not every delivery.
         task_name = str(job.get("name", job["id"]) or "").strip()
         nice_name = task_name.replace("-", " ").replace("_", " ").strip()
+        # Cron prose means the agent's reply usually introduces itself
+        # ("Just ran heartbeat "X" — here's what happened:"). Prepending the
+        # header on top of that delivers two titles back-to-back. Skip the
+        # wrapper whenever the opening line already announces the run —
+        # either a first-person "ran" phrasing or the job's own name.
+        first_line = next(
+            (ln.strip() for ln in str(content or "").splitlines() if ln.strip()),
+            "",
+        )
+        fl_norm = re.sub(r"[^a-z0-9 ]+", " ", first_line.lower())
+        name_norm = re.sub(r"[^a-z0-9 ]+", " ", nice_name.lower()).strip()
+        already_announced = bool(first_line) and bool(
+            re.match(r"\s*(i\s+)?(just\s+)?ran\b", fl_norm)
+            or (name_norm and name_norm in fl_norm)
+        )
         delivery_content = (
             f"I ran “{nice_name}” — here’s what I found:\n\n{content}"
-            if nice_name
+            if nice_name and not already_announced
             else content
         )
     else:
@@ -1299,6 +1393,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None, on_delive
 
     if delivery_errors:
         return "; ".join(delivery_errors)
+    # Every target delivered — snapshot the content so the repeat gate can
+    # compare the next run against what the user actually just received.
+    _record_delivery(job, content)
     return None
 
 
@@ -1637,6 +1734,22 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         "Never combine [SILENT] with content — either report your "
         "findings normally, or say [SILENT] and nothing more.]\n\n"
     )
+    # Account-level (config cron.response_style) or per-job formatting rules.
+    # These are the user's own words about how cron updates should read —
+    # they refine the FORMAT guidance above and win on any conflict.
+    response_style = str(job.get("response_style") or "").strip()
+    if not response_style:
+        try:
+            response_style = str(
+                (load_config().get("cron", {}) or {}).get("response_style") or ""
+            ).strip()
+        except Exception:
+            response_style = ""
+    if response_style:
+        cron_hint += (
+            "[DELIVERY STYLE — the user configured how these updates must "
+            f"read; follow it over the default FORMAT guidance: {response_style}]\n\n"
+        )
     prompt = cron_hint + _heartbeat_report_mode_hint(job) + prompt
     if skills is None:
         legacy = job.get("skill")
