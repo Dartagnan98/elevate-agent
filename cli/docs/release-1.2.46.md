@@ -2,11 +2,12 @@
 
 Steering tells the truth, and the app opens fast.
 
-## The app opens in ~2 seconds again
+## No more slow launch right after an update
 
-A change in 1.2.40 accidentally made every launch wait ~11 seconds on a
-cosmetic macOS Dock call before showing anything. The window now appears
-immediately and the Dock registration happens in the background.
+The relaunch that follows an update install could hang ~11 seconds on a
+macOS Dock call before showing anything (a 1.2.40 change waited on it).
+The window now appears immediately and the Dock registration happens in
+the background. Normal launches were already fast and are unchanged.
 
 ## A steered run is one honest timeline
 
