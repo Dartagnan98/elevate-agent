@@ -2530,6 +2530,8 @@ export interface SessionChildItem {
   end_reason?: string | null;
   message_count?: number | null;
   tool_call_count?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
   title?: string | null;
   model?: string | null;
   session_kind?: string | null;
