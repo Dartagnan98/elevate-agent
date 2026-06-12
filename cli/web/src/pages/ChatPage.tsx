@@ -230,7 +230,7 @@ interface QueuedInput {
   createdAt: number;
   id: string;
   routedText: string;
-  status: "queued" | "error";
+  status: "queued" | "error" | "steering";
   text: string;
 }
 
@@ -321,7 +321,11 @@ interface ActivityTrace {
   id: string;
   // "marker" = an injected run event (e.g. "Conversation steered") that gets
   // its own labelled row in the step timeline, like a tool call.
-  kind: "reasoning" | "status" | "thinking" | "marker";
+  // "steer" = the user's steered message itself, rendered inline in the
+  // timeline as a right-aligned chat bubble at the point it was injected.
+  // "interim" = answer text a continuation ran past — the model's own words,
+  // rendered as a prose block in the flow; the final answer owns the body.
+  kind: "reasoning" | "status" | "thinking" | "marker" | "steer" | "interim";
   text: string;
   messageId?: string;
 }
@@ -1063,6 +1067,9 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       : undefined;
 
   const out: ChatMessage[] = [];
+  // Indexes (into `out`) of user rows persisted with the "steer." id prefix —
+  // mid-run steers the merge pass below folds back into one visual run.
+  const steerRowIdxs: number[] = [];
   // Buffer tool calls (incl. those on empty-content assistant turns that the
   // transcript filter drops) and attach them to the next kept assistant turn —
   // so the tool-call dropdown rebuilds from the saved record and shows even
@@ -1144,6 +1151,13 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       chat.tools = pendingTools.map((t) => ({ ...t, messageId }));
       pendingTools = [];
     }
+    if (
+      m.role === "user" &&
+      typeof m.message_id === "string" &&
+      m.message_id.startsWith("steer.")
+    ) {
+      steerRowIdxs.push(out.length);
+    }
     out.push(chat);
   });
 
@@ -1163,6 +1177,59 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
         break;
       }
     }
+  }
+
+  // Steered continuation rounds (user row persisted as "steer.…") fold back
+  // into ONE visual run — the previous assistant card absorbs the inline
+  // steer bubble, a "Conversation steered" marker, and the next round's
+  // reasoning/tools/text — so the rehydrated transcript reads exactly like
+  // the live view did: one header, one timeline, the answer at the end.
+  // Reverse order so chained steers (A,U,B,U2,C) collapse correctly.
+  for (let k = steerRowIdxs.length - 1; k >= 0; k -= 1) {
+    const ui = steerRowIdxs[k];
+    const U = out[ui];
+    const A = out[ui - 1];
+    const B = out[ui + 1];
+    if (
+      !U || U.role !== "user" ||
+      !A || A.role !== "assistant" ||
+      !B || B.role !== "assistant"
+    ) {
+      continue;
+    }
+    const steerAt = U.createdAt || A.completedAt || A.createdAt;
+    const merged: ChatMessage = {
+      ...A,
+      content: [A.content, B.content].filter(Boolean).join("\n\n"),
+      completedAt: B.completedAt ?? A.completedAt,
+      traces: [
+        ...(A.traces ?? []),
+        {
+          createdAt: steerAt,
+          id: `${A.id}-steer-${k}`,
+          kind: "steer" as const,
+          text: U.content || "",
+          messageId: A.id,
+        },
+        {
+          createdAt: steerAt + 1,
+          id: `${A.id}-steer-marker-${k}`,
+          kind: "marker" as const,
+          text: "Conversation steered",
+          messageId: A.id,
+        },
+        ...(B.traces ?? []).map((t) => ({ ...t, messageId: A.id })),
+      ],
+      tools: [
+        ...(A.tools ?? []),
+        ...(B.tools ?? []).map((t) => ({ ...t, messageId: A.id })),
+      ],
+      tokenCount:
+        typeof A.tokenCount === "number" || typeof B.tokenCount === "number"
+          ? (A.tokenCount ?? 0) + (B.tokenCount ?? 0)
+          : undefined,
+    };
+    out.splice(ui - 1, 3, merged);
   }
 
   return out;
@@ -1301,7 +1368,7 @@ function slimTracesForStorage(
     // thought, not a 500-char stub, on reload/resume. Only non-reasoning
     // traces (tool/status rows) stay capped to bound localStorage size.
     text:
-      trace.kind === "reasoning" || trace.kind === "thinking"
+      trace.kind === "reasoning" || trace.kind === "thinking" || trace.kind === "interim"
         ? trace.text
         : trace.text.length > 500
           ? `${trace.text.slice(0, 500)}…`
@@ -1354,7 +1421,9 @@ function normalizeActiveTurnSnapshot(raw: unknown): ActiveTurnSnapshot | null {
       (trace.kind === "reasoning" ||
         trace.kind === "status" ||
         trace.kind === "thinking" ||
-        trace.kind === "marker"),
+        trace.kind === "marker" ||
+        trace.kind === "steer" ||
+        trace.kind === "interim"),
     )
     .slice(-80)
     .map((trace) => ({ ...trace, messageId: trace.messageId ?? messageId }));
@@ -1759,12 +1828,24 @@ function mergeServerWithCache(
     out.push(enrichedByFp.get(key) ?? cm);
   }
   // Anything the server has that the cache never saw (a turn that completed
-  // server-side after the cache snapshot) — append in server order.
+  // server-side after the cache snapshot) — INSERT BY TIME, not blind-append.
+  // The user's own message persists only at turn flush: leave mid-turn and
+  // come back, and it arrives here as a server-only row AFTER the streamed
+  // answer already sits in the cache — appending pinned it below the answer
+  // it prompted. Sliding it in by createdAt puts it back where it was sent.
   for (const sm of enriched) {
     const key = fp(sm);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(sm);
+    const at = typeof sm.createdAt === "number" ? sm.createdAt : Number.POSITIVE_INFINITY;
+    let idx = out.length;
+    while (idx > 0) {
+      const prev = out[idx - 1];
+      const prevAt = typeof prev.createdAt === "number" ? prev.createdAt : 0;
+      if (prevAt <= at) break;
+      idx--;
+    }
+    out.splice(idx, 0, sm);
   }
   blankTraceIfDropped(cached, out, fp, serverMessages.length);
   return out;
@@ -3185,6 +3266,30 @@ export default function ChatPage() {
   // Message ids of user bubbles steered into the running turn and not yet
   // confirmed; the steer.applied event flips them to "applied".
   const pendingSteerIdsRef = useRef<string[]>([]);
+  // Plain (non-delegation) steers awaiting their steer.applied confirmation.
+  // Their bubble already sits INLINE in the run timeline (added at send
+  // time); the applied event just drops the "Conversation steered" marker
+  // where the injection actually took effect — the two points don't have to
+  // coincide.
+  const pendingSteerCountRef = useRef(0);
+  // Steer requests awaiting the server's ack. The instant the user clicks
+  // "Steer now" the run must be held open — if the turn completes inside the
+  // ack window the digest would settle to "Worked for Ns" and flash back to
+  // thinking when the continuation starts.
+  const steerInFlightRef = useRef(0);
+  // When the current reasoning STRETCH began (message.start / last tool
+  // boundary / last flushed thinking chunk). gpt-5.5 delivers a stretch's
+  // prose in late buffered chunks — anchoring new reasoning rows here keeps
+  // them ORDERED BEFORE a steer bubble/marker inserted mid-stretch.
+  const stretchStartRef = useRef(0);
+  // When the current round's answer text started streaming — if a steer
+  // continues the run past it, the text converts to a timeline row anchored
+  // here instead of fighting the message body.
+  const contentStartRef = useRef(0);
+  // Steered messages accepted by the gateway but not yet APPLIED. They stay
+  // visible in the queue strip ("steering…") and only enter the timeline —
+  // bubble + marker together — at the insertion point (steer.applied).
+  const heldSteersRef = useRef<string[]>([]);
   // display.busy_input_mode from config — what a plain send does while a turn
   // is busy: "queue" (chip, waits for next turn) or "interrupt"/"steer"
   // (soft mid-run injection via session.steer). Loaded once; default queue.
@@ -4041,7 +4146,7 @@ export default function ChatPage() {
   const addActivityTrace = useCallback(
     (kind: ActivityTrace["kind"], text: string, createdAt?: number) => {
       const isReasoning = kind === "thinking" || kind === "reasoning";
-      const isMarker = kind === "marker";
+      const isMarker = kind === "marker" || kind === "steer" || kind === "interim";
       // Reasoning content keeps its RAW text: displayStatusText collapses any
       // chunk mentioning "thinking"/"reasoning"/"computing" into "Working...",
       // which (combined with the filter below) shreds real reasoning into
@@ -4059,7 +4164,15 @@ export default function ChatPage() {
       }
 
       const messageId = currentAssistantRef.current ?? undefined;
-      const at = timestampMillis(createdAt, Date.now());
+      let at = timestampMillis(createdAt, Date.now());
+      if (isReasoning) {
+        // Buffered prose flushes LATE (often at the next boundary). Anchor
+        // the row to when its stretch actually began so a steer bubble or
+        // marker inserted mid-stretch never sorts above thinking the user
+        // was already watching.
+        const anchor = Math.max(stretchStartRef.current, lastToolActivityAtRef.current) + 1;
+        if (anchor > 1 && anchor < at) at = anchor;
+      }
       const toolBoundaryAt = lastToolActivityAtRef.current;
       setActivityTrace((prev) => {
         if (isMarker) {
@@ -4524,6 +4637,8 @@ export default function ChatPage() {
       // hydrate / session.info add the rest as they're learned.
       ownedSessionIdsRef.current = new Set(resumeId ? [resumeId] : []);
       pendingSteerIdsRef.current = [];
+      pendingSteerCountRef.current = 0;
+      heldSteersRef.current = [];
       // A minted-session pin only describes the chat it minted. Navigating to
       // any OTHER chat retires it — otherwise its same-chat guards keep
       // matching later runs and block legitimate switches/wipes.
@@ -5091,31 +5206,25 @@ export default function ChatPage() {
         // Settling + restarting here is what made a steer "cancel the
         // working" and render the continuation as a disconnected turn.
         const isContinuation =
-          compactToolPayload(ev.payload).continuation === true;
+          (compactToolPayload(ev.payload).continuation === true ||
+            pendingSteerIdsRef.current.length > 0 ||
+            pendingSteerCountRef.current > 0 ||
+            heldSteersRef.current.length > 0 ||
+            steerInFlightRef.current > 0) &&
+          currentAssistantRef.current !== null;
         liveGatewayMsgIdRef.current = eventString(ev, "message_id") || null;
         if (isContinuation) {
-          // The split (at the followup-flagged complete) already froze round
-          // 1 and opened the continuation bubble below the steered message —
-          // adopt the new wire id into it and keep the run alive. The steer
-          // marker lives at the end of round 1's timeline; no duplicate here.
-          const ids = pendingSteerIdsRef.current;
-          if (ids.length) {
-            pendingSteerIdsRef.current = [];
-            setMessages((prev) =>
-              prev.map((message) =>
-                ids.includes(message.id) && message.steer && message.steer !== "applied"
-                  ? { ...message, steer: "applied" as const }
-                  : message,
-              ),
-            );
-          }
-          ensureAssistant(at);
+          // Continuation of the same visual run: adopt the new wire id and
+          // change NOTHING else — no status flip, no timer reset, no new
+          // bubble. The steer marker is already in the timeline.
+          consumeAppliedSteers(at);
           setBusy(true);
           setCompacting(false);
-          setStatusText("Working...");
           return;
         }
         lastToolActivityAtRef.current = 0;
+        stretchStartRef.current = at;
+        contentStartRef.current = 0;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
         ensureAssistant(at, eventString(ev, "message_id") || undefined);
         // Snapshot cumulative output tokens so message.complete can diff
@@ -5140,6 +5249,7 @@ export default function ChatPage() {
         const text = eventText(ev);
         if (!text) return;
         setCompacting(false);
+        if (!contentStartRef.current) contentStartRef.current = eventMillis(ev);
         ensureAssistant(eventMillis(ev));
         enqueueAssistantDelta(text);
       }),
@@ -5161,7 +5271,56 @@ export default function ChatPage() {
         // round's text into the open bubble and keep everything live —
         // settling here is what flipped the digest to "Worked for Ns" and
         // made the steer look like it killed the turn.
-        if (compactToolPayload(ev.payload).followup === true) {
+        // A steer of the user's is still pending: the gateway NEVER drops a
+        // pending steer (it re-runs it as a followup round), so even a
+        // complete WITHOUT the followup flag is not the end of this visual
+        // run — settling here is what flashed "Worked for Ns" and spawned a
+        // fresh animation for the steer round.
+        const steerStillPending =
+          (pendingSteerIdsRef.current.length > 0 ||
+            pendingSteerCountRef.current > 0 ||
+            steerInFlightRef.current > 0) &&
+          status === "complete";
+        if (steerStillPending) {
+          // Wedge guard: if the steer raced the very end of the turn and the
+          // gateway never runs a continuation (it will apply on the next
+          // turn instead), settle after a grace window rather than spinning
+          // forever. Any new message.start supersedes this.
+          const heldId = eventString(ev, "message_id");
+          window.setTimeout(() => {
+            if (
+              (pendingSteerIdsRef.current.length > 0 ||
+                pendingSteerCountRef.current > 0) &&
+              liveGatewayMsgIdRef.current === heldId
+            ) {
+              pendingSteerIdsRef.current = [];
+              pendingSteerCountRef.current = 0;
+              heldSteersRef.current = [];
+              const settleAt = Date.now();
+              const settleId = currentAssistantRef.current;
+              if (settleId) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === settleId
+                      ? { ...m, completedAt: settleAt, status: "complete" as const }
+                      : m,
+                  ),
+                );
+              }
+              currentAssistantRef.current = null;
+              setTools([]);
+              setActivityTrace([]);
+              setBusy(false);
+              setStatusText("Ready");
+            }
+          }, 15_000);
+        }
+        if (compactToolPayload(ev.payload).followup === true || steerStillPending) {
+          // A queued steer re-runs as a continuation of the SAME run.
+          // Nothing visual settles. consumeAppliedSteers converts this
+          // round's text into an interim timeline row, inserts the steer
+          // bubble + marker at the insertion point, and the next round
+          // streams fresh into the message body.
           updateUsageFromPayload(ev);
           const followupText = eventText(ev);
           flushAssistantDelta();
@@ -5178,11 +5337,7 @@ export default function ChatPage() {
               ),
             );
           }
-          // Freeze round 1 (its timeline ends with the steer marker) and
-          // open the continuation bubble BELOW the steered user message;
-          // the next round streams there and answers the steer in place.
-          splitRunAtSteer(at);
-          setStatusText("Working...");
+          consumeAppliedSteers(at);
           return;
         }
         const evMsgId = eventString(ev, "message_id");
@@ -5251,7 +5406,9 @@ export default function ChatPage() {
             trace.messageId === messageId &&
             (trace.kind === "reasoning" ||
               trace.kind === "thinking" ||
-              trace.kind === "marker"),
+              trace.kind === "marker" ||
+              trace.kind === "steer" ||
+              trace.kind === "interim"),
         );
         // Freeze this turn's token count. Prefer the real per-turn output
         // (cumulative-now minus the baseline captured at message.start);
@@ -5560,26 +5717,42 @@ export default function ChatPage() {
       // (folded into a tool result / appended after the text response, or
       // relayed from inside a running delegation). Flip the chip on the
       // steered bubble(s) from "steering…" to "applied".
+      gw.on("steer.queued", (ev) => {
+        if (!accepts(ev)) return;
+        // The gateway accepted a steer. It does NOT enter the timeline yet —
+        // it inserts at the point it actually APPLIES (steer.applied), never
+        // above thinking the user was watching when they sent it. Until
+        // then it stays visible in the queue strip as "steering…". Event-
+        // driven so a reattach mid-wait restores the same state.
+        const text = eventString(ev, "text");
+        if (!text) return;
+        if (!heldSteersRef.current.includes(text)) {
+          heldSteersRef.current.push(text);
+          pendingSteerCountRef.current = heldSteersRef.current.length;
+        }
+        setQueuedInputs((prev) =>
+          prev.some((q) => q.status === "steering" && q.text === text)
+            ? prev
+            : [
+                ...prev,
+                {
+                  agentId: "",
+                  createdAt: eventMillis(ev),
+                  id: id("steering"),
+                  routedText: text,
+                  status: "steering" as const,
+                  text,
+                },
+              ].slice(-5),
+        );
+      }),
+    );
+    unsubs.push(
       gw.on("steer.applied", (ev) => {
         if (!accepts(ev)) return;
-        const ids = pendingSteerIdsRef.current;
-        if (!ids.length) return;
-        pendingSteerIdsRef.current = [];
-        setMessages((prev) =>
-          prev.map((message) =>
-            ids.includes(message.id) &&
-            message.steer &&
-            message.steer !== "applied"
-              ? { ...message, steer: "applied" as const }
-              : message,
-          ),
-        );
-        addActivityTrace("status", "Mid-run steer applied", eventMillis(ev));
-        // Freeze the work-so-far (timeline ends with the steer marker) and
-        // continue the run in a fresh bubble below the steered message, so
-        // the response visibly flows PAST the steer instead of the steer
-        // dangling under a still-streaming bubble.
-        splitRunAtSteer(eventMillis(ev));
+        // The run itself is untouched — same bubble, same status, same
+        // timer. The steered message moves into the timeline as a marker.
+        consumeAppliedSteers(eventMillis(ev));
       }),
     );
     unsubs.push(
@@ -5980,6 +6153,14 @@ export default function ChatPage() {
           Array.isArray(resumed.replay_events) &&
           resumed.replay_events.length > 0
         ) {
+          // The ring coalesces reasoning deltas server-side, so it carries
+          // the COMPLETE live turn — replaying it rebuilds the timeline
+          // exactly as it looked live: full thinking, tool cards, steer
+          // bubbles, markers, same interleaving. Clear the locally-restored
+          // live traces first or the replay would double the reasoning on
+          // top of the localStorage snapshot; tool cards dedupe by tool_id
+          // and survive either way.
+          setActivityTrace([]);
           gw.replayEvents(resumed.replay_events);
         }
 
@@ -6683,52 +6864,58 @@ export default function ChatPage() {
     setQueuedInputs((prev) => prev.filter((item) => item.id !== queuedId));
   }, []);
 
-  // Split the visual run at the moment a steer is injected: freeze the
-  // work-so-far onto the current assistant bubble (its timeline ends with
-  // the "Conversation steered" marker), then continue the run in a FRESH
-  // bubble that renders BELOW the steered user message — so the chat reads
-  // user → work → steer → work continues → answer, instead of the steer
-  // dangling under a still-streaming bubble looking unanswered. Deltas,
-  // traces and tools after the split follow currentAssistantRef into the
-  // new bubble; the turn's final message.complete settles that bubble.
-  const splitRunAtSteer = useCallback(
+  // A steer was APPLIED — this is the insertion point. The run itself never
+  // changes (same header, status, timer). Three things happen here, in
+  // timeline order:
+  //   1. any answer text already streamed this round converts to an
+  //      "interim" timeline row (anchored to when it started streaming) so
+  //      the final answer owns the message body alone — no merge games;
+  //   2. the held steered message enters the timeline as the inline bubble
+  //      AT the insertion point (never above thinking the user watched);
+  //   3. the "Conversation steered" marker lands right after it.
+  const consumeAppliedSteers = useCallback(
     (at: number) => {
-      const prevId = currentAssistantRef.current;
-      if (!prevId) return;
-      addActivityTrace("marker", "Conversation steered", at);
-      const turnTools = toolsRef.current
-        .filter((tool) => tool.messageId === prevId)
-        .map((tool) =>
-          tool.status === "running"
-            ? { ...tool, status: "done" as const, completedAt: tool.completedAt ?? at }
-            : tool,
+      const held = heldSteersRef.current;
+      const ids = pendingSteerIdsRef.current;
+      if (!held.length && !ids.length) return;
+      heldSteersRef.current = [];
+      pendingSteerCountRef.current = 0;
+      flushAssistantDelta();
+      let interim = "";
+      updateAssistant((message) => {
+        interim = message.content || "";
+        return interim ? { ...message, content: "" } : message;
+      });
+      if (interim.trim()) {
+        addActivityTrace(
+          "interim",
+          interim,
+          contentStartRef.current && contentStartRef.current < at
+            ? contentStartRef.current
+            : at - 2,
         );
-      const turnTraces = activityTraceRef.current.filter(
-        (trace) =>
-          trace.messageId === prevId &&
-          (trace.kind === "reasoning" ||
-            trace.kind === "thinking" ||
-            trace.kind === "marker"),
-      );
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === prevId
-            ? {
-                ...m,
-                completedAt: at,
-                status: "complete" as const,
-                tools: turnTools.length ? turnTools : m.tools,
-                traces: turnTraces.length ? turnTraces : m.traces,
-              }
-            : m,
-        ),
-      );
-      setTools((prev) => prev.filter((tool) => tool.messageId !== prevId));
-      setActivityTrace((prev) => prev.filter((trace) => trace.messageId !== prevId));
-      currentAssistantRef.current = null;
-      ensureAssistant(at);
+      }
+      contentStartRef.current = 0;
+      for (const text of held) {
+        addActivityTrace("steer", text, at);
+      }
+      addActivityTrace("marker", "Conversation steered", at + 1);
+      stretchStartRef.current = at + 2;
+      // delegation-steer bubbles (standalone chat messages) flip their chip
+      if (ids.length) {
+        pendingSteerIdsRef.current = [];
+        setMessages((prev) =>
+          prev.map((message) =>
+            ids.includes(message.id) && message.steer && message.steer !== "applied"
+              ? { ...message, steer: "applied" as const }
+              : message,
+          ),
+        );
+      }
+      // the strip items for these steers are done
+      setQueuedInputs((prev) => prev.filter((q) => q.status !== "steering"));
     },
-    [addActivityTrace, ensureAssistant],
+    [addActivityTrace, flushAssistantDelta, updateAssistant],
   );
 
   const steerQueuedInput = useCallback(
@@ -6749,8 +6936,19 @@ export default function ChatPage() {
         prev.map((q) => (q.id === queuedId ? { ...q, status: "queued" } : q)),
       );
       setStatusText("Steering current turn...");
+      steerInFlightRef.current += 1;
       void gw
-        .request("session.steer", { session_id: sessionId, text })
+        .request("session.steer", {
+          session_id: sessionId,
+          text,
+          // What the user actually typed — the gateway echoes this in
+          // steer.queued for the inline bubble; `text` may carry the
+          // routing envelope, which must never render.
+          display_text: item.text,
+        })
+        .finally(() => {
+          steerInFlightRef.current = Math.max(0, steerInFlightRef.current - 1);
+        })
         .then((response) => {
           const status =
             response && typeof response === "object" && "status" in response
@@ -6785,10 +6983,16 @@ export default function ChatPage() {
               : status === "queued_delegation"
                 ? "delegation-wait"
                 : "pending";
-          const steeredId = appendMessage("user", item.text, {
-            steer: steerState,
-          });
-          if (steeredId) pendingSteerIdsRef.current.push(steeredId);
+          if (steerState === "pending") {
+            // The steer.queued event (which rides the replay ring) drives
+            // both the strip's "steering…" item and, at apply time, the
+            // inline bubble. Nothing to draw locally.
+          } else {
+            const steeredId = appendMessage("user", item.text, {
+              steer: steerState,
+            });
+            if (steeredId) pendingSteerIdsRef.current.push(steeredId);
+          }
           setQueuedInputs((prev) => prev.filter((q) => q.id !== queuedId));
           setStatusText(
             steerState === "delegation"
@@ -8944,21 +9148,33 @@ function QueuedInputStrip({
       {queuedInputs.map((item) => (
         <div className="steer-bar" key={item.id} role="status">
           <span className="steer-tag">
-            {item.status === "error" ? "ERROR" : "QUEUED"}
+            {item.status === "error"
+              ? "ERROR"
+              : item.status === "steering"
+                ? "STEERING"
+                : "QUEUED"}
           </span>
           <span className="steer-text" title={item.text}>{item.text}</span>
           <span className="steer-hint">
-            {item.status === "error" ? "not sent" : busy ? "waits for current turn" : nowLabel(item.createdAt)}
+            {item.status === "error"
+              ? "not sent"
+              : item.status === "steering"
+                ? "applies at the next safe moment"
+                : busy
+                  ? "waits for current turn"
+                  : nowLabel(item.createdAt)}
           </span>
           <div className="steer-actions">
-            <button
-              className="steer-btn cancel"
-              type="button"
-              onClick={() => onRemove(item.id)}
-            >
-              Cancel
-            </button>
-            {busy && item.status !== "error" ? (
+            {item.status !== "steering" && (
+              <button
+                className="steer-btn cancel"
+                type="button"
+                onClick={() => onRemove(item.id)}
+              >
+                Cancel
+              </button>
+            )}
+            {busy && item.status === "queued" ? (
               <button
                 className="steer-btn steer"
                 type="button"
@@ -9884,6 +10100,8 @@ type BreakdownStep =
   | ToolStep
   | { type: "trace"; id: string; at: number; text: string }
   | { type: "marker"; id: string; at: number; text: string }
+  | { type: "steer"; id: string; at: number; text: string }
+  | { type: "interim"; id: string; at: number; text: string }
   | { type: "group"; id: string; at: number; tools: ToolStep[]; label: string };
 
 type ToolCategory = "command" | "search" | "edit" | "read" | "skill" | "other";
@@ -10062,6 +10280,24 @@ function buildBreakdownSteps(
       });
       continue;
     }
+    if (trace.kind === "steer") {
+      raw.push({
+        type: "steer",
+        id: trace.id,
+        at: trace.createdAt || 0,
+        text: trace.text,
+      });
+      continue;
+    }
+    if (trace.kind === "interim") {
+      raw.push({
+        type: "interim",
+        id: trace.id,
+        at: trace.createdAt || 0,
+        text: trace.text,
+      });
+      continue;
+    }
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
     const text = compactLine(trace.text);
     if (!text) continue;
@@ -10187,6 +10423,26 @@ function BreakdownRow({
   turnStartAt?: number;
 }) {
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
+
+  if (step.type === "interim") {
+    // The model's own interim answer (a steer continued the run past it) —
+    // full-color prose, distinct from muted reasoning.
+    return (
+      <div className="py-1 text-[14px] leading-[1.6] text-[var(--chat-text)] whitespace-pre-wrap">
+        {step.text}
+      </div>
+    );
+  }
+
+  if (step.type === "steer") {
+    // The user's steered message, inline in the run flow — right-aligned
+    // and styled exactly like their chat bubbles.
+    return (
+      <div className="flex justify-end py-1.5">
+        <div className="user-msg inline-block max-w-[85%]">{step.text}</div>
+      </div>
+    );
+  }
 
   if (step.type === "marker") {
     // A run event (steer injection) rendered like a tool row: labelled,
