@@ -6033,7 +6033,9 @@ def _(rid, params: dict) -> dict:
     except Exception:
         pass
 
+    sid = str(params.get("session_id") or "")
     worker = session.get("slash_worker")
+    created = worker is None
     if not worker:
         try:
             worker = _SlashWorker(

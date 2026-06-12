@@ -1535,10 +1535,10 @@ def test_mirror_slash_side_effects_allowed_when_idle(monkeypatch):
 def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     """Regression guard: if session.close runs while session.create's
     _build thread is still constructing the agent, the build thread
-    must detect the orphan and clean up the slash_worker + notify
-    registration it's about to install.  Without the cleanup those
-    resources leak — the subprocess stays alive until atexit and the
-    notify callback lingers in the global registry."""
+    must detect the orphan and clean up the notify registration it's
+    about to install.  The slash worker is created lazily by slash.exec
+    (419c82ec5) so _build must NOT allocate one — eagerly or on the
+    orphan path."""
     import threading
 
     closed_workers: list[str] = []
@@ -1601,6 +1601,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert resp.get("result"), f"got error: {resp.get('error')}"
     sid = resp["result"]["session_id"]
+    build_done = server._sessions[sid]["agent_ready"]
 
     # Build thread is blocked in _slow_make_agent.  Close the session
     # NOW — this pops _sessions[sid] before _build can install the
@@ -1614,23 +1615,21 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert close_resp.get("result", {}).get("closed") is True
 
-    # At this point session.close saw slash_worker=None (not yet
+    # At this point session.close saw slash_worker=None (lazy — never
     # installed) so it didn't close anything.  Release the build thread
-    # and let it finish — it should detect the orphan and clean up the
-    # worker it just allocated + unregister the notify.
+    # and let it finish — it should detect the orphan and unregister
+    # the notify it just installed.
     release_build.set()
 
-    # Give the build thread a moment to run through its finally.
-    for _ in range(100):
-        if closed_workers:
-            break
-        import time
+    # The build thread's finally sets agent_ready AFTER the orphan
+    # cleanup, so once this returns the cleanup has run (or not).
+    assert build_done.wait(timeout=3.0), "build thread never finished"
 
-        time.sleep(0.02)
-
+    # Lazy slash worker: _build never allocates one, so there is no
+    # worker subprocess to orphan (or to close).
     assert (
-        len(closed_workers) == 1
-    ), f"orphan worker was not cleaned up — closed_workers={closed_workers}"
+        closed_workers == []
+    ), f"build thread closed a worker it should never have created: {closed_workers}"
     # Notify may be unregistered by both session.close (unconditional)
     # and the orphan-cleanup path; the key guarantee is that the build
     # thread does at least one unregister call (any prior close
@@ -1643,14 +1642,18 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
 
 def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     """Regression guard: when session.close does NOT race, the build
-    thread must install the worker + notify normally and leave them
-    alone (no over-eager cleanup)."""
+    thread must install the notify normally and leave it alone (no
+    over-eager cleanup).  The slash worker is lazy (419c82ec5): None
+    after build, created by the first slash.exec, and left installed."""
     closed_workers: list[str] = []
     unregistered_keys: list[str] = []
 
     class _FakeWorker:
         def __init__(self, key, model):
             self.key = key
+
+        def run(self, cmd):
+            return "ok"
 
         def close(self):
             closed_workers.append(self.key)
@@ -1701,16 +1704,88 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     # cleaned up by the orphan check.
     assert (
         closed_workers == []
-    ), f"build thread closed its own worker despite no race: {closed_workers}"
+    ), f"build thread closed a worker despite no race: {closed_workers}"
     assert (
         unregistered_keys == []
     ), f"build thread unregistered its own notify despite no race: {unregistered_keys}"
 
-    # Session should have the live worker installed.
+    # Lazy worker: nothing installed at build time.
+    assert session.get("slash_worker") is None
+
+    # First slash.exec creates the worker and leaves it installed.
+    fake_sc = types.ModuleType("agent.skill_commands")
+    fake_sc.get_skill_commands = lambda: {}
+    monkeypatch.setitem(sys.modules, "agent.skill_commands", fake_sc)
+
+    exec_resp = server.handle_request(
+        {
+            "id": "2",
+            "method": "slash.exec",
+            "params": {"session_id": sid, "command": "/noop-test"},
+        }
+    )
+    assert exec_resp.get("result", {}).get("output") == "ok", (
+        f"slash.exec failed: {exec_resp.get('error')}"
+    )
     assert session.get("slash_worker") is not None
+    assert (
+        closed_workers == []
+    ), f"slash.exec closed its own worker despite no race: {closed_workers}"
 
     # Cleanup
     server._sessions.pop(sid, None)
+
+
+def test_slash_exec_close_race_does_not_orphan_lazy_worker(monkeypatch):
+    """Regression guard for the lazy slash-worker path: if session.close
+    runs while slash.exec is constructing the worker, close sees
+    slash_worker=None and closes nothing — slash.exec must detect the
+    orphaned session dict and close the worker it just installed,
+    otherwise the subprocess leaks until process exit (the atexit sweep
+    only walks live _sessions)."""
+    closed_workers: list[str] = []
+    sid = "race-sid"
+
+    class _RacingWorker:
+        def __init__(self, key, model):
+            self.key = key
+            # Deterministically simulate session.close winning the race
+            # mid-construction: it pops the session dict and, finding
+            # slash_worker=None, closes nothing.
+            server._sessions.pop(sid, None)
+
+        def run(self, cmd):
+            return "ok"
+
+        def close(self):
+            closed_workers.append(self.key)
+
+    monkeypatch.setattr(server, "_SlashWorker", _RacingWorker)
+    fake_sc = types.ModuleType("agent.skill_commands")
+    fake_sc.get_skill_commands = lambda: {}
+    monkeypatch.setitem(sys.modules, "agent.skill_commands", fake_sc)
+
+    session = _session()
+    server._sessions[sid] = session
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"session_id": sid, "command": "/noop-test"},
+            }
+        )
+        # The command itself still completes (worker ran before the
+        # orphan check) — the guarantee is about cleanup, not output.
+        assert resp.get("result", {}).get("output") == "ok", (
+            f"slash.exec failed: {resp.get('error')}"
+        )
+        assert closed_workers == ["session-key"], (
+            f"orphaned lazy worker was not closed — closed_workers={closed_workers}"
+        )
+        assert session.get("slash_worker") is None
+    finally:
+        server._sessions.pop(sid, None)
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
