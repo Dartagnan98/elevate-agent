@@ -728,3 +728,41 @@ class TestDelegationChildTimeoutMigration:
             raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         # A deliberately-set value is preserved.
         assert raw["delegation"]["child_timeout_seconds"] == 1800
+
+
+class TestCompressionThresholdMigration:
+    """Config v24→25: stale pre-June 0.5 compaction threshold bumps to 0.85."""
+
+    def test_migrate_bumps_stale_half_window_default(self, tmp_path):
+        import yaml, os
+        from unittest.mock import patch
+        from elevate_cli.config import migrate_config, DEFAULT_CONFIG
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": 24, "compression": {"enabled": True, "threshold": 0.5}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        assert raw["compression"]["threshold"] == 0.85
+
+    def test_migrate_leaves_custom_threshold_alone(self, tmp_path):
+        import yaml, os
+        from unittest.mock import patch
+        from elevate_cli.config import migrate_config
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {"_config_version": 24, "compression": {"enabled": True, "threshold": 0.7}}
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        # A deliberately-set value is preserved.
+        assert raw["compression"]["threshold"] == 0.7

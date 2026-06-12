@@ -1424,7 +1424,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 24,
+    "_config_version": 25,
 }
 
 # =============================================================================
@@ -3419,6 +3419,31 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                 print(
                     "  ✓ Raised delegation child timeout 10min → 4h "
                     "(long subagent jobs no longer killed mid-task)"
+                )
+
+    # ── Version 24 → 25: bump the stale 0.5 compression threshold ──
+    # The default compaction trigger moved 0.50 → 0.85 in June 2026 (every
+    # compaction costs an LLM rewrite + risks context loss; 0.85 still leaves
+    # worst-case turn headroom). Configs written before the change carry the
+    # old default as an explicit value, and an explicit threshold is treated
+    # as user-pinned — it wins over BOTH mode defaults (0.85 estimate / 0.90
+    # real-count), so these boxes silently kept compacting at half the
+    # window ("compacting at 61% context", Justin). Only bump configs still
+    # on the exact old default (0.5) — any other value is a real user choice.
+    if current_ver < 25:
+        config = read_raw_config()
+        comp = config.get("compression")
+        if isinstance(comp, dict) and comp.get("threshold") == 0.5:
+            comp["threshold"] = 0.85
+            config["compression"] = comp
+            save_config(config)
+            results["config_added"].append(
+                "compression.threshold 0.5→0.85 (stale pre-June default compacted at half the window)"
+            )
+            if not quiet:
+                print(
+                    "  ✓ Raised compression threshold 50% → 85% of the "
+                    "context window (was compacting far too early)"
                 )
 
     if current_ver < latest_ver and not quiet:
