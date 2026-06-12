@@ -3479,6 +3479,30 @@ def _drain_pending_delegate_results(session: dict) -> list:
     return [e for e in drained if isinstance(e, dict)]
 
 
+def _repark_delegate_results(session: dict, entries: list) -> None:
+    """Put drained entries back at the FRONT of the parked queue.
+
+    Used when the re-wake's prompt.submit loses the latch race to a user
+    turn after draining — without this the result would silently vanish.
+    Front-insert so it stays ahead of any newer arrivals and rides the very
+    next consumer.
+    """
+    if not entries:
+        return
+    lock = session.get("history_lock")
+    if lock is not None:
+        with lock:
+            session["pending_delegate_results"] = [
+                *entries,
+                *(session.get("pending_delegate_results") or []),
+            ]
+    else:
+        session["pending_delegate_results"] = [
+            *entries,
+            *(session.get("pending_delegate_results") or []),
+        ]
+
+
 def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
     """Idle watcher for parked delegation results.
 
@@ -3490,58 +3514,103 @@ def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
     ever speaks for a result. The API sees the full wake prompt; the STORED
     user message is rewritten (``persist_user_message``) to a clean
     ``⟦subagent-result:<status>⟧ …`` marker so the dashboard renders a
-    "sub-agent completed" card, never a fake user bubble. Gives up after ~60s
-    of sustained busy (the parked result then rides the next user turn).
+    "sub-agent completed" card, never a fake user bubble. Requires a sustained
+    idle window before speaking (so it never collides with the running turn),
+    and gives up after ~90s (the parked result then rides the next user turn).
     """
     submit = _methods.get("prompt.submit")
     if submit is None:
         return False
-    deadline = time.monotonic() + 60.0
+    # A delegation result behaves like a steer: it waits for a genuinely good
+    # moment and never interferes with the running turn. "Good moment" =
+    # the session has been idle CONTINUOUSLY for this long. Firing the instant
+    # `running` flips false raced the gap between a user's back-to-back turns —
+    # the wake turn minted a competing assistant stub that orphaned the live
+    # one (thinking stopped rendering, spinner stuck) and could reject the
+    # user's next message as "session busy". The quiet window closes that race;
+    # while the user keeps talking, the result simply rides their next turn
+    # (which drains the parked list) and this watcher stands down.
+    QUIET_WINDOW = 2.5
+    deadline = time.monotonic() + 90.0
     while time.monotonic() < deadline:
         if not (session.get("pending_delegate_results") or []):
             return True  # a user turn consumed it — nothing left to say
-        if not session.get("running"):
+        if session.get("running"):
+            time.sleep(1.0)
+            continue
+        idle_since = session.get("idle_since")
+        if not isinstance(idle_since, (int, float)):
+            # No stamp yet (turn never ran in this session) — treat now as the
+            # start of the quiet window rather than firing blind.
+            session["idle_since"] = time.monotonic()
+            time.sleep(QUIET_WINDOW)
+            continue
+        if (time.monotonic() - idle_since) < QUIET_WINDOW:
+            time.sleep(0.5)
+            continue
+        # Sustained-idle: claim the turn latch ATOMICALLY before draining, so a
+        # user message landing in this same instant wins or we yield to it —
+        # never two prompt.submit racing into one session.
+        history_lock = session.get("history_lock")
+        if history_lock is not None:
+            with history_lock:
+                if session.get("running"):
+                    continue  # a user turn just claimed it — let them drain
+                if not (session.get("pending_delegate_results") or []):
+                    return True
             drained = _drain_pending_delegate_results(session)
             if not drained:
                 return True
-            overall = (
-                "error"
-                if any(e.get("status") != "completed" for e in drained)
-                else "completed"
-            )
-            goal_label = "; ".join(g for g in (e.get("goal") for e in drained) if g)
-            summaries = "\n\n---\n\n".join(
-                str(e.get("summary") or "") for e in drained
-            ).strip()
-            wake_prompt = (
-                "[automated] Background task(s) you delegated finished. "
-                "Result below.\n\n" + summaries +
-                "\n\nEvaluate whether this satisfies what was asked, then reply "
-                "to the user with a brief synthesis: what came back, whether "
-                "it's complete, and any next step. Do NOT re-delegate the same "
-                "work."
-            )
-            stored_marker = (
-                f"{_SUBAGENT_RESULT_MARKER}:{overall}⟧"
-                + (f" {goal_label}\n\n" if goal_label else "\n\n")
-                + summaries
-            )
-            try:
-                submit(
-                    f"wake_{uuid.uuid4().hex[:8]}",
-                    {
-                        "session_id": sid,
-                        "text": wake_prompt,
-                        "persist_user_message": stored_marker,
-                    },
-                )
+        else:
+            drained = _drain_pending_delegate_results(session)
+            if not drained:
                 return True
-            except Exception:
-                logger.exception("re-wake prompt.submit failed (sid=%s)", sid)
-                return False
-        time.sleep(3.0)
+
+        overall = (
+            "error"
+            if any(e.get("status") != "completed" for e in drained)
+            else "completed"
+        )
+        goal_label = "; ".join(g for g in (e.get("goal") for e in drained) if g)
+        summaries = "\n\n---\n\n".join(
+            str(e.get("summary") or "") for e in drained
+        ).strip()
+        wake_prompt = (
+            "[automated] Background task(s) you delegated finished. "
+            "Result below.\n\n" + summaries +
+            "\n\nEvaluate whether this satisfies what was asked, then reply "
+            "to the user with a brief synthesis: what came back, whether "
+            "it's complete, and any next step. Do NOT re-delegate the same "
+            "work."
+        )
+        stored_marker = (
+            f"{_SUBAGENT_RESULT_MARKER}:{overall}⟧"
+            + (f" {goal_label}\n\n" if goal_label else "\n\n")
+            + summaries
+        )
+        result = None
+        try:
+            result = submit(
+                f"wake_{uuid.uuid4().hex[:8]}",
+                {
+                    "session_id": sid,
+                    "text": wake_prompt,
+                    "persist_user_message": stored_marker,
+                },
+            )
+        except Exception:
+            logger.exception("re-wake prompt.submit failed (sid=%s)", sid)
+            _repark_delegate_results(session, drained)
+            return False
+        # A user turn claimed the latch in the gap between our drain and
+        # submit → "session busy". Put the result back so THEIR turn (or the
+        # next quiet window) delivers it instead of dropping it.
+        if isinstance(result, dict) and result.get("error"):
+            _repark_delegate_results(session, drained)
+            continue
+        return True
     logger.warning(
-        "re-wake watcher timed out (sid=%s busy >60s) — parked result will ride "
+        "re-wake watcher timed out (sid=%s busy >90s) — parked result will ride "
         "the next user turn",
         sid,
     )
@@ -3626,10 +3695,15 @@ def _mark_session_idle(session: dict) -> None:
     if lock is None:
         session["running"] = False
         session["running_tools"] = {}
+        session["idle_since"] = time.monotonic()
         return
     with lock:
         session["running"] = False
         session["running_tools"] = {}
+        # Stamp when this turn went idle so the delegate re-wake watcher can
+        # require a SUSTAINED quiet window before it speaks — never pouncing
+        # in the microsecond gap between a user's back-to-back turns.
+        session["idle_since"] = time.monotonic()
 
 
 @method("debug.trace")

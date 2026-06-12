@@ -1812,7 +1812,9 @@ def test_async_delegate_sink_rewakes_main_agent():
     result and replies. The result must NOT be threaded as a fake user message;
     it rides into the wake turn as context (full text to the API) and is stored
     as a ⟦subagent-result⟧ card marker (persist_user_message)."""
-    session = _session()
+    # Stamp idle well in the past so the sustained-quiet-window gate is already
+    # satisfied and the watcher fires on its first pass (no real 2.5s wait).
+    session = _session(idle_since=time.monotonic() - 100.0)
     sid = "async-sid"
     emitted = []
     submitted = []
@@ -1895,6 +1897,66 @@ def test_parked_result_yields_to_busy_session():
 
     # No competing wake turn while busy; result parked for the user's turn.
     assert submitted == []
+    parked = session.get("pending_delegate_results")
+    assert parked and "Found 7 leads" in parked[0]["summary"]
+
+
+def test_wake_defers_until_sustained_quiet_window():
+    """Idle but not yet QUIET: a session that just went idle (idle_since
+    moments ago) must NOT be woken — the watcher waits out the quiet window so
+    it never pounces in the gap between a user's back-to-back turns."""
+    # idle_since = now → quiet window NOT yet elapsed.
+    session = _session(
+        running=False,
+        idle_since=1000.0,
+        pending_delegate_results=[{"status": "completed", "goal": "g", "summary": "s"}],
+    )
+    submitted = []
+
+    def fake_submit(rid, params):
+        submitted.append((rid, params))
+        return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
+
+    # monotonic stays inside the quiet window then the deadline trips, so the
+    # watcher loops a couple of times waiting and then gives up WITHOUT firing.
+    with patch.dict("tui_gateway.server._methods", {"prompt.submit": fake_submit}), \
+         patch("tui_gateway.server.time.sleep"), \
+         patch("tui_gateway.server.time.monotonic", side_effect=[1000.0, 1000.5, 1001.0, 2000.0]):
+        server._wake_main_agent_with_result("quiet-sid", session)
+
+    assert submitted == []
+    # Result still parked → it will ride the user's next turn.
+    assert session.get("pending_delegate_results")
+
+
+def test_wake_reparks_when_submit_loses_latch_race():
+    """If a user turn claims the latch between our drain and submit (submit
+    returns a 'session busy' error), the drained result must be RE-PARKED, not
+    dropped."""
+    session = _session(
+        running=False,
+        idle_since=0.0,  # quiet window long satisfied
+        pending_delegate_results=[
+            {"status": "completed", "goal": "Find leads", "summary": "Found 7 leads."}
+        ],
+    )
+    submitted = []
+
+    def busy_submit(rid, params):
+        submitted.append((rid, params))
+        return {"jsonrpc": "2.0", "id": rid, "error": {"code": 4009, "message": "session busy"}}
+
+    # monotonic: deadline calc (0→deadline 90), while-enter (1), quiet-window
+    # elapsed check (10 → 10s idle ≥ 2.5 quiet), then while-exit (99999).
+    # First pass: quiet satisfied → drain + submit → busy error → repark, then
+    # the deadline trips so the loop ends.
+    with patch.dict("tui_gateway.server._methods", {"prompt.submit": busy_submit}), \
+         patch("tui_gateway.server.time.sleep"), \
+         patch("tui_gateway.server.time.monotonic", side_effect=[0.0, 1.0, 10.0, 99999.0]):
+        server._wake_main_agent_with_result("race-sid", session)
+
+    # Submit was attempted and lost; the result is back in the parked queue.
+    assert len(submitted) == 1
     parked = session.get("pending_delegate_results")
     assert parked and "Found 7 leads" in parked[0]["summary"]
 
