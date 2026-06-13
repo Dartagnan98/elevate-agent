@@ -27,6 +27,14 @@ from agent.compaction_trace import (
     trace_event as _compaction_trace_event,
     trace_scope as _compaction_trace_scope,
 )
+from agent.local_event_log import (
+    log_session_event as _jsonl_session_event,
+    log_tool_event as _jsonl_tool_event,
+    message_event_stats as _jsonl_message_stats,
+    payload_stats as _jsonl_payload_stats,
+    tool_arg_stats as _jsonl_tool_arg_stats,
+    tool_result_stats as _jsonl_tool_result_stats,
+)
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -508,6 +516,14 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     params = {"type": event, "session_id": sid, "ts": time.time()}
     if payload is not None:
         params["payload"] = payload
+    session = _sessions.get(sid)
+    _jsonl_session_event(
+        "gateway.emit",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or "") if session else "",
+        event_type=event,
+        payload=_jsonl_payload_stats(payload),
+    )
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
 
 
@@ -1342,6 +1358,7 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
 
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
+    started_at = time.time()
     if session is not None:
         try:
             from agent.display import capture_local_edit_snapshot
@@ -1351,7 +1368,6 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         except Exception:
             pass
-        started_at = time.time()
         session.setdefault("tool_started_at", {})[tool_call_id] = started_at
         # Snapshot the running tool so session.resume can rebuild the
         # tool cards on reattach. The event ring rotates a long turn's
@@ -1363,6 +1379,16 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             "context": ctx,
             "started_at": started_at,
         }
+    _jsonl_tool_event(
+        "gateway.tool_start",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or "") if session else "",
+        tool_call_id=tool_call_id,
+        tool_name=name,
+        started_at=started_at,
+        progress_enabled=_tool_progress_enabled(sid),
+        args=_jsonl_tool_arg_stats(args),
+    )
     if _tool_progress_enabled(sid):
         _emit(
             "tool.start",
@@ -1393,6 +1419,19 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
+    _jsonl_tool_event(
+        "gateway.tool_complete",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or "") if session else "",
+        tool_call_id=tool_call_id,
+        tool_name=name,
+        completed_at=completed_at,
+        duration_ms=round(duration_s * 1000) if duration_s is not None else None,
+        progress_enabled=_tool_progress_enabled(sid),
+        summary_present=bool(summary),
+        args=_jsonl_tool_arg_stats(args),
+        result=_jsonl_tool_result_stats(result),
+    )
     try:
         from agent.display import render_edit_diff_with_delta
 
@@ -2389,6 +2428,13 @@ def _(rid, params: dict) -> dict:
         "tool_started_at": {},
     }
     _bind_session_transport(_sessions[sid], current_transport() or _stdio_transport)
+    _jsonl_session_event(
+        "gateway.session_create",
+        gateway_session_id=sid,
+        session_id=key,
+        cols=cols,
+        history_version=0,
+    )
 
     def _build() -> None:
         session = _sessions.get(sid)
@@ -2418,6 +2464,14 @@ def _(rid, params: dict) -> dict:
             db = _get_db()
             if db is not None:
                 db.create_session(key, source="tui", model=_resolve_model())
+                _jsonl_session_event(
+                    "gateway.session_db_create",
+                    gateway_session_id=sid,
+                    session_id=key,
+                    source="tui",
+                    model=_resolve_model(),
+                    success=True,
+                )
             session["agent"] = agent
 
             try:
@@ -2445,8 +2499,22 @@ def _(rid, params: dict) -> dict:
                 info["config_warning"] = cfg_warn
                 logger.warning(cfg_warn)
             _emit("session.info", sid, info)
+            _jsonl_session_event(
+                "gateway.session_agent_ready",
+                gateway_session_id=sid,
+                session_id=key,
+                model=getattr(agent, "model", "") or "",
+                tool_count=len(getattr(agent, "tools", []) or []),
+            )
         except Exception as e:
             session["agent_error"] = str(e)
+            _jsonl_session_event(
+                "gateway.session_agent_init_error",
+                gateway_session_id=sid,
+                session_id=key,
+                error_type=type(e).__name__,
+                error_chars=len(str(e)),
+            )
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             # Orphan check: if session.close raced us and popped
@@ -2647,6 +2715,18 @@ def _(rid, params: dict) -> dict:
         }
         if messages is not None:
             result["messages"] = messages
+        _jsonl_session_event(
+            "gateway.session_resume_existing",
+            gateway_session_id=existing_sid,
+            session_id=persisted_key,
+            requested_session_id=target,
+            active_session_id=str(existing_identity.get("active_session_id") or ""),
+            running=bool(existing_session.get("running")),
+            agent_ready=bool(existing_session.get("agent")),
+            replay_event_count=len(replay_events),
+            running_tool_count=len(running_tools),
+            messages=_jsonl_message_stats(history),
+        )
         return _ok(rid, result)
 
     try:
@@ -2701,6 +2781,15 @@ def _(rid, params: dict) -> dict:
     }
     _bind_session_transport(session, current_transport() or _stdio_transport)
     _sessions[sid] = session
+    _jsonl_session_event(
+        "gateway.session_resume_cold",
+        gateway_session_id=sid,
+        session_id=target,
+        requested_session_id=params.get("session_id", ""),
+        active_session_id=str(identity_payload.get("active_session_id") or ""),
+        include_messages=include_messages,
+        messages=_jsonl_message_stats(history),
+    )
 
     def _build() -> None:
         worker = None
@@ -2742,8 +2831,22 @@ def _(rid, params: dict) -> dict:
 
             _wire_callbacks(sid)
             _emit("session.info", sid, _session_info(agent))
+            _jsonl_session_event(
+                "gateway.session_resume_agent_ready",
+                gateway_session_id=sid,
+                session_id=target,
+                model=getattr(agent, "model", "") or "",
+                tool_count=len(getattr(agent, "tools", []) or []),
+            )
         except Exception as e:
             session["agent_error"] = str(e)
+            _jsonl_session_event(
+                "gateway.session_resume_agent_init_error",
+                gateway_session_id=sid,
+                session_id=target,
+                error_type=type(e).__name__,
+                error_chars=len(str(e)),
+            )
             _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             if _sessions.get(sid) is not session:
@@ -2873,6 +2976,18 @@ def _(rid, params: dict) -> dict:
             ),
         )
         _emit("session.info", params.get("session_id", ""), info)
+        _jsonl_session_event(
+            "gateway.session_compress_response",
+            gateway_session_id=params.get("session_id", ""),
+            session_id=getattr(_agent, "session_id", "") or session.get("session_key", ""),
+            gateway_session_key=session.get("session_key", ""),
+            removed=removed,
+            agent_session_changed=bool(
+                getattr(_agent, "session_id", None)
+                and getattr(_agent, "session_id", None) != session.get("session_key")
+            ),
+            messages=_jsonl_message_stats(messages),
+        )
         return _ok(
             rid,
             {
@@ -2925,6 +3040,13 @@ def _(rid, params: dict) -> dict:
         # alive so the client can switch away and reattach by persisted id while
         # the turn keeps running. Explicit force=true remains available for hard
         # cleanup/interrupt flows.
+        _jsonl_session_event(
+            "gateway.session_close_detached",
+            gateway_session_id=sid,
+            session_id=str(session.get("session_key") or ""),
+            running=True,
+            force=False,
+        )
         return _ok(
             rid,
             {
@@ -2937,6 +3059,14 @@ def _(rid, params: dict) -> dict:
     session = _sessions.pop(sid, None)
     if not session:
         return _ok(rid, {"closed": False})
+    _jsonl_session_event(
+        "gateway.session_close",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or ""),
+        running=bool(session.get("running")),
+        force=bool(force),
+        messages=_jsonl_message_stats(session.get("history", [])),
+    )
     # Genuine session end — run end-of-session hooks AND close the memory
     # connection so the holographic Postgres connection isn't orphaned.
     _release_agent_memory(session.get("agent"), ended=True)
@@ -3004,6 +3134,14 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
+    _jsonl_session_event(
+        "gateway.session_branch",
+        gateway_session_id=new_sid,
+        session_id=new_key,
+        parent_session_id=old_key,
+        title_chars=len(title or ""),
+        messages=_jsonl_message_stats(history),
+    )
     return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
 
 
@@ -3915,6 +4053,24 @@ def _(rid, params: dict) -> dict:
         session["attached_videos"] = []
         files = list(session.get("attached_files", []))
         session["attached_files"] = []
+        accepted_history_version = int(session.get("history_version", 0))
+        accepted_history_count = len(session.get("history", []))
+    _jsonl_session_event(
+        "gateway.prompt_submit_accept",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or ""),
+        request_id=str(rid),
+        text_chars=len(text) if isinstance(text, str) else 0,
+        persist_user_message=bool(isinstance(persist_user_message, str)),
+        agent_id=agent_id,
+        user_message_id=turn_ids["user"],
+        assistant_message_id=turn_ids["assistant"],
+        attachment_image_count=len(images),
+        attachment_video_count=len(videos),
+        attachment_file_count=len(files),
+        history_version=accepted_history_version,
+        history_count=accepted_history_count,
+    )
     # Server-initiated wake turns (a finished delegation being evaluated) have
     # no client-side optimistic bubble — without this the "sub-agent completed"
     # card only appeared after a rehydrate. Emit the stored marker as a live
@@ -3938,6 +4094,15 @@ def _(rid, params: dict) -> dict:
     def run():
         approval_token = None
         session_tokens = []
+        turn_started = time.time()
+        _jsonl_session_event(
+            "gateway.turn_worker_start",
+            gateway_session_id=sid,
+            session_id=str(session.get("session_key") or ""),
+            request_id=str(rid),
+            user_message_id=turn_ids["user"],
+            assistant_message_id=turn_ids["assistant"],
+        )
         try:
             wait_err = _wait_agent(session, rid)
             if wait_err:
@@ -3948,6 +4113,14 @@ def _(rid, params: dict) -> dict:
                     else "agent initialization failed"
                 )
                 _emit("error", sid, {"message": message})
+                _jsonl_session_event(
+                    "gateway.turn_agent_wait_error",
+                    gateway_session_id=sid,
+                    session_id=str(session.get("session_key") or ""),
+                    request_id=str(rid),
+                    error_chars=len(str(message)),
+                    duration_ms=round((time.time() - turn_started) * 1000),
+                )
                 return
             try:
                 _ensure_tui_tool_profile(sid, session, _select_tui_tool_profile(text))
@@ -4141,6 +4314,13 @@ def _(rid, params: dict) -> dict:
                             agent_session_id,
                         )
                         session["session_key"] = agent_session_id
+                        _jsonl_session_event(
+                            "gateway.turn_session_rotated",
+                            gateway_session_id=sid,
+                            session_id=agent_session_id,
+                            parent_session_id=old_session_key,
+                            request_id=str(rid),
+                        )
                         db = _get_db()
                         if db is not None:
                             _emit(
@@ -4230,6 +4410,21 @@ def _(rid, params: dict) -> dict:
                 if not has_followup:
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
+                _jsonl_session_event(
+                    "gateway.turn_round_complete",
+                    gateway_session_id=sid,
+                    session_id=str(session.get("session_key") or ""),
+                    request_id=str(rid),
+                    status=status,
+                    followup=bool(has_followup),
+                    followup_rounds=followup_rounds,
+                    turn_compacted=bool(_turn_compacted),
+                    raw_chars=len(raw) if isinstance(raw, str) else 0,
+                    reasoning_chars=len(last_reasoning) if isinstance(last_reasoning, str) else 0,
+                    history_version=int(session.get("history_version", 0)),
+                    duration_ms=round((time.time() - turn_started) * 1000),
+                    messages=_jsonl_message_stats(session.get("history", [])),
+                )
 
                 # Auto-generate a session title after the first exchange.
                 # CLI parity: cli.py fires maybe_auto_title here, but the
@@ -4334,6 +4529,15 @@ def _(rid, params: dict) -> dict:
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
+            _jsonl_session_event(
+                "gateway.turn_exception",
+                gateway_session_id=sid,
+                session_id=str(session.get("session_key") or ""),
+                request_id=str(rid),
+                error_type=type(e).__name__,
+                error_chars=len(str(e)),
+                duration_ms=round((time.time() - turn_started) * 1000),
+            )
             _emit("error", sid, {"message": str(e)})
         finally:
             try:
@@ -4356,6 +4560,14 @@ def _(rid, params: dict) -> dict:
     ack_user_id = turn_ids["user"]
     ack_assistant_id = turn_ids["assistant"]
     threading.Thread(target=run, daemon=True).start()
+    _jsonl_session_event(
+        "gateway.prompt_submit_streaming",
+        gateway_session_id=sid,
+        session_id=str(session.get("session_key") or ""),
+        request_id=str(rid),
+        user_message_id=ack_user_id,
+        assistant_message_id=ack_assistant_id,
+    )
     # Echo the ids so the client can stamp its optimistic user bubble and
     # pre-bind the assistant message without waiting for message.start.
     return _ok(

@@ -52,6 +52,13 @@ from agent.compaction_trace import (
     trace_event as _compaction_trace_event,
     trace_scope as _compaction_trace_scope,
 )
+from agent.local_event_log import (
+    log_session_event as _jsonl_session_event,
+    log_tool_event as _jsonl_tool_event,
+    message_event_stats as _jsonl_message_stats,
+    tool_arg_stats as _jsonl_tool_arg_stats,
+    tool_result_stats as _jsonl_tool_result_stats,
+)
 
 # Load .env from ~/.elevate/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
@@ -1636,6 +1643,19 @@ class AIAgent:
         self.logs_dir = elevate_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+        _jsonl_session_event(
+            "agent.session_start",
+            session_id=self.session_id,
+            parent_session_id=parent_session_id or "",
+            source=self.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
+            model=self.model,
+            provider=self.provider or "",
+            api_mode=self.api_mode or "",
+            cwd=os.getcwd(),
+            session_log_file=str(self.session_log_file),
+            tool_count=len(self.tools or []),
+            enabled_tool_count=len(self.valid_tool_names or []),
+        )
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
@@ -1681,6 +1701,14 @@ class AIAgent:
                     user_id=None,
                     parent_session_id=self._parent_session_id,
                 )
+                _jsonl_session_event(
+                    "agent.session_db_create",
+                    session_id=self.session_id,
+                    parent_session_id=self._parent_session_id or "",
+                    source=self.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
+                    model=self.model,
+                    success=True,
+                )
             except Exception as e:
                 # Transient SQLite lock contention (e.g. CLI and gateway writing
                 # concurrently) must NOT permanently disable session_search for
@@ -1690,6 +1718,16 @@ class AIAgent:
                 # for this run, but that is recoverable (flushes upsert rows).
                 logger.warning(
                     "Session DB create_session failed (session_search still available): %s", e
+                )
+                _jsonl_session_event(
+                    "agent.session_db_create",
+                    session_id=self.session_id,
+                    parent_session_id=self._parent_session_id or "",
+                    source=self.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
+                    model=self.model,
+                    success=False,
+                    error_type=type(e).__name__,
+                    error_chars=len(str(e)),
                 )
         
         # In-memory todo list for task planning (one per agent/session)
@@ -3641,11 +3679,29 @@ class AIAgent:
         Skipped when ``persist_session=False`` (ephemeral helper flows).
         """
         if not self.persist_session:
+            _jsonl_session_event(
+                "agent.persist_session_skipped",
+                session_id=self.session_id or "",
+                reason="persist_session_false",
+                messages=_jsonl_message_stats(messages),
+            )
             return
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
+        _jsonl_session_event(
+            "agent.persist_session",
+            session_id=self.session_id or "",
+            parent_session_id=self._parent_session_id or "",
+            session_log_file=str(self.session_log_file),
+            db_enabled=bool(self._session_db),
+            last_flushed_db_idx=self._last_flushed_db_idx,
+            conversation_history_count=(
+                len(conversation_history) if isinstance(conversation_history, list) else None
+            ),
+            messages=_jsonl_message_stats(messages),
+        )
 
     def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Persist any un-flushed messages to the SQLite session store.
@@ -3655,6 +3711,12 @@ class AIAgent:
         truly new messages — preventing the duplicate-write bug (#860).
         """
         if not self._session_db:
+            _jsonl_session_event(
+                "agent.session_db_flush_skipped",
+                session_id=self.session_id or "",
+                reason="no_session_db",
+                messages=_jsonl_message_stats(messages),
+            )
             return
         self._apply_persist_user_message_override(messages)
         self._ensure_client_message_ids(messages)
@@ -3669,6 +3731,7 @@ class AIAgent:
             )
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            append_count = max(0, len(messages) - flush_from)
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
@@ -3718,8 +3781,26 @@ class AIAgent:
                     client_message_id=msg.get("client_message_id"),
                 )
             self._last_flushed_db_idx = len(messages)
+            _jsonl_session_event(
+                "agent.session_db_flush",
+                session_id=self.session_id or "",
+                flush_from=flush_from,
+                appended_count=append_count,
+                message_count=len(messages),
+                last_flushed_db_idx=self._last_flushed_db_idx,
+                success=True,
+            )
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
+            _jsonl_session_event(
+                "agent.session_db_flush",
+                session_id=self.session_id or "",
+                success=False,
+                error_type=type(e).__name__,
+                error_chars=len(str(e)),
+                message_count=len(messages),
+                last_flushed_db_idx=self._last_flushed_db_idx,
+            )
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -9322,6 +9403,16 @@ class AIAgent:
                     self.tool_start_callback(tc.id, name, args)
                 except Exception as cb_err:
                     logging.debug(f"Tool start callback error: {cb_err}")
+        _jsonl_tool_event(
+            "agent.tool_batch_start",
+            execution="concurrent",
+            session_id=self.session_id or "",
+            task_id=effective_task_id or "",
+            api_call_count=api_call_count,
+            batch_size=num_tools,
+            tool_names=[name for _, name, _ in parsed_calls],
+            tool_call_ids=[getattr(tc, "id", "") for tc, _, _ in parsed_calls],
+        )
 
         # ── Concurrent execution ─────────────────────────────────────────
         # Each slot holds (function_name, function_args, function_result, duration, error_flag)
@@ -9334,6 +9425,18 @@ class AIAgent:
 
         def _run_tool(index, tool_call, function_name, function_args):
             """Worker function executed in a thread."""
+            _jsonl_tool_event(
+                "agent.tool_start",
+                execution="concurrent",
+                session_id=self.session_id or "",
+                task_id=effective_task_id or "",
+                api_call_count=api_call_count,
+                batch_size=num_tools,
+                batch_index=index,
+                tool_call_id=tool_call.id,
+                tool_name=function_name,
+                args=_jsonl_tool_arg_stats(function_args),
+            )
             # Register this worker tid so the agent can fan out an interrupt
             # to it — see AIAgent.interrupt().  Must happen first thing, and
             # must be paired with discard + clear in the finally block.
@@ -9390,6 +9493,20 @@ class AIAgent:
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result_text[:200])
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result_text))
+            _jsonl_tool_event(
+                "agent.tool_complete",
+                execution="concurrent",
+                session_id=self.session_id or "",
+                task_id=effective_task_id or "",
+                api_call_count=api_call_count,
+                batch_size=num_tools,
+                batch_index=index,
+                tool_call_id=tool_call.id,
+                tool_name=function_name,
+                duration_ms=round(duration * 1000),
+                is_error=bool(is_error),
+                result=_jsonl_tool_result_stats(result),
+            )
             results[index] = (function_name, function_args, result, duration, is_error)
             # Tear down worker-tid tracking.  Clear any interrupt bit we may
             # have set so the next task scheduled onto this recycled tid
@@ -9482,6 +9599,18 @@ class AIAgent:
                 function_name = name
                 function_args = args
                 is_error = True
+                _jsonl_tool_event(
+                    "agent.tool_cancelled",
+                    execution="concurrent",
+                    session_id=self.session_id or "",
+                    task_id=effective_task_id or "",
+                    api_call_count=api_call_count,
+                    batch_size=num_tools,
+                    batch_index=i,
+                    tool_call_id=tc.id,
+                    tool_name=name,
+                    interrupted=bool(self._interrupt_requested),
+                )
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
             function_result_text = _multimodal_text_summary(function_result)
@@ -9595,6 +9724,16 @@ class AIAgent:
                         "tool_call_id": skipped_tc.id,
                     }
                     messages.append(skip_msg)
+                    _jsonl_tool_event(
+                        "agent.tool_skipped",
+                        execution="sequential",
+                        session_id=self.session_id or "",
+                        task_id=effective_task_id or "",
+                        api_call_count=api_call_count,
+                        tool_call_id=skipped_tc.id,
+                        tool_name=skipped_name,
+                        reason="interrupt_before_start",
+                    )
                 break
 
             function_name = tool_call.function.name
@@ -9674,6 +9813,19 @@ class AIAgent:
                     self.tool_start_callback(tool_call.id, function_name, function_args)
                 except Exception as cb_err:
                     logging.debug(f"Tool start callback error: {cb_err}")
+            _jsonl_tool_event(
+                "agent.tool_start",
+                execution="sequential",
+                session_id=self.session_id or "",
+                task_id=effective_task_id or "",
+                api_call_count=api_call_count,
+                batch_size=len(assistant_message.tool_calls),
+                batch_index=i - 1,
+                tool_call_id=tool_call.id,
+                tool_name=function_name,
+                blocked=bool(_block_msg is not None),
+                args=_jsonl_tool_arg_stats(function_args),
+            )
 
             # Checkpoint: snapshot working dir before file-mutating tools
             if _block_msg is None and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
@@ -9901,6 +10053,21 @@ class AIAgent:
                     tool_duration,
                     len(function_result_text),
                 )
+            _jsonl_tool_event(
+                "agent.tool_complete",
+                execution="sequential",
+                session_id=self.session_id or "",
+                task_id=effective_task_id or "",
+                api_call_count=api_call_count,
+                batch_size=len(assistant_message.tool_calls),
+                batch_index=i - 1,
+                tool_call_id=tool_call.id,
+                tool_name=function_name,
+                blocked=bool(_block_msg is not None),
+                duration_ms=round(tool_duration * 1000),
+                is_error=bool(_is_error_result),
+                result=_jsonl_tool_result_stats(function_result),
+            )
 
             if self.tool_progress_callback:
                 try:
@@ -9977,6 +10144,16 @@ class AIAgent:
                         "tool_call_id": skipped_tc.id
                     }
                     messages.append(skip_msg)
+                    _jsonl_tool_event(
+                        "agent.tool_skipped",
+                        execution="sequential",
+                        session_id=self.session_id or "",
+                        task_id=effective_task_id or "",
+                        api_call_count=api_call_count,
+                        tool_call_id=skipped_tc.id,
+                        tool_name=skipped_name,
+                        reason="interrupt_after_tool",
+                    )
                 break
 
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
