@@ -20,6 +20,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agent.cwd import safe_getcwd
+from agent.compaction_trace import (
+    compressor_stats as _compaction_compressor_stats,
+    message_stats as _compaction_message_stats,
+    set_trace_context as _compaction_set_trace_context,
+    trace_event as _compaction_trace_event,
+    trace_scope as _compaction_trace_scope,
+)
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -1087,12 +1094,31 @@ def _compress_session_history(
     if len(history) < 4:
         return 0, _get_usage(agent)
     approx_tokens = estimate_messages_tokens_rough(history)
-    compressed, _ = agent._compress_context(
-        history,
-        getattr(agent, "_cached_system_prompt", "") or "",
-        approx_tokens=approx_tokens,
-        focus_topic=focus_topic or None,
-    )
+    with _compaction_trace_scope(
+        source="gateway",
+        trigger="session.compress",
+        session_id=getattr(agent, "session_id", "") or session.get("session_key", ""),
+        gateway_session_key=session.get("session_key", ""),
+    ):
+        _compaction_trace_event(
+            "gateway.session_compress_start",
+            focus_topic_chars=len(focus_topic or ""),
+            approx_tokens=approx_tokens,
+            messages=_compaction_message_stats(history),
+            compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+        )
+        compressed, _ = agent._compress_context(
+            history,
+            getattr(agent, "_cached_system_prompt", "") or "",
+            approx_tokens=approx_tokens,
+            focus_topic=focus_topic or None,
+        )
+        _compaction_trace_event(
+            "gateway.session_compress_done",
+            removed=len(history) - len(compressed),
+            messages=_compaction_message_stats(compressed),
+            compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+        )
     session["history"] = compressed
     session["history_version"] = int(session.get("history_version", 0)) + 1
     return len(history) - len(compressed), _get_usage(agent)
@@ -2831,6 +2857,21 @@ def _(rid, params: dict) -> dict:
             )
             messages = list(session.get("history", []))
         info = _session_info(session["agent"])
+        _agent = session.get("agent")
+        _compaction_trace_event(
+            "gateway.session_compress_response",
+            session_id=getattr(_agent, "session_id", "") or params.get("session_id", ""),
+            gateway_session_key=session.get("session_key", ""),
+            removed=removed,
+            messages=_compaction_message_stats(messages),
+            compressor=_compaction_compressor_stats(
+                getattr(_agent, "context_compressor", None)
+            ),
+            agent_session_changed=bool(
+                getattr(_agent, "session_id", None)
+                and getattr(_agent, "session_id", None) != session.get("session_key")
+            ),
+        )
         _emit("session.info", params.get("session_id", ""), info)
         return _ok(
             rid,
@@ -6018,10 +6059,27 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         return "(._.) No active agent -- send a message first."
     if not getattr(agent, "compression_enabled", True):
         return "(._.) Compression is disabled in config."
+    _compaction_set_trace_context(
+        source="gateway",
+        trigger="manual_slash_compress",
+        session_id=getattr(agent, "session_id", "") or session.get("session_key", "") or sid,
+        gateway_session_id=sid,
+        gateway_session_key=session.get("session_key", ""),
+    )
+    _compaction_trace_event(
+        "gateway.manual_compress_start",
+        focus_topic_chars=len(focus_topic or ""),
+        running=bool(session.get("running")),
+        compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+    )
 
     with session["history_lock"]:
         original_history = list(session.get("history", []))
         if len(original_history) < 4:
+            _compaction_trace_event(
+                "gateway.manual_compress_too_short",
+                messages=_compaction_message_stats(original_history),
+            )
             return "(._.) Not enough conversation to compress (need at least 4 messages)."
 
         from agent.manual_compression_feedback import summarize_manual_compression
@@ -6034,6 +6092,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         # context" pill) until the result card pops. Client maps this text to
         # setCompacting(true); the "Session compacted" status below clears it.
         # try/finally guarantees the pill is released even on error.
+        _compaction_trace_event("gateway.status_emit", status_kind="compacting_context")
         _emit("status", sid, {"text": "Compacting context"})
         try:
             compressed, _ = agent._compress_context(
@@ -6043,10 +6102,24 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 focus_topic=focus_topic or None,
             )
         except Exception:
+            _compaction_trace_event(
+                "gateway.manual_compress_exception",
+                status_kind="session_compacted_release",
+                messages=_compaction_message_stats(original_history),
+                compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+            )
             _emit("status", sid, {"text": "Session compacted"})  # release the pill
             raise
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
+        _compaction_trace_event(
+            "gateway.manual_compress_history_updated",
+            original_message_count=len(original_history),
+            compressed_message_count=len(compressed),
+            history_version=session.get("history_version", 0),
+            messages=_compaction_message_stats(compressed),
+            compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+        )
 
         # Durably write the compressed history. _compress_context ROTATES to a
         # fresh session (ends the old, creates an empty tip, resets the flush
@@ -6059,7 +6132,16 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         # the rotation, so this writes the full compressed list into the tip.
         try:
             agent._persist_session(compressed, None)
+            _compaction_trace_event(
+                "gateway.manual_compress_persist_done",
+                session_id=getattr(agent, "session_id", "") or "",
+                messages=_compaction_message_stats(compressed),
+            )
         except Exception:
+            _compaction_trace_event(
+                "gateway.manual_compress_persist_exception",
+                session_id=getattr(agent, "session_id", "") or "",
+            )
             logger.exception("manual /compress: failed to persist compressed history")
 
         if (
@@ -6069,6 +6151,11 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
             session["session_key"] = agent.session_id
             db = _get_db()
             if db is not None:
+                _compaction_trace_event(
+                    "gateway.session_identity_emit",
+                    session_id=agent.session_id,
+                    gateway_session_id=sid,
+                )
                 _emit("session.identity", sid, _session_identity_for(db, agent.session_id))
             _restart_slash_worker(session)
 
@@ -6081,8 +6168,17 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         )
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).
+    _compaction_trace_event("gateway.status_emit", status_kind="session_compacted")
     _emit("status", sid, {"text": "Session compacted"})
     _emit("session.info", sid, _session_info(agent))
+    _compaction_trace_event(
+        "gateway.manual_compress_done",
+        noop=bool(summary["noop"]),
+        session_id=getattr(agent, "session_id", "") or "",
+        gateway_session_key=session.get("session_key", ""),
+        messages=_compaction_message_stats(session.get("history", [])),
+        compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
+    )
     icon = "🗜️" if summary["noop"] else "✅"
     lines = [
         f"  {icon} {summary['headline']}",

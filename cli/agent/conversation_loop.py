@@ -55,6 +55,12 @@ from agent.model_metadata import (
     parse_context_limit_from_error,
     save_context_length,
 )
+from agent.compaction_trace import (
+    compressor_stats as _compaction_compressor_stats,
+    message_stats as _compaction_message_stats,
+    trace_event as _compaction_trace_event,
+    trace_scope as _compaction_trace_scope,
+)
 from agent.nous_rate_guard import (
     clear_nous_rate_limit,
     is_genuine_nous_rate_limit,
@@ -532,10 +538,24 @@ def run_conversation(
             # context windows (each pass summarises the middle N turns).
             for _pass in range(3):
                 _orig_len = len(messages)
-                messages, active_system_prompt = agent._compress_context(
-                    messages, system_message, approx_tokens=_preflight_tokens,
-                    task_id=effective_task_id,
-                )
+                with _compaction_trace_scope(
+                    source="agent",
+                    trigger="preflight",
+                    session_id=agent.session_id or "",
+                ):
+                    _compaction_trace_event(
+                        "agent.preflight_trigger",
+                        pass_index=_pass + 1,
+                        measured_tokens=_preflight_tokens,
+                        trigger_tokens=agent.context_compressor.threshold_tokens,
+                        real_mode=False,
+                        messages=_compaction_message_stats(messages),
+                        compressor=_compaction_compressor_stats(agent.context_compressor),
+                    )
+                    messages, active_system_prompt = agent._compress_context(
+                        messages, system_message, approx_tokens=_preflight_tokens,
+                        task_id=effective_task_id,
+                    )
                 if len(messages) >= _orig_len:
                     break  # Cannot compress further
                 # Compression created a new session — clear the history
@@ -2423,11 +2443,26 @@ def run_conversation(
                     compression_attempts += 1
                     if compression_attempts <= max_compression_attempts:
                         original_len = len(messages)
-                        messages, active_system_prompt = agent._compress_context(
-                            messages, system_message,
-                            approx_tokens=approx_tokens,
-                            task_id=effective_task_id,
-                        )
+                        with _compaction_trace_scope(
+                            source="agent",
+                            trigger="long_context_tier",
+                            session_id=agent.session_id or "",
+                        ):
+                            _compaction_trace_event(
+                                "agent.long_context_tier_trigger",
+                                old_context_length=old_ctx,
+                                reduced_context_length=_reduced_ctx,
+                                compression_attempt=compression_attempts,
+                                max_compression_attempts=max_compression_attempts,
+                                approx_tokens=approx_tokens,
+                                messages=_compaction_message_stats(messages),
+                                compressor=_compaction_compressor_stats(compressor),
+                            )
+                            messages, active_system_prompt = agent._compress_context(
+                                messages, system_message,
+                                approx_tokens=approx_tokens,
+                                task_id=effective_task_id,
+                            )
                         # Compression created a new session — clear history
                         # so _flush_messages_to_session_db writes compressed
                         # messages to the new session, not skipping them.
@@ -2590,10 +2625,23 @@ def run_conversation(
                     agent._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
-                        messages, system_message, approx_tokens=approx_tokens,
-                        task_id=effective_task_id,
-                    )
+                    with _compaction_trace_scope(
+                        source="agent",
+                        trigger="payload_too_large",
+                        session_id=agent.session_id or "",
+                    ):
+                        _compaction_trace_event(
+                            "agent.payload_too_large_trigger",
+                            compression_attempt=compression_attempts,
+                            max_compression_attempts=max_compression_attempts,
+                            approx_tokens=approx_tokens,
+                            messages=_compaction_message_stats(messages),
+                            compressor=_compaction_compressor_stats(agent.context_compressor),
+                        )
+                        messages, active_system_prompt = agent._compress_context(
+                            messages, system_message, approx_tokens=approx_tokens,
+                            task_id=effective_task_id,
+                        )
                     # Compression created a new session — clear history
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
@@ -2747,10 +2795,26 @@ def run_conversation(
                     agent._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                     original_len = len(messages)
-                    messages, active_system_prompt = agent._compress_context(
-                        messages, system_message, approx_tokens=approx_tokens,
-                        task_id=effective_task_id,
-                    )
+                    with _compaction_trace_scope(
+                        source="agent",
+                        trigger="context_limit_recovery",
+                        session_id=agent.session_id or "",
+                    ):
+                        _compaction_trace_event(
+                            "agent.context_limit_recovery_trigger",
+                            old_context_length=old_ctx,
+                            new_context_length=new_ctx,
+                            parsed_limit=parsed_limit,
+                            compression_attempt=compression_attempts,
+                            max_compression_attempts=max_compression_attempts,
+                            approx_tokens=approx_tokens,
+                            messages=_compaction_message_stats(messages),
+                            compressor=_compaction_compressor_stats(compressor),
+                        )
+                        messages, active_system_prompt = agent._compress_context(
+                            messages, system_message, approx_tokens=approx_tokens,
+                            task_id=effective_task_id,
+                        )
                     # Compression created a new session — clear history
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
@@ -3522,11 +3586,24 @@ def run_conversation(
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
-                        messages, system_message,
-                        approx_tokens=agent.context_compressor.last_prompt_tokens,
-                        task_id=effective_task_id,
-                    )
+                    with _compaction_trace_scope(
+                        source="agent",
+                        trigger="iteration_boundary",
+                        session_id=agent.session_id or "",
+                    ):
+                        _compaction_trace_event(
+                            "agent.iteration_boundary_trigger",
+                            measured_tokens=_real_tokens,
+                            trigger_tokens=_compressor.threshold_tokens,
+                            real_mode=_compressor.last_prompt_tokens > 0,
+                            messages=_compaction_message_stats(messages),
+                            compressor=_compaction_compressor_stats(_compressor),
+                        )
+                        messages, active_system_prompt = agent._compress_context(
+                            messages, system_message,
+                            approx_tokens=agent.context_compressor.last_prompt_tokens,
+                            task_id=effective_task_id,
+                        )
                     # Compression created a new session — clear history so
                     # _flush_messages_to_session_db writes compressed messages
                     # to the new session (see preflight compression comment).

@@ -46,6 +46,12 @@ from datetime import datetime
 from pathlib import Path
 
 from elevate_constants import get_elevate_home
+from agent.compaction_trace import (
+    compressor_stats as _compaction_compressor_stats,
+    message_stats as _compaction_message_stats,
+    trace_event as _compaction_trace_event,
+    trace_scope as _compaction_trace_scope,
+)
 
 # Load .env from ~/.elevate/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
@@ -10553,10 +10559,24 @@ class AIAgent:
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
                     _orig_len = len(messages)
-                    messages, active_system_prompt = self._compress_context(
-                        messages, system_message, approx_tokens=_preflight_tokens,
-                        task_id=effective_task_id,
-                    )
+                    with _compaction_trace_scope(
+                        source="agent",
+                        trigger="preflight",
+                        session_id=self.session_id or "",
+                    ):
+                        _compaction_trace_event(
+                            "agent.preflight_trigger",
+                            pass_index=_pass + 1,
+                            measured_tokens=_preflight_tokens,
+                            trigger_tokens=_preflight_trigger,
+                            real_mode=_preflight_real_mode,
+                            messages=_compaction_message_stats(messages),
+                            compressor=_compaction_compressor_stats(_compressor),
+                        )
+                        messages, active_system_prompt = self._compress_context(
+                            messages, system_message, approx_tokens=_preflight_tokens,
+                            task_id=effective_task_id,
+                        )
                     if len(messages) >= _orig_len:
                         break  # Cannot compress further
                     # Compression created a new session — clear the history
@@ -12453,11 +12473,26 @@ class AIAgent:
                         compression_attempts += 1
                         if compression_attempts <= max_compression_attempts:
                             original_len = len(messages)
-                            messages, active_system_prompt = self._compress_context(
-                                messages, system_message,
-                                approx_tokens=approx_tokens,
-                                task_id=effective_task_id,
-                            )
+                            with _compaction_trace_scope(
+                                source="agent",
+                                trigger="long_context_tier",
+                                session_id=self.session_id or "",
+                            ):
+                                _compaction_trace_event(
+                                    "agent.long_context_tier_trigger",
+                                    old_context_length=old_ctx,
+                                    reduced_context_length=_reduced_ctx,
+                                    compression_attempt=compression_attempts,
+                                    max_compression_attempts=max_compression_attempts,
+                                    approx_tokens=approx_tokens,
+                                    messages=_compaction_message_stats(messages),
+                                    compressor=_compaction_compressor_stats(compressor),
+                                )
+                                messages, active_system_prompt = self._compress_context(
+                                    messages, system_message,
+                                    approx_tokens=approx_tokens,
+                                    task_id=effective_task_id,
+                                )
                             # Compression created a new session — clear history
                             # so _flush_messages_to_session_db writes compressed
                             # messages to the new session, not skipping them.
@@ -12592,10 +12627,23 @@ class AIAgent:
                         self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message, approx_tokens=approx_tokens,
-                            task_id=effective_task_id,
-                        )
+                        with _compaction_trace_scope(
+                            source="agent",
+                            trigger="payload_too_large",
+                            session_id=self.session_id or "",
+                        ):
+                            _compaction_trace_event(
+                                "agent.payload_too_large_trigger",
+                                compression_attempt=compression_attempts,
+                                max_compression_attempts=max_compression_attempts,
+                                approx_tokens=approx_tokens,
+                                messages=_compaction_message_stats(messages),
+                                compressor=_compaction_compressor_stats(self.context_compressor),
+                            )
+                            messages, active_system_prompt = self._compress_context(
+                                messages, system_message, approx_tokens=approx_tokens,
+                                task_id=effective_task_id,
+                            )
                         # Compression created a new session — clear history
                         # so _flush_messages_to_session_db writes compressed
                         # messages to the new session, not skipping them.
@@ -12750,11 +12798,27 @@ class AIAgent:
 
                         original_len = len(messages)
                         try:
-                            messages, active_system_prompt = self._compress_context(
-                                messages, system_message, approx_tokens=approx_tokens,
-                                task_id=effective_task_id,
-                                focus_topic="context-limit recovery",
-                            )
+                            with _compaction_trace_scope(
+                                source="agent",
+                                trigger="context_limit_recovery",
+                                session_id=self.session_id or "",
+                            ):
+                                _compaction_trace_event(
+                                    "agent.context_limit_recovery_trigger",
+                                    old_context_length=old_ctx,
+                                    new_context_length=new_ctx,
+                                    parsed_limit=parsed_limit,
+                                    compression_attempt=compression_attempts,
+                                    max_compression_attempts=max_compression_attempts,
+                                    approx_tokens=approx_tokens,
+                                    messages=_compaction_message_stats(messages),
+                                    compressor=_compaction_compressor_stats(compressor),
+                                )
+                                messages, active_system_prompt = self._compress_context(
+                                    messages, system_message, approx_tokens=approx_tokens,
+                                    task_id=effective_task_id,
+                                    focus_topic="context-limit recovery",
+                                )
                         except TypeError as type_error:
                             if "unexpected keyword argument 'focus_topic'" not in str(type_error):
                                 raise
@@ -13579,11 +13643,27 @@ class AIAgent:
                             f"{_compressor.context_length:,}",
                             f"{getattr(self, '_compression_output_reserve_tokens', 0):,}",
                         )
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message,
-                            approx_tokens=self.context_compressor.last_prompt_tokens,
-                            task_id=effective_task_id,
-                        )
+                        with _compaction_trace_scope(
+                            source="agent",
+                            trigger="iteration_boundary",
+                            session_id=self.session_id or "",
+                        ):
+                            _compaction_trace_event(
+                                "agent.iteration_boundary_trigger",
+                                measured_tokens=_real_tokens,
+                                trigger_tokens=_trigger_tokens,
+                                real_mode=_real_mode,
+                                output_reserve_tokens=getattr(
+                                    self, "_compression_output_reserve_tokens", 0
+                                ),
+                                messages=_compaction_message_stats(messages),
+                                compressor=_compaction_compressor_stats(_compressor),
+                            )
+                            messages, active_system_prompt = self._compress_context(
+                                messages, system_message,
+                                approx_tokens=self.context_compressor.last_prompt_tokens,
+                                task_id=effective_task_id,
+                            )
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages
                         # to the new session (see preflight compression comment).
@@ -13600,9 +13680,28 @@ class AIAgent:
                         # needed. No session rotation — message contents are
                         # rewritten in place; the session DB keeps the full-
                         # fidelity originals.
-                        messages, _pruned = _compressor.prune_only(
-                            messages, current_tokens=_real_tokens,
-                        )
+                        with _compaction_trace_scope(
+                            source="agent",
+                            trigger="prune_only",
+                            session_id=self.session_id or "",
+                        ):
+                            _compaction_trace_event(
+                                "agent.prune_only_trigger",
+                                measured_tokens=_real_tokens,
+                                trigger_tokens=_trigger_tokens,
+                                real_mode=_real_mode,
+                                messages=_compaction_message_stats(messages),
+                                compressor=_compaction_compressor_stats(_compressor),
+                            )
+                            messages, _pruned = _compressor.prune_only(
+                                messages, current_tokens=_real_tokens,
+                            )
+                            _compaction_trace_event(
+                                "agent.prune_only_done",
+                                changed=_pruned,
+                                messages=_compaction_message_stats(messages),
+                                compressor=_compaction_compressor_stats(_compressor),
+                            )
                         if _pruned:
                             self._safe_print("  ⟳ pruned stale context (no summary)")
                     

@@ -37,6 +37,7 @@ from agent.media_context import (
     strip_image_parts_from_parts as _media_strip_image_parts_from_parts,
     strip_images_from_content as _media_strip_images_from_content,
 )
+from agent.compaction_trace import compressor_stats, message_stats, trace_event
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -1655,7 +1656,20 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # active task is never lost to compression (fixes #10896).
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
-        return max(cut_idx, head_end + 1)
+        final_cut = max(cut_idx, head_end + 1)
+        trace_event(
+            "compressor.tail_cut",
+            message_count=n,
+            head_end=head_end,
+            token_budget=token_budget,
+            soft_ceiling=soft_ceiling,
+            accumulated_tokens_est=accumulated,
+            min_tail=min_tail,
+            cut_idx=final_cut,
+            tail_size=max(0, n - final_cut),
+            last_user_idx=self._find_last_user_message_idx(messages, head_end),
+        )
+        return final_cut
 
     # ------------------------------------------------------------------
     # ContextEngine: manual /compress preflight
@@ -1748,6 +1762,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 running so a manual ``/compress`` can retry immediately after
                 an auto-compression abort.  Auto-compress callers pass False.
         """
+        _trace_started = time.monotonic()
+        trace_event(
+            "compressor.compress_start",
+            current_tokens=current_tokens,
+            force=force,
+            focus_topic_chars=len(focus_topic or ""),
+            messages=message_stats(messages),
+            compressor=compressor_stats(self),
+        )
         # Reset per-call summary failure state — callers inspect these fields
         # after compress() returns to decide whether to surface a warning.
         self._last_summary_dropped_count = 0
@@ -1779,6 +1802,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
         if n_messages <= _min_for_compress:
+            trace_event(
+                "compressor.too_short",
+                n_messages=n_messages,
+                min_for_compress=_min_for_compress,
+                messages=message_stats(messages),
+                compressor=compressor_stats(self),
+            )
             if not self.quiet_mode:
                 logger.warning(
                     "Cannot compress: only %d messages (need > %d)",
@@ -1795,6 +1825,13 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
+        trace_event(
+            "compressor.preprocess_done",
+            n_messages=n_messages,
+            auto_skill_compacted=auto_skill_compacted,
+            pruned_count=pruned_count,
+            messages=message_stats(messages),
+        )
 
         # Phase 2: Determine boundaries
         compress_start = self._protect_head_size(messages)
@@ -1802,8 +1839,23 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         # Use token-budget tail protection instead of fixed message count
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+        trace_event(
+            "compressor.boundary",
+            n_messages=n_messages,
+            compress_start=compress_start,
+            compress_end=compress_end,
+            compressible_count=max(0, compress_end - compress_start),
+            tail_count=max(0, n_messages - compress_end),
+        )
 
         if compress_start >= compress_end:
+            trace_event(
+                "compressor.noop_window",
+                compress_start=compress_start,
+                compress_end=compress_end,
+                messages=message_stats(messages),
+                compressor=compressor_stats(self),
+            )
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
@@ -1849,6 +1901,14 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         # Phase 3: Generate structured summary
         summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        trace_event(
+            "compressor.summary_result",
+            summary_success=bool(summary),
+            summary_chars=len(summary or ""),
+            turns_to_summarize_count=len(turns_to_summarize),
+            summary_failure_cooldown_active=self._summary_failure_cooldown_until > time.time(),
+            compressor=compressor_stats(self),
+        )
 
         # If summary generation failed, behavior splits on
         # ``abort_on_summary_failure`` (config: compression.abort_on_summary_failure):
@@ -1866,6 +1926,12 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._last_summary_dropped_count = 0  # nothing actually dropped
             self._last_summary_fallback_used = False
             self._last_compress_aborted = True
+            trace_event(
+                "compressor.abort",
+                n_skipped=n_skipped,
+                messages=message_stats(messages),
+                compressor=compressor_stats(self),
+            )
             if not self.quiet_mode:
                 logger.warning(
                     "Summary generation failed — aborting compression "
@@ -1906,6 +1972,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 f"messages contained earlier work in this session. Continue based on the "
                 f"recent messages below and the current state of any files or resources."
             )
+            trace_event(
+                "compressor.fallback_summary",
+                n_dropped=n_dropped,
+                compressor=compressor_stats(self),
+            )
 
         _merge_summary_into_tail = False
         last_head_role = messages[compress_start - 1].get("role", "user") if compress_start > 0 else "user"
@@ -1940,6 +2011,17 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 + "\n\n--- END OF CONTEXT SUMMARY — "
                 "respond to the message below, not the summary above ---"
             )
+
+        trace_event(
+            "compressor.summary_placement",
+            summary_role=summary_role,
+            merge_summary_into_tail=_merge_summary_into_tail,
+            last_head_role=last_head_role,
+            first_tail_role=first_tail_role,
+            standalone_summary_role_user=(
+                not _merge_summary_into_tail and summary_role == "user"
+            ),
+        )
 
         if not _merge_summary_into_tail:
             compressed.append({"role": summary_role, "content": summary})
@@ -1982,6 +2064,18 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._ineffective_compression_count += 1
         else:
             self._ineffective_compression_count = 0
+        trace_event(
+            "compressor.compress_done",
+            original_message_count=n_messages,
+            compressed_message_count=len(compressed),
+            display_tokens=display_tokens,
+            new_estimate=new_estimate,
+            saved_estimate=saved_estimate,
+            savings_pct=savings_pct,
+            duration_ms=int((time.monotonic() - _trace_started) * 1000),
+            messages=message_stats(compressed),
+            compressor=compressor_stats(self),
+        )
 
         if not self.quiet_mode:
             logger.info(

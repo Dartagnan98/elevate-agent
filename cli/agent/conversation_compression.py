@@ -42,6 +42,13 @@ from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
 )
+from agent.compaction_trace import (
+    compressor_stats,
+    current_trace_fields,
+    message_stats,
+    set_trace_context,
+    trace_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -484,12 +491,41 @@ def compress_context(
             agent._compression_feasibility_checked = True
 
     _pre_msg_count = len(messages)
+    _trace_started = time.monotonic()
+    _current_trace = current_trace_fields()
+    _existing_trigger = str(_current_trace.get("trigger") or "")
+    if _existing_trigger:
+        _trigger = _existing_trigger
+    elif force:
+        _trigger = "manual_force"
+    elif focus_topic == "context-limit recovery":
+        _trigger = "context_limit_recovery"
+    else:
+        _trigger = "auto"
+    _trace_id = set_trace_context(
+        source="agent",
+        trigger=_trigger,
+        session_id=agent.session_id or "",
+        model=getattr(agent, "model", "") or "",
+    )
+    trace_event(
+        "agent.compress_context_start",
+        trace_id=_trace_id,
+        message_count=_pre_msg_count,
+        approx_tokens=approx_tokens,
+        task_id=task_id,
+        force=force,
+        focus_topic_chars=len(focus_topic or ""),
+        messages=message_stats(messages),
+        compressor=compressor_stats(getattr(agent, "context_compressor", None)),
+    )
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
         f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
         focus_topic,
     )
+    trace_event("agent.status_emit", status_kind="compacting_context")
     agent._emit_status(
         "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
     )
@@ -502,11 +538,28 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        try:
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        except TypeError:
+            # Plugin context engine with strict signature that doesn't accept
+            # focus_topic / force — fall back to calling without them.
+            trace_event("agent.compress_context_signature_fallback")
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+    except Exception as exc:
+        trace_event(
+            "agent.compress_context_exception",
+            error_type=type(exc).__name__,
+            duration_ms=int((time.monotonic() - _trace_started) * 1000),
+            compressor=compressor_stats(getattr(agent, "context_compressor", None)),
+        )
+        raise
+    trace_event(
+        "agent.compress_context_compressor_returned",
+        original_message_count=_pre_msg_count,
+        compressed_message_count=len(compressed),
+        messages=message_stats(compressed),
+        compressor=compressor_stats(getattr(agent, "context_compressor", None)),
+    )
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
@@ -515,6 +568,13 @@ def compress_context(
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        trace_event(
+            "agent.compress_context_aborted",
+            warning_deduped=getattr(agent, "_last_compression_summary_warning", None) == _err,
+            messages=message_stats(messages),
+            compressor=compressor_stats(getattr(agent, "context_compressor", None)),
+            duration_ms=int((time.monotonic() - _trace_started) * 1000),
+        )
         if getattr(agent, "_last_compression_summary_warning", None) != _err:
             agent._last_compression_summary_warning = _err
             agent._emit_warning(
@@ -561,11 +621,20 @@ def compress_context(
         logger.debug("Plan snapshot preservation skipped: %s", e)
     todo_snapshot = agent._todo_store.format_for_injection()
     compressed = insert_preserved_context(compressed, [plan_snapshot, todo_snapshot])
+    trace_event(
+        "agent.preserved_context_inserted",
+        plan_snapshot_present=bool(plan_snapshot),
+        plan_snapshot_chars=len(plan_snapshot or ""),
+        todo_snapshot_present=bool(todo_snapshot),
+        todo_snapshot_chars=len(todo_snapshot or ""),
+        messages=message_stats(compressed),
+    )
 
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)
     agent._cached_system_prompt = new_system_prompt
 
+    old_session_id = None
     if agent._session_db:
         try:
             # Propagate title to the new session with auto-numbering
@@ -574,6 +643,11 @@ def compress_context(
             agent.commit_memory_session(messages)
             agent._session_db.end_session(agent.session_id, "compression")
             old_session_id = agent.session_id
+            trace_event(
+                "agent.session_rotation_start",
+                session_id=old_session_id or "",
+                parent_session_id=old_session_id or "",
+            )
             _new_sid_base = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
             # Preserve the cron_<jobid>_ prefix across compression-driven
             # session rotation. Without this, the dashboard's per-cron
@@ -619,18 +693,42 @@ def compress_context(
             agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
             # Reset flush cursor — new session starts with no messages written
             agent._last_flushed_db_idx = 0
+            trace_event(
+                "agent.session_rotation_done",
+                session_id=agent.session_id or "",
+                parent_session_id=old_session_id or "",
+                new_session_id=agent.session_id or "",
+                title_propagated=bool(old_title),
+            )
         except Exception as e:
+            trace_event(
+                "agent.session_rotation_exception",
+                error_type=type(e).__name__,
+                session_id=getattr(agent, "session_id", "") or "",
+                parent_session_id=old_session_id or "",
+            )
             logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
 
     try:
         _store_compression_checkpoint(
             agent,
             session_id=agent.session_id or "",
-            old_session_id=locals().get("old_session_id"),
+            old_session_id=old_session_id,
             source_messages=messages,
             compressed_messages=compressed,
         )
+        trace_event(
+            "agent.compression_checkpoint_stored",
+            session_id=agent.session_id or "",
+            parent_session_id=old_session_id or "",
+        )
     except Exception as _checkpoint_err:
+        trace_event(
+            "agent.compression_checkpoint_exception",
+            error_type=type(_checkpoint_err).__name__,
+            session_id=agent.session_id or "",
+            parent_session_id=old_session_id or "",
+        )
         logger.debug("compression checkpoint skipped: %s", _checkpoint_err)
 
     # Notify the context engine that the session_id rotated because of
@@ -639,7 +737,7 @@ def compress_context(
     # rollover instead of re-initializing fresh per-session state.
     # See elevate-lcm#68. Built-in ContextCompressor ignores kwargs.
     try:
-        _old_sid = locals().get("old_session_id")
+        _old_sid = old_session_id
         if _old_sid and hasattr(agent.context_compressor, "on_session_start"):
             agent.context_compressor.on_session_start(
                 agent.session_id or "",
@@ -655,7 +753,7 @@ def compress_context(
     # the logical conversation continues; only the id and DB row rolled
     # over. See #6672.
     try:
-        _old_sid = locals().get("old_session_id")
+        _old_sid = old_session_id
         if _old_sid and agent._memory_manager:
             agent._memory_manager.on_session_switch(
                 agent.session_id or "",
@@ -736,6 +834,17 @@ def compress_context(
         "context compression done: session=%s messages=%d->%d tokens=~%s",
         agent.session_id or "none", _pre_msg_count, len(compressed),
         f"{_compressed_est:,}",
+    )
+    trace_event(
+        "agent.compress_context_done",
+        session_id=agent.session_id or "",
+        parent_session_id=old_session_id or "",
+        original_message_count=_pre_msg_count,
+        compressed_message_count=len(compressed),
+        compressed_request_tokens_est=_compressed_est,
+        duration_ms=int((time.monotonic() - _trace_started) * 1000),
+        messages=message_stats(compressed),
+        compressor=compressor_stats(getattr(agent, "context_compressor", None)),
     )
     return compressed, new_system_prompt
 
