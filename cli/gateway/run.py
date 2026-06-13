@@ -34,6 +34,12 @@ from datetime import datetime
 from typing import Dict, Optional, Any, List
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
+from agent.compaction_trace import (
+    compressor_stats as _compaction_compressor_stats,
+    message_stats as _compaction_message_stats,
+    trace_event as _compaction_trace_event,
+    trace_scope as _compaction_trace_scope,
+)
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -141,6 +147,15 @@ _GATEWAY_SECRET_PATTERNS = (
 def _gateway_platform_value(platform: Any) -> str:
     """Return a normalized gateway platform value for enums or raw strings."""
     return str(getattr(platform, "value", platform) or "").strip().lower()
+
+
+def _gateway_compaction_source_fields(source: Any) -> dict[str, Any]:
+    """Metadata-only source shape for compaction traces."""
+    return {
+        "gateway_source": _gateway_platform_value(getattr(source, "platform", "")) or None,
+        "has_chat_id": bool(getattr(source, "chat_id", None)),
+        "has_thread_id": bool(getattr(source, "thread_id", None)),
+    }
 
 
 def _redact_gateway_user_facing_secrets(text: str) -> str:
@@ -6409,6 +6424,34 @@ class GatewayRunner:
                     _approx_tokens >= _compress_token_threshold
                     or _msg_count >= _HARD_MSG_LIMIT
                 )
+                _hyg_reason = (
+                    "message_count"
+                    if _msg_count >= _HARD_MSG_LIMIT
+                    else "tokens"
+                    if _approx_tokens >= _compress_token_threshold
+                    else "below_threshold"
+                )
+
+                with _compaction_trace_scope(
+                    source="gateway",
+                    trigger="session_hygiene",
+                    session_id=session_entry.session_id,
+                    **_gateway_compaction_source_fields(source),
+                ) as _hyg_trace_id:
+                    _compaction_trace_event(
+                        "gateway.session_hygiene_check",
+                        messages=_compaction_message_stats(history),
+                        rough_tokens=_approx_tokens,
+                        token_source=_token_source,
+                        model=_hyg_model,
+                        provider=_hyg_provider,
+                        context_length=_hyg_context_length,
+                        threshold_pct=_hyg_threshold_pct,
+                        threshold_tokens=_compress_token_threshold,
+                        hard_message_limit=_HARD_MSG_LIMIT,
+                        needs_compress=_needs_compress,
+                        reason=_hyg_reason,
+                    )
 
                 if _needs_compress:
                     logger.info(
@@ -6456,12 +6499,37 @@ class GatewayRunner:
                                     _hyg_agent._print_fn = lambda *a, **kw: None
 
                                     loop = asyncio.get_running_loop()
+                                    _hyg_started = time.monotonic()
+                                    _hyg_original_sid = session_entry.session_id
+                                    _compaction_trace_event(
+                                        "gateway.session_hygiene_compress_start",
+                                        trace_id=_hyg_trace_id,
+                                        messages=_compaction_message_stats(_hyg_msgs),
+                                        rough_tokens=_approx_tokens,
+                                        token_source=_token_source,
+                                        model=_hyg_model,
+                                        provider=_hyg_runtime.get("provider"),
+                                        compressor=_compaction_compressor_stats(
+                                            getattr(_hyg_agent, "context_compressor", None)
+                                        ),
+                                    )
+
+                                    def _run_hygiene_compress():
+                                        with _compaction_trace_scope(
+                                            _hyg_trace_id,
+                                            source="gateway",
+                                            trigger="session_hygiene",
+                                            session_id=_hyg_original_sid,
+                                            **_gateway_compaction_source_fields(source),
+                                        ):
+                                            return _hyg_agent._compress_context(
+                                                _hyg_msgs, "",
+                                                approx_tokens=_approx_tokens,
+                                            )
+
                                     _compressed, _ = await loop.run_in_executor(
                                         None,
-                                        lambda: _hyg_agent._compress_context(
-                                            _hyg_msgs, "",
-                                            approx_tokens=_approx_tokens,
-                                        ),
+                                        _run_hygiene_compress,
                                     )
 
                                     # _compress_context ends the old session and creates
@@ -6472,6 +6540,12 @@ class GatewayRunner:
                                     if _hyg_new_sid != session_entry.session_id:
                                         session_entry.session_id = _hyg_new_sid
                                         self.session_store._save()
+                                        _compaction_trace_event(
+                                            "gateway.session_hygiene_rotation",
+                                            trace_id=_hyg_trace_id,
+                                            session_id=_hyg_new_sid,
+                                            parent_session_id=_hyg_original_sid,
+                                        )
 
                                     self.session_store.rewrite_transcript(
                                         session_entry.session_id, _compressed
@@ -6482,6 +6556,25 @@ class GatewayRunner:
                                     _new_count = len(_compressed)
                                     _new_tokens = estimate_messages_tokens_rough(
                                         _compressed
+                                    )
+                                    _compaction_trace_event(
+                                        "gateway.session_hygiene_rewrite_done",
+                                        trace_id=_hyg_trace_id,
+                                        session_id=session_entry.session_id,
+                                        parent_session_id=(
+                                            _hyg_original_sid
+                                            if session_entry.session_id != _hyg_original_sid
+                                            else None
+                                        ),
+                                        messages=_compaction_message_stats(_compressed),
+                                        rough_tokens=_new_tokens,
+                                        token_source="estimated",
+                                        duration_ms=round(
+                                            (time.monotonic() - _hyg_started) * 1000
+                                        ),
+                                        compressor=_compaction_compressor_stats(
+                                            getattr(_hyg_agent, "context_compressor", None)
+                                        ),
                                     )
 
                                     logger.info(
@@ -6499,11 +6592,36 @@ class GatewayRunner:
                                         )
                                 finally:
                                     self._cleanup_agent_resources(_hyg_agent)
+                            else:
+                                _compaction_trace_event(
+                                    "gateway.session_hygiene_abort",
+                                    trace_id=_hyg_trace_id,
+                                    reason="not_enough_supported_messages",
+                                    message_count=len(_hyg_msgs),
+                                )
+                        else:
+                            _compaction_trace_event(
+                                "gateway.session_hygiene_abort",
+                                trace_id=_hyg_trace_id,
+                                reason="missing_api_key",
+                            )
 
                     except Exception as e:
+                        _compaction_trace_event(
+                            "gateway.session_hygiene_exception",
+                            trace_id=_hyg_trace_id,
+                            error_type=type(e).__name__,
+                            error=str(e)[:400],
+                        )
                         logger.warning(
                             "Session hygiene auto-compress failed: %s", e
                         )
+                else:
+                    _compaction_trace_event(
+                        "gateway.session_hygiene_noop",
+                        trace_id=_hyg_trace_id,
+                        reason=_hyg_reason,
+                    )
 
         # First-message onboarding -- only on the very first interaction ever
         if not history and not self.session_store.has_any_sessions():
@@ -9459,12 +9577,28 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         history = self.session_store.load_transcript(session_entry.session_id)
+        focus_topic = (event.get_command_args() or "").strip() or None
+        with _compaction_trace_scope(
+            source="gateway",
+            trigger="manual_compress",
+            session_id=session_entry.session_id,
+            **_gateway_compaction_source_fields(source),
+        ) as _manual_trace_id:
+            _compaction_trace_event(
+                "gateway.manual_compress_requested",
+                messages=_compaction_message_stats(history),
+                focus_present=bool(focus_topic),
+                focus_chars=len(focus_topic or ""),
+            )
 
         if not history or len(history) < 4:
+            _compaction_trace_event(
+                "gateway.manual_compress_noop",
+                trace_id=_manual_trace_id,
+                reason="not_enough_messages",
+                message_count=len(history or []),
+            )
             return "Not enough conversation to compress (need at least 4 messages)."
-
-        # Extract optional focus topic from command args
-        focus_topic = (event.get_command_args() or "").strip() or None
 
         try:
             from run_agent import AIAgent
@@ -9477,6 +9611,11 @@ class GatewayRunner:
                 session_key=session_key,
             )
             if not runtime_kwargs.get("api_key"):
+                _compaction_trace_event(
+                    "gateway.manual_compress_abort",
+                    trace_id=_manual_trace_id,
+                    reason="missing_api_key",
+                )
                 return "No provider configured -- cannot compress."
 
             msgs = [
@@ -9506,28 +9645,66 @@ class GatewayRunner:
 
                 compressor = tmp_agent.context_compressor
                 if not compressor.has_content_to_compress(msgs):
+                    _compaction_trace_event(
+                        "gateway.manual_compress_noop",
+                        trace_id=_manual_trace_id,
+                        reason="no_content_to_compress",
+                        messages=_compaction_message_stats(msgs),
+                        rough_tokens=approx_tokens,
+                        compressor=_compaction_compressor_stats(compressor),
+                    )
                     return "Nothing to compress yet (the transcript is still all protected context)."
 
                 loop = asyncio.get_running_loop()
+                started = time.monotonic()
+                original_session_id = session_entry.session_id
+                _compaction_trace_event(
+                    "gateway.manual_compress_start",
+                    trace_id=_manual_trace_id,
+                    messages=_compaction_message_stats(msgs),
+                    rough_tokens=approx_tokens,
+                    model=model,
+                    provider=runtime_kwargs.get("provider"),
+                    focus_present=bool(focus_topic),
+                    focus_chars=len(focus_topic or ""),
+                    compressor=_compaction_compressor_stats(compressor),
+                )
+
+                def _run_manual_compress():
+                    with _compaction_trace_scope(
+                        _manual_trace_id,
+                        source="gateway",
+                        trigger="manual_compress",
+                        session_id=original_session_id,
+                        **_gateway_compaction_source_fields(source),
+                    ):
+                        return tmp_agent._compress_context(
+                            msgs,
+                            "",
+                            approx_tokens=approx_tokens,
+                            focus_topic=focus_topic,
+                            force=True,
+                        )
+
                 compressed, _ = await loop.run_in_executor(
                     None,
-                    lambda: tmp_agent._compress_context(
-                        msgs,
-                        "",
-                        approx_tokens=approx_tokens,
-                        focus_topic=focus_topic,
-                        force=True,
-                    )
+                    _run_manual_compress,
                 )
 
                 # _compress_context already calls end_session() on the old session
                 # (preserving its full transcript in SQLite) and creates a new
-                # session_id for the continuation.  Write the compressed messages
-                # into the NEW session so the original history stays searchable.
+                # session_id for the continuation. Write compressed messages into
+                # the NEW session so the original history stays searchable.
                 new_session_id = tmp_agent.session_id
                 if new_session_id != session_entry.session_id:
                     session_entry.session_id = new_session_id
                     self.session_store._save()
+                    _compaction_trace_event(
+                        "gateway.manual_compress_rotation",
+                        trace_id=_manual_trace_id,
+                        session_id=new_session_id,
+                        parent_session_id=original_session_id,
+                    )
 
                 self.session_store.rewrite_transcript(new_session_id, compressed)
                 # Reset stored token count — transcript changed, old value is stale
@@ -9535,6 +9712,21 @@ class GatewayRunner:
                     session_entry.session_key, last_prompt_tokens=0
                 )
                 new_tokens = estimate_messages_tokens_rough(compressed)
+                _compaction_trace_event(
+                    "gateway.manual_compress_rewrite_done",
+                    trace_id=_manual_trace_id,
+                    session_id=new_session_id,
+                    parent_session_id=(
+                        original_session_id
+                        if new_session_id != original_session_id
+                        else None
+                    ),
+                    messages=_compaction_message_stats(compressed),
+                    rough_tokens=new_tokens,
+                    token_source="estimated",
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    compressor=_compaction_compressor_stats(compressor),
+                )
                 summary = summarize_manual_compression(
                     msgs,
                     compressed,
@@ -9551,6 +9743,12 @@ class GatewayRunner:
                 lines.append(summary["note"])
             return "\n".join(lines)
         except Exception as e:
+            _compaction_trace_event(
+                "gateway.manual_compress_exception",
+                trace_id=_manual_trace_id,
+                error_type=type(e).__name__,
+                error=str(e)[:400],
+            )
             logger.warning("Manual compress failed: %s", e)
             return f"Compression failed: {e}"
 
