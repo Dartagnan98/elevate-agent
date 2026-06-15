@@ -891,6 +891,13 @@ function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
   if (role === "tool") return false;
   if (role !== "user" && isRawToolPayload(clean)) return false;
   if (clean.startsWith("[CONTEXT COMPACTION")) return false;
+  // Compaction-internal scaffolding persisted as role="user" rows. The REST
+  // path (web_server.get_session_messages) hides these; the gateway-resume path
+  // does not, so without matching them here the client renders them as user
+  // bubbles after a compaction (cold resume / reopened run / second surface).
+  if (clean.startsWith("[Your latest Plan panel plan was preserved")) return false;
+  if (clean.startsWith("[Your active task list was preserved")) return false;
+  if (clean.startsWith("[RECENT AUTONOMOUS ACTIVITY")) return false;
   if (role === "system") {
     if (/^⚡\s*loaded skill:/i.test(clean)) return false;
     if (/^session busy\b/i.test(clean)) return false;

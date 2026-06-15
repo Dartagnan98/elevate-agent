@@ -32,6 +32,7 @@ import logging
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -537,6 +538,47 @@ def compress_context(
         except Exception:
             pass
 
+    # Keepalive heartbeat for the blocking summary call. compress() runs the
+    # auxiliary summary LLM synchronously and can block the turn for tens of
+    # seconds (observed ~112s on a 252K-token session) with nothing on the
+    # wire. Without this, the dashboard WebSocket idles, gets dropped, and --
+    # because the web client does not auto-reconnect -- every post-compaction
+    # frame lands on a dead socket: the turn finishes and persists server-side
+    # but the chat looks hung and the thinking indicator disappears. Mirror the
+    # non-streaming watchdog in run_agent: _touch_activity keeps the gateway
+    # inactivity monitor satisfied (unthrottled), and _emit_status re-emits a
+    # progress frame so the socket stays warm and the user sees elapsed time.
+    # _emit_status throttles same-category repeats (default 30s) so the frame
+    # cadence cannot flood a no-overwrite gateway. Fires only past 15s, so
+    # short compactions carry zero overhead. No-ops harmlessly when the agent
+    # has no status_callback (quiet pre-agent hygiene / manual tmp agents).
+    _ka_stop = threading.Event()
+    _ka_start = time.monotonic()
+    try:
+        _ka_interval = float(os.getenv("ELEVATE_COMPACTION_KEEPALIVE_INTERVAL", "") or 15.0)
+    except (TypeError, ValueError):
+        _ka_interval = 15.0
+    if _ka_interval < 0.05:
+        _ka_interval = 0.05
+
+    def _compaction_keepalive() -> None:
+        while not _ka_stop.wait(_ka_interval):
+            _elapsed = int(time.monotonic() - _ka_start)
+            try:
+                agent._touch_activity(f"compacting context ({_elapsed}s elapsed)")
+            except Exception:
+                pass
+            try:
+                agent._emit_status(
+                    f"🗜️ Compacting context — still summarizing ({_elapsed}s elapsed)…"
+                )
+            except Exception:
+                pass
+
+    _ka_thread = threading.Thread(
+        target=_compaction_keepalive, daemon=True, name="compaction-keepalive"
+    )
+    _ka_thread.start()
     try:
         try:
             compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
@@ -553,6 +595,9 @@ def compress_context(
             compressor=compressor_stats(getattr(agent, "context_compressor", None)),
         )
         raise
+    finally:
+        _ka_stop.set()
+        _ka_thread.join(timeout=2.0)
     trace_event(
         "agent.compress_context_compressor_returned",
         original_message_count=_pre_msg_count,

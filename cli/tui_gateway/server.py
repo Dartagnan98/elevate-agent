@@ -6305,7 +6305,10 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         # setCompacting(true); the "Session compacted" status below clears it.
         # try/finally guarantees the pill is released even on error.
         _compaction_trace_event("gateway.status_emit", status_kind="compacting_context")
-        _emit("status", sid, {"text": "Compacting context"})
+        # Emit on the status.update channel the frontend actually subscribes to
+        # (it has no gw.on("status") listener). Text "Compacting context" maps to
+        # setCompacting(true); "Session compacted" below maps to setCompacting(false).
+        _status_update(sid, "compacting_context", "Compacting context")
         try:
             compressed, _ = agent._compress_context(
                 original_history,
@@ -6320,7 +6323,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 messages=_compaction_message_stats(original_history),
                 compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
             )
-            _emit("status", sid, {"text": "Session compacted"})  # release the pill
+            _status_update(sid, "session_compacted", "Session compacted")  # release the pill
             raise
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
@@ -6381,7 +6384,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).
     _compaction_trace_event("gateway.status_emit", status_kind="session_compacted")
-    _emit("status", sid, {"text": "Session compacted"})
+    _status_update(sid, "session_compacted", "Session compacted")
     _emit("session.info", sid, _session_info(agent))
     _compaction_trace_event(
         "gateway.manual_compress_done",
