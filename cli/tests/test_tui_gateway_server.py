@@ -2099,3 +2099,52 @@ def test_async_delegate_sink_never_raises():
         sink(None)            # no payload
         sink({"results": "not a list"})  # wrong shape
     # No assertion needed beyond "did not raise".
+
+
+def test_slash_exec_compact_routes_to_compaction_handler(monkeypatch):
+    """/compact (and its /compress alias) reach the in-process compaction
+    handler via slash.exec — proving the command rename is wired end to end,
+    not just that the strings exist in source."""
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_run_direct_compress_slash",
+        lambda sid, session, focus: (calls.append((sid, focus)), "COMPACTED")[1],
+    )
+    for verb in ("compact", "compress"):
+        calls.clear()
+        server._sessions["sid"] = _session(
+            agent=types.SimpleNamespace(compression_enabled=True),
+            history=[{"role": "user", "content": str(i)} for i in range(6)],
+        )
+        try:
+            resp = server.handle_request(
+                {
+                    "id": "1",
+                    "method": "slash.exec",
+                    "params": {"session_id": "sid", "command": f"/{verb}"},
+                }
+            )
+        finally:
+            server._sessions.pop("sid", None)
+        assert (
+            resp.get("result", {}).get("output") == "COMPACTED"
+        ), f"/{verb} did not route to the compaction handler: {resp}"
+        assert calls, f"/{verb} did not invoke _run_direct_compress_slash"
+
+
+def test_slash_exec_compact_short_session_uses_compact_wording():
+    """A too-short session yields the renamed 'compact' wording."""
+    server._sessions["sid"] = _session(history=[{"role": "user", "content": "hi"}])
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"session_id": "sid", "command": "/compact"},
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+    out = resp.get("result", {}).get("output", "")
+    assert "compact" in out.lower() and "compress" not in out.lower(), out
