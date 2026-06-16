@@ -124,8 +124,9 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
-    help: 'compress transcript',
-    name: 'compress',
+    help: 'compact transcript',
+    name: 'compact',
+    aliases: ['compress'],
     run: (arg, ctx) => {
       ctx.gateway
         .rpc<SessionCompressResponse>('session.compress', {
@@ -149,11 +150,11 @@ export const sessionCommands: SlashCommand[] = [
             }
 
             if ((r.removed ?? 0) <= 0) {
-              return ctx.transcript.sys('nothing to compress')
+              return ctx.transcript.sys('nothing to compact')
             }
 
             ctx.transcript.sys(
-              `compressed ${r.removed} messages${r.usage?.total ? ` · ${fmtK(r.usage.total)} tok` : ''}`
+              `compacted ${r.removed} messages${r.usage?.total ? ` · ${fmtK(r.usage.total)} tok` : ''}`
             )
           })
         )

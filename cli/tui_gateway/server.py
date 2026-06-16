@@ -2846,7 +2846,7 @@ def _(rid, params: dict) -> dict:
         return err
     if session.get("running"):
         return _err(
-            rid, 4009, "session busy — /interrupt the current turn before /compress"
+            rid, 4009, "session busy — /interrupt the current turn before /compact"
         )
     try:
         with session["history_lock"]:
@@ -5157,7 +5157,7 @@ _TUI_HIDDEN: frozenset[str] = frozenset(
 )
 
 _TUI_EXTRA: list[tuple[str, str, str]] = [
-    ("/compact", "Toggle compact display mode", "TUI"),
+    ("/compactview", "Toggle compact display mode", "TUI"),
     ("/logs", "Show recent gateway log lines", "TUI"),
 ]
 
@@ -5892,8 +5892,8 @@ def _(rid, params: dict) -> dict:
         text_lower = text.lower()
         extras = [
             {
-                "text": "/compact",
-                "display": "/compact",
+                "text": "/compactview",
+                "display": "/compactview",
                 "meta": "Toggle compact display mode",
             },
             {
@@ -5974,7 +5974,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # worker thread running agent.run_conversation is using.  Parity
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
-    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compress"}
+    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compact", "compress"}
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
         return f"session busy — /interrupt the current turn before running /{name}"
 
@@ -5990,7 +5990,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             new_prompt = (cfg.get("agent") or {}).get("system_prompt", "") or ""
             agent.ephemeral_system_prompt = new_prompt or None
             agent._cached_system_prompt = None
-        elif name == "compress" and agent:
+        elif name in ("compact", "compress") and agent:
             with session["history_lock"]:
                 _compress_session_history(session, arg)
             _emit("session.info", sid, _session_info(agent))
@@ -6016,7 +6016,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
     """Handle /compress in-process instead of paying the slash-worker tax."""
     agent = session.get("agent")
     if session.get("running"):
-        return "session busy — /interrupt the current turn before running /compress"
+        return "session busy — /interrupt the current turn before running /compact"
     if not agent:
         return "(._.) No active agent -- send a message first."
     if not getattr(agent, "compression_enabled", True):
@@ -6025,7 +6025,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
     with session["history_lock"]:
         original_history = list(session.get("history", []))
         if len(original_history) < 4:
-            return "(._.) Not enough conversation to compress (need at least 4 messages)."
+            return "(._.) Not enough conversation to compact (need at least 4 messages)."
 
         from agent.manual_compression_feedback import summarize_manual_compression
         from agent.model_metadata import estimate_messages_tokens_rough
@@ -6112,14 +6112,14 @@ def _(rid, params: dict) -> dict:
             rid, 4018, f"pending-input command: use command.dispatch for /{_cmd_base}"
         )
 
-    if _cmd_base == "compress":
+    if _cmd_base in ("compact", "compress"):
         _focus = " ".join(_cmd_parts[1:]).strip() if len(_cmd_parts) > 1 else ""
         with session["history_lock"]:
             if len(session.get("history", [])) < 4:
                 return _ok(
                     rid,
                     {
-                        "output": "(._.) Not enough conversation to compress (need at least 4 messages)."
+                        "output": "(._.) Not enough conversation to compact (need at least 4 messages)."
                     },
                 )
         if wait_err := _wait_agent(session, rid):

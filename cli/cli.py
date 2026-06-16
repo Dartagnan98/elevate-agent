@@ -6089,7 +6089,7 @@ class ElevateCLI:
             self._handle_reasoning_command(cmd_original)
         elif canonical == "fast":
             self._handle_fast_command(cmd_original)
-        elif canonical == "compress":
+        elif canonical == "compact":
             self._manual_compress(cmd_original)
         elif canonical == "usage":
             self._show_usage()
@@ -7114,13 +7114,14 @@ class ElevateCLI:
     def _manual_compress(self, cmd_original: str = ""):
         """Manually trigger context compression on the current conversation.
 
-        Accepts an optional focus topic: ``/compress <focus>`` guides the
+        Accepts an optional focus topic: ``/compact <focus>`` guides the
         summariser to preserve information related to *focus* while being
         more aggressive about discarding everything else.  Inspired by
-        Claude Code's ``/compact <focus>`` feature.
+        Claude Code's ``/compact <focus>`` feature. ``/compress`` is a
+        backward-compatible alias.
         """
         if not self.conversation_history or len(self.conversation_history) < 4:
-            print("(._.) Not enough conversation to compress (need at least 4 messages).")
+            print("(._.) Not enough conversation to compact (need at least 4 messages).")
             return
 
         if not self.agent:

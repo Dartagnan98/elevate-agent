@@ -130,13 +130,13 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'toggle compact transcript',
-    name: 'compact',
+    help: 'toggle compact transcript display',
+    name: 'compactview',
     run: (arg, ctx) => {
       const next = flagFromArg(arg, ctx.ui.compact)
 
       if (next === null) {
-        return ctx.transcript.sys('usage: /compact [on|off|toggle]')
+        return ctx.transcript.sys('usage: /compactview [on|off|toggle]')
       }
 
       patchUiState({ compact: next })
