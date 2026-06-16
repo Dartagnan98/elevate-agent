@@ -349,3 +349,44 @@ def test_mark_persistent_process_sets_flag():
 def human_controlled_checklist_cells_for(deal_id):
     with connect() as conn:
         return human_controlled_checklist_cells(conn, deal_id)
+
+
+# ── _match_deal: deal resolution from natural turn text (regression) ──────────
+# These guard the bug where the matcher only checked a non-existent `address`
+# key and required the full `(seller)`-suffixed title verbatim, so real
+# conversation never resolved a deal and the scorecard never auto-ticked.
+
+def test_match_deal_resolves_via_listing_address():
+    deal = {
+        "listingAddress": "915 Lakeshore Road, Kelowna BC",
+        "title": "915 Lakeshore Road, Kelowna BC (seller)",
+    }
+    text = "i finished the pre-cma dashboard setup for 915 lakeshore road, kelowna bc"
+    assert ta._match_deal(text, deal) >= ta.SCORECARD_INFER_THRESHOLD
+
+
+def test_match_deal_resolves_via_street_signature_without_city():
+    deal = {"listingAddress": "915 Lakeshore Road, Kelowna BC", "title": "x"}
+    # natural phrasing: street only, no municipality
+    text = "the 915 lakeshore road listing is all set up now"
+    assert ta._match_deal(text, deal) >= ta.SCORECARD_INFER_THRESHOLD
+
+
+def test_match_deal_strips_side_suffix_from_title():
+    # title carries the side tag and there is no listingAddress
+    deal = {"listingAddress": None, "title": "742 Evergreen Terrace, Kamloops BC (seller)"}
+    text = "verified the lofty contact for 742 evergreen terrace, kamloops bc today"
+    assert ta._match_deal(text, deal) >= ta.SCORECARD_INFER_THRESHOLD
+
+
+def test_match_deal_ignores_bare_number():
+    # a stray number that happens to equal the house number must NOT resolve
+    deal = {"listingAddress": "915 Lakeshore Road, Kelowna BC", "title": "915 Lakeshore Road (seller)"}
+    text = "i spent 915 dollars on facebook ads this week"
+    assert ta._match_deal(text, deal) == 0.0
+
+
+def test_match_deal_no_signal_no_match():
+    deal = {"listingAddress": "915 Lakeshore Road, Kelowna BC", "title": "915 Lakeshore Road (seller)"}
+    text = "drafted a follow-up email to the smiths about their condo search"
+    assert ta._match_deal(text, deal) == 0.0

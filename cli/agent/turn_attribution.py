@@ -51,6 +51,20 @@ _DEAL_READONLY_ACTIONS = {"show", "list", "", None}
 # strings ("12", "the") would false-positive everywhere.
 _MIN_SUBSTR = 6
 
+# Deal address can live under any of these keys depending on the read path;
+# the listing flow stores it as ``listingAddress``. (The old matcher only
+# checked ``address``, which the deal dict never carries — so address-based
+# resolution silently never fired.)
+_DEAL_ADDRESS_KEYS = ("listingAddress", "address", "dealAddress")
+
+# Deal titles often carry a trailing side tag, e.g. "123 Main St (seller)".
+# Natural conversation never includes that tag, so strip it before matching —
+# otherwise the full-title substring check can never hit on real phrasing.
+_TITLE_SIDE_SUFFIX_RE = re.compile(
+    r"\s*[\(\[\-–—]\s*(?:seller|buyer|listing|purchase|sale)s?\s*[\)\]]?\s*$",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class Attribution:
@@ -167,13 +181,43 @@ def _norm(s: Any) -> str:
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
+def _deal_street_signature(deal: Mapping[str, Any]) -> str:
+    """The street line of the deal's address (everything before the first
+    comma), normalized. "742 Evergreen Terrace, Kamloops BC" -> "742 evergreen
+    terrace". Lets "the 742 Evergreen Terrace listing" resolve without the full
+    municipal address, while staying specific (number + street name)."""
+    raw = ""
+    for key in _DEAL_ADDRESS_KEYS:
+        raw = _norm(deal.get(key))
+        if raw:
+            break
+    if not raw:
+        raw = _norm(_TITLE_SIDE_SUFFIX_RE.sub("", str(deal.get("title") or "")))
+    street = raw.split(",")[0].strip()
+    # Require a house-number + a street-name token so a bare number can't match.
+    parts = street.split(" ")
+    if len(parts) >= 2 and any(c.isdigit() for c in parts[0]):
+        return street
+    return ""
+
+
 def _match_deal(text: str, deal: Mapping[str, Any]) -> float:
-    """Confidence that ``text`` references this deal via address/title."""
+    """Confidence that ``text`` references this deal via address/title.
+
+    Matches (in order): the full listing address as a substring; the title with
+    any trailing side tag like "(seller)" stripped; or the street line of the
+    address ("742 evergreen terrace"). ``text`` is already normalized."""
     best = 0.0
-    for key in ("address", "title"):
+    for key in _DEAL_ADDRESS_KEYS:
         needle = _norm(deal.get(key))
         if len(needle) >= _MIN_SUBSTR and needle in text:
-            best = max(best, 0.8)
+            return 0.85
+    title = _norm(_TITLE_SIDE_SUFFIX_RE.sub("", str(deal.get("title") or "")))
+    if len(title) >= _MIN_SUBSTR and title in text:
+        best = 0.8
+    sig = _deal_street_signature(deal)
+    if len(sig) >= _MIN_SUBSTR and sig in text:
+        best = max(best, 0.8)
     return best
 
 
@@ -248,7 +292,7 @@ def resolve_attributions(
         d = deal_by_id.get(did, {"id": did})
         out.append(Attribution(
             "deal", did, 1.0,
-            str(d.get("address") or d.get("title") or did), list(tools_used), summary,
+            str(d.get("listingAddress") or d.get("title") or did), list(tools_used), summary,
         ))
 
     for cid in explicit_contact_ids:
@@ -269,7 +313,7 @@ def resolve_attributions(
         if score >= AUTO_LOG_THRESHOLD:
             out.append(Attribution(
                 "deal", did, score,
-                str(d.get("address") or d.get("title") or did), list(tools_used), summary,
+                str(d.get("listingAddress") or d.get("title") or did), list(tools_used), summary,
             ))
 
     for c in contacts:
