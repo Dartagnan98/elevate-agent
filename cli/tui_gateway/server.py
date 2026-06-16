@@ -4319,39 +4319,14 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
-                # A session-id rotation means the turn COMPACTED (compress
-                # ends the old session, opens a fresh tip). Its compressed
-                # message list is authoritative and the pre-turn full history
-                # is now stale — so the write-back below must accept it even
-                # if the history_version moved, or session["history"] keeps
-                # the full pre-compaction history and the NEXT turn compacts
-                # all over again ("compacted twice" — Justin's report).
-                _turn_compacted = False
-                agent_session_id = getattr(agent, "session_id", None)
-                if isinstance(agent_session_id, str) and agent_session_id:
-                    old_session_key = str(session.get("session_key") or "")
-                    if agent_session_id != old_session_key:
-                        _turn_compacted = True
-                        logger.info(
-                            "prompt.submit: agent session rotated %s -> %s",
-                            old_session_key,
-                            agent_session_id,
-                        )
-                        session["session_key"] = agent_session_id
-                        _jsonl_session_event(
-                            "gateway.turn_session_rotated",
-                            gateway_session_id=sid,
-                            session_id=agent_session_id,
-                            parent_session_id=old_session_key,
-                            request_id=str(rid),
-                        )
-                        db = _get_db()
-                        if db is not None:
-                            _emit(
-                                "session.identity",
-                                sid,
-                                _session_identity_for(db, agent_session_id),
-                            )
+                # Compaction redesign: a compacting turn NO LONGER rotates the
+                # session id — the transcript is append-only and compaction lives
+                # in the payload-time cursor + metadata. So the old
+                # rotation-compensation (session-key swap + session.identity emit
+                # + force-write-back that overrode a history_version bump) is gone;
+                # the plain version-match write-back below is sufficient. The
+                # "compacted twice" loop that needed the override can no longer
+                # happen because there is no rotation to desync on.
 
                 last_reasoning = None
                 status_note = None
@@ -4359,11 +4334,8 @@ def _(rid, params: dict) -> dict:
                     if isinstance(result.get("messages"), list):
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
-                            if current_version == current_history_version or _turn_compacted:
+                            if current_version == current_history_version:
                                 session["history"] = result["messages"]
-                                # Advance past whatever the latest version is —
-                                # on the compacted-override path current_version
-                                # may be ahead of our captured baseline.
                                 _next_ver = max(current_version, current_history_version) + 1
                                 session["history_version"] = _next_ver
                                 current_history_version = _next_ver
@@ -4442,7 +4414,6 @@ def _(rid, params: dict) -> dict:
                     status=status,
                     followup=bool(has_followup),
                     followup_rounds=followup_rounds,
-                    turn_compacted=bool(_turn_compacted),
                     raw_chars=len(raw) if isinstance(raw, str) else 0,
                     reasoning_chars=len(last_reasoning) if isinstance(last_reasoning, str) else 0,
                     history_version=int(session.get("history_version", 0)),
@@ -6360,15 +6331,14 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
             compressor=_compaction_compressor_stats(getattr(agent, "context_compressor", None)),
         )
 
-        # Durably write the compressed history. _compress_context ROTATES to a
-        # fresh session (ends the old, creates an empty tip, resets the flush
-        # cursor) but does NOT flush — inside run_conversation the turn's normal
-        # _persist_session does that. Manual /compress runs outside a turn, so
-        # without this the rotated session stays EMPTY in the DB: leaving and
-        # returning resumes the OLD 177-message session and re-compacts it (the
-        # "compressed twice with different numbers" bug). Flushing here makes
-        # the compress survive a resume. _last_flushed_db_idx was reset to 0 by
-        # the rotation, so this writes the full compressed list into the tip.
+        # Compaction redesign: _compress_context no longer ROTATES — the
+        # transcript is append-only and compaction is stored as session metadata
+        # (cursor + summary) by update_compaction inside _compress_context. The
+        # session id is stable, so the old rotation-compensation here (force-flush
+        # into a fresh empty tip + session-key swap + session.identity emit +
+        # slash-worker restart) is gone. A defensive _persist_session keeps any
+        # genuinely new rows durable; it writes nothing when the transcript was
+        # already flushed by the prior turn.
         try:
             agent._persist_session(compressed, None)
             _compaction_trace_event(
@@ -6382,21 +6352,6 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 session_id=getattr(agent, "session_id", "") or "",
             )
             logger.exception("manual /compress: failed to persist compressed history")
-
-        if (
-            getattr(agent, "session_id", None)
-            and agent.session_id != session.get("session_key")
-        ):
-            session["session_key"] = agent.session_id
-            db = _get_db()
-            if db is not None:
-                _compaction_trace_event(
-                    "gateway.session_identity_emit",
-                    session_id=agent.session_id,
-                    gateway_session_id=sid,
-                )
-                _emit("session.identity", sid, _session_identity_for(db, agent.session_id))
-            _restart_slash_worker(session)
 
         new_tokens = estimate_messages_tokens_rough(compressed)
         summary = summarize_manual_compression(
