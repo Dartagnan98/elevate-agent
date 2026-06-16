@@ -116,3 +116,130 @@ resume identical) with before/after screenshots**; legacy session still opens.
 Then write a `## RESULT` section at the bottom of this file: what built, test
 output, screenshots paths, any deferred items, and the deploy readiness call.
 Leave a final summary for the morning.
+
+---
+
+## RESULT (2026-06-16, autonomous build)
+
+**Status: COMPLETE. Steps 2–7 built, tested, committed on `compaction-redesign`.
+Validated end-to-end on the isolated dashboard (:9143). Branch only — NOT deployed.**
+
+### What built (one commit per step)
+- `26755cfa7` **Step 2** — agent state (`compaction_cursor`/`compaction_summary`)
+  + `messages_for_api()` payload-build seam, hooked at the live loop AND the
+  max-iterations summary call, BEFORE `_sanitize_api_messages`. Transcript copy
+  is never mutated; codex path inherits the trimmed `api_messages`.
+- `fa4e5379a` **Step 3** — `compress_context` is compute-cursor-not-rewrite via
+  new `ContextCompressor.summarize_to_cursor()` (reuses the cutoff helpers +
+  `_generate_summary`, folds the prior summary iteratively, assembles nothing).
+  Deleted the rotation block, `insert_preserved_context` call, checkpoint store,
+  and `on_session_start/switch`. Persists `(summary,cursor)` via
+  `update_compaction`; parks the `-1` sentinel + invalidates the usage projector
+  (the list object is stable now, so it can't self-invalidate). System prompt
+  kept byte-stable (cache prefix survives).
+- `374d195b5` **Step 4** — cold resume reads the row first: `compaction_cursor`
+  truthy → skip the tip-walk, load the full append-only transcript; `__init__`
+  hydration sets cursor/summary. `INSERT OR IGNORE` create_session preserves the
+  columns on resume. cursor 0/NULL → legacy tip-walk kept verbatim.
+- `0dfd1c9cb` **Step 5** — removed the now-dead dashboard-gateway
+  rotation-compensation (`_turn_compacted` session-key swap + `session.identity`
+  emit + force-write-back override in `prompt.submit`; the
+  `_run_direct_compress_slash` rotation branch). Plain version-match write-back
+  kept. (Scoped — see Deferred.)
+- `bf0555d6f` **Step 6** — `CRITICAL_THRESHOLD=0.95` +
+  `should_critical_compress_now`; iteration-boundary forces `force=True`
+  compaction past the anti-thrash backoff at ≥95%. **Bugfix:** the
+  context-overflow AND 413 recovery paths detected success by `len(messages)`
+  shrinking — never true in the cursor model, so they would have failed every
+  overflow turn; now detect cursor advance + force=True. Net-new
+  `emergency_truncate_tool_results()` shortens oversized tool-result CONTENT
+  (never removes rows) as the last resort before `compression_exhausted`.
+- `a328210af` **Step 7** — anti-thrash cooldown composition proven (no prod
+  code): `summarize_to_cursor` arms the low-yield counters, `should_compress`
+  backs off, the 0.95 line overrides.
+- `50bc07660` — rewrote the two plan-snapshot tests to the new contract
+  (plan/todo live in the summary, not injected rows).
+
+### Test results
+- Per-step unit tests: all green. New suites: `test_summarize_to_cursor.py` (8),
+  `test_compress_context_cursor.py` (3), `test_compaction_resume_hydration.py` (3),
+  `test_critical_compaction.py` (7), `test_antithrash_cursor_composition.py` (3),
+  plus the Step-2 seam tests (8) and Step-1 metadata tests.
+- **Full agent suite: `tests/agent` + `tests/run_agent` = 3320 passed, 8 skipped,
+  4 failed — ALL FOUR PRE-EXISTING, NONE mine** (verified against the Step-2
+  baseline `26755cfa7`):
+  - `test_prompt_builder…test_builds_index_with_skills` — the handoff-acknowledged
+    wording failure.
+  - `test_concurrent_interrupt` ×2 — branch trace instrumentation (`_jsonl_tool_event`
+    at run_agent.py:9521 reads `self.session_id`; the test `_Stub` lacks it). Fails
+    on the baseline too; unrelated to compaction.
+  - `test_subagent_stop_hook::test_fires_per_child` — same `_Stub` cause; passes in
+    isolation, only fails under xdist ordering. Not a regression.
+  - gateway `test_direct_compress_persists_and_emits_pill` was ALSO pre-existing-broken
+    (relief batch moved the pill to `status.update`); updated + now green.
+
+### Backend E2E (isolated :9143, traced) — PASS
+Drove real compacting workloads through the dashboard WS. From
+`$ISO/logs/compaction-trace.jsonl` + the isolated SQLite:
+- **ZERO** rotation-family events (`session_rotation_*`, `preserved_context_inserted`,
+  `compression_checkpoint_stored`, `create_session(parent=)`, `on_session_switch`).
+- 5 real `compress_context_done`, 4 `compaction_metadata_persisted`, 2
+  `compress_context_noop` (cursor didn't advance → handled, not an error).
+- Compacted sessions: `…3ba5a5` rows=16 cursor=10 summary=11,234 chars;
+  `…737161` rows=12 cursor=8 summary=6,651 chars. **rows ≥ cursor on both →
+  transcript intact, never rewritten/shrunk.** Post-compaction real prompt
+  dropped to ~51,700 (trimmed payload), task continued.
+
+### UI E2E (Playwright, real dashboard web UI) — PASS
+`~/claudeclaw/compaction_ui_e2e.mjs` (single-turn) and
+`compaction_ui_e2e_multi.mjs` (3 compacting turns). Both PASS:
+- compaction fired (status pill), **ZERO session rotations**;
+- visible transcript **append-only** — all 3 user turns stayed visible across the
+  compaction (turn-1 bubble never vanished); monotonic row count;
+- **no internal `[CONTEXT COMPACTION]`/preserved-plan/`[CONTEXT SUMMARY]` bubbles**
+  in the rendered transcript; session stayed in the sidebar list;
+- **reopen (page reload + re-open) rebuilt the identical transcript** (all user
+  turns, no internal text).
+- Screenshots in `cli/docs/compaction-e2e-screenshots/`:
+  `ui_e2e_multi_AFTER_turn1.png` (before later compactions),
+  `ui_e2e_multi_AFTER_turn3.png` (clean "Compacting context · 51,694 in" pill
+  with the full append-only transcript above it),
+  `ui_e2e_multi_REOPEN.png` (reopen-identical), plus the single-turn
+  `ui_e2e_BEFORE/AFTER_compaction.png`.
+
+### Legacy compatibility — PASS
+32 pre-redesign rotated-lineage sessions (cursor 0 + parent) in the isolated DB.
+Resumed via the dashboard WS (`session.resume`) → tip-walk resolves the chain
+with no error; DB-level `get_compression_tip` + `get_messages_as_conversation`
+return real content (a 99-message rotation chain `a1e593/e142b2 → 9455a1`
+resolved correctly). The cursor 0/NULL legacy read path is fully intact.
+
+### Deferred (inert dead code — documented, NOT blocking; follow-up cleanup pass)
+All self-disabling because nothing rotates anymore (gated on a session_id change
+that no longer happens). Left to avoid destabilizing surfaces the UI E2E doesn't
+exercise:
+- caller-side `conversation_history = None` nulling in `run_agent.py` after
+  `_compress_context` (harmless for the cursor model; flush rides `_last_flushed_db_idx`).
+- the inline-fallback `_compress_context` rotation engine in `run_agent.py`
+  (dead — the shared-import path never fails) + its now-unused helpers
+  (`insert_preserved_context`, `_store_compression_checkpoint`).
+- `gateway/run.py` (the separate PLATFORM gateway — Telegram/Discord, not the
+  dashboard) rotation blocks; its `rewrite_transcript` calls are legitimate
+  truncation that must stay.
+- estimate-mode trigger measurement still sums the full transcript: only matters
+  for providers that DON'T report `prompt_tokens` (rare; the harness + Anthropic/
+  OpenAI/codex all report → real-count projection tracks the trimmed payload
+  correctly, so no thrash observed). A cursor-aware estimate is the clean fix.
+
+### Deploy-readiness call
+**Ready for a SUPERVISED deploy decision — do NOT auto-ship.** The branch is
+green, the bug class (rotation/orphaned-continuations, the `_session_init_model_config`
+crash, "compacted twice", 20KB internal bubbles) is structurally eliminated for
+new sessions, and legacy sessions still open. Before shipping: (1) rebase onto
+current `~/elevate` main and RE-VERIFY the worktree anchors (run_agent payload
+seam + recovery line numbers) per the build plan's anchor note; (2) do the
+de-traced surgical port into the bundle (strip the `ELEVATE_*_TRACE` diagnostics
++ the `compaction-trace`/jsonl ledger calls that are branch-only); (3) ship the
+relief batch together (it makes the pill honest); (4) one more real-account soak
+on Justin's box profile before customer-wide. The deferred items above are
+hygiene, not correctness — safe to land in a follow-up.
