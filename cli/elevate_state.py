@@ -435,7 +435,7 @@ def _list_sessions_rich_pg(
             COALESCE(
                 (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
                  FROM chat_messages m
-                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                  ORDER BY m.timestamp, m.id LIMIT 1),
                 ''
             ) AS _preview_raw,
@@ -1765,7 +1765,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1788,7 +1788,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1865,7 +1865,7 @@ class SessionDB:
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw,
@@ -3783,7 +3783,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,
@@ -3812,7 +3812,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,

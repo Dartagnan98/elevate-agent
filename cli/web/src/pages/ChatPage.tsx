@@ -1264,6 +1264,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 
 export const __chatPageTestables = {
   normalizeStoredTranscript,
+  shouldKeepTranscriptMessage,
 };
 
 function readStoredTranscriptCache(): StoredTranscriptCache {

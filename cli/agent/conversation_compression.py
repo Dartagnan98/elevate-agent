@@ -527,9 +527,12 @@ def compress_context(
         focus_topic,
     )
     trace_event("agent.status_emit", status_kind="compacting_context")
-    agent._emit_status(
-        "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
-    )
+    try:
+        agent._emit_status(
+            "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
+        )
+    except Exception:
+        pass  # a flaky status sink must never abort the compaction itself
 
     # Notify external memory provider before compression discards context
     if agent._memory_manager:
@@ -540,18 +543,21 @@ def compress_context(
 
     # Keepalive heartbeat for the blocking summary call. compress() runs the
     # auxiliary summary LLM synchronously and can block the turn for tens of
-    # seconds (observed ~112s on a 252K-token session) with nothing on the
-    # wire. Without this, the dashboard WebSocket idles, gets dropped, and --
-    # because the web client does not auto-reconnect -- every post-compaction
-    # frame lands on a dead socket: the turn finishes and persists server-side
-    # but the chat looks hung and the thinking indicator disappears. Mirror the
-    # non-streaming watchdog in run_agent: _touch_activity keeps the gateway
-    # inactivity monitor satisfied (unthrottled), and _emit_status re-emits a
-    # progress frame so the socket stays warm and the user sees elapsed time.
-    # _emit_status throttles same-category repeats (default 30s) so the frame
-    # cadence cannot flood a no-overwrite gateway. Fires only past 15s, so
-    # short compactions carry zero overhead. No-ops harmlessly when the agent
-    # has no status_callback (quiet pre-agent hygiene / manual tmp agents).
+    # seconds (observed ~112s on a 252K-token session) with nothing streaming.
+    # During that window this thread (a) calls _touch_activity every interval to
+    # reset the gateway inactivity-kill watchdog, and (b) re-emits a status frame
+    # so the "Compacting context" pill stays visible and (where the throttle
+    # allows) ticks elapsed time, instead of the chat looking hung / the thinking
+    # indicator vanishing.
+    # NOTE: this is NOT what keeps the WebSocket open. uvicorn already pings every
+    # ~20s (ws_ping_interval default), so the socket survives a silent compaction
+    # on its own; _touch_activity only feeds the internal watchdog, and the
+    # throttled _emit_status (default 30s same-category) is SLOWER than uvicorn's
+    # ping -- it is for the pill/progress display, not socket survival. (To show
+    # true per-second elapsed on web, lower the throttle for this category; left
+    # as-is to avoid flooding no-overwrite lanes like Telegram.)
+    # Fires only past one interval (default 15s), so short compactions carry zero
+    # overhead; no-ops when the agent has no status_callback.
     _ka_stop = threading.Event()
     _ka_start = time.monotonic()
     try:
