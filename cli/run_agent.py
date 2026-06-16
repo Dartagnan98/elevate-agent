@@ -1905,6 +1905,14 @@ class AIAgent:
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
 
+        # When a skill is activated but the model narrates its plan without
+        # calling any tool, nudge it to continue executing instead of ending
+        # the turn ("lists the skill then doesn't complete it"). Default on;
+        # set agent.skill_execution_nudge: false to disable.
+        self._skill_execution_nudge_enabled = bool(
+            _agent_section.get("skill_execution_nudge", True)
+        )
+
         # App-level API retry count (wraps each model API call).  Default 3,
         # overridable via agent.api_max_retries in config.yaml.  See #11616.
         try:
@@ -3298,8 +3306,65 @@ class AIAgent:
             marker in assistant_text for marker in workspace_markers
         )
         return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
-    
-    
+
+    # Markers emitted by skill_commands when a skill is activated for a turn:
+    # explicit /slash invocation, CLI preload, or gateway auto-load. Any match
+    # means a skill is steering the current turn.
+    _SKILL_ACTIVATION_MARKERS = (
+        "skill, indicating they want",   # build_skill_invocation_message
+        "skill preloaded",               # build_preloaded_skills_prompt
+        "skill is auto-loaded",          # gateway auto-skill lanes
+    )
+
+    def _active_skill_stalled_before_acting(
+        self,
+        assistant_content: str,
+        messages: List[Dict[str, Any]],
+    ) -> bool:
+        """Detect the "lists the skill steps then stops" failure.
+
+        Returns True when a skill was activated for this turn but the model
+        narrated/planned in plain text WITHOUT executing any tool, so the loop
+        is about to end the turn with the skill's work undone. This is the
+        provider-agnostic counterpart to _looks_like_codex_intermediate_ack.
+
+        Conservative by construction:
+          - requires an active-skill marker in the transcript,
+          - requires NO tool result since that marker (so it never fires once
+            the skill is actually running tools, nor after a completed step),
+          - requires non-empty text, and
+          - never fires when the model is asking the user a question (a valid
+            reason to pause).
+        Bounded by the same continuation cap as the codex-ack path.
+        """
+        if not self.valid_tool_names:
+            return False
+        skill_idx = -1
+        for idx in range(len(messages) - 1, -1, -1):
+            msg = messages[idx]
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str) and any(
+                marker in content for marker in self._SKILL_ACTIVATION_MARKERS
+            ):
+                skill_idx = idx
+                break
+        if skill_idx < 0:
+            return False
+        # A tool ran after the skill activated -> it is executing / finishing a
+        # step; let the turn proceed.
+        for msg in messages[skill_idx + 1:]:
+            if isinstance(msg, dict) and msg.get("role") in ("tool", "function"):
+                return False
+        text = self._strip_think_blocks(assistant_content or "").strip()
+        if not text:
+            return False
+        # Asking the user for input is a valid place to stop.
+        if text.rstrip().endswith("?"):
+            return False
+        return True
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """
         Extract reasoning/thinking content from an assistant message.
@@ -14271,15 +14336,29 @@ class AIAgent:
                     self._empty_content_retries = 0
                     self._thinking_prefill_retries = 0
 
-                    if (
+                    # Codex's intermediate-ack heuristic (workspace plans). Kept
+                    # codex-only and ungated to preserve existing behavior.
+                    _codex_ack_continue = (
                         self.api_mode == "codex_responses"
-                        and self.valid_tool_names
-                        and codex_ack_continuations < 2
                         and self._looks_like_codex_intermediate_ack(
                             user_message=user_message,
                             assistant_content=final_response,
                             messages=messages,
                         )
+                    )
+                    # Provider-agnostic skill path: a skill was activated but the
+                    # model planned in text without running any tool — nudge it
+                    # to execute the skill instead of ending the turn.
+                    _skill_stall_continue = (
+                        self._skill_execution_nudge_enabled
+                        and self._active_skill_stalled_before_acting(
+                            final_response, messages
+                        )
+                    )
+                    if (
+                        self.valid_tool_names
+                        and codex_ack_continuations < 2
+                        and (_codex_ack_continue or _skill_stall_continue)
                     ):
                         codex_ack_continuations += 1
                         interim_msg = self._build_assistant_message(assistant_message, "incomplete")
