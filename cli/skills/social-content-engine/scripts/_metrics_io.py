@@ -126,20 +126,23 @@ def has_post_been_seen(platform: str, post_id: str) -> bool:
     return False
 
 
-def find_composio_account(toolkit_slug: str) -> Optional[dict[str, Any]]:
-    """Look up the first connected Composio account for a toolkit slug.
+# A connected account must be in one of these states to actually execute a
+# tool. EXPIRED / REVOKED / ERROR accounts still come back from the list call,
+# but every execute against them returns HTTP 410/422 — so treating them as
+# "connected" just produced cryptic tool errors. Resolve only usable accounts
+# and report the dead state instead.
+_USABLE_ACCOUNT_STATES = {"ACTIVE", "INITIATED", ""}
 
-    Returns the account dict (with `id`, `user_id`, etc.) or None if no
-    account is connected. Fetchers use this to know whether to attempt a
-    pull at all.
-    """
+
+def _list_connected_accounts(toolkit_slug: str) -> Optional[list[dict[str, Any]]]:
+    """Return the raw account items for a toolkit, or None if Composio itself is
+    unavailable (import/env failure or API error — NOT 'no account')."""
     try:
         from elevate_cli import composio_client
     except Exception as exc:
         # An import failure here is an ENVIRONMENT problem (wrong interpreter —
-        # see _bootstrap), never a missing connection. Surfacing it stops the
-        # misleading "not_configured" from masquerading as a disconnected
-        # platform. _bootstrap should prevent ever reaching this branch.
+        # see _bootstrap), never a missing connection. _bootstrap should prevent
+        # ever reaching this branch.
         print(
             f"[social-content-engine] composio_client unavailable "
             f"({type(exc).__name__}: {exc}) under {sys.executable} — "
@@ -155,9 +158,41 @@ def find_composio_account(toolkit_slug: str) -> Optional[dict[str, Any]]:
             file=sys.stderr,
         )
         return None
-    items = ((resp.get("data") or {}).get("items")) or []
+    return [i for i in (((resp.get("data") or {}).get("items")) or []) if isinstance(i, dict)]
+
+
+def resolve_connected_account(toolkit_slug: str) -> tuple[Optional[dict[str, Any]], str]:
+    """Resolve a USABLE connected account and a precise status label.
+
+    Returns ``(account, status)``:
+      - ``(account, "ok")``                — an ACTIVE/INITIATED account exists.
+      - ``(None, "not_configured")``       — no account connected at all.
+      - ``(None, "connection_<state>")``   — an account exists but is EXPIRED /
+        REVOKED / etc.; the realtor must RECONNECT it. (Surfaces as e.g.
+        ``connection_expired`` instead of a raw HTTP 410.)
+      - ``(None, "composio_unavailable")`` — Composio import/API failure.
+    """
+    items = _list_connected_accounts(toolkit_slug)
+    if items is None:
+        return None, "composio_unavailable"
+    if not items:
+        return None, "not_configured"
     for item in items:
-        # Composio returns account dicts with `id`, `user_id`, `status`, etc.
-        if isinstance(item, dict) and item.get("status", "").upper() in ("ACTIVE", "INITIATED", ""):
-            return item
-    return items[0] if items else None
+        if (item.get("status") or "").upper() in _USABLE_ACCOUNT_STATES:
+            return item, "ok"
+    state = (items[0].get("status") or "unknown").strip().lower() or "unknown"
+    print(
+        f"[social-content-engine] {toolkit_slug} connection is {state.upper()} "
+        f"(account {items[0].get('id')}) — reconnect this platform; the token is "
+        f"no longer valid.",
+        file=sys.stderr,
+    )
+    return None, f"connection_{state}"
+
+
+def find_composio_account(toolkit_slug: str) -> Optional[dict[str, Any]]:
+    """Look up the first USABLE connected Composio account for a toolkit slug,
+    or None. Backward-compatible wrapper over :func:`resolve_connected_account`
+    (which also returns the precise status for callers that want it)."""
+    account, _status = resolve_connected_account(toolkit_slug)
+    return account

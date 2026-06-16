@@ -36,6 +36,7 @@ _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from _metrics_io import (
     append_metric,
     find_composio_account,
+    resolve_connected_account,
     has_post_been_seen,
 )
 
@@ -125,9 +126,9 @@ def fetch(*, lookback_days: int = 30, max_posts: int = 200) -> dict[str, Any]:
         "status": "ok",
     }
 
-    account = find_composio_account(TOOLKIT_SLUG)
+    account, conn_status = resolve_connected_account(TOOLKIT_SLUG)
     if not account:
-        summary["status"] = "not_configured"
+        summary["status"] = conn_status
         return summary
 
     try:
