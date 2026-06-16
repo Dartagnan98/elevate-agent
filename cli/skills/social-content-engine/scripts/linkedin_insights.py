@@ -14,6 +14,8 @@ page. Personal-profile post listing is not exposed.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  re-exec under the bundled app Python if launched by a bare python3
+
 import argparse
 import sys
 from typing import Any

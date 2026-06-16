@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -134,10 +135,25 @@ def find_composio_account(toolkit_slug: str) -> Optional[dict[str, Any]]:
     """
     try:
         from elevate_cli import composio_client
-    except Exception:
+    except Exception as exc:
+        # An import failure here is an ENVIRONMENT problem (wrong interpreter —
+        # see _bootstrap), never a missing connection. Surfacing it stops the
+        # misleading "not_configured" from masquerading as a disconnected
+        # platform. _bootstrap should prevent ever reaching this branch.
+        print(
+            f"[social-content-engine] composio_client unavailable "
+            f"({type(exc).__name__}: {exc}) under {sys.executable} — "
+            f"environment issue, not a missing connection.",
+            file=sys.stderr,
+        )
         return None
     resp = composio_client.list_all_connected_accounts(toolkit=toolkit_slug, page_size=10, max_pages=1)
     if not resp.get("ok"):
+        print(
+            f"[social-content-engine] composio API error for {toolkit_slug!r}: "
+            f"{resp.get('error')}",
+            file=sys.stderr,
+        )
         return None
     items = ((resp.get("data") or {}).get("items")) or []
     for item in items:

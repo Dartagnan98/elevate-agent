@@ -15,6 +15,8 @@ API which is a separate scope. Mark hold-rate fields null in v1.
 
 from __future__ import annotations
 
+import _bootstrap  # noqa: F401  re-exec under the bundled app Python if launched by a bare python3
+
 import argparse
 import sys
 from datetime import datetime, timedelta, timezone
