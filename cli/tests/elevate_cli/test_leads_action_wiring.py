@@ -233,5 +233,6 @@ def test_crm_lead_text_approval_routes_to_imessage(tmp_path, monkeypatch):
     assert isinstance(enqueue, dict)
     assert enqueue["channel"] == "imessage"
     assert enqueue["payload"]["recipient"]["phone"] == "2505550123"
+    assert enqueue["payload"]["safety"]["approved_dashboard_send"] is True
     assert enqueue["payload"]["channel_meta"]["resolved_channel"] == "imessage"
     assert enqueue["payload"]["channel_meta"]["resolved_from"] == "lead-text-routing"

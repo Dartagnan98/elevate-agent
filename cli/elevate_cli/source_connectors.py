@@ -4149,6 +4149,10 @@ def _approve_atomic(
             "social_handle": merged.get("social_handle") or merged.get("recipient_handle"),
             "apple_handle": apple_fallback or phone or None,
         },
+        "safety": {
+            "approved_dashboard_send": True,
+            "approved_at": _now(),
+        },
         "channel_meta": {
             "toolkit": merged.get("toolkit"),
             "account_id": merged.get("composio_account_id"),
@@ -4170,6 +4174,7 @@ def _approve_atomic(
         payload["outreach_lane"] = outreach_lane
         payload["outreachLane"] = outreach_lane
 
+    queued_row: dict[str, Any] | None = None
     with outreach_db.connect() as conn:
         with outreach_db.transaction(conn):
             if template_id and not attempt_id:
@@ -4188,7 +4193,7 @@ def _approve_atomic(
             if attempt_id:
                 payload["attempt_id"] = attempt_id
                 payload["attemptId"] = attempt_id
-            outreach_db.enqueue_send(
+            queued_row = outreach_db.enqueue_send(
                 conn,
                 source_id=source_id,
                 thread_id=thread_id,
@@ -4197,22 +4202,23 @@ def _approve_atomic(
                 payload=payload,
                 attempt_id=attempt_id,
             )
+            task_record["send_queue_id"] = (queued_row or {}).get("id")
             _write_source_ui_state(source_dir, state)
 
-    # Fire the sender immediately so the UI experience is "click → sent."
-    # Background thread so the HTTP response isn't blocked on the agent
-    # subprocess (10-90s for an LLM dispatch). Tick once with a small batch
-    # so unrelated queued rows don't get drained on every approve.
-    if os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") not in ("0", "false", "no"):
+    # Fire this approved sender row immediately so the UI experience is
+    # "click Approve → send this draft." Dispatch the row created by this
+    # approval instead of running a global queue tick; that keeps old queued
+    # rows blocked until their own dashboard approval path runs again.
+    if queued_row and os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") not in ("0", "false", "no"):
         import threading
-        def _tick() -> None:
+        def _send_approved_row() -> None:
             try:
                 from elevate_cli import sender as _sender
-                _sender.tick(batch=int(os.getenv("ELEVATE_APPROVE_TICK_BATCH", "1")))
+                _sender.dispatch_one(queued_row)
             except Exception as _exc:
                 import traceback
                 traceback.print_exc()
-        threading.Thread(target=_tick, name=f"approve-tick-{task_id[:24]}", daemon=True).start()
+        threading.Thread(target=_send_approved_row, name=f"approve-send-{task_id[:24]}", daemon=True).start()
 
 
 def _lofty_lead_name(lead: JsonRecord) -> str:

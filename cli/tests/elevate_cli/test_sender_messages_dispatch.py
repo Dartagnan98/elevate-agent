@@ -169,3 +169,38 @@ def test_imsg_success_with_chatdb_not_delivered_raises(monkeypatch):
         assert "error=4" in str(exc)
     else:
         raise AssertionError("expected SenderTransientError")
+
+
+def test_dashboard_approved_messages_bypass_global_live_gate(monkeypatch):
+    from elevate_cli import outreach_db, sender
+
+    monkeypatch.delenv("ELEVATE_MESSAGES_LIVE_CONFIRMED", raising=False)
+
+    marked: dict[str, object] = {}
+
+    def fake_mark_sent(queue_id: str, provider_message_id: str):
+        marked["sent"] = {"queue_id": queue_id, "provider_message_id": provider_message_id}
+        return {"id": queue_id, "status": outreach_db.SEND_STATUS_SENT, "providerMessageId": provider_message_id}
+
+    def fake_dispatch(_row):
+        return "imsg-approved123", {"gateway": "imsg"}
+
+    monkeypatch.setattr(outreach_db, "mark_sent", fake_mark_sent)
+    monkeypatch.setattr(sender, "get_dispatcher", lambda channel: fake_dispatch)
+
+    result = sender.dispatch_one(
+        {
+            "id": "q-approved",
+            "channel": "imessage",
+            "status": outreach_db.SEND_STATUS_SENDING,
+            "attempts": 0,
+            "payload": {
+                "draft_text": "Hi approved lead",
+                "recipient": {"phone": "+12505550123"},
+                "safety": {"approved_dashboard_send": True},
+            },
+        }
+    )
+
+    assert result["status"] == outreach_db.SEND_STATUS_SENT
+    assert marked["sent"] == {"queue_id": "q-approved", "provider_message_id": "imsg-approved123"}

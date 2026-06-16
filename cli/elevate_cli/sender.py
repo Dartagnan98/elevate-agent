@@ -659,7 +659,10 @@ def _messages_send_blocked(row: dict[str, Any]) -> bool:
     channel = str(row.get("channel") or "").lower()
     if channel not in {"sms", "imessage"}:
         return False
-    return not (_messages_live_confirmed() or _messages_test_allowed(row))
+    payload = row.get("payload") or {}
+    safety = payload.get("safety") or {}
+    approved_dashboard_send = bool(safety.get("approved_dashboard_send"))
+    return not (_messages_live_confirmed() or approved_dashboard_send or _messages_test_allowed(row))
 
 
 def send_messages_self_test(to: str, text: str | None = None) -> dict[str, Any]:
