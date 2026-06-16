@@ -1958,6 +1958,59 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
     }
 
 
+def deal_open_stage_cells(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The current stage's still-open REQUIRED checklist cells (id + label).
+
+    Same lightweight gate as ``deal_card_gate`` (skips the province lookups).
+    Used by post-turn scorecard inference to bound the closed candidate set: we
+    only ever reason about cells that are actually open on this deal right now,
+    so the inference can never invent progress on a cell that isn't pending.
+    """
+    deal_id = str(deal.get("id") or "")
+    checklist = deal.get("extraToggles") or {}
+    conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
+    attachments = list_deal_attachments(conn, deal_id) if deal_id else []
+    prior_runs = list_deal_action_runs(conn, deal_id) if deal_id else []
+    from elevate_cli.admin_deal_flow import resolve_deal_phase
+
+    flow = resolve_deal_phase(
+        deal=deal,
+        checklist=checklist,
+        attachments=attachments,
+        prior_runs=prior_runs,
+        conditions=conditions,
+        condition_docs=None,
+    )
+    gate = flow.get("gate") or {}
+    cells: list[dict[str, Any]] = []
+    for item in gate.get("missingChecklist") or []:
+        cid = str(item.get("id") or "").strip()
+        if cid:
+            cells.append({"id": cid, "label": str(item.get("label") or cid)})
+    return cells
+
+
+def human_controlled_checklist_cells(conn: sqlite3.Connection, deal_id: str) -> set[str]:
+    """Checklist cells whose MOST RECENT toggle_change event was set by a human.
+
+    Protects operator intent: inferred / agent writes must never re-tick a cell
+    the realtor explicitly controlled (e.g. unticked it, or marked it not-done).
+    Scans newest-first; the first event seen per field decides who owns it.
+    """
+    seen: set[str] = set()
+    human: set[str] = set()
+    for ev in list_deal_events(conn, deal_id, limit=200):
+        if ev.get("kind") != "toggle_change":
+            continue
+        field = str(ev.get("fieldName") or "").strip()
+        if not field or field in seen:
+            continue
+        seen.add(field)
+        if str(ev.get("actor") or "").startswith("human"):
+            human.add(field)
+    return human
+
+
 def list_deal_tasks(
     conn: sqlite3.Connection,
     *,

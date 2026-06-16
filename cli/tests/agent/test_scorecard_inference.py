@@ -1,0 +1,187 @@
+"""Phase B L2 — post-turn scorecard inference.
+
+Exercises the real DB + gate + set_deal_toggle path. resolve_attributions is
+patched so deal resolution is deterministic (not dependent on fuzzy-match
+scoring); the aux call_llm is mocked so we control which cells it "satisfies".
+"""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+import agent.turn_attribution as ta
+from elevate_cli.data import connect, create_deal
+from elevate_cli.data.deals import (
+    deal_open_stage_cells,
+    get_deal,
+    human_controlled_checklist_cells,
+    set_deal_toggle,
+)
+
+
+def _make_deal():
+    with connect() as conn:
+        return create_deal(
+            conn, title="Maple Crescent Listing", side="listing", current_stage=0, actor="human:test"
+        )
+
+
+def _open_cell_ids(deal_id):
+    with connect() as conn:
+        deal = get_deal(conn, deal_id)
+        return [c["id"] for c in deal_open_stage_cells(conn, deal)]
+
+
+def _fake_llm(satisfied_ids, counter=None):
+    def _call(*a, **k):
+        if counter is not None:
+            counter.append(1)
+        content = json.dumps({"satisfied_ids": list(satisfied_ids)})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    return _call
+
+
+def _patch_deal(monkeypatch, deal_id, confidence=0.9):
+    monkeypatch.setattr(
+        ta, "resolve_attributions",
+        lambda conn, turn, **k: [ta.Attribution("deal", deal_id, confidence, "Maple", [], "did stuff")],
+    )
+
+
+def _chat_turn(text="the pre-cma google form is filled now"):
+    # Pure conversational turn — NO tool calls. This is exactly the case the
+    # tool-gate trapdoor used to drop.
+    return [
+        {"role": "user", "content": "did we finish the google form?"},
+        {"role": "assistant", "content": text},
+    ]
+
+
+def _toggle(deal_id, field, value, actor):
+    with connect() as conn:
+        set_deal_toggle(conn, deal_id, field=field, value=value, actor=actor)
+
+
+def test_infers_and_ticks_on_chat_only_turn(monkeypatch):
+    deal = _make_deal()
+    cells = _open_cell_ids(deal["id"])
+    assert cells, "stage 0 should have open required cells"
+    target = cells[0]
+
+    _patch_deal(monkeypatch, deal["id"])
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([target]))
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+    assert (deal["id"], target) in applied
+
+    with connect() as conn:
+        toggles = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert toggles.get(target) is True
+
+
+def test_skips_human_controlled_cell(monkeypatch):
+    deal = _make_deal()
+    cells = _open_cell_ids(deal["id"])
+    assert len(cells) >= 2, "need >=2 open cells to test precedence"
+    human_cell, agent_cell = cells[0], cells[1]
+
+    # Realtor explicitly marked the first cell not-done.
+    _toggle(deal["id"], human_cell, False, "human:realtor")
+    assert human_cell in human_controlled_checklist_cells_for(deal["id"])
+
+    _patch_deal(monkeypatch, deal["id"])
+    # The model "satisfies" BOTH — the human-controlled one must still be skipped.
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([human_cell, agent_cell]))
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+    applied_cells = {c for _, c in applied}
+    assert agent_cell in applied_cells
+    assert human_cell not in applied_cells
+
+    with connect() as conn:
+        toggles = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert toggles.get(human_cell) is not True
+    assert toggles.get(agent_cell) is True
+
+
+def test_no_open_cells_means_no_aux_call(monkeypatch):
+    deal = _make_deal()
+    cells = _open_cell_ids(deal["id"])
+    # Tick every open cell so the stage has nothing pending.
+    for c in cells:
+        _toggle(deal["id"], c, True, "agent:test")
+
+    _patch_deal(monkeypatch, deal["id"])
+    calls: list[int] = []
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([], counter=calls))
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+    assert applied == []
+    assert calls == [], "no open cells must short-circuit before the aux call"
+
+
+def test_closed_set_guarantee_rejects_invented_id(monkeypatch):
+    deal = _make_deal()
+    _patch_deal(monkeypatch, deal["id"])
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm(["totally-made-up-cell"]))
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+    assert applied == []
+
+
+def test_low_confidence_deal_is_skipped(monkeypatch):
+    deal = _make_deal()
+    _patch_deal(monkeypatch, deal["id"], confidence=0.6)  # below SCORECARD_INFER_THRESHOLD
+    calls: list[int] = []
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([], counter=calls))
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+    assert applied == []
+    assert calls == []
+
+
+def test_attribute_turn_safely_starts_l2_on_chat_only_turn(monkeypatch):
+    """The actual trapdoor: attribute_turn_safely must START L2 on a turn with
+    NO tool calls. Freshness logging is tool-gated; scorecard inference is not."""
+    from elevate_cli import access
+
+    monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
+
+    seen: dict = {}
+
+    def _spy(turn, **kwargs):
+        seen["turn"] = list(turn)
+        seen["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(ta, "run_scorecard_inference", _spy)
+
+    # Run the spawned thread synchronously so the assertion is race-free.
+    import threading
+
+    class _SyncThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._t, self._a, self._k = target, args, kwargs or {}
+
+        def start(self):
+            self._t(*self._a, **self._k)
+
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+
+    # Pure user/assistant turn — no tool calls anywhere.
+    turn = [
+        {"role": "user", "content": "did we finish the google form?"},
+        {"role": "assistant", "content": "yes, the pre-cma google form is filled"},
+    ]
+    ta.attribute_turn_safely(turn, agent_id="admin", session_id="s1")
+
+    assert "turn" in seen, "L2 was not started by attribute_turn_safely on a chat-only turn"
+    assert not any(name for name, _ in ta._iter_tool_calls(seen["turn"])), "turn should have no tool calls"
+    assert seen["kwargs"].get("session_id") == "s1"
+    assert "sticky_ids" in seen["kwargs"]
+
+
+# helper kept out of the way of pytest collection
+def human_controlled_checklist_cells_for(deal_id):
+    with connect() as conn:
+        return human_controlled_checklist_cells(conn, deal_id)
