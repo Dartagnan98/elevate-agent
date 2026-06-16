@@ -6991,6 +6991,13 @@ def cmd_profile(args):
 
 def cmd_dashboard(args):
     """Start the web UI server."""
+    # Long-running process: post-turn scorecard inference stays async (snappy UI).
+    try:
+        from agent.turn_attribution import mark_persistent_process
+
+        mark_persistent_process()
+    except Exception:
+        pass
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401

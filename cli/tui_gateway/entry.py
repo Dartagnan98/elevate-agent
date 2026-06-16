@@ -123,6 +123,15 @@ def _warm_slash_completions():
 
 
 def main():
+    # Persistent agent runtime (dashboard/TUI): post-turn scorecard inference
+    # stays async so the UI stays snappy. One-shot runs (chat -q, cron) don't
+    # mark themselves, so they drain the tick inline before exit.
+    try:
+        from agent.turn_attribution import mark_persistent_process
+
+        mark_persistent_process()
+    except Exception:
+        pass
     _install_sidecar_publisher()
 
     if not write_json({

@@ -14111,12 +14111,19 @@ class AIAgent:
         # Self-gated to real-estate accounts; never raises.
         if not interrupted:
             try:
-                from agent.turn_attribution import attribute_turn_safely
+                from agent.turn_attribution import (
+                    attribute_turn_safely,
+                    should_wait_for_inference,
+                )
+                # Persistent processes (dashboard/gateway/REPL) finish scorecard
+                # inference async; one-shot runs (chat -q, cron) drain it inline
+                # so the tick is never lost on exit.
                 attribute_turn_safely(
                     messages,
                     agent_id=getattr(self, "_agent_id", "") or "",
                     session_id=self.session_id,
                     main_runtime=self._current_main_runtime(),
+                    wait=should_wait_for_inference(),
                 )
             except Exception as exc:
                 logger.debug("turn attribution hook failed: %s", exc)

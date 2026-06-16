@@ -675,12 +675,47 @@ def run_scorecard_inference(
     return applied
 
 
+# ── Async by default; one-shot runs drain inline before exit ─────────────────
+# Interactive + gateway turns stay async (snappy UI). One-shot / short-lived
+# runs (chat -q, cron) drain inline (wait=True), because the tick can't be
+# rescued at process exit: the inference's network aux call cannot complete
+# during interpreter shutdown (proven by a real one-shot test — an atexit drain
+# left the tick unticked). Persistent boots mark themselves; everything else
+# defaults to the safe inline wait so a tick is never silently lost.
+_INFERENCE_THREAD_NAME = "scorecard-inference"
+_INFERENCE_WAIT_TIMEOUT = 10.0
+_PERSISTENT_PROCESS_ENV = "ELEVATE_PERSISTENT_PROCESS"
+
+
+def mark_persistent_process() -> None:
+    """Long-running boots (dashboard, gateway, interactive REPL) call this so
+    post-turn scorecard inference stays ASYNC. One-shot processes don't, so
+    ``should_wait_for_inference()`` returns True for them and the tick drains
+    inline before exit."""
+    import os
+
+    os.environ[_PERSISTENT_PROCESS_ENV] = "1"
+
+
+def should_wait_for_inference() -> bool:
+    """True for one-shot / short-lived runs (drain the scorecard tick inline
+    before the process exits); False for persistent processes that can finish
+    the async tick in-flight. Safe default is True — a missed persistent marker
+    only costs a few seconds of latency; a missed one-shot would silently lose
+    the update."""
+    import os
+
+    return os.environ.get(_PERSISTENT_PROCESS_ENV) != "1"
+
+
 def attribute_turn_safely(
     messages: Sequence[Mapping[str, Any]],
     *,
     agent_id: str | None = None,
     session_id: str | None = None,
     main_runtime: Mapping[str, Any] | None = None,
+    wait: bool = False,
+    wait_timeout: float = _INFERENCE_WAIT_TIMEOUT,
 ) -> None:
     """Fire-and-forget post-turn attribution for the live agent loop.
 
@@ -688,6 +723,11 @@ def attribute_turn_safely(
     (nothing was *worked*), and never raises — attribution must never affect
     the user-facing turn. Gated to accounts that actually have the real-estate
     admin pack so non-RE sessions pay nothing.
+
+    Scorecard inference (L2) is async by default so interactive turns stay
+    snappy; a process-exit drain lets one-shot runs finish it. Pass ``wait=True``
+    to block up to ``wait_timeout`` for the tick to land before returning (for a
+    caller that knows it is about to exit and wants it inline).
     """
     try:
         turn = _current_turn(messages)
@@ -727,14 +767,21 @@ def attribute_turn_safely(
         # resolved deal actually has open current-stage cells.
         if _scorecard_inference_enabled():
             import threading
-            threading.Thread(
+            t = threading.Thread(
                 target=run_scorecard_inference,
                 args=(list(turn),),
                 kwargs=dict(
                     sticky_ids=set(sticky), session_id=session_id, main_runtime=main_runtime,
                 ),
+                name=_INFERENCE_THREAD_NAME,
                 daemon=True,
-            ).start()
+            )
+            t.start()
+            if wait:
+                # One-shot / short-lived run: block up to the bound so the tick
+                # lands inline (a healthy interpreter — the aux call can run).
+                t.join(timeout=max(0.0, wait_timeout))
+            # else: stay async (snappy). Persistent processes finish it in-flight.
 
         # Step 3 — micro-resolver backstop. Tool turns only, operator opt-in, and
         # only when the deterministic layers placed NOTHING. Off-thread.

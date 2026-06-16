@@ -5,6 +5,7 @@ patched so deal resolution is deterministic (not dependent on fuzzy-match
 scoring); the aux call_llm is mocked so we control which cells it "satisfies".
 """
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -165,11 +166,14 @@ def test_attribute_turn_safely_starts_l2_on_chat_only_turn(monkeypatch):
     import threading
 
     class _SyncThread:
-        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
             self._t, self._a, self._k = target, args, kwargs or {}
 
         def start(self):
             self._t(*self._a, **self._k)
+
+        def join(self, timeout=None):
+            pass
 
     monkeypatch.setattr(threading, "Thread", _SyncThread)
 
@@ -251,6 +255,94 @@ def test_nudge_kept_when_l2_did_nothing(monkeypatch):
     )
     nudge = ta.build_turn_nudge(_nudge_msgs(), current_user_idx=2)
     assert nudge and "Maple" in nudge
+
+
+# ── bounded drain: async by default, sync-on-demand for one-shot exits ───────
+
+def test_attribute_turn_safely_wait_true_ticks_before_return(monkeypatch):
+    from elevate_cli import access
+
+    monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
+    deal = _make_deal()
+    target = _open_cell_ids(deal["id"])[0]
+    monkeypatch.setattr(
+        ta, "resolve_attributions",
+        lambda conn, turn, **k: [ta.Attribution("deal", deal["id"], 0.9, "X", [], "s")],
+    )
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_llm([target]))
+
+    ta.attribute_turn_safely(
+        _chat_turn(), agent_id="admin", session_id="s", wait=True, wait_timeout=10
+    )
+    # No sleep: wait=True must have drained the tick before returning.
+    with connect() as conn:
+        tg = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert tg.get(target) is True
+
+
+def test_attribute_turn_safely_default_is_async_and_quick(monkeypatch):
+    from elevate_cli import access
+
+    monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
+    deal = _make_deal()
+    target = _open_cell_ids(deal["id"])[0]
+    monkeypatch.setattr(
+        ta, "resolve_attributions",
+        lambda conn, turn, **k: [ta.Attribution("deal", deal["id"], 0.9, "X", [], "s")],
+    )
+
+    def _slow_llm(*a, **k):
+        time.sleep(2.0)  # if attribution were synchronous this would block the turn
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps({"satisfied_ids": [target]})))])
+
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _slow_llm)
+
+    start = time.monotonic()
+    ta.attribute_turn_safely(_chat_turn(), agent_id="admin", session_id="s")  # wait=False default
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f"interactive turn must not block on the aux call (took {elapsed:.2f}s)"
+
+    # Still running async -> not ticked yet.
+    with connect() as conn:
+        tg = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert tg.get(target) is not True
+
+    # Join the async thread (healthy interpreter) and confirm it lands the tick.
+    import threading
+
+    for th in threading.enumerate():
+        if th.name == ta._INFERENCE_THREAD_NAME:
+            th.join(timeout=8)
+    with connect() as conn:
+        tg = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert tg.get(target) is True
+
+
+def test_should_wait_for_inference_defaults_to_true(monkeypatch):
+    # One-shot / short-lived runs (no persistent marker) drain inline.
+    monkeypatch.delenv(ta._PERSISTENT_PROCESS_ENV, raising=False)
+    assert ta.should_wait_for_inference() is True
+
+
+def test_persistent_marker_makes_inference_async(monkeypatch):
+    monkeypatch.setenv(ta._PERSISTENT_PROCESS_ENV, "1")
+    assert ta.should_wait_for_inference() is False
+
+
+def test_mark_persistent_process_sets_flag():
+    import os
+
+    had = os.environ.pop(ta._PERSISTENT_PROCESS_ENV, None)
+    try:
+        assert ta.should_wait_for_inference() is True
+        ta.mark_persistent_process()
+        assert os.environ.get(ta._PERSISTENT_PROCESS_ENV) == "1"
+        assert ta.should_wait_for_inference() is False
+    finally:
+        os.environ.pop(ta._PERSISTENT_PROCESS_ENV, None)
+        if had is not None:
+            os.environ[ta._PERSISTENT_PROCESS_ENV] = had
 
 
 # helper kept out of the way of pytest collection

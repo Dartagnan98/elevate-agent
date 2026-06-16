@@ -14179,6 +14179,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # Long-running process: post-turn scorecard inference stays async (snappy).
+    try:
+        from agent.turn_attribution import mark_persistent_process
+
+        mark_persistent_process()
+    except Exception:
+        pass
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same ELEVATE_HOME.
     # The PID file is scoped to ELEVATE_HOME, so future multi-profile
