@@ -39,7 +39,7 @@ export type BuyerDeal = {
   addr: string;
   line2: string;
   badge: string;
-  progress: string;
+  progress?: string;
   next: string;
   blocked?: boolean;
   canAdvance?: boolean;

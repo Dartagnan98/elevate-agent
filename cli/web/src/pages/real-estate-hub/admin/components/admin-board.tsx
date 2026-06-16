@@ -180,6 +180,8 @@ interface Deal {
   price?: string;
   mls?: string;
   side?: string;
+  canAdvance?: boolean;
+  missingCount?: number;
 }
 
 function DealCard({
