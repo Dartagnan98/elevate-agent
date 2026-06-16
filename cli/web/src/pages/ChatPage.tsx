@@ -837,6 +837,13 @@ const TRANSCRIPT_STORE_ENABLED = (() => {
   return false;
 })();
 
+// Per-session agent memory. The selected agent is a frontend overlay sent as
+// `agent_id` on every prompt; the backend keeps no durable record of which lane
+// a chat ran as. localStorage map (canonical persisted session id -> agent id)
+// so each chat remembers its own agent and the picker reflects it on switch,
+// instead of one global value leaking the last pick onto every other chat.
+const AGENT_BY_SESSION_STORAGE_KEY = "elevate.chat.agentBySession";
+
 // When the store is the source of truth, hydrated rows must carry the gateway's
 // stable id so a reload dedupes against the live-streamed copy instead of
 // duplicating it. Off-flag, keep the legacy random ids byte-for-byte.
@@ -3681,6 +3688,68 @@ export default function ChatPage() {
     () => messages.some((message) => message.role === "user"),
     [messages],
   );
+
+  // ── Per-session agent memory ─────────────────────────────────────────────
+  // selectedAgentId is one component-level value; without keying it to the
+  // conversation, picking an agent in a new chat flips the picker button on
+  // every other chat too (and on switch-back). The backend has no durable
+  // record of a chat's agent (it's resent as agent_id each prompt), so the
+  // map lives client-side: written on send, restored when the chat changes.
+  const agentBySessionRef = useRef<Record<string, string> | null>(null);
+  const lastAppliedAgentChatKeyRef = useRef<string | null>(null);
+
+  const readAgentBySession = useCallback((): Record<string, string> => {
+    if (agentBySessionRef.current) return agentBySessionRef.current;
+    let map: Record<string, string> = {};
+    try {
+      const raw = window.localStorage?.getItem(AGENT_BY_SESSION_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          map = parsed as Record<string, string>;
+        }
+      }
+    } catch {
+      map = {};
+    }
+    agentBySessionRef.current = map;
+    return map;
+  }, []);
+
+  const rememberSessionAgent = useCallback(
+    (sid: string | null | undefined, agentId: string | null | undefined) => {
+      const key = (sid ?? "").trim();
+      const value = (agentId ?? "").trim();
+      if (!key || !value) return;
+      const map = readAgentBySession();
+      if (map[key] === value) return;
+      map[key] = value;
+      try {
+        window.localStorage?.setItem(
+          AGENT_BY_SESSION_STORAGE_KEY,
+          JSON.stringify(map),
+        );
+      } catch {
+        /* private mode / quota — in-memory map still serves this tab */
+      }
+    },
+    [readAgentBySession],
+  );
+
+  // Restore the chat's own agent whenever the conversation identity changes
+  // (switch chat, resume, reload). Guarded on chatKey so a deliberate pick on
+  // the current chat — which never changes chatKey — is never clobbered. A
+  // brand-new chat (no stored entry) resets to the Executive Assistant.
+  useEffect(() => {
+    if (lastAppliedAgentChatKeyRef.current === chatKey) return;
+    lastAppliedAgentChatKeyRef.current = chatKey;
+    // chatKey IS the canonical id for a resumed chat (resumeId) and is what
+    // send() keys the map by once a draft mints. A fresh draft has no entry,
+    // so it falls to the default — deliberately NOT reading the previous
+    // chat's persisted id, which would leak its agent onto the new chat.
+    const saved = readAgentBySession()[chatKey];
+    setSelectedAgentId(saved || "executive-assistant");
+  }, [chatKey, readAgentBySession]);
 
   const appendMessage = useCallback(
     (role: ChatRole, content: string, extras: Partial<ChatMessage> = {}) => {
@@ -6713,6 +6782,12 @@ export default function ChatPage() {
         if (agentId) {
           payload.agent_id = agentId;
         }
+        // Bind this chat to the agent it actually ran, keyed by the canonical
+        // persisted id (what ?resume= uses) so a later switch-back restores it.
+        rememberSessionAgent(
+          persistedSessionIdRef.current ?? resumeId ?? effectiveSessionId,
+          agentId,
+        );
         // Persist the on-screen bubble's id so a reload hydrates the same id
         // (store dedup). Gateway validates [A-Za-z0-9._-]{1,64} else mints.
         if (TRANSCRIPT_STORE_ENABLED && effectiveUserMessageId) {
@@ -6728,7 +6803,7 @@ export default function ChatPage() {
         setStatusText("Error");
       }
     },
-    [appendMessage, attachments, gw, sessionId],
+    [appendMessage, attachments, gw, rememberSessionAgent, resumeId, sessionId],
   );
 
   // Skill slash commands (/cma-audit) load the full SKILL.md into the model's
