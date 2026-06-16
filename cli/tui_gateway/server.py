@@ -2730,24 +2730,48 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, result)
 
     try:
-        # Follow the compression-continuation chain to its live tip before
-        # loading history. When a turn compacts, the agent rotates to a NEW
-        # child session holding the compressed (small) history; the original
-        # session keeps its full pre-compaction transcript and is marked
-        # ended ("compression"). A cold resume keyed on the ORIGINAL id would
-        # reload that full transcript every time — so the next turn's preflight
-        # immediately re-compacts, looping forever ("it already compacted twice
-        # but still thinks it needs to"). Resolving to the tip loads the small
-        # compressed history and binds the agent/slash-worker to the live
-        # continuation. get_compression_tip is idempotent and a no-op for
-        # sessions that were never compressed.
+        # Compaction redesign: a new-style session (compaction_cursor set on its
+        # row) is NEVER rotated. Its transcript is the full append-only history;
+        # the payload cursor + synthetic summary live in session METADATA and are
+        # hydrated onto the agent in AIAgent.__init__ (so the next turn trims the
+        # payload without touching the transcript). Resolve it directly — skip the
+        # compression-tip walk entirely so a stale/legacy tip can never redirect a
+        # cursor session — and load its full transcript verbatim.
+        _resume_row = None
         try:
-            _tip = db.get_compression_tip(target)
+            _resume_row = db.get_session(target)
         except Exception:
-            _tip = None
-        if _tip and _tip != target:
-            logger.info("resume: following compression chain %s -> %s", target, _tip)
-            target = _tip
+            _resume_row = None
+        _new_style_compaction = bool(
+            _resume_row and (_resume_row.get("compaction_cursor") or 0)
+        )
+        if not _new_style_compaction:
+            # Legacy (pre-redesign) read path — KEPT verbatim so old rotated
+            # lineages still open. Follow the compression-continuation chain to
+            # its live tip before loading history. When a turn compacted under the
+            # OLD design, the agent rotated to a NEW child session holding the
+            # compressed (small) history; the original keeps its full
+            # pre-compaction transcript and is marked ended ("compression"). A cold
+            # resume keyed on the ORIGINAL id would reload that full transcript
+            # every time — so the next turn's preflight immediately re-compacts,
+            # looping forever ("it already compacted twice but still thinks it
+            # needs to"). Resolving to the tip loads the small compressed history
+            # and binds the agent/slash-worker to the live continuation.
+            # get_compression_tip is idempotent and a no-op for sessions that were
+            # never compressed.
+            try:
+                _tip = db.get_compression_tip(target)
+            except Exception:
+                _tip = None
+            if _tip and _tip != target:
+                logger.info("resume: following compression chain %s -> %s", target, _tip)
+                target = _tip
+        else:
+            logger.info(
+                "resume: cursor-model session %s (compaction_cursor=%s) — "
+                "skipping tip-walk, loading full append-only transcript",
+                target, _resume_row.get("compaction_cursor"),
+            )
         identity_payload = _session_identity_for(db, target)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
