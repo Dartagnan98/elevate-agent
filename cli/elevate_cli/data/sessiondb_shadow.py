@@ -86,6 +86,12 @@ def shadow_update_system_prompt(session_id: str, system_prompt: str) -> None:
     _safe(update_system_prompt, session_id, system_prompt)
 
 
+def shadow_update_compaction(session_id: str, summary, cursor: int) -> None:
+    from elevate_cli.data.chat_sessions import update_compaction
+
+    _safe(update_compaction, session_id, summary, cursor)
+
+
 def shadow_update_token_counts(
     session_id: str,
     *,
