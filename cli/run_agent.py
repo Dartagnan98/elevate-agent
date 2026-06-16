@@ -12933,6 +12933,11 @@ class AIAgent:
                         self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
+                        # Cursor model: compaction advances the payload cursor and
+                        # leaves the transcript unchanged, so success is measured by
+                        # the cursor, not len(messages). force=True bypasses the
+                        # anti-thrash backoff (this is overflow recovery).
+                        _recover_pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                         with _compaction_trace_scope(
                             source="agent",
                             trigger="payload_too_large",
@@ -12949,31 +12954,57 @@ class AIAgent:
                             messages, active_system_prompt = self._compress_context(
                                 messages, system_message, approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
+                                force=True,
                             )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
                         conversation_history = None
 
-                        if len(messages) < original_len:
-                            self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        _recover_cursor_advanced = int(
+                            getattr(self, "compaction_cursor", 0) or 0
+                        ) > _recover_pre_cursor
+                        if len(messages) < original_len or _recover_cursor_advanced:
+                            if len(messages) < original_len:
+                                self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            else:
+                                self._emit_status("🗜️ Compacted earlier turns, retrying...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
-                        else:
-                            self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
-                            logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
-                            self._persist_session(messages, conversation_history)
-                            return {
-                                "messages": messages,
-                                "completed": False,
-                                "api_calls": api_call_count,
-                                "error": "Request payload too large (413). Cannot compress further.",
-                                "partial": True,
-                                "failed": True,
-                                "compression_exhausted": True,
-                            }
+
+                        # Last resort: truncate oversized tool results (content
+                        # only, no rows removed), then retry once.
+                        try:
+                            _, _emerg_n = self.context_compressor.emergency_truncate_tool_results(messages)
+                        except Exception as _emerg_err:
+                            _emerg_n = 0
+                            logger.debug("emergency tool-result truncation skipped: %s", _emerg_err)
+                        if _emerg_n:
+                            self._emit_status(
+                                f"🗜️ Truncated {_emerg_n} oversized tool result(s) to fit — retrying..."
+                            )
+                            self.context_compressor.last_prompt_tokens = -1
+                            _usage_projector = getattr(self, "_usage_projector", None)
+                            if _usage_projector is not None:
+                                try:
+                                    _usage_projector.invalidate()
+                                except Exception:
+                                    pass
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
+
+                        self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
+                        self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
+                        logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
+                        self._persist_session(messages, conversation_history)
+                        return {
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": "Request payload too large (413). Cannot compress further.",
+                            "partial": True,
+                            "failed": True,
+                            "compression_exhausted": True,
+                        }
 
                     # Check for context-length errors BEFORE generic 4xx handler.
                     # The classifier detects context overflow from: explicit error
@@ -13103,6 +13134,13 @@ class AIAgent:
                         self._emit_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
 
                         original_len = len(messages)
+                        # Cursor model: compaction advances the payload cursor and
+                        # leaves the transcript (messages) unchanged, so "did it
+                        # help?" can no longer be measured by len(messages). Track
+                        # the cursor across the call. force=True bypasses the
+                        # anti-thrash backoff — this is overflow recovery, not a
+                        # routine trigger.
+                        _recover_pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                         try:
                             with _compaction_trace_scope(
                                 source="agent",
@@ -13124,42 +13162,76 @@ class AIAgent:
                                     messages, system_message, approx_tokens=approx_tokens,
                                     task_id=effective_task_id,
                                     focus_topic="context-limit recovery",
+                                    force=True,
                                 )
                         except TypeError as type_error:
-                            if "unexpected keyword argument 'focus_topic'" not in str(type_error):
+                            if "unexpected keyword argument" not in str(type_error):
                                 raise
                             # Backwards compatibility for subclasses/tests with
-                            # the pre-focus_topic _compress_context signature.
+                            # the pre-focus_topic / pre-force _compress_context
+                            # signature.
                             messages, active_system_prompt = self._compress_context(
                                 messages, system_message, approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                             )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
                         conversation_history = None
 
-                        if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
+                        _recover_cursor_advanced = int(
+                            getattr(self, "compaction_cursor", 0) or 0
+                        ) > _recover_pre_cursor
+                        if (
+                            len(messages) < original_len
+                            or _recover_cursor_advanced
+                            or (new_ctx and new_ctx < old_ctx)
+                        ):
                             if len(messages) < original_len:
                                 self._emit_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                            elif _recover_cursor_advanced:
+                                self._emit_status("🗜️ Compacted earlier turns, retrying...")
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
-                        else:
-                            # Can't compress further and already at minimum tier
-                            self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
-                            logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
-                            self._persist_session(messages, conversation_history)
-                            return {
-                                "messages": messages,
-                                "completed": False,
-                                "api_calls": api_call_count,
-                                "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
-                                "partial": True,
-                                "failed": True,
-                                "compression_exhausted": True,
-                            }
+
+                        # Cursor could not advance and the list did not shrink —
+                        # even the cursor-trimmed tail exceeds the window (a single
+                        # enormous tool result). LAST RESORT before failing the
+                        # turn: unconditionally truncate oversized tool results in
+                        # the tail (edits content only, never removes rows), then
+                        # retry once.
+                        try:
+                            _, _emerg_n = self.context_compressor.emergency_truncate_tool_results(messages)
+                        except Exception as _emerg_err:
+                            _emerg_n = 0
+                            logger.debug("emergency tool-result truncation skipped: %s", _emerg_err)
+                        if _emerg_n:
+                            self._emit_status(
+                                f"🗜️ Truncated {_emerg_n} oversized tool result(s) to fit — retrying..."
+                            )
+                            self.context_compressor.last_prompt_tokens = -1
+                            _usage_projector = getattr(self, "_usage_projector", None)
+                            if _usage_projector is not None:
+                                try:
+                                    _usage_projector.invalidate()
+                                except Exception:
+                                    pass
+                            time.sleep(1)
+                            restart_with_compressed_messages = True
+                            break
+
+                        # Truly stuck: can't compress further and already at minimum tier
+                        self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
+                        self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
+                        logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                        self._persist_session(messages, conversation_history)
+                        return {
+                            "messages": messages,
+                            "completed": False,
+                            "api_calls": api_call_count,
+                            "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
+                            "partial": True,
+                            "failed": True,
+                            "compression_exhausted": True,
+                        }
 
                     # Check for non-retryable client errors.  The classifier
                     # already accounts for 413, 429, 529 (transient), context
@@ -13922,6 +13994,7 @@ class AIAgent:
                     from agent.conversation_compression import (
                         resolve_compression_pressure as _resolve_pressure,
                         should_compress_now as _should_compress_now,
+                        should_critical_compress_now as _should_critical_compress_now,
                         should_prune_only_now as _should_prune_only_now,
                     )
                     _compressor = self.context_compressor
@@ -13937,10 +14010,27 @@ class AIAgent:
                         ),
                     )
 
-                    if self.compression_enabled and _should_compress_now(
-                        _compressor, _real_tokens, _trigger_tokens
+                    # Critical line (0.95 of the window): force a synchronous
+                    # compaction that BYPASSES the anti-thrash backoff. At/above
+                    # 95% the next call is about to overflow the provider context
+                    # window, so overflow safety wins over thrash avoidance —
+                    # compress with force=True even if should_compress_now() would
+                    # be vetoed by the low-yield / ineffective-compression cooldown.
+                    _crit_window = int(getattr(_compressor, "context_length", 0) or 0)
+                    _critical_compact = (
+                        self.compression_enabled
+                        and _should_critical_compress_now(_real_tokens, _crit_window)
+                    )
+
+                    if self.compression_enabled and (
+                        _critical_compact
+                        or _should_compress_now(_compressor, _real_tokens, _trigger_tokens)
                     ):
-                        self._safe_print("  ⟳ compacting context…")
+                        self._safe_print(
+                            "  ⟳ compacting context (critical)…"
+                            if _critical_compact
+                            else "  ⟳ compacting context…"
+                        )
                         logger.info(
                             "Compaction trigger: ~%s tokens >= %s line (%s mode, "
                             "window %s, reserve %s)",
@@ -13959,6 +14049,7 @@ class AIAgent:
                                 measured_tokens=_real_tokens,
                                 trigger_tokens=_trigger_tokens,
                                 real_mode=_real_mode,
+                                critical=bool(_critical_compact),
                                 output_reserve_tokens=getattr(
                                     self, "_compression_output_reserve_tokens", 0
                                 ),
@@ -13969,6 +14060,7 @@ class AIAgent:
                                 messages, system_message,
                                 approx_tokens=self.context_compressor.last_prompt_tokens,
                                 task_id=effective_task_id,
+                                force=_critical_compact,
                             )
                         # Compression created a new session — clear history so
                         # _flush_messages_to_session_db writes compressed messages

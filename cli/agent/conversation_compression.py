@@ -1180,6 +1180,30 @@ def should_compress_now(compressor: Any, measured_tokens: int, trigger_tokens: i
     return bool(compressor.should_compress(max(measured_tokens, threshold_tokens)))
 
 
+# Critical line: the last synchronous-compaction trigger before a turn would
+# overflow the provider context window and fall back to error-recovery
+# compaction. The normal trigger leaves ``output_reserve`` of headroom and
+# obeys the anti-thrash backoff; the critical line fires a FORCED compaction
+# even when the backoff would otherwise skip, because at >=95% of the window
+# the next call is about to 400 on context length.
+CRITICAL_THRESHOLD = 0.95
+
+
+def should_critical_compress_now(measured_tokens: int, window: int) -> bool:
+    """True when compaction MUST run synchronously this iteration, bypassing the
+    anti-thrash cooldown.
+
+    ``measured_tokens`` is the projected (real-count) or estimated prompt size of
+    what the next call would send; ``window`` is the model context length. At or
+    above ``CRITICAL_THRESHOLD`` of the window, overflow safety wins over thrash
+    avoidance — the caller forces compaction (``force=True``) regardless of the
+    low-yield / ineffective-compression backoff.
+    """
+    if measured_tokens <= 0 or window <= 0:
+        return False
+    return measured_tokens >= int(window * CRITICAL_THRESHOLD)
+
+
 def should_prune_only_now(compressor: Any, measured_tokens: int, trigger_tokens: int) -> bool:
     """True when the cheap no-LLM prune pass should run.
 
@@ -1223,6 +1247,8 @@ __all__ = [
     "RealUsageProjector",
     "effective_compression_trigger_tokens",
     "resolve_compression_pressure",
+    "CRITICAL_THRESHOLD",
+    "should_critical_compress_now",
     "should_compress_now",
     "should_prune_only_now",
 ]

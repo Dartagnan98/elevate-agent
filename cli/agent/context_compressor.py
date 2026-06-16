@@ -1857,6 +1857,74 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
         return pruned, True
 
+    def emergency_truncate_tool_results(
+        self, messages: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """LAST-RESORT context recovery: unconditionally truncate oversized
+        tool-result bodies in place so a turn that STILL overflows after a forced
+        compaction can fit, instead of failing with ``compression_exhausted``.
+
+        The cursor model keeps the transcript append-only for normal compaction —
+        the cursor just hides earlier turns from the payload. But when even the
+        cursor-trimmed payload exceeds the window (a single enormous tool result
+        in the kept tail), the cursor cannot help. This replaces every tool
+        result longer than ``_EMERGENCY_TAIL_TOOL_RESULT_CHARS`` — except the most
+        recent ``_EMERGENCY_TAIL_KEEP_RECENT`` — with a one-line summary. It edits
+        tool-result CONTENT only (never removes message rows, so the visible
+        transcript's row structure is preserved, same as ``prune_only``), and it
+        is the same truncation family as the gated emergency-tail pass in
+        ``_prune_old_tool_results`` but unconditional.
+
+        Mutates ``messages`` in place AND returns ``(messages, n_truncated)``.
+        """
+        if not messages:
+            return messages, 0
+
+        # tool_call_id -> (name, args) for nicer one-line summaries.
+        call_id_to_tool: dict[str, tuple] = {}
+        for m in messages:
+            for tc in m.get("tool_calls") or []:
+                if isinstance(tc, dict):
+                    cid = tc.get("id") or ""
+                    fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                    if cid:
+                        call_id_to_tool[cid] = (fn.get("name", "unknown"), fn.get("arguments", ""))
+
+        oversized = [
+            i for i, m in enumerate(messages)
+            if m.get("role") == "tool"
+            and isinstance(m.get("content"), str)
+            and len(m["content"]) > _EMERGENCY_TAIL_TOOL_RESULT_CHARS
+            and not m["content"].startswith("[Duplicate tool output")
+            and m["content"] != _PRUNED_TOOL_PLACEHOLDER
+        ]
+        to_truncate = (
+            oversized[:-_EMERGENCY_TAIL_KEEP_RECENT]
+            if _EMERGENCY_TAIL_KEEP_RECENT
+            else oversized
+        )
+        n = 0
+        for i in to_truncate:
+            msg = messages[i]
+            cid = msg.get("tool_call_id", "")
+            name, args = call_id_to_tool.get(cid, ("unknown", ""))
+            messages[i] = {**msg, "content": _summarize_tool_result(name, args, msg["content"])}
+            n += 1
+        if n:
+            trace_event(
+                "compressor.emergency_truncate_tool_results",
+                truncated=n,
+                oversized=len(oversized),
+                message_count=len(messages),
+            )
+            if not self.quiet_mode:
+                logger.warning(
+                    "Emergency truncation: shortened %d oversized tool result(s) "
+                    "to fit the context window (last resort before turn failure).",
+                    n,
+                )
+        return messages, n
+
     def summarize_to_cursor(
         self,
         messages: List[Dict[str, Any]],
