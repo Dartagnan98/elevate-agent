@@ -585,14 +585,21 @@ def compress_context(
         target=_compaction_keepalive, daemon=True, name="compaction-keepalive"
     )
     _ka_thread.start()
+    # Compaction redesign (docs/compaction-redesign.md): the transcript is NEVER
+    # rewritten or rotated. Compute a new payload cursor + synthetic summary over
+    # messages[prev_cursor:compacted_idx], fold the prior summary in iteratively,
+    # and persist BOTH as session metadata. messages_for_api injects the summary
+    # and skips the compacted head only when the API payload is built.
+    _prev_cursor = int(getattr(agent, "compaction_cursor", 0) or 0)
+    _prev_summary = getattr(agent, "compaction_summary", None)
     try:
-        try:
-            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-        except TypeError:
-            # Plugin context engine with strict signature that doesn't accept
-            # focus_topic / force — fall back to calling without them.
-            trace_event("agent.compress_context_signature_fallback")
-            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        summary_text, compacted_idx = agent.context_compressor.summarize_to_cursor(
+            messages,
+            prev_cursor=_prev_cursor,
+            previous_summary=_prev_summary,
+            focus_topic=focus_topic,
+            force=force,
+        )
     except Exception as exc:
         trace_event(
             "agent.compress_context_exception",
@@ -607,8 +614,9 @@ def compress_context(
     trace_event(
         "agent.compress_context_compressor_returned",
         original_message_count=_pre_msg_count,
-        compressed_message_count=len(compressed),
-        messages=message_stats(compressed),
+        prev_cursor=_prev_cursor,
+        compacted_idx=compacted_idx,
+        summary_present=bool(summary_text),
         compressor=compressor_stats(getattr(agent, "context_compressor", None)),
     )
 
@@ -664,156 +672,66 @@ def compress_context(
                     "check auxiliary.compression.model in config.yaml."
                 )
 
-    plan_snapshot = None
+    # No-op compaction: the cut did not advance past the current cursor, so
+    # nothing new was hidden (summarize_to_cursor returned None without
+    # aborting). It already armed the low-yield cooldown so should_compress()
+    # backs off. Leave cursor/summary AND the usage projector untouched — the
+    # payload did not shrink — and return the transcript unchanged.
+    if summary_text is None:
+        trace_event(
+            "agent.compress_context_noop",
+            session_id=agent.session_id or "",
+            cursor=_prev_cursor,
+            duration_ms=int((time.monotonic() - _trace_started) * 1000),
+            compressor=compressor_stats(getattr(agent, "context_compressor", None)),
+        )
+        _existing_sp = getattr(agent, "_cached_system_prompt", None) or agent._build_system_prompt(system_message)
+        return messages, _existing_sp
+
+    # Trigger memory extraction over the compacted region before it scrolls out
+    # of the model's window. NO rotation: the session id is stable, the
+    # transcript stays append-only, only the compaction METADATA moves.
     try:
-        from tools.present_plan_tool import format_latest_plan_for_injection
-        plan_snapshot = format_latest_plan_for_injection(messages)
-    except Exception as e:
-        logger.debug("Plan snapshot preservation skipped: %s", e)
-    todo_snapshot = agent._todo_store.format_for_injection()
-    compressed = insert_preserved_context(compressed, [plan_snapshot, todo_snapshot])
-    trace_event(
-        "agent.preserved_context_inserted",
-        plan_snapshot_present=bool(plan_snapshot),
-        plan_snapshot_chars=len(plan_snapshot or ""),
-        todo_snapshot_present=bool(todo_snapshot),
-        todo_snapshot_chars=len(todo_snapshot or ""),
-        messages=message_stats(compressed),
-    )
+        agent.commit_memory_session(messages)
+    except Exception as _mem_err:
+        logger.debug("commit_memory_session (compression) skipped: %s", _mem_err)
 
-    agent._invalidate_system_prompt()
-    new_system_prompt = agent._build_system_prompt(system_message)
-    agent._cached_system_prompt = new_system_prompt
-
-    old_session_id = None
+    # Persist the new compaction state as SESSION METADATA (NOT message rows):
+    # the payload-time cursor + synthetic summary. The transcript is never
+    # rewritten — messages_for_api applies these only when building the API copy.
+    agent.compaction_cursor = compacted_idx
+    agent.compaction_summary = summary_text
     if agent._session_db:
         try:
-            # Propagate title to the new session with auto-numbering
-            old_title = agent._session_db.get_session_title(agent.session_id)
-            # Trigger memory extraction on the old session before it rotates.
-            agent.commit_memory_session(messages)
-            agent._session_db.end_session(agent.session_id, "compression")
-            old_session_id = agent.session_id
-            trace_event(
-                "agent.session_rotation_start",
-                session_id=old_session_id or "",
-                parent_session_id=old_session_id or "",
+            agent._session_db.update_compaction(
+                agent.session_id, summary_text, compacted_idx
             )
-            _new_sid_base = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-            # Preserve the cron_<jobid>_ prefix across compression-driven
-            # session rotation. Without this, the dashboard's per-cron
-            # session list (which groups by `cron_<jobid>_*` prefix in
-            # App.tsx) loses the restarted continuation and the user sees
-            # the cron as "nothing ran" even though the work completed.
-            if old_session_id and old_session_id.startswith("cron_"):
-                _parts = old_session_id.split("_", 3)  # ["cron", "<jobid>", "<ts>", ...]
-                if len(_parts) >= 2:
-                    agent.session_id = f"cron_{_parts[1]}_{_new_sid_base}"
-                else:
-                    agent.session_id = _new_sid_base
-            else:
-                agent.session_id = _new_sid_base
-            os.environ["ELEVATE_SESSION_ID"] = agent.session_id
-            try:
-                from gateway.session_context import _SESSION_ID
-                _SESSION_ID.set(agent.session_id)
-            except Exception:
-                pass
-            agent._session_db_created = False
-            agent._session_db.create_session(
-                session_id=agent.session_id,
-                source=agent.platform or os.environ.get("ELEVATE_SESSION_SOURCE", "cli"),
-                model=agent.model,
-                # getattr guard: a missing attribute here once aborted the whole
-                # rotation block AFTER end_session(old) — the continuation row
-                # was then backfilled by the message flush with NO parent link
-                # and NO title, surfacing as an unrelated new chat holding just
-                # the post-compaction turn and breaking the compression-tip
-                # walk (resume reloaded full history → re-compaction loop).
-                model_config=getattr(agent, "_session_init_model_config", None),
-                parent_session_id=old_session_id,
-            )
-            agent._session_db_created = True
-            # Auto-number the title for the continuation session
-            if old_title:
-                try:
-                    new_title = agent._session_db.get_next_title_in_lineage(old_title)
-                    agent._session_db.set_session_title(agent.session_id, new_title)
-                except (ValueError, Exception) as e:
-                    logger.debug("Could not propagate title on compression: %s", e)
-            agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
-            # Reset flush cursor — new session starts with no messages written
-            agent._last_flushed_db_idx = 0
             trace_event(
-                "agent.session_rotation_done",
+                "agent.compaction_metadata_persisted",
                 session_id=agent.session_id or "",
-                parent_session_id=old_session_id or "",
-                new_session_id=agent.session_id or "",
-                title_propagated=bool(old_title),
+                cursor=compacted_idx,
+                summary_chars=len(summary_text or ""),
             )
-        except Exception as e:
+        except Exception as _meta_err:
             trace_event(
-                "agent.session_rotation_exception",
-                error_type=type(e).__name__,
-                session_id=getattr(agent, "session_id", "") or "",
-                parent_session_id=old_session_id or "",
+                "agent.compaction_metadata_exception",
+                error_type=type(_meta_err).__name__,
+                session_id=agent.session_id or "",
             )
-            logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
-
-    try:
-        _store_compression_checkpoint(
-            agent,
-            session_id=agent.session_id or "",
-            old_session_id=old_session_id,
-            source_messages=messages,
-            compressed_messages=compressed,
-        )
-        trace_event(
-            "agent.compression_checkpoint_stored",
-            session_id=agent.session_id or "",
-            parent_session_id=old_session_id or "",
-        )
-    except Exception as _checkpoint_err:
-        trace_event(
-            "agent.compression_checkpoint_exception",
-            error_type=type(_checkpoint_err).__name__,
-            session_id=agent.session_id or "",
-            parent_session_id=old_session_id or "",
-        )
-        logger.debug("compression checkpoint skipped: %s", _checkpoint_err)
-
-    # Notify the context engine that the session_id rotated because of
-    # compression (not a fresh /new). Plugin engines (e.g. elevate-lcm) use
-    # boundary_reason="compression" to preserve DAG lineage across the
-    # rollover instead of re-initializing fresh per-session state.
-    # See elevate-lcm#68. Built-in ContextCompressor ignores kwargs.
-    try:
-        _old_sid = old_session_id
-        if _old_sid and hasattr(agent.context_compressor, "on_session_start"):
-            agent.context_compressor.on_session_start(
-                agent.session_id or "",
-                boundary_reason="compression",
-                old_session_id=_old_sid,
+            logger.warning(
+                "Compaction metadata write failed for %s: %s",
+                agent.session_id, _meta_err,
             )
-    except Exception as _ce_err:
-        logger.debug("context engine on_session_start (compression): %s", _ce_err)
 
-    # Notify memory providers of the compression-driven session_id rotation
-    # so provider-cached per-session state (Hindsight's _document_id,
-    # accumulated turn buffers, counters) refreshes. reset=False because
-    # the logical conversation continues; only the id and DB row rolled
-    # over. See #6672.
-    try:
-        _old_sid = old_session_id
-        if _old_sid and agent._memory_manager:
-            agent._memory_manager.on_session_switch(
-                agent.session_id or "",
-                parent_session_id=_old_sid,
-                reset=False,
-                reason="compression",
-            )
-    except Exception as _me_err:
-        logger.debug("memory manager on_session_switch (compression): %s", _me_err)
+    # The system prompt is intentionally NOT rebuilt on compaction: nothing
+    # about the cursor model changes it (the summary lives in a payload-time
+    # synthetic message, not the system prompt), and keeping it byte-stable
+    # preserves the provider prompt-cache prefix across the compaction boundary.
+    new_system_prompt = (
+        getattr(agent, "_cached_system_prompt", None)
+        or agent._build_system_prompt(system_message)
+    )
+    agent._cached_system_prompt = new_system_prompt
 
     # Warn on repeated compressions (quality degrades with each pass)
     _cc = agent.context_compressor.compression_count
@@ -824,20 +742,30 @@ def compress_context(
             force=True,
         )
 
-    # Update token estimate after compaction so pressure calculations
-    # use the post-compression count, not the stale pre-compression one.
-    # Use estimate_request_tokens_rough() so tool schemas are included —
-    # with 50+ tools enabled, schemas alone can add 20-30K tokens, and
-    # omitting them delays the next compression cycle far past the
-    # configured threshold (issue #14695).
-    _compressed_est = estimate_request_tokens_rough(
-        compressed,
-        system_prompt=new_system_prompt or "",
-        tools=agent.tools or None,
-    )
-    agent.context_compressor.last_prompt_tokens = _compressed_est
+    # Post-compaction trigger guard (#14695): the visible message list is
+    # unchanged, so the usage projector's snapshot (taken on the FULL payload)
+    # would project the pre-compaction size and immediately re-fire compaction.
+    # Park the -1 sentinel + invalidate the projector so the trigger stays quiet
+    # until the next API call reports real usage for the now-trimmed payload.
+    # (In the old rotating design the projector self-invalidated because the
+    # caller rebound `messages` to a brand-new list; the cursor model reuses the
+    # same list object, so we must invalidate explicitly here.)
+    agent.context_compressor.last_prompt_tokens = -1
     agent.context_compressor.last_completion_tokens = 0
+    try:
+        agent.context_compressor.awaiting_real_usage_after_compression = True
+    except Exception:
+        pass
+    _usage_projector = getattr(agent, "_usage_projector", None)
+    if _usage_projector is not None:
+        try:
+            _usage_projector.invalidate()
+        except Exception:
+            pass
 
+    # Context-pressure telemetry — summarise from the synthetic summary itself
+    # (the compacted head is now represented by it) so the dashboard pressure
+    # panel reflects what the model actually carries forward.
     try:
         from gateway.session_context import get_session_env
 
@@ -851,30 +779,22 @@ def compress_context(
             from elevate_cli.agent_policy import record_agent_context_pressure
             from elevate_cli.data import connect
 
-            _summary_bits = []
-            for _msg in compressed[:4]:
-                if isinstance(_msg, dict):
-                    _text = _content_text(_msg.get("content")).strip()
-                    if _text:
-                        _summary_bits.append(_text)
-                if len("\n\n".join(_summary_bits)) > 2400:
-                    break
             with connect() as _conn:
                 record_agent_context_pressure(
                     _pressure_agent_id,
                     session_id=str(getattr(agent, "session_id", "") or ""),
                     current_tokens=int(approx_tokens or 0),
                     context_limit=_context_limit,
-                    summary="\n\n".join(_summary_bits)[:4000],
+                    summary=str(summary_text or "")[:4000],
                     conn=_conn,
                     actor=_pressure_agent_id,
                 )
     except Exception as _pressure_exc:
         logger.debug("agent context-pressure record skipped: %s", _pressure_exc)
 
-    # Clear the file-read dedup cache.  After compression the original
-    # read content is summarised away — if the model re-reads the same
-    # file it needs the full content, not a "file unchanged" stub.
+    # Clear the file-read dedup cache.  After compaction the original read
+    # content is summarised away — if the model re-reads the same file it needs
+    # the full content, not a "file unchanged" stub.
     try:
         from tools.file_tools import reset_file_dedup
         reset_file_dedup(task_id)
@@ -882,22 +802,22 @@ def compress_context(
         pass
 
     logger.info(
-        "context compression done: session=%s messages=%d->%d tokens=~%s",
-        agent.session_id or "none", _pre_msg_count, len(compressed),
-        f"{_compressed_est:,}",
+        "context compaction done: session=%s cursor=%d->%d summary=%d chars "
+        "(transcript untouched, no rotation)",
+        agent.session_id or "none", _prev_cursor, compacted_idx,
+        len(summary_text or ""),
     )
     trace_event(
         "agent.compress_context_done",
         session_id=agent.session_id or "",
-        parent_session_id=old_session_id or "",
+        prev_cursor=_prev_cursor,
+        compacted_idx=compacted_idx,
         original_message_count=_pre_msg_count,
-        compressed_message_count=len(compressed),
-        compressed_request_tokens_est=_compressed_est,
+        summary_chars=len(summary_text or ""),
         duration_ms=int((time.monotonic() - _trace_started) * 1000),
-        messages=message_stats(compressed),
         compressor=compressor_stats(getattr(agent, "context_compressor", None)),
     )
-    return compressed, new_system_prompt
+    return messages, new_system_prompt
 
 
 def try_shrink_image_parts_in_messages(api_messages: list) -> bool:

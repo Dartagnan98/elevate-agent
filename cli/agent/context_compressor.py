@@ -1857,6 +1857,166 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
         return pruned, True
 
+    def summarize_to_cursor(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        prev_cursor: int = 0,
+        previous_summary: Optional[str] = None,
+        focus_topic: str = None,
+        force: bool = False,
+    ) -> Tuple[Optional[str], int]:
+        """Compaction-redesign core: compute ``(summary_text, compacted_idx)``
+        WITHOUT rewriting the transcript.
+
+        This is the cursor-model counterpart to :meth:`compress`.  It reuses the
+        exact same cutoff machinery (``_protect_head_size`` →
+        ``_align_boundary_forward`` → ``_find_tail_cut_by_tokens``, which itself
+        runs ``_align_boundary_backward`` + ``_ensure_last_user_message_in_tail``)
+        so the chosen index never splits a tool_call/result pair and always keeps
+        the most recent user turn in the live tail.  It then summarizes the newly
+        compacted region ``messages[prev_cursor:compacted_idx]`` via
+        ``_generate_summary`` — folding ``previous_summary`` in iteratively on
+        re-compaction — and returns the new cursor.
+
+        Crucially it ASSEMBLES NOTHING: ``messages`` is read, never mutated.  The
+        caller persists ``(summary_text, compacted_idx)`` as session metadata and
+        injects the summary only at payload-build time
+        (``AIAgent.messages_for_api``).  The visible transcript stays byte-for-byte
+        intact — no head/summary/tail rewrite, no session rotation.
+
+        Returns:
+            ``(summary_text, compacted_idx)`` on a successful compaction.
+            ``(None, prev_cursor)`` when there is nothing new to compact (the cut
+            did not advance past ``prev_cursor``) or summary generation aborted —
+            the same no-op/abort contract :meth:`compress` exposes via
+            ``_last_compress_aborted`` (set only for the abort case).
+        """
+        _trace_started = time.monotonic()
+        # Reset per-call summary failure state — callers inspect these fields
+        # after we return to decide whether to surface a warning.
+        self._last_summary_dropped_count = 0
+        self._last_summary_fallback_used = False
+        self._last_summary_error = None
+        self._last_aux_model_failure_error = None
+        self._last_aux_model_failure_model = None
+        self._last_compress_aborted = False
+
+        # Consume the should_compress() trigger measurement exactly once (mirrors
+        # compress()) so a later direct call can't reuse a stale baseline, and so
+        # the low-yield cooldown compares in the same request-rough units.
+        _measured_trigger = self._pending_compress_tokens
+        self._pending_compress_tokens = 0
+        # Manual /compress (force=True) must not arm the auto low-yield cooldown.
+        _track_low_yield = not force
+        if force and self._summary_failure_cooldown_until > 0.0:
+            self._summary_failure_cooldown_until = 0.0
+
+        prev_cursor = max(0, int(prev_cursor or 0))
+        n_messages = len(messages)
+
+        # Boundary computation — identical helpers to compress(). The transcript
+        # is NEVER pre-pruned here: hygiene (media strip / tool-result prune) is
+        # owned by prune_only and the emergency-truncation last resort. The
+        # cursor model must not mutate history, only choose where to cut.
+        compress_start = self._align_boundary_forward(
+            messages, self._protect_head_size(messages)
+        )
+        compacted_idx = self._find_tail_cut_by_tokens(messages, compress_start)
+
+        trace_event(
+            "compressor.summarize_to_cursor_boundary",
+            n_messages=n_messages,
+            prev_cursor=prev_cursor,
+            compress_start=compress_start,
+            compacted_idx=compacted_idx,
+            compressor=compressor_stats(self),
+        )
+
+        # Advance-only: a cut that does not move past the current cursor frees
+        # nothing. Count it as ineffective + low-yield so should_compress() backs
+        # off instead of re-entering on every iteration boundary (mirrors
+        # compress()'s no-compressible-window branch).
+        if compacted_idx <= prev_cursor:
+            self._last_compression_savings_pct = 0.0
+            if _track_low_yield:
+                self._ineffective_compression_count += 1
+                self._consecutive_low_yield_compactions += 1
+                self._last_low_yield_tokens = (
+                    _measured_trigger or estimate_messages_tokens_rough(messages)
+                )
+            trace_event(
+                "compressor.summarize_to_cursor_noop",
+                prev_cursor=prev_cursor,
+                compacted_idx=compacted_idx,
+                ineffective_compression_count=self._ineffective_compression_count,
+                consecutive_low_yield=self._consecutive_low_yield_compactions,
+                compressor=compressor_stats(self),
+            )
+            return None, prev_cursor
+
+        # Region folded in this pass. First compaction (prev_cursor==0) summarizes
+        # the whole pre-cursor span; re-compaction adds only the delta since the
+        # last cursor to `previous_summary`.
+        turns_to_summarize = messages[prev_cursor:compacted_idx]
+        if not turns_to_summarize:
+            return None, prev_cursor
+
+        # Seed the iterative-summary base from the caller's persisted summary so a
+        # fresh compressor instance after a RESUME still folds rather than
+        # re-summarizing from scratch (compress() relied on finding the summary
+        # embedded in the transcript head; the cursor model keeps it in metadata).
+        if previous_summary:
+            self._previous_summary = self._clip_summary_for_rollup(previous_summary)
+
+        summary = self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
+        if not summary:
+            # Summary generation failed/aborted. Honour compress()'s abort
+            # contract: do NOT advance the cursor, let the caller warn + freeze.
+            self._last_compress_aborted = True
+            trace_event(
+                "compressor.summarize_to_cursor_abort",
+                prev_cursor=prev_cursor,
+                compacted_idx=compacted_idx,
+                summary_failure_cooldown_active=self._summary_failure_cooldown_until > time.time(),
+                compressor=compressor_stats(self),
+            )
+            return None, prev_cursor
+
+        self.compression_count += 1
+
+        # Anti-thrash low-yield accounting in cursor terms: "removed messages" is
+        # the count newly hidden behind the cursor this pass. <=1 newly hidden is
+        # the low-yield pathology should_compress()'s cooldown suppresses.
+        removed_messages = compacted_idx - prev_cursor
+        low_yield = removed_messages <= _LOW_YIELD_REMOVED_MESSAGES
+        if _track_low_yield:
+            if low_yield:
+                self._consecutive_low_yield_compactions += 1
+                self._ineffective_compression_count += 1
+                self._last_low_yield_tokens = (
+                    _measured_trigger or estimate_messages_tokens_rough(messages)
+                )
+            else:
+                self._consecutive_low_yield_compactions = 0
+                self._ineffective_compression_count = 0
+                self._last_low_yield_tokens = 0
+        self._last_compression_savings_pct = 0.0 if low_yield else 100.0
+
+        trace_event(
+            "compressor.summarize_to_cursor_done",
+            n_messages=n_messages,
+            prev_cursor=prev_cursor,
+            compacted_idx=compacted_idx,
+            removed_messages=removed_messages,
+            low_yield=low_yield,
+            consecutive_low_yield=self._consecutive_low_yield_compactions,
+            summary_chars=len(summary or ""),
+            duration_ms=int((time.monotonic() - _trace_started) * 1000),
+            compressor=compressor_stats(self),
+        )
+        return summary, compacted_idx
+
     def compress(self, messages: List[Dict[str, Any]], current_tokens: int = None, focus_topic: str = None, force: bool = False) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
 

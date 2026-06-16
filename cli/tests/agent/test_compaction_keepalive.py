@@ -16,7 +16,8 @@ from agent.conversation_compression import compress_context
 
 
 class _SlowCompressor:
-    """compress() that blocks, then optionally raises, to model a slow summary."""
+    """summarize_to_cursor() that blocks, then optionally raises, to model a
+    slow summary (the redesign call compress_context wraps in the heartbeat)."""
 
     def __init__(self, sleep_s, exc=None):
         self._sleep_s = sleep_s
@@ -25,11 +26,12 @@ class _SlowCompressor:
         self.context_length = 200000
         self.threshold_tokens = 170000
 
-    def compress(self, messages, current_tokens=None, focus_topic=None, force=False):
+    def summarize_to_cursor(self, messages, *, prev_cursor=0,
+                            previous_summary=None, focus_topic=None, force=False):
         time.sleep(self._sleep_s)
         if self._exc is not None:
             raise self._exc
-        return messages
+        return None, prev_cursor
 
 
 class _FakeAgent:

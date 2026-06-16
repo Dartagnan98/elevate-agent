@@ -27,11 +27,11 @@ from agent.conversation_compression import compress_context
 
 
 class _SlowCompressor:
-    """compress() that blocks for ``sleep_s`` then raises ``exc``.
+    """summarize_to_cursor() that blocks for ``sleep_s`` then raises ``exc``.
 
     Mirrors the stub in test_compaction_keepalive.py: blocking models a slow
-    auxiliary summary call; raising lets us skip the success-path session
-    rotation while still exercising the heartbeat + finally teardown.
+    auxiliary summary call; raising lets us skip the success-path metadata
+    write while still exercising the heartbeat + finally teardown.
     """
 
     def __init__(self, sleep_s, exc=None):
@@ -40,11 +40,12 @@ class _SlowCompressor:
         self.context_length = 200000
         self.threshold_tokens = 170000
 
-    def compress(self, messages, current_tokens=None, focus_topic=None, force=False):
+    def summarize_to_cursor(self, messages, *, prev_cursor=0,
+                            previous_summary=None, focus_topic=None, force=False):
         time.sleep(self._sleep_s)
         if self._exc is not None:
             raise self._exc
-        return messages
+        return None, prev_cursor
 
 
 class _FakeAgent:
