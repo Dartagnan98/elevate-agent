@@ -220,6 +220,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    compaction_summary TEXT,
+    compaction_cursor INTEGER DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -435,7 +437,7 @@ def _list_sessions_rich_pg(
             COALESCE(
                 (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
                  FROM chat_messages m
-                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                  ORDER BY m.timestamp, m.id LIMIT 1),
                 ''
             ) AS _preview_raw,
@@ -969,6 +971,28 @@ class SessionDB:
             shadow_update_system_prompt(session_id, system_prompt)
         except Exception as exc:
             logger.debug("PG shadow system prompt update failed for %s: %s", session_id, exc)
+
+    def update_compaction(
+        self, session_id: str, summary: Optional[str], cursor: int
+    ) -> None:
+        """Store compaction metadata on the session row (redesign: payload-time
+        cursor + synthetic summary, never written into the message transcript).
+
+        ``cursor`` = number of leading messages the payload builder skips;
+        ``summary`` = the synthetic handoff summary injected only at API-build.
+        A cursor of 0 with a NULL summary is the legacy/no-compaction sentinel.
+        """
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET compaction_summary = ?, compaction_cursor = ? WHERE id = ?",
+                (summary, int(cursor or 0), session_id),
+            )
+        self._execute_write(_do)
+        try:
+            from elevate_cli.data.sessiondb_shadow import shadow_update_compaction
+            shadow_update_compaction(session_id, summary, int(cursor or 0))
+        except Exception as exc:
+            logger.debug("PG shadow compaction update failed for %s: %s", session_id, exc)
 
     def update_token_counts(
         self,
@@ -1765,7 +1789,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1788,7 +1812,7 @@ class SessionDB:
                     COALESCE(
                         (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                          FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                          ORDER BY m.timestamp, m.id LIMIT 1),
                         ''
                     ) AS _preview_raw,
@@ -1865,7 +1889,7 @@ class SessionDB:
                 COALESCE(
                     (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                      FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                     WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                      ORDER BY m.timestamp, m.id LIMIT 1),
                     ''
                 ) AS _preview_raw,
@@ -3783,7 +3807,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,
@@ -3812,7 +3836,7 @@ class SessionDB:
                         COALESCE(
                             (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
                              FROM messages m
-                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                             WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL AND m.content NOT LIKE '[CONTEXT COMPACTION%' AND m.content NOT LIKE '[Your latest Plan panel plan was preserved%' AND m.content NOT LIKE '[Your active task list was preserved%' AND m.content NOT LIKE '[RECENT AUTONOMOUS ACTIVITY%'
                              ORDER BY m.timestamp, m.id LIMIT 1),
                             ''
                         ) AS _preview_raw,

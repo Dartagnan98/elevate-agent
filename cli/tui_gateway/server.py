@@ -1316,6 +1316,7 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
 
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
+    started_at = time.time()
     if session is not None:
         try:
             from agent.display import capture_local_edit_snapshot
@@ -1325,7 +1326,6 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
         except Exception:
             pass
-        started_at = time.time()
         session.setdefault("tool_started_at", {})[tool_call_id] = started_at
         # Snapshot the running tool so session.resume can rebuild the
         # tool cards on reattach. The event ring rotates a long turn's
@@ -2624,24 +2624,48 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, result)
 
     try:
-        # Follow the compression-continuation chain to its live tip before
-        # loading history. When a turn compacts, the agent rotates to a NEW
-        # child session holding the compressed (small) history; the original
-        # session keeps its full pre-compaction transcript and is marked
-        # ended ("compression"). A cold resume keyed on the ORIGINAL id would
-        # reload that full transcript every time — so the next turn's preflight
-        # immediately re-compacts, looping forever ("it already compacted twice
-        # but still thinks it needs to"). Resolving to the tip loads the small
-        # compressed history and binds the agent/slash-worker to the live
-        # continuation. get_compression_tip is idempotent and a no-op for
-        # sessions that were never compressed.
+        # Compaction redesign: a new-style session (compaction_cursor set on its
+        # row) is NEVER rotated. Its transcript is the full append-only history;
+        # the payload cursor + synthetic summary live in session METADATA and are
+        # hydrated onto the agent in AIAgent.__init__ (so the next turn trims the
+        # payload without touching the transcript). Resolve it directly — skip the
+        # compression-tip walk entirely so a stale/legacy tip can never redirect a
+        # cursor session — and load its full transcript verbatim.
+        _resume_row = None
         try:
-            _tip = db.get_compression_tip(target)
+            _resume_row = db.get_session(target)
         except Exception:
-            _tip = None
-        if _tip and _tip != target:
-            logger.info("resume: following compression chain %s -> %s", target, _tip)
-            target = _tip
+            _resume_row = None
+        _new_style_compaction = bool(
+            _resume_row and (_resume_row.get("compaction_cursor") or 0)
+        )
+        if not _new_style_compaction:
+            # Legacy (pre-redesign) read path — KEPT verbatim so old rotated
+            # lineages still open. Follow the compression-continuation chain to
+            # its live tip before loading history. When a turn compacted under the
+            # OLD design, the agent rotated to a NEW child session holding the
+            # compressed (small) history; the original keeps its full
+            # pre-compaction transcript and is marked ended ("compression"). A cold
+            # resume keyed on the ORIGINAL id would reload that full transcript
+            # every time — so the next turn's preflight immediately re-compacts,
+            # looping forever ("it already compacted twice but still thinks it
+            # needs to"). Resolving to the tip loads the small compressed history
+            # and binds the agent/slash-worker to the live continuation.
+            # get_compression_tip is idempotent and a no-op for sessions that were
+            # never compressed.
+            try:
+                _tip = db.get_compression_tip(target)
+            except Exception:
+                _tip = None
+            if _tip and _tip != target:
+                logger.info("resume: following compression chain %s -> %s", target, _tip)
+                target = _tip
+        else:
+            logger.info(
+                "resume: cursor-model session %s (compaction_cursor=%s) — "
+                "skipping tip-walk, loading full append-only transcript",
+                target, _resume_row.get("compaction_cursor"),
+            )
         identity_payload = _session_identity_for(db, target)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -4081,32 +4105,14 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
-                # A session-id rotation means the turn COMPACTED (compress
-                # ends the old session, opens a fresh tip). Its compressed
-                # message list is authoritative and the pre-turn full history
-                # is now stale — so the write-back below must accept it even
-                # if the history_version moved, or session["history"] keeps
-                # the full pre-compaction history and the NEXT turn compacts
-                # all over again ("compacted twice" — Justin's report).
-                _turn_compacted = False
-                agent_session_id = getattr(agent, "session_id", None)
-                if isinstance(agent_session_id, str) and agent_session_id:
-                    old_session_key = str(session.get("session_key") or "")
-                    if agent_session_id != old_session_key:
-                        _turn_compacted = True
-                        logger.info(
-                            "prompt.submit: agent session rotated %s -> %s",
-                            old_session_key,
-                            agent_session_id,
-                        )
-                        session["session_key"] = agent_session_id
-                        db = _get_db()
-                        if db is not None:
-                            _emit(
-                                "session.identity",
-                                sid,
-                                _session_identity_for(db, agent_session_id),
-                            )
+                # Compaction redesign: a compacting turn NO LONGER rotates the
+                # session id — the transcript is append-only and compaction lives
+                # in the payload-time cursor + metadata. So the old
+                # rotation-compensation (session-key swap + session.identity emit
+                # + force-write-back that overrode a history_version bump) is gone;
+                # the plain version-match write-back below is sufficient. The
+                # "compacted twice" loop that needed the override can no longer
+                # happen because there is no rotation to desync on.
 
                 last_reasoning = None
                 status_note = None
@@ -4114,11 +4120,8 @@ def _(rid, params: dict) -> dict:
                     if isinstance(result.get("messages"), list):
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
-                            if current_version == current_history_version or _turn_compacted:
+                            if current_version == current_history_version:
                                 session["history"] = result["messages"]
-                                # Advance past whatever the latest version is —
-                                # on the compacted-override path current_version
-                                # may be ahead of our captured baseline.
                                 _next_ver = max(current_version, current_history_version) + 1
                                 session["history_version"] = _next_ver
                                 current_history_version = _next_ver
@@ -6034,7 +6037,10 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         # context" pill) until the result card pops. Client maps this text to
         # setCompacting(true); the "Session compacted" status below clears it.
         # try/finally guarantees the pill is released even on error.
-        _emit("status", sid, {"text": "Compacting context"})
+        # Emit on the status.update channel the frontend actually subscribes to
+        # (it has no gw.on("status") listener). Text "Compacting context" maps to
+        # setCompacting(true); "Session compacted" below maps to setCompacting(false).
+        _status_update(sid, "compacting_context", "Compacting context")
         try:
             compressed, _ = agent._compress_context(
                 original_history,
@@ -6043,34 +6049,23 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 focus_topic=focus_topic or None,
             )
         except Exception:
-            _emit("status", sid, {"text": "Session compacted"})  # release the pill
+            _status_update(sid, "session_compacted", "Session compacted")  # release the pill
             raise
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
 
-        # Durably write the compressed history. _compress_context ROTATES to a
-        # fresh session (ends the old, creates an empty tip, resets the flush
-        # cursor) but does NOT flush — inside run_conversation the turn's normal
-        # _persist_session does that. Manual /compress runs outside a turn, so
-        # without this the rotated session stays EMPTY in the DB: leaving and
-        # returning resumes the OLD 177-message session and re-compacts it (the
-        # "compressed twice with different numbers" bug). Flushing here makes
-        # the compress survive a resume. _last_flushed_db_idx was reset to 0 by
-        # the rotation, so this writes the full compressed list into the tip.
+        # Compaction redesign: _compress_context no longer ROTATES — the
+        # transcript is append-only and compaction is stored as session metadata
+        # (cursor + summary) by update_compaction inside _compress_context. The
+        # session id is stable, so the old rotation-compensation here (force-flush
+        # into a fresh empty tip + session-key swap + session.identity emit +
+        # slash-worker restart) is gone. A defensive _persist_session keeps any
+        # genuinely new rows durable; it writes nothing when the transcript was
+        # already flushed by the prior turn.
         try:
             agent._persist_session(compressed, None)
         except Exception:
             logger.exception("manual /compress: failed to persist compressed history")
-
-        if (
-            getattr(agent, "session_id", None)
-            and agent.session_id != session.get("session_key")
-        ):
-            session["session_key"] = agent.session_id
-            db = _get_db()
-            if db is not None:
-                _emit("session.identity", sid, _session_identity_for(db, agent.session_id))
-            _restart_slash_worker(session)
 
         new_tokens = estimate_messages_tokens_rough(compressed)
         summary = summarize_manual_compression(
@@ -6081,7 +6076,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         )
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).
-    _emit("status", sid, {"text": "Session compacted"})
+    _status_update(sid, "session_compacted", "Session compacted")
     _emit("session.info", sid, _session_info(agent))
     icon = "🗜️" if summary["noop"] else "✅"
     lines = [

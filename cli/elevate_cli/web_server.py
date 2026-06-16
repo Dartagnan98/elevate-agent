@@ -3276,9 +3276,20 @@ async def search_sessions(q: str = "", limit: int = 20):
             # Group by session_id — return unique sessions with their best snippet
             _hidden = set(_platform_chat_sources())
             seen: dict = {}
+            # Mirror the transcript filter (get_session_messages / ChatPage
+            # shouldKeepTranscriptMessage): compaction-internal role=user rows are
+            # scaffolding, not content, and must not surface as search snippets.
+            _internal_prefixes = (
+                "[CONTEXT COMPACTION",
+                "[Your latest Plan panel plan was preserved",
+                "[Your active task list was preserved",
+                "[RECENT AUTONOMOUS ACTIVITY",
+            )
             for m in matches:
                 if str(m.get("source") or "") in _hidden:
                     continue  # platform-chat sessions are hidden from the app
+                if m.get("role") == "user" and str(m.get("content") or "").lstrip().startswith(_internal_prefixes):
+                    continue  # compaction-internal scaffolding, not real content
                 sid = m["session_id"]
                 if sid not in seen:
                     seen[sid] = {

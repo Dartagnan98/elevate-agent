@@ -35,6 +35,7 @@ _SESSION_COLUMNS = (
     "estimated_cost_usd", "actual_cost_usd", "cost_status", "cost_source",
     "pricing_version", "title", "api_call_count",
     "handoff_state", "handoff_platform", "handoff_error",
+    "compaction_summary", "compaction_cursor",
 )
 
 _MESSAGE_COLUMNS = (
@@ -323,6 +324,19 @@ def update_system_prompt(session_id: str, system_prompt: str) -> None:
         conn.execute(
             "UPDATE chat_sessions SET system_prompt = ? WHERE id = ?",
             (system_prompt, session_id),
+        )
+        conn.commit()
+
+
+def update_compaction(session_id: str, summary, cursor: int) -> None:
+    """Store payload-time compaction metadata (redesign): synthetic summary +
+    leading-message cursor on the session row, never in the transcript."""
+    if not session_id:
+        return
+    with connect() as conn:
+        conn.execute(
+            "UPDATE chat_sessions SET compaction_summary = ?, compaction_cursor = ? WHERE id = ?",
+            (summary, int(cursor or 0), session_id),
         )
         conn.commit()
 

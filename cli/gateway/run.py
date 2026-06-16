@@ -143,6 +143,72 @@ def _gateway_platform_value(platform: Any) -> str:
     return str(getattr(platform, "value", platform) or "").strip().lower()
 
 
+# --- Session-hygiene ineffective-compression guard ----------------------------
+# Pure, unit-tested decision helpers for the hygiene no-op guard. Module-level so
+# tests pin the REAL logic, not a replica. State lives on the gateway as
+# self._hygiene_noop_guard: dict[session_id -> msg_count]; an entry means "this
+# session compacted with no reduction at ~this message count".
+_HYGIENE_NOOP_RETRY_MARGIN = 25
+_HYGIENE_NOOP_GUARD_MAX = 2048
+
+
+def _hygiene_should_skip(
+    guard: dict,
+    session_id: str,
+    *,
+    msg_count: int,
+    margin: int,
+    reason: str,
+    approx_tokens: int,
+    warn_tokens: int,
+) -> bool:
+    """Whether to skip a hygiene compaction this turn to avoid re-running the
+    ~24-36s aux summary on a session that cannot be reduced.
+
+    SAFETY: only skip a previously-ineffective, *message-count-driven* session
+    that has not grown past the retry margin. NEVER skip when the token estimate
+    is at/over the 95% warn line, or when the trigger is a real token breach --
+    re-compaction can still help there, and suppressing it would hand the next
+    turn an over-limit payload (the exact overflow hygiene exists to prevent).
+    Side effect: clears a stale entry once the session has grown past the margin.
+    """
+    prev = guard.get(session_id)
+    if prev is None:
+        return False
+    if msg_count > prev + margin:
+        guard.pop(session_id, None)  # grew past margin -> re-evaluate fresh
+        return False
+    # Within margin and previously ineffective -- but never suppress a session
+    # that genuinely needs compaction.
+    if approx_tokens >= warn_tokens:
+        return False
+    if reason != "message_count":
+        return False
+    return True
+
+
+def _hygiene_record(
+    guard: dict,
+    session_id: str,
+    *,
+    msg_count: int,
+    ineffective: bool,
+    max_entries: int = _HYGIENE_NOOP_GUARD_MAX,
+) -> None:
+    """Record (ineffective) or clear (effective) the guard entry for a session.
+
+    Bounded: re-inserts at the end so the dict stays ordered by recency, and
+    evicts the oldest entries past ``max_entries`` so a long-lived gateway cannot
+    grow the guard without bound.
+    """
+    guard.pop(session_id, None)  # drop existing so a re-record moves to the end
+    if not ineffective:
+        return
+    guard[session_id] = msg_count
+    while len(guard) > max_entries:
+        guard.pop(next(iter(guard)), None)
+
+
 def _redact_gateway_user_facing_secrets(text: str) -> str:
     """Best-effort secret redaction before text can leave the gateway."""
     redacted = str(text or "")
@@ -6409,6 +6475,42 @@ class GatewayRunner:
                     _approx_tokens >= _compress_token_threshold
                     or _msg_count >= _HARD_MSG_LIMIT
                 )
+                _hyg_reason = (
+                    "message_count"
+                    if _msg_count >= _HARD_MSG_LIMIT
+                    else "tokens"
+                    if _approx_tokens >= _compress_token_threshold
+                    else "below_threshold"
+                )
+
+                # Cross-call ineffective-compression guard. The hygiene path builds
+                # a FRESH AIAgent per message, so the compressor's own 2-strike
+                # ineffective backoff never accumulates: a non-compressible session
+                # would otherwise re-run the ~24-36s aux summary every turn. We
+                # remember sessions that compacted with no reduction and skip them
+                # until they grow -- but ONLY when it's SAFE (_hygiene_should_skip
+                # never skips near the token limit or on a real token-trigger, or a
+                # genuinely-over-limit session would be suppressed into an overflow).
+                _noop_guard = getattr(self, "_hygiene_noop_guard", None)
+                if _noop_guard is None:
+                    _noop_guard = {}
+                    self._hygiene_noop_guard = _noop_guard
+                if _needs_compress and _hygiene_should_skip(
+                    _noop_guard,
+                    session_entry.session_id,
+                    msg_count=_msg_count,
+                    margin=_HYGIENE_NOOP_RETRY_MARGIN,
+                    reason=_hyg_reason,
+                    approx_tokens=_approx_tokens,
+                    warn_tokens=_warn_token_threshold,
+                ):
+                    _needs_compress = False
+                    _prev_noop = _noop_guard.get(session_entry.session_id)
+                    logger.info(
+                        "Session hygiene: skipping %s — ineffective at %s msgs, now %s "
+                        "(reason=%s, tokens under warn line); waiting for growth",
+                        session_entry.session_id, _prev_noop, _msg_count, _hyg_reason,
+                    )
 
                 if _needs_compress:
                     logger.info(
@@ -6443,6 +6545,7 @@ class GatewayRunner:
                             ]
 
                             if len(_hyg_msgs) >= 4:
+                                _hyg_original_sid = session_entry.session_id
                                 _hyg_agent = AIAgent(
                                     **_hyg_runtime,
                                     model=_hyg_model,
@@ -6490,6 +6593,29 @@ class GatewayRunner:
                                         _msg_count, _new_count,
                                         f"{_approx_tokens:,}", f"{_new_tokens:,}",
                                     )
+
+                                    # Record/clear the ineffective-compression guard
+                                    # read at the gate above, so a non-compressible
+                                    # session stops re-running the aux summary every
+                                    # turn. Ineffective = no message reduction or the
+                                    # summary aborted.
+                                    _hyg_ineffective = (
+                                        len(_compressed) >= len(_hyg_msgs)
+                                        or bool(getattr(
+                                            getattr(_hyg_agent, "context_compressor", None),
+                                            "_last_compress_aborted", False,
+                                        ))
+                                    )
+                                    _hygiene_record(
+                                        _noop_guard,
+                                        session_entry.session_id,
+                                        msg_count=_msg_count,
+                                        ineffective=_hyg_ineffective,
+                                    )
+                                    # An effective compaction rotates the session id;
+                                    # clear any stale guard entry under the OLD id too.
+                                    if _hyg_original_sid != session_entry.session_id:
+                                        _noop_guard.pop(_hyg_original_sid, None)
 
                                     if _new_tokens >= _warn_token_threshold:
                                         logger.warning(
