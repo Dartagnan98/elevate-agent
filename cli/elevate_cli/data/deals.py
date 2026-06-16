@@ -2011,6 +2011,35 @@ def human_controlled_checklist_cells(conn: sqlite3.Connection, deal_id: str) -> 
     return human
 
 
+def deal_had_recent_inferred_ticks(
+    conn: sqlite3.Connection, deal_id: str, *, within_seconds: int = 300
+) -> bool:
+    """True if an ``agent:inferred`` toggle_change landed on this deal within the
+    recency window — i.e. post-turn scorecard inference (L2) already reflected
+    the last turn's work onto the board. Used to demote the board-sync nudge to a
+    fallback so it does not nag about changes L2 just made."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(0, within_seconds))
+    for ev in list_deal_events(conn, deal_id, limit=50):
+        if ev.get("kind") != "toggle_change":
+            continue
+        if str(ev.get("actor") or "") != "agent:inferred":
+            continue
+        created = ev.get("createdAt")
+        if not created:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(created))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= cutoff:
+            return True
+    return False
+
+
 def list_deal_tasks(
     conn: sqlite3.Connection,
     *,
@@ -2195,9 +2224,12 @@ def list_deal_tasks(
 
 _ARTIFACT_CHECKLIST_HINTS = {
     "cma_report": "draft-cma-followup",
+    "cma_pdf": "draft-cma-followup",
     "title_search": "workflow_title_ordered",
     "title_pdf": "workflow_title_ordered",
+    "title_report": "workflow_title_ordered",
     "mlc_pdf": "workflow_stage_2_complete",
+    "listing_agreement": "workflow_stage_2_complete",
     "mlc_form": "workflow_stage_2_complete",
     "listing_agreement_pdf": "workflow_stage_2_complete",
     "listing_forms": "workflow_stage_2_complete",

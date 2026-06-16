@@ -12,6 +12,7 @@ import pytest
 import agent.turn_attribution as ta
 from elevate_cli.data import connect, create_deal
 from elevate_cli.data.deals import (
+    deal_had_recent_inferred_ticks,
     deal_open_stage_cells,
     get_deal,
     human_controlled_checklist_cells,
@@ -39,6 +40,10 @@ def _fake_llm(satisfied_ids, counter=None):
         content = json.dumps({"satisfied_ids": list(satisfied_ids)})
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
     return _call
+
+
+def _tc(name, args):
+    return {"id": "x", "function": {"name": name, "arguments": json.dumps(args)}}
 
 
 def _patch_deal(monkeypatch, deal_id, confidence=0.9):
@@ -179,6 +184,73 @@ def test_attribute_turn_safely_starts_l2_on_chat_only_turn(monkeypatch):
     assert not any(name for name, _ in ta._iter_tool_calls(seen["turn"])), "turn should have no tool calls"
     assert seen["kwargs"].get("session_id") == "s1"
     assert "sticky_ids" in seen["kwargs"]
+
+
+# ── L3: board-sync nudge demoted to fallback ────────────────────────────────
+
+def _nudge_msgs():
+    # Prev turn worked a deal via a generic tool (build_turn_nudge requires the
+    # last turn to have used a tool); current turn is the new user message.
+    return [
+        {"role": "user", "content": "work the maple deal"},
+        {"role": "assistant", "content": "did stuff", "tool_calls": [_tc("draft_message", {})]},
+        {"role": "user", "content": "thanks"},
+    ]
+
+
+def _patch_nudge_resolution(monkeypatch, deal_id, confidence=0.9):
+    from elevate_cli import access
+
+    monkeypatch.setattr(access, "is_entitlement_active", lambda *a, **k: True)
+    monkeypatch.setattr(
+        ta, "resolve_attributions",
+        lambda conn, turn, **k: [ta.Attribution("deal", deal_id, confidence, "Maple", [], "s")],
+    )
+
+
+def test_deal_had_recent_inferred_ticks_detects_and_ages_out():
+    deal = _make_deal()
+    cells = _open_cell_ids(deal["id"])
+    with connect() as conn:
+        assert deal_had_recent_inferred_ticks(conn, deal["id"]) is False
+    _toggle(deal["id"], cells[0], True, "agent:inferred")
+    with connect() as conn:
+        assert deal_had_recent_inferred_ticks(conn, deal["id"]) is True
+        # within_seconds=0 -> the tick is already in the past -> aged out.
+        assert deal_had_recent_inferred_ticks(conn, deal["id"], within_seconds=0) is False
+
+
+def test_nudge_suppressed_when_inferred_and_no_open_cells(monkeypatch):
+    deal = _make_deal()
+    _patch_nudge_resolution(monkeypatch, deal["id"])
+    monkeypatch.setattr(
+        "elevate_cli.data.deals.deal_had_recent_inferred_ticks", lambda conn, did, **k: True
+    )
+    monkeypatch.setattr("elevate_cli.data.deals.deal_open_stage_cells", lambda conn, deal: [])
+    assert ta.build_turn_nudge(_nudge_msgs(), current_user_idx=2) is None
+
+
+def test_nudge_kept_when_open_cells_remain(monkeypatch):
+    deal = _make_deal()
+    _patch_nudge_resolution(monkeypatch, deal["id"])
+    monkeypatch.setattr(
+        "elevate_cli.data.deals.deal_had_recent_inferred_ticks", lambda conn, did, **k: True
+    )
+    monkeypatch.setattr(
+        "elevate_cli.data.deals.deal_open_stage_cells", lambda conn, deal: [{"id": "x", "label": "x"}]
+    )
+    nudge = ta.build_turn_nudge(_nudge_msgs(), current_user_idx=2)
+    assert nudge and "Maple" in nudge
+
+
+def test_nudge_kept_when_l2_did_nothing(monkeypatch):
+    deal = _make_deal()
+    _patch_nudge_resolution(monkeypatch, deal["id"])
+    monkeypatch.setattr(
+        "elevate_cli.data.deals.deal_had_recent_inferred_ticks", lambda conn, did, **k: False
+    )
+    nudge = ta.build_turn_nudge(_nudge_msgs(), current_user_idx=2)
+    assert nudge and "Maple" in nudge
 
 
 # helper kept out of the way of pytest collection

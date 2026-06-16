@@ -387,7 +387,27 @@ def build_turn_nudge(
                 if c is not None and not (c.get("pipelineStatus") or "").strip():
                     unlabeled.append(a.label)
 
-        deals = [a for a in attributions if a.entity_kind == "deal"]
+            # L3: the board-sync nudge is a FALLBACK. Drop a worked deal from the
+            # reminder only when post-turn inference (L2) already ticked cells for
+            # it AND its current stage has nothing open left — i.e. L2 fully
+            # caught it up. If open cells remain, or L2 did nothing, keep nudging.
+            from elevate_cli.data.deals import (
+                deal_had_recent_inferred_ticks,
+                deal_open_stage_cells,
+                get_deal,
+            )
+            deals = []
+            for a in attributions:
+                if a.entity_kind != "deal":
+                    continue
+                try:
+                    if deal_had_recent_inferred_ticks(conn, a.entity_id):
+                        deal = get_deal(conn, a.entity_id)
+                        if deal is not None and not deal_open_stage_cells(conn, deal):
+                            continue  # L2 handled it fully — no reminder needed
+                except Exception:
+                    pass
+                deals.append(a)
         lines: list[str] = []
         if deals:
             labels = ", ".join(sorted({a.label for a in deals})[:3])
