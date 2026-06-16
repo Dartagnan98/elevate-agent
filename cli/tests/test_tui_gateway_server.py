@@ -475,22 +475,22 @@ def test_config_set_personality_resets_history_and_returns_info(monkeypatch):
 
 def test_direct_compress_persists_and_emits_pill(monkeypatch):
     """Manual /compress must (1) emit the 'Compacting context' pill before the
-    blocking summary and 'Session compacted' after, and (2) PERSIST the
-    compressed history — _compress_context rotates to a fresh empty session, so
-    without an explicit flush the compress is lost on resume (the "compressed
-    twice" bug)."""
+    blocking summary and 'Session compacted' after, and (2) PERSIST the history.
+
+    Compaction redesign: _compress_context no longer ROTATES — the transcript is
+    append-only and compaction lives in the payload cursor + metadata. So the
+    session id is STABLE, session_key never swaps, and the in-memory history is
+    the (unchanged) transcript. The pill rides the status.update channel."""
     original = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-    compressed = [
-        {"role": "user", "content": "summary"},
-        {"role": "user", "content": "m7"},
-    ]
     persisted = []
 
     agent = types.SimpleNamespace(
         compression_enabled=True,
         _cached_system_prompt="sys",
-        session_id="rotated-session",  # differs from session_key → rotation path
-        _compress_context=lambda *a, **k: (compressed, "sys"),
+        session_id="old-session",  # stable — no rotation in the cursor model
+        # New compress_context returns the SAME transcript unchanged (the cut +
+        # summary are persisted as metadata, not assembled into the list).
+        _compress_context=lambda hist, *a, **k: (hist, "sys"),
         _persist_session=lambda msgs, hist: persisted.append(list(msgs)),
     )
     session = _session(agent=agent, session_key="old-session")
@@ -510,20 +510,21 @@ def test_direct_compress_persists_and_emits_pill(monkeypatch):
     finally:
         server._sessions.pop("dsid", None)
 
-    # Compressed history was persisted into the rotated session.
-    assert persisted == [compressed]
-    # In-memory history + session_key both moved to the compressed/rotated state.
-    assert session["history"] == compressed
-    assert session["session_key"] == "rotated-session"
-    # Pill on before, off after.
-    status_texts = [p.get("text") for (ev, p) in emitted if ev == "status"]
+    # The (unchanged) transcript was persisted; session_key did NOT rotate.
+    assert persisted == [original]
+    assert session["history"] == original
+    assert session["session_key"] == "old-session"
+    # Pill on before, off after — on the status.update channel the client reads.
+    status_texts = [
+        p.get("text") for (ev, p) in emitted if ev == "status.update"
+    ]
     assert "Compacting context" in status_texts
     assert "Session compacted" in status_texts
     assert status_texts.index("Compacting context") < status_texts.index(
         "Session compacted"
     )
     # Result card still reports the numbers.
-    assert "Compressed" in out or "messages" in out
+    assert "Compressed" in out or "messages" in out or "compact" in out.lower()
 
 
 def test_session_compress_uses_compress_helper(monkeypatch):
