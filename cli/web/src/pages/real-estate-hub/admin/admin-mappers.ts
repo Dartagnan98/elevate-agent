@@ -140,6 +140,10 @@ export function adminDealToDeal(d: AdminDeal): Deal {
     mls: d.mlsNumber ?? undefined,
     primary: pinned,
     top25Note: note,
+    progress: d.progress ?? d.scorecard?.progress ?? undefined,
+    blocked: d.scorecard?.blocked ?? undefined,
+    canAdvance: d.scorecard?.canAdvance ?? undefined,
+    missingCount: d.scorecard?.missingCount ?? undefined,
   };
 }
 
@@ -157,7 +161,10 @@ export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
     addr: `${title} — buyer track`,
     line2: note ? `Looking: ${note}` : d.listingAddress || (d.province ? `Looking: ${d.province}` : "—"),
     badge,
-    progress: "0/3",
+    progress: d.progress ?? d.scorecard?.progress ?? undefined,
+    blocked: d.scorecard?.blocked ?? undefined,
+    canAdvance: d.scorecard?.canAdvance ?? undefined,
+    missingCount: d.scorecard?.missingCount ?? undefined,
     next,
     primary: d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true,
     top25Note: note,

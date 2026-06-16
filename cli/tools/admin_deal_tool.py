@@ -96,13 +96,31 @@ def _admin_deal_handler(args: dict[str, Any], **_: Any) -> str:
                 )
 
             if action == "set_checklist":
-                field = str(args.get("field") or "").strip()
-                if not field:
-                    return tool_error("set_checklist requires 'field' (a checklist/workflow id)")
-                value = args.get("value", True)
-                set_deal_toggle(conn, deal_id, field=field, value=value, actor=_ACTOR)
+                # Accept either one cell (field + value) or many in one call
+                # (cells: {id: value}). Bulk avoids the "tick one cell and stop"
+                # failure where the model fires a single toggle and moves on.
+                cells = args.get("cells")
+                applied: dict[str, Any] = {}
+                if isinstance(cells, dict) and cells:
+                    for raw_field, raw_value in cells.items():
+                        cell = str(raw_field or "").strip()
+                        if not cell:
+                            continue
+                        set_deal_toggle(conn, deal_id, field=cell, value=raw_value, actor=_ACTOR)
+                        applied[cell] = raw_value
+                    if not applied:
+                        return tool_error("set_checklist 'cells' had no valid checklist ids")
+                else:
+                    field = str(args.get("field") or "").strip()
+                    if not field:
+                        return tool_error(
+                            "set_checklist requires 'field' (a checklist/workflow id) or a 'cells' map"
+                        )
+                    value = args.get("value", True)
+                    set_deal_toggle(conn, deal_id, field=field, value=value, actor=_ACTOR)
+                    applied[field] = value
                 ctx = get_deal_context(conn, deal_id)
-                return tool_result(success=True, applied={field: value}, gate=_gate_brief(ctx))
+                return tool_result(success=True, applied=applied, gate=_gate_brief(ctx))
 
             if action == "set_fields":
                 fields = args.get("fields")
@@ -243,7 +261,7 @@ ADMIN_DEAL_SCHEMA = {
             "write it to the deal and the board syncs live.\n\n"
             "Actions:\n"
             "- show: deal + gate (stage, what's missing, whether it can advance).\n"
-            "- set_checklist: tick one checklist/workflow cell (field + value).\n"
+            "- set_checklist: tick checklist/workflow cells — one (field + value) or many at once (cells map). Prefer the cells map when a stage completes several items.\n"
             "- set_fields: set named deal fields (listPrice, listingAddress, dates...).\n"
             "- attach: attach an artifact (kind + file_path).\n"
             "- complete_run: finalize the stage's pending run (applies checklist_updates "
@@ -268,8 +286,9 @@ ADMIN_DEAL_SCHEMA = {
                     "description": "Which board operation to run.",
                 },
                 "deal_id": {"type": "string", "description": "The deal id to operate on."},
-                "field": {"type": "string", "description": "set_checklist: the checklist/workflow id to tick."},
+                "field": {"type": "string", "description": "set_checklist: the checklist/workflow id to tick (single-cell form)."},
                 "value": {"description": "set_checklist: the value (default true). Booleans tick cells; strings/dates fill workflow fields."},
+                "cells": {"type": "object", "description": "set_checklist: { checklistId: value } to tick several cells in one call. Use instead of field/value when a stage completes multiple items."},
                 "fields": {"type": "object", "description": "set_fields: { fieldName: value } of named deal fields."},
                 "kind": {"type": "string", "description": "attach: artifact kind (e.g. cma_report, offer_pdf)."},
                 "file_path": {"type": "string", "description": "attach: path to the artifact file."},

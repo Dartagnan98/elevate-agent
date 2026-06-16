@@ -7061,6 +7061,7 @@ def get_admin_deals(
     """Return Admin Hub deals for the configured jurisdiction."""
     try:
         from elevate_cli.data import connect, list_deals
+        from elevate_cli.data.deals import deal_card_gate
 
         with connect() as conn:
             rows = list_deals(
@@ -7072,6 +7073,17 @@ def get_admin_deals(
                 limit=limit,
                 offset=offset,
             )
+            # Enrich each card with its live scorecard (checklist progress +
+            # gate state) so the board shows it without opening the modal.
+            for row in rows:
+                try:
+                    scorecard = deal_card_gate(conn, row)
+                    row["scorecard"] = scorecard
+                    # Feed the existing DealCard `progress` render path with live data.
+                    if scorecard.get("progress"):
+                        row["progress"] = scorecard["progress"]
+                except Exception:
+                    _log.debug("deal_card_gate failed for deal %s", row.get("id"), exc_info=True)
             return {"items": rows, "count": len(rows), "jurisdiction": _admin_jurisdiction_config()}
     except HTTPException:
         raise

@@ -226,13 +226,17 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         "toolsets": ["agent_bus", "agent_handoff", "agent_management", "memory", "todo", "skills", "deals_overview", "leads_overview", "lead_status"],
         "prompt": (
             "You are the Executive Assistant — the orchestrator and default agent for this Elevate "
-            "workspace. You coordinate the fleet; you do not do specialist work yourself. Route every "
-            "user directive to the agent that owns it (Admin/Transaction Coordinator, Outreach, "
-            "Marketing, Ads, Social Media, Analyst) and synthesize a single clear answer when work "
-            "crosses domains.\n\n"
+            "workspace. You carry every tool the specialists do, so you CAN act directly when that is "
+            "faster. Your default is still to route each user directive to the agent that owns it "
+            "(Admin/Transaction Coordinator, Outreach, Marketing, Ads, Social Media, Analyst) and "
+            "synthesize a single clear answer when work crosses domains.\n\n"
             "Operating doctrine:\n"
-            "- Route, don't execute. If a narrower agent owns the task, hand it off — doing specialist "
-            "work yourself breaks the fleet.\n"
+            "- Prefer routing, but you are not blocked from acting. You can do any specialist action "
+            "yourself — especially quick single writes like ticking a scorecard cell, setting one deal "
+            "field, or labeling a lead. Do it inline when delegating would just add a hop. Hand off when "
+            "the work is heavy, parallel, multi-step, or genuinely a specialist's deep craft. Think of "
+            "it as: 'I can do this here, or pass it along so we keep moving' — pick whichever serves the "
+            "user fastest.\n"
             "- When you delegate, WRITE A TIGHT TASK GOAL — one or two sentences of exactly what the "
             "specialist must do and return. NEVER paste the user's whole message (and never the "
             "instructions/test-notes around it) into the goal; distill it. The specialist gets only your "
@@ -812,6 +816,28 @@ DEFAULT_AGENT_DEFS: tuple[dict[str, Any], ...] = (
         ),
     },
 )
+
+
+# ── Executive Assistant = full-capability superset ───────────────────────────
+# The EA carries the union of every agent's toolsets, computed here so it never
+# drifts when a specialist gains a tool. It can perform any specialist action
+# itself and *chooses* to delegate (that's a behavioral preference in the EA
+# prompt, not a capability wall). Add a toolset to _EA_TOOLSET_DENYLIST only to
+# keep it out of base chat (e.g. to trim the tool schema for token budget).
+_EA_TOOLSET_DENYLIST: frozenset[str] = frozenset()
+_EA_TOOLSET_UNION: list[str] = sorted(
+    {
+        str(ts)
+        for _defn in DEFAULT_AGENT_DEFS
+        for ts in (_defn.get("toolsets") or [])
+        if str(ts).strip()
+    }
+    - _EA_TOOLSET_DENYLIST
+)
+for _ea_defn in DEFAULT_AGENT_DEFS:
+    if _ea_defn.get("id") == "executive-assistant":
+        _ea_defn["toolsets"] = list(_EA_TOOLSET_UNION)
+        break
 
 
 def _as_list(value: Any) -> list[str]:

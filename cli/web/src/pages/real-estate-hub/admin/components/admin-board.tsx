@@ -220,6 +220,11 @@ function DealCard({
       <div className="ab-deal-mid">
         <span className="ab-deal-badge">{deal.badge}</span>
         {deal.progress && <span className="ab-deal-progress mono">{deal.progress}</span>}
+        {deal.canAdvance ? (
+          <span className="ab-deal-gate ready">Ready to advance</span>
+        ) : !deal.blocked && deal.missingCount ? (
+          <span className="ab-deal-gate">{deal.missingCount} to advance</span>
+        ) : null}
       </div>
       <div className="ab-deal-next">
         <span className="ab-deal-next-label mono">Next</span>

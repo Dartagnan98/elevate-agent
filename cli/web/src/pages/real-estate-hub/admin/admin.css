@@ -2030,6 +2030,16 @@
   color: var(--fg-faint);
   flex-shrink: 0;
 }
+.ab-deal-gate {
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  letter-spacing: 0.02em;
+  color: var(--fg-faint);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ab-deal-gate.ready {
+  color: var(--status-done);
+}
 .ab-deal-next {
   margin-top: 8px;
   padding-top: 8px;

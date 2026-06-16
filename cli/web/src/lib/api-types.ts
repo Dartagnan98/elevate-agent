@@ -358,6 +358,17 @@ export interface AdminProfilePromotionResponse {
   deal: AdminDeal;
 }
 
+export interface AdminDealScorecard {
+  progress: string | null;
+  completedChecklist: number;
+  totalChecklist: number;
+  canAdvance: boolean;
+  blocked: boolean;
+  missingCount: number;
+  stageName?: string | null;
+  nextStageName?: string | null;
+}
+
 export interface AdminDeal {
   id: string;
   title: string;
@@ -425,6 +436,10 @@ export interface AdminDeal {
   offerAcceptedAt?: string | null;
   subjectsRemovedAt?: string | null;
   completedAt?: string | null;
+  // Server-computed card scorecard (checklist progress + gate state). Added by
+  // GET /api/admin/deals so the board shows progress without opening the modal.
+  progress?: string | null;
+  scorecard?: AdminDealScorecard | null;
 }
 
 export interface DealContactCreateRequest {

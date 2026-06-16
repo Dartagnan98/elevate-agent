@@ -1913,6 +1913,51 @@ def _deal_task_common(
     }
 
 
+def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[str, Any]:
+    """At-a-glance scorecard summary for a board card: checklist progress + gate.
+
+    Deliberately lighter than ``get_deal_context`` — it skips the province-guide
+    and conditional-document lookups so it can run across a whole board list
+    without a per-card DB storm. The deal modal remains the authoritative full
+    gate (it passes condition_docs); this is the card-level scorecard the realtor
+    reviews before opening anything.
+    """
+    deal_id = str(deal.get("id") or "")
+    checklist = deal.get("extraToggles") or {}
+    conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
+    attachments = list_deal_attachments(conn, deal_id) if deal_id else []
+    prior_runs = list_deal_action_runs(conn, deal_id) if deal_id else []
+    from elevate_cli.admin_deal_flow import resolve_deal_phase
+
+    flow = resolve_deal_phase(
+        deal=deal,
+        checklist=checklist,
+        attachments=attachments,
+        prior_runs=prior_runs,
+        conditions=conditions,
+        condition_docs=None,
+    )
+    gate = flow.get("gate") or {}
+    completed = int(gate.get("completedChecklist") or 0)
+    total = int(gate.get("totalChecklist") or 0)
+    missing = (
+        len(gate.get("missingChecklist") or [])
+        + len(gate.get("missingFields") or [])
+        + len(gate.get("missingDocs") or [])
+    )
+    blocking = len(gate.get("blockingRuns") or [])
+    return {
+        "progress": f"{completed}/{total}" if total else None,
+        "completedChecklist": completed,
+        "totalChecklist": total,
+        "canAdvance": bool(gate.get("canAdvance")),
+        "blocked": blocking > 0,
+        "missingCount": missing,
+        "stageName": gate.get("stageName"),
+        "nextStageName": gate.get("nextStageName"),
+    }
+
+
 def list_deal_tasks(
     conn: sqlite3.Connection,
     *,
