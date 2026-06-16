@@ -49,6 +49,23 @@ Persisted as SESSION METADATA (NOT message rows):
 - `get_session` already returns the fields. TEST: write+read round-trips both
   backends in the isolated harness.
 
+### WORKTREE ANCHOR NOTE (read before Step 2)
+The 4-agent map used `~/elevate` (current main `f5e5c9fb4`). The build lives in
+worktree `~/elevate-diag-trace` (branch `compaction-redesign`, older base +
+trace + anti-thrash), so line numbers DIFFER. Re-anchored worktree lines:
+- `AIAgent.run_conversation` method: `run_agent.py:10351`.
+- Live chat payload seam (inside run_conversation): build `api_messages=[]`
+  `:11133` -> system prepend `:11203` -> `_sanitize_api_messages` `:11216` ->
+  `_hydrate_media_refs_for_api` `:11217` -> `_build_api_kwargs` `:11454`.
+  Hook `messages_for_api()` AFTER `:11203`, BEFORE `:11216`.
+- SECOND build site at `:10199-10304` (codex `codex_kwargs` path, in a method
+  BEFORE run_conversation) — apply the same seam or route both through one
+  helper. CONFIRM it's a live codex path before editing.
+- Agent state init: `self.session_id` `:1634`, `self._session_db = session_db`
+  `:1674` (hydrate `compaction_cursor`/`compaction_summary` right after 1674).
+- When deploying, rebase onto current main and RE-VERIFY these anchors against
+  the deploy target (compaction files unlikely to have diverged, but check).
+
 ### Step 2 — Agent state + payload seam (the core mechanism)
 - Init `self.compaction_cursor=0`, `self.compaction_summary=None` in
   `AIAgent.__init__` (`run_agent.py:1619`+); hydrate from
