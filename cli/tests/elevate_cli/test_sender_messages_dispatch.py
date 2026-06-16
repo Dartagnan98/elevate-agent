@@ -18,6 +18,8 @@ def test_imessage_dispatch_uses_imsg_gateway(monkeypatch):
 
     monkeypatch.setattr(sender.shutil, "which", fake_which)
     monkeypatch.setattr(sender.subprocess, "run", fake_run)
+    monkeypatch.setattr(sender, "_verify_send_landed", lambda *args, **kwargs: ("iMessage", 0))
+    monkeypatch.setenv("ELEVATE_IMSG_VERIFY_DELAY", "0")
 
     pmid, info = sender._messages_native_dispatch(
         {
@@ -100,3 +102,70 @@ def test_messages_self_test_sends_exactly_one(monkeypatch):
     assert sent[0]["channel"] == "imessage"
     assert sent[0]["payload"]["draft_text"] == "test body"
     assert sent[0]["payload"]["safety"] == {"test_send": True}
+
+
+def test_sms_dispatch_uses_imsg_auto_service(monkeypatch):
+    from elevate_cli import sender
+
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        return "/usr/local/bin/imsg" if name == "imsg" else None
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="sent\n", stderr="")
+
+    monkeypatch.setattr(sender.shutil, "which", fake_which)
+    monkeypatch.setattr(sender.subprocess, "run", fake_run)
+    monkeypatch.setattr(sender, "_verify_send_landed", lambda *args, **kwargs: ("iMessage", 0))
+    monkeypatch.setenv("ELEVATE_IMSG_VERIFY_DELAY", "0")
+
+    pmid, info = sender._messages_native_dispatch(
+        {
+            "id": "q-sms",
+            "channel": "sms",
+            "payload": {
+                "draft_text": "SMS Lead Desk test",
+                "recipient": {"phone": "+12505550123"},
+                "safety": {"test_send": True},
+            },
+        }
+    )
+
+    assert pmid.startswith("imsg-")
+    assert info["service"] == "auto"
+    assert calls[0][-1] == "auto"
+
+
+def test_imsg_success_with_chatdb_not_delivered_raises(monkeypatch):
+    from elevate_cli import sender
+
+    def fake_which(name: str) -> str | None:
+        return "/usr/local/bin/imsg" if name == "imsg" else None
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="sent\n", stderr="")
+
+    monkeypatch.setattr(sender.shutil, "which", fake_which)
+    monkeypatch.setattr(sender.subprocess, "run", fake_run)
+    monkeypatch.setattr(sender, "_verify_send_landed", lambda *args, **kwargs: ("SMS", 4))
+    monkeypatch.setenv("ELEVATE_IMSG_VERIFY_DELAY", "0")
+
+    try:
+        sender._messages_native_dispatch(
+            {
+                "id": "q-sms-fail",
+                "channel": "sms",
+                "payload": {
+                    "draft_text": "SMS Lead Desk test",
+                    "recipient": {"phone": "+12505550123"},
+                    "safety": {"test_send": True},
+                },
+            }
+        )
+    except sender.SenderTransientError as exc:
+        assert "not delivered" in str(exc)
+        assert "error=4" in str(exc)
+    else:
+        raise AssertionError("expected SenderTransientError")

@@ -410,10 +410,14 @@ def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, 
 
 def _imsg_service_for_channel(channel: str, detected: str) -> str:
     if channel == "sms":
-        return "sms"
+        # Let the local Messages gateway choose the concrete phone transport.
+        # Some current "SMS" conversations are stored as RCS in chat.db; forcing
+        # --service sms can create a local row that later flips to Not Delivered.
+        # `auto` allows imsg/Messages to use SMS relay or the existing RCS route.
+        return "auto"
     if channel == "imessage":
         return "imessage"
-    return "sms" if detected == "SMS" else "imessage"
+    return "auto" if detected == "SMS" else "imessage"
 
 
 def _imsg_send_via(handle: str, draft: str, channel: str, detected: str) -> tuple[str, dict[str, Any]] | None:
@@ -429,6 +433,7 @@ def _imsg_send_via(handle: str, draft: str, channel: str, detected: str) -> tupl
     if not imsg_bin:
         return None
     service = _imsg_service_for_channel(str(channel or ""), detected)
+    started = time.time()
     cmd = [imsg_bin, "send", "--to", handle, "--text", draft, "--service", service]
     try:
         result = subprocess.run(
@@ -445,6 +450,19 @@ def _imsg_send_via(handle: str, draft: str, channel: str, detected: str) -> tupl
     if result.returncode != 0:
         last = (stderr or stdout or f"exit={result.returncode}").strip().splitlines()[-1][:240]
         raise SenderTransientError(f"imsg send failed: {last}")
+    # `imsg send` can return success after Messages accepts the row, then the
+    # row flips to Not Delivered a moment later. Verify phone handles through
+    # chat.db before marking the queue row sent.
+    verified = None
+    if handle.startswith("+") or any(ch.isdigit() for ch in handle):
+        time.sleep(float(os.getenv("ELEVATE_IMSG_VERIFY_DELAY", "2.0")))
+        verified = _verify_send_landed(handle, draft[:32], started)
+        if verified is not None and verified[1] != 0:
+            svc, error_code = verified
+            raise SenderTransientError(
+                f"imsg send landed but Messages reported not delivered "
+                f"(service={svc or service}, error={error_code})"
+            )
     pmid = f"imsg-{uuid.uuid4().hex[:10]}"
     return pmid, {
         "agent": "messages-native",
@@ -455,6 +473,8 @@ def _imsg_send_via(handle: str, draft: str, channel: str, detected: str) -> tupl
         "transport_attempted": detected,
         "dispatched_at": _now(),
         "stdout": stdout.strip()[:500],
+        "verified": verified is not None,
+        "verification": {"service": verified[0], "error": verified[1]} if verified else None,
     }
 
 
