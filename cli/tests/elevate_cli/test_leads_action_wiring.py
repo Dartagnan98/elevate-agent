@@ -183,3 +183,55 @@ def test_approve_atomic_records_template_attempt_and_enqueue_payload(tmp_path, m
     assert enqueue["attempt_id"] == "attempt-1"
     assert enqueue["payload"]["template_id"] == "tpl-1"
     assert enqueue["payload"]["attempt_id"] == "attempt-1"
+
+
+def test_crm_lead_text_approval_routes_to_imessage(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    calls: dict[str, object] = {}
+
+    @contextmanager
+    def fake_connect():
+        yield object()
+
+    @contextmanager
+    def fake_transaction(conn):
+        yield conn
+
+    def fake_enqueue(conn, **kwargs):
+        calls["enqueue"] = kwargs
+
+    monkeypatch.setattr(outreach_db, "connect", fake_connect)
+    monkeypatch.setattr(outreach_db, "transaction", fake_transaction)
+    monkeypatch.setattr(outreach_db, "enqueue_send", fake_enqueue)
+    monkeypatch.setenv("ELEVATE_APPROVE_AUTO_TICK", "0")
+
+    source_dir = tmp_path / "sources" / "crm"
+    source_dir.mkdir(parents=True)
+    (source_dir / "tasks.jsonl").write_text(
+        json.dumps(
+            {
+                "task_id": "task-1",
+                "thread_id": "thread-1",
+                "channel": "Apple Messages",
+                "phone": "2505550123",
+                "display_name": "Ava Buyer",
+                "target_ui_surfaces": ["Leads", "Action Board"],
+                "draft_text": "Hey Ava, still looking?",
+                "approval_required": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state = {"tasks": {"task-1": {"status": "approved"}}}
+
+    sc._approve_atomic("crm", "task-1", state["tasks"]["task-1"], source_dir, state)
+
+    enqueue = calls["enqueue"]
+    assert isinstance(enqueue, dict)
+    assert enqueue["channel"] == "imessage"
+    assert enqueue["payload"]["recipient"]["phone"] == "2505550123"
+    assert enqueue["payload"]["channel_meta"]["resolved_channel"] == "imessage"
+    assert enqueue["payload"]["channel_meta"]["resolved_from"] == "lead-text-routing"

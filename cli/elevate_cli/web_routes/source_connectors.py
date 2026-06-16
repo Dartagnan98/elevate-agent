@@ -27,6 +27,11 @@ class SourceInboxProfileAction(BaseModel):
     status: str | None = None
 
 
+class SenderTestImessageAction(BaseModel):
+    to: str
+    text: str | None = None
+
+
 def create_source_connectors_router(*, log: logging.Logger | None = None) -> APIRouter:
     """Build routes for source connectors, source inbox, and sender controls."""
     router = APIRouter()
@@ -253,6 +258,18 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
         except Exception as exc:
             _log.exception("POST /api/sender/tick failed")
             raise HTTPException(status_code=500, detail=f"Sender tick failed: {exc}")
+
+
+    @router.post("/api/sender/test-imessage")
+    async def post_sender_test_imessage(body: SenderTestImessageAction):
+        """Send exactly one local Messages self-test before live lead sends are enabled."""
+        try:
+            from elevate_cli import sender
+
+            return sender.send_messages_self_test(body.to, body.text)
+        except Exception as exc:
+            _log.exception("POST /api/sender/test-imessage failed")
+            raise HTTPException(status_code=500, detail=f"iMessage self-test failed: {exc}")
 
 
     @router.get("/api/sender/stats")

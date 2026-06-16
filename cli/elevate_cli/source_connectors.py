@@ -2127,14 +2127,16 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
             "source_id": "apple-messages",
             "provider": "Apple Messages",
             "account_label": "Mac Messages",
-            "connection_type": "macos_messages_chat_db_snapshot",
+            "connection_type": "macos_messages_local_gateway",
             "auth_status": "local_read_ok",
-            "sync_mode": "manual_snapshot",
+            "sync_mode": "background_live_sync",
             "owner_agent": OWNER_BY_SOURCE["apple-messages"],
             "enabled_ui_surfaces": surfaces,
             "setup_status": "connected",
             "last_sync_at": now,
-            "setup_notes": "Local read-only snapshot imported from Mac Messages chat.db.",
+            "setup_notes": "Local Messages bridge is connected for background sync. Outbound sends use the local imsg gateway and remain approval/self-test gated.",
+            "outbound_enabled": True,
+            "send_transport": "imsg",
             "database_path": str(index_path),
             "source_database_path": str(chat_db),
             "record_counts": {
@@ -2149,10 +2151,13 @@ def initialize_apple_messages_source(config: dict[str, Any] | None = None) -> Js
         source_dir / "status.json",
         {
             "connected": True,
-            "import_only": True,
+            "import_only": False,
             "blocked": False,
+            "outbound_enabled": True,
+            "send_transport": "imsg",
+            "sync_mode": "background_live_sync",
             "last_error": None,
-            "next_operator_step": "Click Refresh/Re-import to update the local message database. Live background sync is not enabled yet.",
+            "next_operator_step": "Background sync is enabled. Run the one-message Lead Desk self-test and confirm delivery before setting ELEVATE_MESSAGES_LIVE_CONFIRMED=1 for queued lead sends.",
             "last_checked_at": now,
             "last_imported_at": now,
             "counts": {
@@ -2278,8 +2283,10 @@ def _render_apple_messages_agent_prompt() -> str:
     })
     return (
         "TASK\n"
-        "Run the Apple Messages connector as a visible local session. This is a\n"
-        "read-only Mac Messages + AddressBook import; do not send or draft replies.\n\n"
+        "Run the Apple Messages connector as a visible local session. This keeps\n"
+        "the local Mac Messages index fresh for Lead Desk. Outbound is send-enabled\n"
+        "through the local imsg gateway, but every lead send stays approval-gated and\n"
+        "blocked until the one-message self-test is confirmed.\n\n"
         "DO THIS\n"
         f"1. Run the local sync command:\n   `{sync_cmd}`\n"
         "2. If macOS blocks chat.db or AddressBook access, stop and report the exact\n"
@@ -2296,7 +2303,8 @@ def _render_apple_messages_agent_prompt() -> str:
         "   `DONE contacts=<contacts_db> conversations=<conversations_db> apple_events=<apple_events_db> identity_conflicts_pending=<pending_count>`\n"
         "   If blocked, reply `FAILED <one-line reason>`.\n\n"
         "CONSTRAINTS\n"
-        "- Local read/import only. Never send a message.\n"
+        "- Do not bulk-send queued leads from this connector run. Only the dedicated\n"
+        "  one-message self-test may send before live confirmation.\n"
         "- Do not use deprecated ~/.elevate/data/operational.db for verification.\n"
         "- Keep all output in the session so the operator can watch the run."
     )
@@ -3894,7 +3902,7 @@ def update_source_thread_state(
 
 
 _SOURCE_TO_CHANNEL = {
-    "apple-messages": "sms",
+    "apple-messages": "imessage",
     "sms-provider": "sms",
     "android-device": "sms",
     "rcs": "sms",
@@ -3905,10 +3913,102 @@ _SOURCE_TO_CHANNEL = {
 
 
 def _channel_for_source(source_id: str) -> str | None:
-    """Return the outbound channel for a source_id, or None if the source has
+    """Return the default outbound channel for a source_id, or None if the source has
     no outbound (skills/market-stats/etc are read-only inputs, not channels).
     """
     return _SOURCE_TO_CHANNEL.get(source_id)
+
+
+def _first_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        for item in value:
+            found = _first_string(item)
+            if found:
+                return found
+    if isinstance(value, dict):
+        for key in ("value", "phone", "email", "handle", "id", "label"):
+            found = _first_string(value.get(key))
+            if found:
+                return found
+    return ""
+
+
+def _approval_recipient_handle(record: JsonRecord) -> tuple[str, str]:
+    """Return (phone, email_or_apple_id) from a source task/queue record."""
+    phone = _first_string(
+        record.get("phone")
+        or record.get("recipient_phone")
+        or record.get("mobile")
+        or record.get("phones")
+    )
+    email = _first_string(
+        record.get("email")
+        or record.get("recipient_email")
+        or record.get("apple_id")
+        or record.get("apple_handle")
+        or record.get("handle")
+        or record.get("emails")
+    )
+    # If a generic handle is phone-shaped, use it as the phone instead of an
+    # iMessage email fallback. This is common for Apple Messages JSONL rows.
+    if not phone:
+        handle = _first_string(record.get("handle") or record.get("recipient") or record.get("to"))
+        digits = "".join(ch for ch in handle if ch.isdigit())
+        if handle.startswith("+") or len(digits) >= 10:
+            phone = handle
+        elif "@" in handle and not email:
+            email = handle
+    return phone, email
+
+
+def _approval_text_route(record: JsonRecord) -> str | None:
+    """Infer an explicit Apple Messages/SMS channel from draft task metadata."""
+    haystack = " ".join(
+        _tag_text(record.get(key))
+        for key in (
+            "channel",
+            "template_channel",
+            "source_id",
+            "source",
+            "provider",
+            "task_type",
+            "title",
+            "summary",
+            "tags",
+            "target_ui_surfaces",
+            "enabled_ui_surfaces",
+        )
+    ).lower()
+    if "crm_note" in haystack or "lofty_note" in haystack:
+        return None
+    if "sms" in haystack and "apple" not in haystack and "imessage" not in haystack:
+        return "sms"
+    if any(token in haystack for token in ("imessage", "apple-messages", "apple messages", "messages", "text message", "text", "sms")):
+        return "imessage"
+    phone, email = _approval_recipient_handle(record)
+    lead_surface = any(token in haystack for token in ("lead", "outreach", "action board", "approval"))
+    if lead_surface and (phone or email):
+        return "imessage"
+    return None
+
+
+def _channel_for_approval(source_id: str, record: JsonRecord) -> str | None:
+    """Return the actual outbound channel for one approved draft.
+
+    Source ids are not enough: some Lead Desk drafts are CRM-sourced because the
+    lead came from Lofty, but the intended outbound transport is Apple
+    Messages/SMS. Prefer explicit task channel metadata and recipient evidence
+    before falling back to the connector default.
+    """
+    default = _channel_for_source(source_id)
+    if source_id == "apple-messages":
+        return "imessage"
+    text_route = _approval_text_route(record)
+    if text_route:
+        return text_route
+    return default
 
 
 def _source_view_for_state(source_id: str, source_dir: Path) -> JsonRecord:
@@ -4015,11 +4115,6 @@ def _approve_atomic(
     """
     from elevate_cli import outreach_db
 
-    channel = _channel_for_source(source_id)
-    if not channel:
-        _write_source_ui_state(source_dir, state)
-        return
-
     # ui-state's task entry only carries {status, updated_at, draft_text}.
     # The recipient (phone/email/handle) lives in the original tasks.jsonl
     # record. Merge it in so the queue payload has what the dispatcher needs;
@@ -4033,23 +4128,33 @@ def _approve_atomic(
         if v not in (None, ""):
             merged[k] = v
 
+    channel = _channel_for_approval(source_id, merged)
+    if not channel:
+        _write_source_ui_state(source_dir, state)
+        return
+
     thread_id = str(merged.get("thread_id") or merged.get("threadId") or task_id)
     if thread_id == task_id and task_id.startswith("thread-draft:"):
         thread_id = task_id.removeprefix("thread-draft:")
     draft_text = str(merged.get("draft_text") or _draft_text_for_task(merged) or "").strip()
+    phone, apple_fallback = _approval_recipient_handle(merged)
     payload = {
         "draft_text": draft_text,
         "recipient": {
             "person_name": merged.get("person_name") or merged.get("personName") or merged.get("display_name"),
             "contact_id": merged.get("contact_id"),
             "conversation_id": merged.get("conversation_id") or merged.get("source_record_id"),
-            "phone": merged.get("phone") or merged.get("recipient_phone") or (merged.get("phones") or [None])[0],
-            "email": merged.get("email") or merged.get("recipient_email") or (merged.get("emails") or [None])[0],
+            "phone": phone or None,
+            "email": apple_fallback or None,
             "social_handle": merged.get("social_handle") or merged.get("recipient_handle"),
+            "apple_handle": apple_fallback or phone or None,
         },
         "channel_meta": {
             "toolkit": merged.get("toolkit"),
             "account_id": merged.get("composio_account_id"),
+            "source_channel": merged.get("channel") or merged.get("template_channel"),
+            "resolved_channel": channel,
+            "resolved_from": "lead-text-routing" if channel in {"imessage", "sms"} else "source-default",
         },
         "source_id": source_id,
         "thread_id": thread_id,

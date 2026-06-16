@@ -408,19 +408,68 @@ def _osa_send_via(phone: str, draft: str, service_type: str) -> tuple[int, str, 
     return (result.returncode, result.stdout or "", result.stderr or "")
 
 
+def _imsg_service_for_channel(channel: str, detected: str) -> str:
+    if channel == "sms":
+        return "sms"
+    if channel == "imessage":
+        return "imessage"
+    return "sms" if detected == "SMS" else "imessage"
+
+
+def _imsg_send_via(handle: str, draft: str, channel: str, detected: str) -> tuple[str, dict[str, Any]] | None:
+    """Send through the local `imsg send` gateway when available.
+
+    Returns None only when `imsg` is not installed or legacy osascript is forced,
+    allowing the older AppleScript path to remain as a fallback. Any attempted
+    `imsg` failure is raised so we never silently mark a real send as successful.
+    """
+    if os.getenv("ELEVATE_MESSAGES_USE_OSASCRIPT", "").lower() in ("1", "true", "yes"):
+        return None
+    imsg_bin = shutil.which("imsg")
+    if not imsg_bin:
+        return None
+    service = _imsg_service_for_channel(str(channel or ""), detected)
+    cmd = [imsg_bin, "send", "--to", handle, "--text", draft, "--service", service]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=int(os.getenv("ELEVATE_IMSG_SEND_TIMEOUT", "45")),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SenderTransientError("imsg send timed out") from exc
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    if result.returncode != 0:
+        last = (stderr or stdout or f"exit={result.returncode}").strip().splitlines()[-1][:240]
+        raise SenderTransientError(f"imsg send failed: {last}")
+    pmid = f"imsg-{uuid.uuid4().hex[:10]}"
+    return pmid, {
+        "agent": "messages-native",
+        "gateway": "imsg",
+        "channel": channel or "imessage",
+        "handle": handle,
+        "service": service,
+        "transport_attempted": detected,
+        "dispatched_at": _now(),
+        "stdout": stdout.strip()[:500],
+    }
+
+
 def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Send via macOS Messages.app — dynamic iMessage vs SMS per recipient.
 
     Detection flow:
-      1. Pre-flight chat.db lookup → pick the service that worked most
+      1. Resolve the Apple Messages handle from recipient phone first, then
+         email / Apple ID fallback for iMessage-only contacts.
+      2. Pre-flight chat.db lookup → pick the service that worked most
          recently for this handle. Defaults to iMessage if no history.
-      2. Run osascript send via the chosen service.
-      3. Post-send verify in chat.db (give Messages 1.5s to write the
+      3. Run osascript send via the chosen service.
+      4. Post-send verify in chat.db (give Messages 1.5s to write the
          row + Apple's IDS to ack). If the row landed with error != 0
-         AND we picked iMessage, retry on SMS once.
-      4. SMS legitimately succeeds even when chat.db.error != 0 in
-         rare cases (carrier propagation lag), so SMS post-verify only
-         fails on explicit "not sent" markers.
+         AND we picked iMessage, retry on SMS once when the handle is a phone.
 
     Override the whole detection with `ELEVATE_SMS_DISPATCHER=agent`
     (revert to LLM) or `ELEVATE_FORCE_SMS=1` (skip iMessage entirely).
@@ -431,16 +480,29 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
         raise SenderPermanentError("messages-native: payload missing draft_text")
     recipient = payload.get("recipient") or {}
     phone = _format_phone(recipient.get("phone"))
-    if not phone:
-        raise SenderPermanentError("messages-native: recipient missing phone")
+    email = str(recipient.get("email") or "").strip()
+    handle = phone or email
+    if not handle:
+        raise SenderPermanentError("messages-native: recipient missing phone/email handle")
 
     force_sms = os.getenv("ELEVATE_FORCE_SMS", "").lower() in ("1", "true", "yes")
-    detected = "SMS" if force_sms else _detect_preferred_transport(phone)
+    # SMS only makes sense for phone handles. Email / Apple ID routes stay on iMessage.
+    detected = "SMS" if (force_sms and phone) else _detect_preferred_transport(handle)
+    if not phone and detected == "SMS":
+        detected = "iMessage"
+
+    imsg_result = _imsg_send_via(handle, draft, str(row.get("channel") or "imessage"), detected)
+    if imsg_result is not None:
+        pmid, info = imsg_result
+        info["phone"] = phone
+        info["email"] = email
+        return pmid, info
+
     started = time.time()
 
     def _attempt(service_type: str) -> tuple[str, dict[str, Any]] | None:
         send_start = time.time()
-        rc, stdout, stderr = _osa_send_via(phone, draft, service_type)
+        rc, stdout, stderr = _osa_send_via(handle, draft, service_type)
         if rc != 0:
             last = (stderr or stdout or f"exit={rc}").strip().splitlines()[-1][:240]
             raise SenderTransientError(f"messages-native[{service_type}]: {last}")
@@ -458,8 +520,10 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 pmid = f"{pmid_prefix}-{uuid.uuid4().hex[:10]}"
                 return pmid, {
                     "agent": "messages-native",
-                    "channel": "sms",
+                    "channel": row.get("channel") or "sms",
+                    "handle": handle,
                     "phone": phone,
+                    "email": email,
                     "transport": svc_observed,
                     "transport_attempted": service_type,
                     "dispatched_at": _now(),
@@ -471,8 +535,10 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
         pmid = f"{service_type.lower()}-{uuid.uuid4().hex[:10]}"
         return pmid, {
             "agent": "messages-native",
-            "channel": "sms",
+            "channel": row.get("channel") or "sms",
+            "handle": handle,
             "phone": phone,
+            "email": email,
             "transport": service_type,
             "transport_attempted": service_type,
             "verified": False,
@@ -483,7 +549,12 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
     if first is not None:
         return first
 
-    fallback = "SMS" if detected == "iMessage" else "iMessage"
+    fallback = "SMS" if (detected == "iMessage" and phone) else "iMessage"
+    if fallback == detected:
+        raise SenderTransientError(
+            f"messages-native: {detected} failed delivery checks for {handle} "
+            f"(chat.db error != 0)"
+        )
     second = _attempt(fallback)
     if second is not None:
         info = second[1]
@@ -492,7 +563,7 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
 
     raise SenderTransientError(
         f"messages-native: both {detected} and {fallback} failed delivery "
-        f"checks for {phone} (chat.db error != 0)"
+        f"checks for {handle} (chat.db error != 0)"
     )
 
 
@@ -512,8 +583,10 @@ def _wire_default_dispatchers() -> None:
     sms_mode = (os.getenv("ELEVATE_SMS_DISPATCHER") or "native").lower()
     if sms_mode == "agent":
         register_dispatcher("sms", _send_agent_dispatch)
+        register_dispatcher("imessage", _send_agent_dispatch)
     else:
         register_dispatcher("sms", _messages_native_dispatch)
+        register_dispatcher("imessage", _messages_native_dispatch)
     for channel in ("email", "social_dm"):
         register_dispatcher(channel, _send_agent_dispatch)
 
@@ -537,6 +610,74 @@ def _next_retry_at(attempts: int) -> str:
     return (datetime.now(timezone.utc) + delta).isoformat()
 
 
+def _messages_live_confirmed() -> bool:
+    return os.getenv("ELEVATE_MESSAGES_LIVE_CONFIRMED", "").lower() in ("1", "true", "yes")
+
+
+def _recipient_handle_from_row(row: dict[str, Any]) -> str:
+    payload = row.get("payload") or {}
+    recipient = payload.get("recipient") or {}
+    return (
+        _format_phone(recipient.get("phone"))
+        or str(recipient.get("email") or recipient.get("apple_handle") or "").strip()
+    )
+
+
+def _messages_test_allowed(row: dict[str, Any]) -> bool:
+    payload = row.get("payload") or {}
+    safety = payload.get("safety") or {}
+    if not bool(safety.get("test_send")):
+        return False
+    expected = os.getenv("ELEVATE_MESSAGES_TEST_RECIPIENT", "").strip()
+    if not expected:
+        return True
+    actual = _recipient_handle_from_row(row)
+    return _format_phone(actual) == _format_phone(expected) or actual.lower() == expected.lower()
+
+
+def _messages_send_blocked(row: dict[str, Any]) -> bool:
+    channel = str(row.get("channel") or "").lower()
+    if channel not in {"sms", "imessage"}:
+        return False
+    return not (_messages_live_confirmed() or _messages_test_allowed(row))
+
+
+def send_messages_self_test(to: str, text: str | None = None) -> dict[str, Any]:
+    """Send exactly one Lead Desk self-test through the local Messages gateway."""
+    handle = str(to or "").strip()
+    if not handle:
+        raise SenderPermanentError("self-test recipient is required")
+    body = (text or f"Elevate Lead Desk test message {int(time.time())}. Reply received confirms outbound is live.").strip()
+    row = {
+        "id": f"self-test-{uuid.uuid4().hex[:10]}",
+        "sourceId": "apple-messages",
+        "threadId": "self-test",
+        "taskId": "self-test",
+        "channel": "imessage",
+        "status": outreach_db.SEND_STATUS_SENDING,
+        "attempts": 0,
+        "payload": {
+            "draft_text": body,
+            "recipient": {
+                "phone": _format_phone(handle) if any(ch.isdigit() for ch in handle) else None,
+                "email": handle if "@" in handle else None,
+                "apple_handle": handle,
+                "person_name": "Skyleigh self-test",
+            },
+            "safety": {"test_send": True},
+            "channel_meta": {"resolved_channel": "imessage", "resolved_from": "self-test"},
+        },
+    }
+    pmid, info = get_dispatcher("imessage")(row)
+    return {
+        "ok": True,
+        "providerMessageId": pmid,
+        "channel": "imessage",
+        "recipient": handle,
+        "info": info,
+    }
+
+
 def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
     """Send one queue row. Updates queue state. Safe to call concurrently with
     other rows because each `mark_*` call is its own atomic SQLite write."""
@@ -549,6 +690,13 @@ def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
     # 'sending' with a provider_message_id already set.
     if row.get("providerMessageId") and row.get("status") != outreach_db.SEND_STATUS_SENT:
         return outreach_db.mark_sent(queue_id, row["providerMessageId"])
+
+    if _messages_send_blocked(row):
+        return outreach_db.mark_retrying(
+            queue_id,
+            error="messages-live-gated: run/confirm the one-message self-test before live lead sends",
+            next_retry_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        ) or {}
 
     dispatcher = get_dispatcher(channel)
     try:
