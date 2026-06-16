@@ -1659,7 +1659,18 @@ class AIAgent:
         
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
-        
+
+        # Compaction redesign (docs/compaction-redesign.md): the transcript is
+        # NEVER rewritten or rotated. Compaction = a payload-time cursor + a
+        # synthetic summary, persisted as SESSION METADATA (sessions.
+        # compaction_cursor / compaction_summary) and injected ONLY when the
+        # API payload is built (see messages_for_api). 0 / None = the legacy /
+        # no-compaction sentinel; such sessions still resolve via the old
+        # rotation tip-walk read path. Hydrated from the row below (after the
+        # session DB is attached) so fresh + resume share one path.
+        self.compaction_cursor: int = 0
+        self.compaction_summary: Optional[str] = None
+
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
         
@@ -1729,7 +1740,30 @@ class AIAgent:
                     error_type=type(e).__name__,
                     error_chars=len(str(e)),
                 )
-        
+
+        # Compaction redesign: hydrate the payload-time cursor + synthetic
+        # summary from the session row. For a fresh session the row was just
+        # created with the defaults (cursor 0 / NULL summary), so this is a
+        # no-op; for a RESUMED session (same session_id — create_session is an
+        # idempotent upsert) it restores the compaction state persisted by the
+        # last turn, so the model sees the trimmed window without re-walking a
+        # rotation tip. One path covers both fresh and resume.
+        if self._session_db:
+            try:
+                _crow = self._session_db.get_session(self.session_id)
+                if _crow:
+                    _cur = _crow.get("compaction_cursor")
+                    if _cur:
+                        self.compaction_cursor = int(_cur)
+                    _sum = _crow.get("compaction_summary")
+                    if _sum:
+                        self.compaction_summary = _sum
+            except Exception as _hydr_err:
+                logger.debug(
+                    "compaction metadata hydrate skipped for %s: %s",
+                    self.session_id, _hydr_err,
+                )
+
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
         self._todo_store = TodoStore()
@@ -5493,6 +5527,84 @@ class AIAgent:
         return getattr(tc, "id", "") or ""
 
     _VALID_API_ROLES = frozenset({"system", "user", "assistant", "tool", "function", "developer"})
+
+    def messages_for_api(
+        self, api_messages: List[Dict[str, Any]], sys_offset: int
+    ) -> List[Dict[str, Any]]:
+        """Apply the compaction cursor + synthetic summary at payload-build time.
+
+        Compaction redesign (docs/compaction-redesign.md): the transcript is
+        never rewritten or rotated.  Instead, when ``self.compaction_cursor``
+        is set, the API payload skips the first ``compaction_cursor`` TRANSCRIPT
+        messages and represents them with a single synthetic summary message
+        injected here — and ONLY here.  ``self._session_messages`` (the visible,
+        persisted transcript) is left completely untouched.
+
+        ``api_messages`` is the already-built payload list, where the first
+        ``sys_offset`` entries are non-transcript leaders (the system prompt and
+        any prefill messages); everything at/after ``sys_offset`` is the
+        transcript copy.  The result is::
+
+            api_messages[:sys_offset]                       # system + prefill
+            + [synthetic summary]                           # if cursor + summary
+            + api_messages[sys_offset + compaction_cursor:] # the kept tail
+
+        Cursor 0 (or no summary) is the legacy / no-compaction sentinel and the
+        payload is returned unchanged.
+        """
+        cursor = int(getattr(self, "compaction_cursor", 0) or 0)
+        summary = getattr(self, "compaction_summary", None)
+        if cursor <= 0 or not summary:
+            return api_messages
+
+        sys_offset = max(0, int(sys_offset or 0))
+        n_transcript = len(api_messages) - sys_offset
+        if n_transcript <= 0:
+            return api_messages
+        # Defensive clamp: never skip past the end of the transcript.
+        if cursor >= n_transcript:
+            cursor = n_transcript - 1
+            if cursor <= 0:
+                return api_messages
+
+        cut = sys_offset + cursor
+        # Defensive tool-pair guard: the cursor is produced by the cutoff
+        # machinery (summarize_to_cursor) which aligns on tool boundaries, but
+        # if the first kept message is an orphan tool result (its tool_call was
+        # skipped by the cursor), nudge the cut BACK to include the parent
+        # assistant turn so the API never receives a mismatched pair.  The
+        # downstream _sanitize_api_messages would otherwise stub it; pulling the
+        # boundary keeps the kept window self-consistent.
+        guard = 0
+        while (
+            cut < len(api_messages)
+            and api_messages[cut].get("role") in ("tool", "function")
+            and cut > sys_offset
+            and guard < n_transcript
+        ):
+            cut -= 1
+            guard += 1
+        # If we walked back onto the assistant that owns the tool group, keep it.
+        if (
+            cut > sys_offset
+            and api_messages[cut].get("role") == "tool"
+        ):
+            # Could not find a clean non-tool boundary inside the kept window;
+            # fall back to no trim rather than ship an orphan.
+            return api_messages
+
+        from agent.context_compressor import SUMMARY_PREFIX as _SUMMARY_PREFIX
+        _summary_text = str(summary)
+        if not _summary_text.startswith(_SUMMARY_PREFIX):
+            _summary_text = f"{_SUMMARY_PREFIX}\n{_summary_text}"
+        _summary_text = (
+            _summary_text
+            + "\n\n--- END OF CONTEXT SUMMARY — "
+            "respond to the message below, not the summary above ---"
+        )
+        synthetic = {"role": "user", "content": _summary_text}
+
+        return api_messages[:sys_offset] + [synthetic] + api_messages[cut:]
 
     @staticmethod
     def _sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -10217,6 +10329,12 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+            # Compaction redesign payload seam (max-iterations summary call):
+            # the final-summary request must also see the trimmed window.
+            _compaction_sys_offset = (1 if effective_system else 0) + len(
+                self.prefill_messages or []
+            )
+            api_messages = self.messages_for_api(api_messages, _compaction_sys_offset)
             api_messages = self._hydrate_media_refs_for_api(api_messages)
 
             summary_extra_body = {}
@@ -11208,6 +11326,17 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+
+            # Compaction redesign payload seam: skip the compacted transcript
+            # head and splice in the synthetic summary, ONLY for the API copy.
+            # sys_offset counts every non-transcript leader (system + prefill)
+            # so the cursor lands on transcript boundaries. Runs BEFORE
+            # _sanitize_api_messages so any tool_result whose tool_call was
+            # skipped by the cursor is re-stubbed below. No-op when cursor==0.
+            _compaction_sys_offset = (1 if effective_system else 0) + len(
+                self.prefill_messages or []
+            )
+            api_messages = self.messages_for_api(api_messages, _compaction_sys_offset)
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
