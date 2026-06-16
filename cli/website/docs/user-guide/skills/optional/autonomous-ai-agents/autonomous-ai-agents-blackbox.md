@@ -94,7 +94,7 @@ During an interactive session, use these commands:
 
 | Command | Effect |
 |---------|--------|
-| `/compress` | Shrink conversation history to save tokens |
+| `/compact` | Compact conversation history to save tokens |
 | `/clear` | Wipe history and start fresh |
 | `/stats` | View current token usage |
 | `Ctrl+C` | Cancel current operation |

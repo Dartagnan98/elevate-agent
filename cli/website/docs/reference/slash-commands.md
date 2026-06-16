@@ -28,7 +28,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/retry` | Retry the last message (resend to agent) |
 | `/undo` | Remove the last user/assistant exchange |
 | `/title` | Set a title for the current session (usage: /title My Session Name) |
-| `/compress [focus topic]` | Manually compress conversation context (flush memories + summarize). Optional focus topic narrows what the summary preserves. |
+| `/compact [focus topic]` | Manually compact conversation context (flush memories + summarize). Optional focus topic narrows what the summary preserves. Alias: `/compress`. |
 | `/rollback` | List or restore filesystem checkpoints (usage: /rollback [number]) |
 | `/snapshot [create\|restore <id>\|prune]` (alias: `/snap`) | Create or restore state snapshots of Elevate config/state. `create [label]` saves a snapshot, `restore <id>` reverts to it, `prune [N]` removes old snapshots, or list all with no args. |
 | `/stop` | Kill all running background processes |
@@ -130,7 +130,7 @@ The messaging gateway supports the following built-in commands inside Telegram, 
 | `/retry` | Retry the last message. |
 | `/undo` | Remove the last exchange. |
 | `/sethome` (alias: `/set-home`) | Mark the current chat as the platform home channel for deliveries. |
-| `/compress [focus topic]` | Manually compress conversation context. Optional focus topic narrows what the summary preserves. |
+| `/compact [focus topic]` | Manually compact conversation context. Optional focus topic narrows what the summary preserves. |
 | `/title [name]` | Set or show the session title. |
 | `/resume [name]` | Resume a previously named session. |
 | `/usage` | Show token usage, estimated cost breakdown (input/output), context window state, and session duration. |

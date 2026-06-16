@@ -79,7 +79,7 @@ The bar adapts to terminal width — full layout at ≥ 76 columns, compact at 5
 | Green | < 50% | Plenty of room |
 | Yellow | 50–80% | Getting full |
 | Orange | 80–95% | Approaching limit |
-| Red | ≥ 95% | Near overflow — consider `/compress` |
+| Red | ≥ 95% | Near overflow — consider `/compact` |
 
 Use `/usage` for a detailed breakdown including per-category costs (input vs output tokens).
 

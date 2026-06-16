@@ -241,7 +241,7 @@ The registry of record is `elevate_cli/commands.py` — every consumer
 /retry               Resend last message
 /undo                Remove last exchange
 /title [name]        Name the session
-/compress            Manually compress context
+/compact            Manually compact context
 /stop                Kill background processes
 /rollback [N]        Restore filesystem checkpoint
 /snapshot [sub]      Create or restore state snapshots of Hermes config/state (CLI)
