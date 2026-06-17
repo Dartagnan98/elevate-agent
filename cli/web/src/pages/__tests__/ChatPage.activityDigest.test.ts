@@ -67,6 +67,24 @@ describe("ChatActivityDigest reasoning persistence", () => {
     ).toBe(true);
   });
 
+  it("keeps the step body visible across the live-to-completed transition", () => {
+    const live = __chatPageTestables.resolveActivityDigestVisibility({
+      busy: true,
+      hasErroredStep: false,
+      hasSteps: true,
+      userOpen: null,
+    });
+    const completed = __chatPageTestables.resolveActivityDigestVisibility({
+      busy: false,
+      hasErroredStep: false,
+      hasSteps: true,
+      userOpen: null,
+    });
+
+    expect(live).toMatchObject({ expanded: true, showSteps: true });
+    expect(completed).toMatchObject({ expanded: true, showSteps: true });
+  });
+
   it("keeps live work expanded before the first step arrives", () => {
     expect(
       __chatPageTestables.defaultActivityDigestOpen({
@@ -75,6 +93,29 @@ describe("ChatActivityDigest reasoning persistence", () => {
         hasSteps: false,
       }),
     ).toBe(true);
+    expect(
+      __chatPageTestables.resolveActivityDigestVisibility({
+        busy: true,
+        hasErroredStep: false,
+        hasSteps: false,
+        userOpen: null,
+      }),
+    ).toMatchObject({ expanded: true, showPendingThinking: true });
+  });
+
+  it("respects an explicit user close across completion", () => {
+    expect(
+      __chatPageTestables.resolveActivityDigestVisibility({
+        busy: false,
+        hasErroredStep: false,
+        hasSteps: true,
+        userOpen: false,
+      }),
+    ).toEqual({
+      expanded: false,
+      showPendingThinking: false,
+      showSteps: false,
+    });
   });
 
   it("preserves full multiline reasoning in the finished breakdown", () => {

@@ -1274,6 +1274,7 @@ export const __chatPageTestables = {
   defaultActivityDigestOpen,
   describeToolGroup,
   normalizeStoredTranscript,
+  resolveActivityDigestVisibility,
   shouldKeepTranscriptMessage,
   toolTarget,
 };
@@ -10864,6 +10865,30 @@ function defaultActivityDigestOpen({
   return hasErroredStep || hasSteps || busy;
 }
 
+function resolveActivityDigestVisibility({
+  busy,
+  hasErroredStep,
+  hasSteps,
+  userOpen,
+}: {
+  busy: boolean;
+  hasErroredStep: boolean;
+  hasSteps: boolean;
+  userOpen: boolean | null;
+}): {
+  expanded: boolean;
+  showPendingThinking: boolean;
+  showSteps: boolean;
+} {
+  const expanded =
+    userOpen ?? defaultActivityDigestOpen({ busy, hasErroredStep, hasSteps });
+  return {
+    expanded,
+    showPendingThinking: expanded && busy && !hasSteps,
+    showSteps: expanded && hasSteps,
+  };
+}
+
 // Working/worked digest. While a turn streams, the header is the live
 // meter: pulsing accent mark + a cycling thinking verb + elapsed + running
 // token count, and the breakdown is expanded by default so reasoning (grey)
@@ -10959,11 +10984,13 @@ function ChatActivityDigest({
       ? step.status === "error"
       : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
   );
-  const expanded = open ?? defaultActivityDigestOpen({
+  const visibility = resolveActivityDigestVisibility({
     busy,
     hasErroredStep,
     hasSteps: steps.length > 0,
+    userOpen: open,
   });
+  const { expanded } = visibility;
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -11113,14 +11140,14 @@ function ChatActivityDigest({
         )}
       </button>
 
-      {expanded && steps.length > 0 && (
+      {visibility.showSteps && (
         <div className="processing-body mt-1.5 space-y-1">
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} turnStartAt={start} />
           ))}
         </div>
       )}
-      {expanded && busy && steps.length === 0 && (
+      {visibility.showPendingThinking && (
         <div className="processing-body mt-1.5">
           {/* Nothing has streamed yet (big prompt, model still ingesting) —
               show a live thinking row immediately so the wait reads as
