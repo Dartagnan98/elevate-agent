@@ -6,6 +6,7 @@ type TestTool = Parameters<typeof __chatPageTestables.describeToolGroup>[0][numb
 type TestTrace = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[1][number];
 type TestMessage = Parameters<typeof __chatPageTestables.repairOutOfOrderUserTurns>[0][number];
 type TestActiveSnapshot = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[1];
+type TestBackgroundTask = Parameters<typeof __chatPageTestables.sortBackgroundTasksForDisplay>[0][number];
 
 function tool(overrides: Partial<TestTool>): TestTool {
   return {
@@ -37,6 +38,16 @@ function message(overrides: Partial<TestMessage>): TestMessage {
     id: "message-1",
     role: "assistant",
     status: "complete",
+    ...overrides,
+  };
+}
+
+function backgroundTask(overrides: Partial<TestBackgroundTask>): TestBackgroundTask {
+  return {
+    id: "task-1",
+    kind: "subagent",
+    label: "Subagent",
+    status: "done",
     ...overrides,
   };
 }
@@ -303,5 +314,35 @@ describe("server/cache transcript merge", () => {
 
     expect(merged.map((item) => item.id)).toEqual(["u1", "a1", "u2", "a2"]);
     expect(merged.filter((item) => item.role === "user" && item.content === prompt)).toHaveLength(2);
+  });
+});
+
+describe("background task ordering", () => {
+  it("orders finished subagents by completion time instead of start time", () => {
+    const sorted = __chatPageTestables.sortBackgroundTasksForDisplay([
+      backgroundTask({
+        id: "media",
+        startedAt: 1_000,
+        completedAt: 4_000,
+        status: "done",
+      }),
+      backgroundTask({
+        id: "seller-follow-up",
+        startedAt: 2_000,
+        completedAt: 3_000,
+        status: "done",
+      }),
+      backgroundTask({
+        id: "pricing-retry",
+        startedAt: 5_000,
+        status: "running",
+      }),
+    ]);
+
+    expect(sorted.map((item) => item.id)).toEqual([
+      "pricing-retry",
+      "media",
+      "seller-follow-up",
+    ]);
   });
 });

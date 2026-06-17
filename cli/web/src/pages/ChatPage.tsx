@@ -957,10 +957,12 @@ function SubagentResultCard({
   status,
   goal,
   summary,
+  createdAt,
 }: {
   status: "completed" | "error";
   goal: string;
   summary: string;
+  createdAt: number;
 }) {
   const [open, setOpen] = useState(false);
   const ok = status !== "error";
@@ -980,14 +982,17 @@ function SubagentResultCard({
           )}
         />
         <Bot className="h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)]" />
-        <span className="font-medium text-[var(--chat-muted-strong)]">
+        <span className="min-w-0 flex-1 truncate font-medium text-[var(--chat-muted-strong)]">
           {ok ? "Sub-agent completed" : "Sub-agent finished with issues"}
           {goal ? <span className="font-normal text-[var(--fg-faint)]"> · {goal}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] tabular-nums text-[var(--fg-faint)]">
+          {nowLabel(createdAt)}
         </span>
         {summary ? (
           <ChevronDown
             className={cn(
-              "ml-auto h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)] transition-transform",
+              "h-3.5 w-3.5 shrink-0 text-[var(--fg-faint)] transition-transform",
               open && "rotate-180",
             )}
           />
@@ -1000,6 +1005,23 @@ function SubagentResultCard({
       ) : null}
     </div>
   );
+}
+
+function backgroundTaskDisplayTime(task: BackgroundTaskItem): number {
+  return task.status === "running"
+    ? task.startedAt ?? task.completedAt ?? 0
+    : task.completedAt ?? task.startedAt ?? 0;
+}
+
+function sortBackgroundTasksForDisplay(
+  items: BackgroundTaskItem[],
+): BackgroundTaskItem[] {
+  return [...items].sort((a, b) => {
+    const at = backgroundTaskDisplayTime(a);
+    const bt = backgroundTaskDisplayTime(b);
+    if (bt !== at) return bt - at;
+    return a.id.localeCompare(b.id);
+  });
 }
 
 function hasActivitySnapshot(message: Partial<ChatMessage>): boolean {
@@ -1288,6 +1310,7 @@ export const __chatPageTestables = {
   resolveActivityDigestVisibility,
   shouldStartManualCompactActivity,
   shouldKeepTranscriptMessage,
+  sortBackgroundTasksForDisplay,
   toolTarget,
 };
 
@@ -8456,7 +8479,7 @@ export default function ChatPage() {
             ),
         )
       : items;
-    return deduped.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    return sortBackgroundTasksForDisplay(deduped);
   }, [subagents, tools, childSessions]);
   const runningBackgroundTasks = useMemo(
     () => backgroundTasks.filter((task) => task.status === "running").length,
@@ -8904,6 +8927,7 @@ export default function ChatPage() {
                       return (
                         <SubagentResultCard
                           key={message.id}
+                          createdAt={message.createdAt}
                           status={sub.status}
                           goal={sub.goal}
                           summary={sub.summary}
