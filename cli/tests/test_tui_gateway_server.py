@@ -473,16 +473,15 @@ def test_config_set_personality_resets_history_and_returns_info(monkeypatch):
     assert ("session.info", "sid", {"model": "x"}) in emits
 
 
-def test_direct_compress_persists_and_emits_pill(monkeypatch):
+def test_direct_compress_keeps_append_only_transcript_and_emits_pill(monkeypatch):
     """Manual /compress must (1) emit the 'Compacting context' pill before the
-    blocking summary and 'Session compacted' after, and (2) PERSIST the history.
+    blocking summary and 'Session compacted' after, and (2) not duplicate rows.
 
     Compaction redesign: _compress_context no longer ROTATES — the transcript is
     append-only and compaction lives in the payload cursor + metadata. So the
     session id is STABLE, session_key never swaps, and the in-memory history is
     the (unchanged) transcript. The pill rides the status.update channel."""
     original = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-    persisted = []
 
     agent = types.SimpleNamespace(
         compression_enabled=True,
@@ -491,7 +490,9 @@ def test_direct_compress_persists_and_emits_pill(monkeypatch):
         # New compress_context returns the SAME transcript unchanged (the cut +
         # summary are persisted as metadata, not assembled into the list).
         _compress_context=lambda hist, *a, **k: (hist, "sys"),
-        _persist_session=lambda msgs, hist: persisted.append(list(msgs)),
+        _persist_session=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("manual compact must not re-persist transcript rows")
+        ),
     )
     session = _session(agent=agent, session_key="old-session")
     session["history"] = list(original)
@@ -510,8 +511,7 @@ def test_direct_compress_persists_and_emits_pill(monkeypatch):
     finally:
         server._sessions.pop("dsid", None)
 
-    # The (unchanged) transcript was persisted; session_key did NOT rotate.
-    assert persisted == [original]
+    # The transcript stays unchanged in memory; session_key did NOT rotate.
     assert session["history"] == original
     assert session["session_key"] == "old-session"
     # Pill on before, off after — on the status.update channel the client reads.

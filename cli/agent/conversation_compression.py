@@ -487,6 +487,16 @@ def compress_context(
             agent._compression_feasibility_checked = True
 
     _pre_msg_count = len(messages)
+    _cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+    logger.info(
+        "compaction.started reason=%s session=%s "
+        "messages=%d tokens=~%s cursor_before=%d",
+        "critical_compact" if force else "full_compact",
+        agent.session_id or "none",
+        _pre_msg_count,
+        f"{approx_tokens:,}" if approx_tokens else "unknown",
+        _cursor_before,
+    )
     logger.info(
         "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
         agent.session_id or "none", _pre_msg_count,
@@ -494,9 +504,7 @@ def compress_context(
         focus_topic,
     )
     try:
-        agent._emit_status(
-            "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
-        )
+        agent._emit_status("Working through earlier context so I can continue...")
     except Exception:
         pass  # a flaky status sink must never abort the compaction itself
 
@@ -512,8 +520,8 @@ def compress_context(
     # seconds (observed ~112s on a 252K-token session) with nothing streaming.
     # During that window this thread (a) calls _touch_activity every interval to
     # reset the gateway inactivity-kill watchdog, and (b) re-emits a status frame
-    # so the "Compacting context" pill stays visible and (where the throttle
-    # allows) ticks elapsed time, instead of the chat looking hung / the thinking
+    # so the status pill stays visible and (where the throttle allows) ticks
+    # elapsed time, instead of the chat looking hung / the thinking
     # indicator vanishing.
     # NOTE: this is NOT what keeps the WebSocket open. uvicorn already pings every
     # ~20s (ws_ping_interval default), so the socket survives a silent compaction
@@ -537,12 +545,12 @@ def compress_context(
         while not _ka_stop.wait(_ka_interval):
             _elapsed = int(time.monotonic() - _ka_start)
             try:
-                agent._touch_activity(f"compacting context ({_elapsed}s elapsed)")
+                agent._touch_activity(f"working through earlier context ({_elapsed}s elapsed)")
             except Exception:
                 pass
             try:
                 agent._emit_status(
-                    f"🗜️ Compacting context — still summarizing ({_elapsed}s elapsed)…"
+                    f"Still summarizing earlier context ({_elapsed}s elapsed)..."
                 )
             except Exception:
                 pass
@@ -556,7 +564,7 @@ def compress_context(
     # messages[prev_cursor:compacted_idx], fold the prior summary in iteratively,
     # and persist BOTH as session metadata. messages_for_api injects the summary
     # and skips the compacted head only when the API payload is built.
-    _prev_cursor = int(getattr(agent, "compaction_cursor", 0) or 0)
+    _prev_cursor = _cursor_before
     _prev_summary = getattr(agent, "compaction_summary", None)
     try:
         summary_text, compacted_idx = agent.context_compressor.summarize_to_cursor(

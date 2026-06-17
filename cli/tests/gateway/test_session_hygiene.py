@@ -401,6 +401,211 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
 
 
 @pytest.mark.asyncio
+async def test_session_hygiene_defers_normal_token_pressure_to_agent(
+    monkeypatch,
+    tmp_path,
+):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class FakeCompressAgent:
+        last_instance = None
+
+        def __init__(self, **_kwargs):
+            type(self).last_instance = self
+            raise AssertionError("ordinary token pressure should not run hygiene")
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeCompressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    adapter = HygieneCaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="agent:main:telegram:dm:8404672468:agent:executive-assistant",
+        session_id="sess-normal-pressure",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        last_prompt_tokens=90_000,
+    )
+    runner.session_store.load_transcript.return_value = _make_history(
+        6,
+        content_size=20,
+    )
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_model_overrides = {}
+    runner._session_db = MagicMock()
+    runner._session_db.get_session.return_value = {}
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 90_500,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_elevate_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100_000,
+    )
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="8404672468",
+            chat_type="dm",
+            user_id="8404672468",
+            agent_id="executive-assistant",
+        ),
+        message_id="1",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "ok"
+    assert FakeCompressAgent.last_instance is None
+    runner.session_store.rewrite_transcript.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("session_id", "history", "last_prompt_tokens", "context_length"),
+    [
+        ("sess-critical-pressure", _make_history(6, content_size=20), 96_000, 100_000),
+        ("sess-legacy-raw", _make_history(450, content_size=10), 0, 100_000),
+    ],
+)
+async def test_session_hygiene_runs_gateway_recovery_for_critical_or_legacy(
+    monkeypatch,
+    tmp_path,
+    session_id,
+    history,
+    last_prompt_tokens,
+    context_length,
+):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    class FakeCompressAgent:
+        last_instance = None
+        last_kwargs = None
+
+        def __init__(self, **kwargs):
+            self.session_id = kwargs.get("session_id", "fake-session")
+            self.compaction_cursor = 0
+            self.compaction_summary = None
+            self.context_compressor = SimpleNamespace(_last_compress_aborted=False)
+            self._print_fn = None
+            self.shutdown_memory_provider = MagicMock()
+            self.close = MagicMock()
+            type(self).last_instance = self
+            type(self).last_kwargs = kwargs
+
+        def _compress_context(self, messages, *_args, **_kwargs):
+            return (list(messages), None)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeCompressAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    gateway_run = importlib.import_module("gateway.run")
+    GatewayRunner = gateway_run.GatewayRunner
+
+    adapter = HygieneCaptureAdapter()
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="agent:main:telegram:dm:8404672468:agent:executive-assistant",
+        session_id=session_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        last_prompt_tokens=last_prompt_tokens,
+    )
+    runner.session_store.load_transcript.return_value = history
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_model_overrides = {}
+    runner._session_db = MagicMock()
+    runner._session_db.get_session.return_value = {}
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+
+    monkeypatch.setattr(gateway_run, "_elevate_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: context_length,
+    )
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="8404672468",
+            chat_type="dm",
+            user_id="8404672468",
+            agent_id="executive-assistant",
+        ),
+        message_id="1",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "ok"
+    assert FakeCompressAgent.last_instance is not None
+    assert FakeCompressAgent.last_kwargs["session_db"] is runner._session_db
+    FakeCompressAgent.last_instance.shutdown_memory_provider.assert_called_once()
+    FakeCompressAgent.last_instance.close.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_session_hygiene_skips_message_count_for_cursor_compacted_session(
     monkeypatch,
     tmp_path,
@@ -439,7 +644,9 @@ async def test_session_hygiene_skips_message_count_for_cursor_compacted_session(
         updated_at=datetime.now(),
         platform=Platform.TELEGRAM,
         chat_type="dm",
-        last_prompt_tokens=35_000,
+        # This may be stale/full-transcript after resume. Cursor metadata should
+        # force gateway hygiene to estimate summary+tail instead.
+        last_prompt_tokens=99_000,
     )
     runner.session_store.load_transcript.return_value = _make_history(
         450,

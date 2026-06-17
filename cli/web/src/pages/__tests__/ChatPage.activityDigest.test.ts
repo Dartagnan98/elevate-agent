@@ -161,17 +161,15 @@ describe("ChatActivityDigest reasoning persistence", () => {
 });
 
 describe("manual /compact activity", () => {
-  it("starts the automatic-style activity row for idle manual compact commands", () => {
+  it("recognizes manual compact commands without starting activity locally", () => {
     expect(__chatPageTestables.isCompactSlashCommand("/compact")).toBe(true);
     expect(__chatPageTestables.isCompactSlashCommand("/compact summarize old lead work")).toBe(true);
     expect(__chatPageTestables.isCompactSlashCommand("/compactview")).toBe(false);
-
-    expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", false)).toBe(true);
-    expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", true)).toBe(false);
   });
 
   it("clears stale context usage only when compaction starts", () => {
     expect(__chatPageTestables.shouldClearUsageForStatus("Compacting context")).toBe(true);
+    expect(__chatPageTestables.shouldClearUsageForStatus("Working through earlier context")).toBe(true);
     expect(__chatPageTestables.shouldClearUsageForStatus("Session compacted")).toBe(false);
   });
 });

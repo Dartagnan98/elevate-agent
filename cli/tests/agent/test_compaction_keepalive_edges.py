@@ -82,13 +82,13 @@ class _FakeAgent:
 
 
 def _beats(agent):
-    return [m for m in agent.status_emits if "still summarizing" in m]
+    return [m for m in agent.status_emits if "still summarizing" in m.lower()]
 
 
 def _touch_beats(agent):
     # The initial _emit_status doesn't call _touch_activity; every heartbeat
     # loop does. So activity_touches are 1:1 with heartbeat iterations.
-    return [d for d in agent.activity_touches if "compacting context" in d]
+    return [d for d in agent.activity_touches if "working through earlier context" in d]
 
 
 # (a) cadence: ~0.7s block at a 0.2s interval -> at least 2-3 beats.

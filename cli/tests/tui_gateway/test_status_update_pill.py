@@ -109,8 +109,10 @@ def test_compress_slash_routes_pill_through_status_update(server):
     assert "_emit('status'" not in src
 
     # Both pill texts are emitted via _status_update.
-    assert '_status_update(sid, "compacting_context", "Compacting context")' in src
-    assert '_status_update(sid, "session_compacted", "Session compacted")' in src
+    assert '"compacting_context"' in src
+    assert '"Compacting context"' in src
+    assert '"session_compacted"' in src
+    assert '"Session compacted"' in src
 
     # _status_update is actually used (sanity vs. the grep above being vacuous).
     assert "_status_update(" in src
@@ -214,6 +216,8 @@ def test_run_direct_compress_slash_emits_pill_on_status_update_channel(server, m
     texts = [p["text"] for p in status_payloads]
     assert "Compacting context" in texts
     assert "Session compacted" in texts
+    assert all(p.get("reason") == "manual_compact" for p in status_payloads)
+    assert all(p.get("source") == "manual" for p in status_payloads)
     # "Compacting context" (setCompacting true) must precede the release.
     assert texts.index("Compacting context") < texts.index("Session compacted")
 

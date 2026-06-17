@@ -620,14 +620,18 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
 
 
-def _status_update(sid: str, kind: str, text: str | None = None):
+def _status_update(sid: str, kind: str, text: str | None = None, **extra):
     body = (text if text is not None else kind).strip()
     if not body:
         return
+    payload = {"kind": kind if text is not None else "status", "text": body}
+    for key, value in extra.items():
+        if value is not None:
+            payload[key] = value
     _emit(
         "status.update",
         sid,
-        {"kind": kind if text is not None else "status", "text": body},
+        payload,
     )
 
 
@@ -6355,7 +6359,13 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         # Emit on the status.update channel the frontend actually subscribes to
         # (it has no gw.on("status") listener). Text "Compacting context" maps to
         # setCompacting(true); "Session compacted" below maps to setCompacting(false).
-        _status_update(sid, "compacting_context", "Compacting context")
+        _status_update(
+            sid,
+            "compacting_context",
+            "Compacting context",
+            reason="manual_compact",
+            source="manual",
+        )
         try:
             compressed, _ = agent._compress_context(
                 original_history,
@@ -6364,24 +6374,21 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
                 focus_topic=focus_topic or None,
             )
         except Exception:
-            _status_update(sid, "session_compacted", "Session compacted")  # release the pill
+            _status_update(
+                sid,
+                "session_compacted",
+                "Session compacted",
+                reason="manual_compact",
+                source="manual",
+            )  # release the pill
             raise
         cursor_after = int(getattr(agent, "compaction_cursor", 0) or 0)
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
 
-        # Compaction redesign: _compress_context no longer ROTATES — the
-        # transcript is append-only and compaction is stored as session metadata
-        # (cursor + summary) by update_compaction inside _compress_context. The
-        # session id is stable, so the old rotation-compensation here (force-flush
-        # into a fresh empty tip + session-key swap + session.identity emit +
-        # slash-worker restart) is gone. A defensive _persist_session keeps any
-        # genuinely new rows durable; it writes nothing when the transcript was
-        # already flushed by the prior turn.
-        try:
-            agent._persist_session(compressed, None)
-        except Exception:
-            logger.exception("manual /compress: failed to persist compressed history")
+        # Cursor compaction persists cursor + summary inside _compress_context.
+        # The transcript remains append-only; re-persisting it here would append
+        # duplicate SQLite rows for messages that were already flushed.
 
         new_tokens = _estimate_compaction_request_tokens(agent, compressed)
         summary = summarize_manual_compression(
@@ -6394,7 +6401,13 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         )
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).
-    _status_update(sid, "session_compacted", "Session compacted")
+    _status_update(
+        sid,
+        "session_compacted",
+        "Session compacted",
+        reason="manual_compact",
+        source="manual",
+    )
     _emit("session.info", sid, _session_info(agent))
     icon = "🗜️" if summary["noop"] else "✅"
     lines = [

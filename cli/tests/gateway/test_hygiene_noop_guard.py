@@ -64,6 +64,12 @@ def test_token_triggered_compression_not_false_skipped():
     assert g["s"] == 100  # preserved
 
 
+def test_critical_pressure_not_false_skipped():
+    g = {"s": 100}
+    assert _skip(g, "s", 100, reason="critical_pressure") is False
+    assert g["s"] == 100  # preserved
+
+
 def test_record_ineffective_then_effective_clears():
     g = {}
     _hygiene_record(g, "s", msg_count=100, ineffective=True)

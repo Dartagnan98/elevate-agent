@@ -13913,15 +13913,39 @@ class AIAgent:
                         self.compression_enabled
                         and _should_critical_compress_now(_real_tokens, _crit_window)
                     )
+                    _compaction_source = (
+                        "real_count_projection"
+                        if _real_mode
+                        else "effective_estimate"
+                    )
 
                     if self.compression_enabled and (
                         _critical_compact
                         or _should_compress_now(_compressor, _real_tokens, _trigger_tokens)
                     ):
-                        self._safe_print(
-                            "  ⟳ compacting context (critical)…"
+                        _compaction_reason = (
+                            "critical_compact"
                             if _critical_compact
-                            else "  ⟳ compacting context…"
+                            else "full_compact"
+                        )
+                        logger.info(
+                            "compaction.decision reason=%s source=%s session=%s "
+                            "raw_messages=%d effective_messages=%d tokens_before=%s "
+                            "threshold_tokens=%s context_limit=%s cursor_before=%s",
+                            _compaction_reason,
+                            _compaction_source,
+                            self.session_id or "none",
+                            len(messages),
+                            len(_pressure_fallback_messages),
+                            _real_tokens,
+                            _trigger_tokens,
+                            _crit_window,
+                            int(getattr(self, "compaction_cursor", 0) or 0),
+                        )
+                        self._safe_print(
+                            "  ⟳ recovering context…"
+                            if _critical_compact
+                            else "  ⟳ working through earlier context…"
                         )
                         logger.info(
                             "Compaction trigger: ~%s tokens >= %s line (%s mode, "
@@ -13953,11 +13977,31 @@ class AIAgent:
                         # needed. No session rotation — message contents are
                         # rewritten in place; the session DB keeps the full-
                         # fidelity originals.
+                        logger.info(
+                            "compaction.decision reason=prune source=%s session=%s "
+                            "raw_messages=%d effective_messages=%d tokens_before=%s "
+                            "threshold_tokens=%s context_limit=%s cursor_before=%s",
+                            _compaction_source,
+                            self.session_id or "none",
+                            len(messages),
+                            len(_pressure_fallback_messages),
+                            _real_tokens,
+                            _trigger_tokens,
+                            _crit_window,
+                            int(getattr(self, "compaction_cursor", 0) or 0),
+                        )
                         messages, _pruned = _compressor.prune_only(
                             messages, current_tokens=_real_tokens,
                         )
                         if _pruned:
-                            self._safe_print("  ⟳ pruned stale context (no summary)")
+                            logger.info(
+                                "compaction.completed reason=prune source=%s session=%s "
+                                "tokens_before=%s threshold_tokens=%s note=no_summary",
+                                _compaction_source,
+                                self.session_id or "none",
+                                _real_tokens,
+                                _trigger_tokens,
+                            )
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages

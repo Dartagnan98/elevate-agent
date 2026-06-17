@@ -64,7 +64,7 @@ def test_keepalive_fires_while_compress_blocks_and_stops_after(monkeypatch):
     with pytest.raises(RuntimeError):
         compress_context(agent, [{"role": "user", "content": "hi"}], "sys")
 
-    beats = [m for m in agent.status_emits if "still summarizing" in m]
+    beats = [m for m in agent.status_emits if "still summarizing" in m.lower()]
     assert len(beats) >= 2, agent.status_emits
     assert len(agent.activity_touches) >= 2, agent.activity_touches
 

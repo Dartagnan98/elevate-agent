@@ -1281,7 +1281,6 @@ export const __chatPageTestables = {
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
   shouldClearUsageForStatus,
-  shouldStartManualCompactActivity,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   toolTarget,
@@ -2823,12 +2822,8 @@ function isCompactSlashCommand(text: string): boolean {
   return /^\/+compact(?:\s|$)/i.test(text.trim());
 }
 
-function shouldStartManualCompactActivity(text: string, busy: boolean): boolean {
-  return isCompactSlashCommand(text) && !busy;
-}
-
 function shouldClearUsageForStatus(text: string): boolean {
-  return /compacting context/i.test(text);
+  return /compacting context|working through earlier context/i.test(text);
 }
 
 function isOpenPreviewIntent(text: string): boolean {
@@ -3405,6 +3400,8 @@ export default function ChatPage() {
   // (delta/thinking/tool) and a !busy safety net below.
   const [compacting, setCompacting] = useState(false);
   const manualCompactAssistantRef = useRef<string | null>(null);
+  const manualCompactRequestInFlightRef = useRef(false);
+  const manualCompactCompletedByStatusRef = useRef(false);
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
@@ -3621,6 +3618,16 @@ export default function ChatPage() {
     (text: string) => {
       const messageId = manualCompactAssistantRef.current;
       const completedAt = Date.now();
+      if (!messageId && manualCompactCompletedByStatusRef.current) {
+        manualCompactCompletedByStatusRef.current = false;
+        manualCompactRequestInFlightRef.current = false;
+        setTools([]);
+        setActivityTrace([]);
+        setBusy(false);
+        setCompacting(false);
+        setStatusText("Ready");
+        return;
+      }
       if (messageId) {
         const traces = activityTraceRef.current
           .filter((trace) => !trace.messageId || trace.messageId === messageId)
@@ -3643,6 +3650,7 @@ export default function ChatPage() {
       }
       if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
       manualCompactAssistantRef.current = null;
+      manualCompactRequestInFlightRef.current = false;
       setTools([]);
       setActivityTrace([]);
       setBusy(false);
@@ -3660,6 +3668,8 @@ export default function ChatPage() {
       }
       if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
       manualCompactAssistantRef.current = null;
+      manualCompactRequestInFlightRef.current = false;
+      manualCompactCompletedByStatusRef.current = false;
       setTools([]);
       setActivityTrace([]);
       setBusy(false);
@@ -5434,6 +5444,11 @@ export default function ChatPage() {
         const text = eventString(ev, "text");
         if (text) {
           const at = eventMillis(ev);
+          const payload = compactToolPayload(ev.payload);
+          const reason = typeof payload.reason === "string" ? payload.reason : "";
+          const source = typeof payload.source === "string" ? payload.source : "";
+          const manualCompactStatus =
+            reason === "manual_compact" || source === "manual";
           setStatusText(displayStatusText(text));
           addActivityTrace("status", text, at);
           // Compaction is the one status that maps to a long blocking stall.
@@ -5443,9 +5458,16 @@ export default function ChatPage() {
           if (shouldClearUsageForStatus(text)) {
             setCompacting(true);
             setUsage(null);
-          }
-          else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
-            if (manualCompactAssistantRef.current) {
+            if (manualCompactStatus && manualCompactRequestInFlightRef.current) {
+              const messageId = ensureAssistant(at);
+              manualCompactAssistantRef.current = messageId;
+              setBusy(true);
+            }
+          } else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
+            if (manualCompactStatus && manualCompactAssistantRef.current) {
+              manualCompactCompletedByStatusRef.current = true;
+              completeManualCompactAssistant("Finished compacting");
+            } else if (manualCompactAssistantRef.current) {
               setStatusText("Finished compacting");
             } else {
               setCompacting(false);
@@ -6259,6 +6281,7 @@ export default function ChatPage() {
     appendMessage,
     autoResumeDecided,
     clearPendingAssistantDelta,
+    completeManualCompactAssistant,
     enqueueAssistantDelta,
     ensureAssistant,
     flushAssistantDelta,
@@ -7445,40 +7468,38 @@ export default function ChatPage() {
           setStatusText("Connecting...");
           return;
         }
-        const manualCompact = shouldStartManualCompactActivity(trimmed, busy);
-        let manualCompactAssistantId: string | null = null;
-        let slashUserMessageId = "";
+        const manualCompact = isCompactSlashCommand(trimmed);
+        const slashUserMessageId = appendMessage("user", trimmed);
         if (manualCompact) {
-          flushSync(() => {
-            slashUserMessageId = appendMessage("user", trimmed);
-            setTools([]);
-            setActivityTrace([]);
-            manualCompactAssistantId = ensureAssistant();
-            manualCompactAssistantRef.current = manualCompactAssistantId;
-            setBusy(true);
-            setCompacting(true);
-            setStatusText("Compacting context");
-          });
-          await afterNextPaint();
-        } else {
-          slashUserMessageId = appendMessage("user", trimmed);
+          manualCompactCompletedByStatusRef.current = false;
+          manualCompactRequestInFlightRef.current = true;
         }
-        const slashResult = await executeSlash({
-          callbacks: {
-            compactDone: (body) => completeManualCompactAssistant(body),
-            compactFailed: (body) => cancelManualCompactAssistant(body),
-            send: submitPrompt,
-            sendSkill: submitSkillInvocation,
-            sys: (body) =>
-              manualCompactAssistantId
-                ? cancelManualCompactAssistant(body)
-                : appendMessage("system", body),
-          },
-          command: trimmed,
-          gw,
-          sessionId: targetSessionId,
-        });
+        let slashResult: Awaited<ReturnType<typeof executeSlash>>;
+        try {
+          slashResult = await executeSlash({
+            callbacks: {
+              compactDone: (body) => completeManualCompactAssistant(body),
+              compactFailed: (body) => cancelManualCompactAssistant(body),
+              send: submitPrompt,
+              sendSkill: submitSkillInvocation,
+              sys: (body) =>
+                manualCompact && manualCompactAssistantRef.current
+                  ? cancelManualCompactAssistant(body)
+                  : appendMessage("system", body),
+            },
+            command: trimmed,
+            gw,
+            sessionId: targetSessionId,
+          });
+        } finally {
+          if (manualCompact) {
+            manualCompactRequestInFlightRef.current = false;
+          }
+        }
         if (slashResult === "transport-error") {
+          const manualCompactAssistantId = manualCompact
+            ? manualCompactAssistantRef.current
+            : null;
           setMessages((prev) =>
             prev.filter(
               (message) =>
