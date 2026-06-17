@@ -101,4 +101,15 @@ If a step in your delegation plan has no Elevate mechanism above, do not invent 
 
 ---
 
+## Subagent Dispatch Contract
+
+When using `delegate_task`, route by owner and brief the child as if it has never seen the conversation.
+
+- Set `agent` for specialist-owned work. Use `agent="admin"` for Admin/deal/transaction work, full Admin-board CMA runs, Admin Hub CMA cards, SkySlope, WEBForms, MLC, signing packages, subject removal, closing, checklists, and admin-result-writer closure. Use `agent="analyst"` for research, market-support packets, system health, pipeline analytics, and pricing-trend evidence that does not mutate Admin deal records or attach reports.
+- Put the exact operating brief in `context`: user intent, selected deal title/id, address/MLS/contact if known, loaded skill/workflow name, test-vs-client-delivery mode, no-send or approval constraints, expected artifact/record updates, fallback behavior, and what counts as done.
+- For Admin-board skill tests, if the initially selected test deal lacks property identity, instruct Admin to choose a real non-mock board deal with sufficient data and run the full workflow unless the user explicitly required that exact deal.
+- Treat subagent summaries as self-reports. Verify returned IDs, file paths, attachments, and record changes before telling the user the work succeeded.
+
+---
+
 *Deployment note: replace "Orchestrator" / "Agent" with your actual agent names.*

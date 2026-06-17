@@ -3300,6 +3300,17 @@ def _build_top_level_description() -> str:
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
         "- Parallel independent workstreams (research A and B simultaneously)\n\n"
+        "ELEVATE SPECIALIST ROUTING:\n"
+        "- For work that belongs to a fleet specialist, set 'agent' instead of "
+        "making a generic toolset-scoped helper. The named specialist gets its "
+        "persona, full loadout, and skills.\n"
+        "- Use agent='admin' for Admin/deal/transaction work, full CMA or Market "
+        "Evaluation runs tied to Admin deals, Admin Hub CMA cards, report "
+        "attachments, SkySlope, WEBForms, MLC, signing packages, subject removal, "
+        "closing, checklists, or admin-result-writer closure.\n"
+        "- Use agent='analyst' only for research, market support packets, system "
+        "health, pipeline analytics, and pricing-trend evidence that does not "
+        "mutate Admin deal records or attach reports.\n\n"
         "WHEN NOT TO USE (use these instead):\n"
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
@@ -3320,6 +3331,14 @@ def _build_top_level_description() -> str:
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
+        "- For operational workflows, context must include the exact user intent, "
+        "selected record/deal IDs, address/MLS/contact when available, loaded "
+        "skill or workflow name, test-vs-delivery mode, approval/no-send "
+        "constraints, fallback behavior, expected artifacts/record updates, and "
+        "what counts as done. If the user asks to test a full Admin-board skill "
+        "and the initially selected deal lacks property identity, tell the Admin "
+        "specialist to choose a real non-mock board deal with sufficient data "
+        "unless the user explicitly required that exact deal.\n"
         "- If the user is writing in a non-English language, or asked for "
         "output in a specific language / tone / style, say so in 'context' "
         "(e.g. \"respond in Chinese\", \"return output in Japanese\"). "
@@ -3439,9 +3458,11 @@ DELEGATE_TASK_SCHEMA = {
             "goal": {
                 "type": "string",
                 "description": (
-                    "What the subagent should accomplish. Be specific and "
-                    "self-contained -- the subagent knows nothing about your "
-                    "conversation history."
+                    "What the subagent should accomplish. Be specific, operational, "
+                    "and self-contained -- the subagent knows nothing about your "
+                    "conversation history. Include the workflow to run, target "
+                    "record/deal ID or file path when known, fallback behavior, "
+                    "expected artifacts or record updates, and done criteria."
                 ),
             },
             "cancel_task_id": {
@@ -3460,8 +3481,11 @@ DELEGATE_TASK_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Background information the subagent needs: file paths, "
-                    "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
+                    "error messages, project structure, constraints, selected "
+                    "deal/title/id/address/MLS/contact, loaded skill names, "
+                    "test-vs-delivery mode, approval/no-send constraints, and "
+                    "fallback instructions. The more specific you are, the better "
+                    "the subagent performs."
                 ),
             },
             "toolsets": {
@@ -3481,11 +3505,15 @@ DELEGATE_TASK_SCHEMA = {
                 "description": (
                     "Run the subagent AS a specialist from your fleet — it gets "
                     "that agent's persona, full tool loadout, and skills "
-                    "(overrides 'toolsets'). Use this to hand real work to the "
-                    "right specialist instead of a generic helper. Examples: "
-                    "'admin' (deal / transaction coordination — has admin_deal), "
+                    "(overrides 'toolsets'). Required for real specialist-owned "
+                    "work; do not omit it and fall back to a generic helper when "
+                    "the work has an owner. Examples: "
+                    "'admin' (deal / transaction coordination, full Admin-board "
+                    "CMA runs, SkySlope, WEBForms, MLC, signing, subject removal, "
+                    "closing, admin_deal/admin-result-writer), "
                     "'outreach' (lead response + status — has lead_status), "
-                    "'analyst', 'marketing', 'social-media'. Omit for a generic "
+                    "'analyst' (research/system/pipeline support only), "
+                    "'marketing', 'social-media'. Omit only for a truly generic "
                     "subagent scoped by 'toolsets'."
                 ),
             },
@@ -3494,10 +3522,21 @@ DELEGATE_TASK_SCHEMA = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "goal": {"type": "string", "description": "Task goal"},
+                        "goal": {
+                            "type": "string",
+                            "description": (
+                                "Task goal. Must be self-contained with workflow, "
+                                "target record/file, fallback behavior, artifacts, "
+                                "and done criteria."
+                            ),
+                        },
                         "context": {
                             "type": "string",
-                            "description": "Task-specific context",
+                            "description": (
+                                "Task-specific context: IDs, files, selected deal, "
+                                "skill names, constraints, approval/no-send mode, "
+                                "and fallback instructions."
+                            ),
                         },
                         "toolsets": {
                             "type": "array",
@@ -3524,7 +3563,7 @@ DELEGATE_TASK_SCHEMA = {
                         },
                         "agent": {
                             "type": "string",
-                            "description": "Run THIS task as a fleet specialist (persona + full loadout + skills). See top-level 'agent'. e.g. 'admin', 'outreach', 'analyst'.",
+                            "description": "Run THIS task as a fleet specialist (persona + full loadout + skills). Use 'admin' for Admin/deal/full Admin-board CMA/SkySlope/WEBForms work; 'analyst' only for research/system/pipeline support.",
                         },
                     },
                     "required": ["goal"],

@@ -148,6 +148,37 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn(f"up to {_get_max_concurrent_children()}", fn["description"])
         self.assertIn(f"max_spawn_depth={_get_max_spawn_depth()}", fn["description"])
 
+    def test_schema_promotes_specialist_agent_for_admin_work(self):
+        """The model-facing schema should steer Admin workflows to agent='admin'.
+
+        Regression: a full Admin-board CMA test was delegated to Analyst with a
+        weak "report whether it can recover context" brief. The tool schema must
+        explicitly route full Admin/CMA/SkySlope/WEBForms work to Admin and
+        require a self-contained brief.
+        """
+        from tools.delegate_tool import _build_dynamic_schema_overrides
+
+        overrides = _build_dynamic_schema_overrides()
+        desc = overrides["description"]
+        props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]
+
+        self.assertIn("agent='admin'", desc)
+        self.assertIn("full CMA", desc)
+        self.assertIn("SkySlope", desc)
+        self.assertIn("WEBForms", desc)
+        self.assertIn("real non-mock board deal", desc)
+
+        goal_desc = props["goal"]["description"]
+        context_desc = props["context"]["description"]
+        agent_desc = props["agent"]["description"]
+
+        self.assertIn("record/deal ID", goal_desc)
+        self.assertIn("fallback behavior", goal_desc)
+        self.assertIn("selected deal", context_desc)
+        self.assertIn("loaded skill names", context_desc)
+        self.assertIn("full Admin-board CMA", agent_desc)
+        self.assertIn("admin-result-writer", agent_desc)
+
 
 class TestChildSystemPrompt(unittest.TestCase):
     def test_goal_only(self):
