@@ -55,6 +55,7 @@ def _make_mock_parent(depth=0):
     parent._print_fn = None
     parent.tool_progress_callback = None
     parent.thinking_callback = None
+    parent.clarify_callback = None
     # A bare MagicMock auto-vivifies _async_delegate_sink as a *callable*
     # attribute, which would route every test through the non-blocking async
     # path (returns {status:"dispatched"} instead of {results:[...]}). Real
@@ -468,6 +469,93 @@ class TestDelegateTask(unittest.TestCase):
         self.assertTrue(callable(mock_child.thinking_callback))
         mock_child.thinking_callback("deliberating...")
         parent.tool_progress_callback.assert_not_called()
+
+
+class TestInstalledAgentParity(unittest.TestCase):
+    @patch("gateway.agent_lanes.agent_lane_prompt", return_value="ADMIN PERSONA")
+    @patch("elevate_cli.agent_hub.get_agent_def")
+    def test_named_installed_agent_keeps_configured_loadout_and_policy(
+        self, mock_get_agent_def, mock_lane_prompt
+    ):
+        parent = _make_mock_parent(depth=0)
+        clarify_cb = object()
+        parent.clarify_callback = clarify_cb
+        mock_get_agent_def.return_value = {
+            "id": "admin",
+            "name": "Admin",
+            "enabled": True,
+            "toolsets": [
+                "admin_deal",
+                "delegation",
+                "memory",
+                "skills",
+                "clarify",
+                "code_execution",
+            ],
+        }
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Run the Admin workflow",
+                context="Use deal B11",
+                toolsets=["terminal"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                agent="admin",
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertEqual(kwargs["agent_id"], "admin")
+        self.assertEqual(
+            kwargs["enabled_toolsets"],
+            [
+                "admin_deal",
+                "delegation",
+                "memory",
+                "skills",
+                "clarify",
+                "code_execution",
+            ],
+        )
+        self.assertFalse(kwargs["skip_context_files"])
+        self.assertFalse(kwargs["skip_memory"])
+        self.assertIs(kwargs["clarify_callback"], clarify_cb)
+        self.assertIn("ADMIN PERSONA", kwargs["ephemeral_system_prompt"])
+        self.assertIn("INSTALLED AGENT MODE", kwargs["ephemeral_system_prompt"])
+        self.assertNotIn("HANDOFF RULE", kwargs["ephemeral_system_prompt"])
+
+    def test_generic_child_stays_restricted(self):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["terminal", "file", "delegation", "memory"]
+        parent.clarify_callback = object()
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            MockAgent.return_value = mock_child
+
+            _build_child_agent(
+                task_index=0,
+                goal="Generic helper task",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        kwargs = MockAgent.call_args[1]
+        self.assertNotIn("delegation", kwargs["enabled_toolsets"])
+        self.assertTrue(kwargs["skip_context_files"])
+        self.assertTrue(kwargs["skip_memory"])
+        self.assertIsNone(kwargs["clarify_callback"])
+        self.assertIn("HANDOFF RULE", kwargs["ephemeral_system_prompt"])
 
 
 class TestToolNamePreservation(unittest.TestCase):

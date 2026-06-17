@@ -889,6 +889,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    installed_agent: bool = False,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -938,7 +939,16 @@ def _build_child_system_prompt(
         "Be thorough but concise -- your response is returned to the "
         "parent agent as a summary."
     )
-    if role != "orchestrator":
+    if installed_agent:
+        parts.append(
+            "\nINSTALLED AGENT MODE: You are running as the configured installed "
+            "agent selected for this task. Use your normal configured tools, "
+            "skills, and memory/context behavior. If your configured tools allow "
+            "delegation, any further delegation is still bounded by the live "
+            f"max_spawn_depth={max_spawn_depth}, concurrency limits, and kill "
+            "switches."
+        )
+    elif role != "orchestrator":
         # Single-orchestrator model: leaves cannot spawn their own subagents.
         # Instead of getting stuck or half-doing another specialist's job, a
         # leaf finishes what it can and hands the rest back UP — the main agent
@@ -1327,9 +1337,10 @@ def _build_child_agent(
 
     if _spec_def and _spec_def.get("toolsets"):
         # The specialist's loadout is authoritative — its full hub toolsets,
-        # NOT intersected with the parent. This is the recognized exception to
-        # child ⊆ parent. Still strip globally-blocked tools.
-        child_toolsets = _strip_blocked_tools(list(_spec_def.get("toolsets") or []))
+        # NOT intersected with the parent and NOT stripped like a generic helper.
+        # `delegate_task(agent="admin")` must mean "run Admin as configured";
+        # depth/concurrency/kill-switch limits are enforced at execution time.
+        child_toolsets = list(_spec_def.get("toolsets") or [])
     elif toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
@@ -1348,20 +1359,18 @@ def _build_child_agent(
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
 
-    # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
-    # removed.  The re-add is unconditional on parent-toolset membership because
-    # orchestrator capability is granted by role, not inherited — see the
-    # test_intersection_preserves_delegation_bound test for the design rationale.
-    if effective_role == "orchestrator" and "delegation" not in child_toolsets:
-        child_toolsets.append("delegation")
-    else:
-        # SINGLE-ORCHESTRATOR: a leaf subagent must NEVER spawn its own
-        # subagent. Strip the delegation toolset even when a named specialist's
-        # loadout carries it (every hub agent now ships `delegation`), so the
-        # only delegation tool in the tree belongs to the main agent. A leaf
-        # that discovers more work returns it upward (see the prompt note) and
-        # the main agent spawns the next worker from there.
-        child_toolsets = [t for t in child_toolsets if t != "delegation"]
+    if not _spec_def:
+        # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
+        # removed.  The re-add is unconditional on parent-toolset membership because
+        # orchestrator capability is granted by role, not inherited — see the
+        # test_intersection_preserves_delegation_bound test for the design rationale.
+        if effective_role == "orchestrator" and "delegation" not in child_toolsets:
+            child_toolsets.append("delegation")
+        else:
+            # SINGLE-ORCHESTRATOR: a generic leaf subagent must not spawn its own
+            # subagent. Installed specialists keep their configured loadout and
+            # are bounded by delegate_task's runtime depth/kill-switch checks.
+            child_toolsets = [t for t in child_toolsets if t != "delegation"]
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
     child_prompt = _build_child_system_prompt(
@@ -1371,6 +1380,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        installed_agent=bool(_spec_def),
     )
     # Named-specialist: prepend the agent's lane persona so the child speaks and
     # acts as that specialist, not a generic subagent.
@@ -1564,9 +1574,11 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
-        skip_context_files=True,
-        skip_memory=True,
-        clarify_callback=None,
+        skip_context_files=not bool(_spec_def),
+        skip_memory=not bool(_spec_def),
+        clarify_callback=(
+            getattr(parent_agent, "clarify_callback", None) if _spec_def else None
+        ),
         thinking_callback=child_thinking_cb,
         reasoning_callback=child_reasoning_cb,
         session_db=getattr(parent_agent, "_session_db", None),
@@ -3314,7 +3326,9 @@ def _build_top_level_description() -> str:
         "WHEN NOT TO USE (use these instead):\n"
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
-        "- Tasks needing user interaction -> subagents cannot use clarify\n"
+        "- Tasks needing user interaction -> generic subagents cannot use "
+        "clarify; named installed agents keep their configured clarify/tool "
+        "behavior\n"
         "- Durable work that must survive an app restart / reboot -> use "
         "cronjob (action='create') or terminal(background=True, "
         "notify_on_complete=True) instead.\n\n"
@@ -3351,9 +3365,13 @@ def _build_top_level_description() -> str:
         "subagent to return a verifiable handle (URL, ID, absolute path, HTTP "
         "status) and verify it yourself — fetch the URL, stat the file, read "
         "back the content — before telling the user the operation succeeded.\n"
-        "- Leaf subagents (role='leaf', the default) CANNOT call: "
+        "- Generic leaf subagents (role='leaf', the default) CANNOT call: "
         "delegate_task, clarify, memory, send_message, execute_code.\n"
-        "- Orchestrator subagents (role='orchestrator') retain "
+        "- Named installed agents (agent='admin', agent='outreach', etc.) keep "
+        "their configured persona, toolsets, skills, memory/context policy, and "
+        "clarify behavior; runtime depth/concurrency/kill-switch limits still "
+        "apply.\n"
+        "- Generic orchestrator subagents (role='orchestrator') retain "
         "delegate_task so they can spawn their own workers, but still "
         "cannot use clarify, memory, send_message, or execute_code. "
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
