@@ -650,6 +650,10 @@ class ContextCompressor(ContextEngine):
             config_context_length=config_context_length,
             provider=provider,
         )
+        # The summary request may run on a smaller auxiliary model than the
+        # main conversation model.  AIAgent's feasibility check updates this
+        # when it can resolve the auxiliary context window.
+        self.summary_context_length = self.context_length
         # Floor: never compress below MINIMUM_CONTEXT_LENGTH tokens even if
         # the percentage would suggest a lower value.  This prevents premature
         # compression on large-context models at 50% while keeping the % sane
@@ -1168,6 +1172,71 @@ class ContextCompressor(ContextEngine):
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
+
+    def _estimate_summary_input_tokens(self, turns: List[Dict[str, Any]]) -> int:
+        """Roughly estimate the serialized turns sent to the summary model."""
+        if not turns:
+            return 0
+        return (len(self._serialize_for_summary(turns)) + 3) // _CHARS_PER_TOKEN
+
+    def _summary_input_token_budget(self) -> int:
+        """Return a conservative token budget for turns in a summary request."""
+        window = int(
+            getattr(self, "summary_context_length", 0)
+            or self.context_length
+            or MINIMUM_CONTEXT_LENGTH
+        )
+        output_budget = min(
+            int(self.max_summary_tokens * 1.3),
+            max(1000, int(window * 0.25)),
+        )
+        prompt_overhead = min(12_000, max(6_000, int(window * 0.12)))
+        budget = int(window * 0.75) - output_budget - prompt_overhead
+        if self.threshold_tokens > 0:
+            budget = min(budget, int(self.threshold_tokens * 0.80))
+        return max(4_000, budget)
+
+    def _cap_summary_window(
+        self,
+        messages: List[Dict[str, Any]],
+        start: int,
+        end: int,
+    ) -> int:
+        """Shrink ``end`` until the summarizer input fits its context budget."""
+        start = max(0, start)
+        end = min(max(start, end), len(messages))
+        if end <= start:
+            return end
+
+        budget = self._summary_input_token_budget()
+        turns = messages[start:end]
+        if self._estimate_summary_input_tokens(turns) <= budget:
+            return end
+
+        original_end = end
+        while end > start:
+            span = end - start
+            next_end = start + max(1, int(span * 0.75))
+            next_end = self._align_boundary_backward(messages, next_end)
+            if next_end <= start or next_end >= end:
+                next_end = start + 1
+            end = next_end
+            if self._estimate_summary_input_tokens(messages[start:end]) <= budget:
+                if not self.quiet_mode:
+                    logger.warning(
+                        "Compaction summary window capped: turns %d-%d -> %d-%d "
+                        "to fit auxiliary summary budget (~%d tokens)",
+                        start,
+                        original_end,
+                        start,
+                        end,
+                        budget,
+                    )
+                return end
+            if end == start + 1:
+                break
+
+        return max(start + 1, end)
 
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:
         """Switch from a separate ``summary_model`` back to the main model.
@@ -1990,6 +2059,10 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         # Region folded in this pass. First compaction (prev_cursor==0) summarizes
         # the whole pre-cursor span; re-compaction adds only the delta since the
         # last cursor to `previous_summary`.
+        compacted_idx = self._cap_summary_window(messages, prev_cursor, compacted_idx)
+        if compacted_idx <= prev_cursor:
+            return None, prev_cursor
+
         turns_to_summarize = messages[prev_cursor:compacted_idx]
         if not turns_to_summarize:
             return None, prev_cursor
@@ -2141,6 +2214,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     self._ineffective_compression_count,
                     self._consecutive_low_yield_compactions,
                 )
+            return messages
+
+        compress_end = self._cap_summary_window(messages, compress_start, compress_end)
+        if compress_start >= compress_end:
+            self._last_compression_savings_pct = 0.0
+            if _track_low_yield:
+                self._ineffective_compression_count += 1
+                self._consecutive_low_yield_compactions += 1
+                self._last_low_yield_tokens = _measured_trigger or display_tokens
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]

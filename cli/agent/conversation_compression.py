@@ -311,6 +311,8 @@ def check_compression_model_feasibility(agent: Any) -> None:
             provider=(_aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")),
             custom_providers=agent._custom_providers,
         )
+        if aux_context:
+            agent.context_compressor.summary_context_length = aux_context
 
         # Hard floor: the auxiliary compression model must have at least
         # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model

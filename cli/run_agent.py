@@ -2762,6 +2762,8 @@ class AIAgent:
                 api_key=aux_api_key,
                 config_context_length=getattr(self, "_aux_compression_context_length_config", None),
             )
+            if aux_context:
+                self.context_compressor.summary_context_length = aux_context
 
             # Hard floor: the auxiliary compression model must have at least
             # MINIMUM_CONTEXT_LENGTH (64K) tokens of context.  The main model

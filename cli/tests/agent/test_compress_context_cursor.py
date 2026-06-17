@@ -92,6 +92,14 @@ def _transcript(n):
     return out
 
 
+def _large_transcript(n):
+    out = []
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        out.append({"role": role, "content": f"message {i}\n" + ("x" * 10000)})
+    return out
+
+
 def test_transcript_untouched_metadata_persisted_no_rotation(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     compressor = _make_compressor()
@@ -181,3 +189,28 @@ def test_abort_freezes_no_cursor_no_metadata(tmp_path):
     assert row.get("compaction_summary") in (None, "")
     # Projector NOT invalidated on abort (payload didn't change).
     assert agent._usage_projector.invalidated == 0
+
+
+def test_cursor_summary_window_capped_before_llm_call():
+    compressor = _make_compressor()
+    compressor.context_length = 64000
+    compressor.summary_context_length = 64000
+    compressor.threshold_tokens = 64000
+    compressor.max_summary_tokens = 3200
+    compressor.tail_token_budget = 40
+    messages = _large_transcript(120)
+    seen = []
+
+    def fake_summary(turns, focus_topic=None):
+        seen.append((len(turns), compressor._estimate_summary_input_tokens(turns)))
+        return "## Active Task\nkeep going"
+
+    compressor._generate_summary = fake_summary
+
+    summary, cursor = compressor.summarize_to_cursor(messages)
+
+    assert summary
+    assert cursor > 0
+    assert cursor < 100
+    assert seen
+    assert seen[0][1] <= compressor._summary_input_token_budget()
