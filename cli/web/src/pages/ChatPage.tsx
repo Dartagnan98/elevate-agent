@@ -161,6 +161,7 @@ interface SubagentMessageResponse {
   found?: boolean;
   accepted?: number;
   emitted?: number;
+  client_message_id?: string;
   targets?: unknown[];
 }
 

@@ -3686,6 +3686,26 @@ class AIAgent:
             return
         self._apply_persist_user_message_override(messages)
         self._ensure_client_message_ids(messages)
+        existing_steer_client_ids: set[str] | None = None
+
+        def _has_existing_steer_client_id(client_message_id: str) -> bool:
+            nonlocal existing_steer_client_ids
+            if existing_steer_client_ids is None:
+                existing_steer_client_ids = set()
+                try:
+                    for row in self._session_db.get_messages(self.session_id):
+                        row_id = row.get("client_message_id") if isinstance(row, dict) else None
+                        if isinstance(row_id, str) and row_id.startswith("steer."):
+                            existing_steer_client_ids.add(row_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Session DB steer duplicate lookup failed for %s: %s",
+                        self.session_id,
+                        exc,
+                    )
+                    existing_steer_client_ids = set()
+            return client_message_id in existing_steer_client_ids
+
         try:
             # If create_session() failed at startup (e.g. transient lock), the
             # session row may not exist yet.  ensure_session() uses INSERT OR
@@ -3701,6 +3721,13 @@ class AIAgent:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
                 client_message_id = msg.get("client_message_id")
+                if (
+                    role == "user"
+                    and isinstance(client_message_id, str)
+                    and client_message_id.startswith("steer.")
+                    and _has_existing_steer_client_id(client_message_id)
+                ):
+                    continue
                 if (
                     role == "user"
                     and isinstance(client_message_id, str)
@@ -4641,6 +4668,7 @@ class AIAgent:
         *,
         urgent: bool = False,
         source: str = "user",
+        client_message_id: str | None = None,
     ) -> bool:
         """Queue a mid-run message for injection at the next safe boundary.
 
@@ -4656,6 +4684,8 @@ class AIAgent:
             "source": str(source or "user")[:40],
             "queued_at": time.time(),
         }
+        if isinstance(client_message_id, str) and client_message_id.strip():
+            item["client_message_id"] = client_message_id.strip()
         _lock = getattr(self, "_pending_soft_interrupts_lock", None)
         if _lock is None:
             existing = getattr(self, "_pending_soft_interrupts", [])
@@ -4722,6 +4752,15 @@ class AIAgent:
                 parts.append(content)
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _soft_interrupt_client_message_id(items: list[dict[str, Any]]) -> str:
+        """Return a durable steer client id carried by queued soft interrupts."""
+        for item in items or []:
+            client_message_id = item.get("client_message_id")
+            if isinstance(client_message_id, str) and client_message_id.startswith("steer."):
+                return client_message_id
+        return ""
+
 
     def _notify_steer_applied(self, items: list[dict[str, Any]] | None, *, via: str) -> None:
         """Tell the host UI a queued mid-run follow-up was actually injected.
@@ -4743,6 +4782,11 @@ class AIAgent:
                 count=len(items or []) or 1,
                 via=via,
                 sources=[str(i.get("source") or "user") for i in (items or [])],
+                client_message_ids=[
+                    str(i.get("client_message_id"))
+                    for i in (items or [])
+                    if isinstance(i.get("client_message_id"), str)
+                ],
             )
         except Exception:
             pass
@@ -13300,7 +13344,15 @@ class AIAgent:
                             (_tail["content"] or "") + "\n\n" + _cut_text
                         )
                     else:
-                        messages.append({"role": "user", "content": _cut_text})
+                        _cut_msg = {"role": "user", "content": _cut_text}
+                        if not _cut_steer:
+                            _cut_client_message_id = self._soft_interrupt_client_message_id(_cut_items)
+                            if _cut_client_message_id:
+                                _cut_msg["client_message_id"] = _cut_client_message_id
+                                _cut_display = self._soft_interrupt_display_text(_cut_items)
+                                if _cut_display:
+                                    _cut_msg["_display_content"] = _cut_display
+                        messages.append(_cut_msg)
                     self._notify_steer_applied(_cut_items, via="stream_cut")
                     self._session_messages = messages
                     self._save_session_log(messages)
@@ -14179,7 +14231,11 @@ class AIAgent:
                             # dashboard folds steer.* user rows back into the
                             # previous assistant turn instead of showing a
                             # new "Worked..." block for the continuation.
-                            "client_message_id": f"steer.{uuid.uuid4().hex}",
+                            "client_message_id": (
+                                self._soft_interrupt_client_message_id(_soft_items)
+                                if _soft_items and not _steer_after_text
+                                else f"steer.{uuid.uuid4().hex}"
+                            ),
                         }
                         _display_content = "\n\n".join(
                             p for p in _display_parts if str(p).strip()

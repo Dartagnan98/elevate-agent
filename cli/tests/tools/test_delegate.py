@@ -570,6 +570,7 @@ class TestLiveSubagentMessaging(unittest.TestCase):
         agent = MagicMock()
         agent.session_id = "child-1"
         agent._parent_session_id = "parent-1"
+        agent._session_db = None
         agent.queue_soft_interrupt.return_value = True
         with _active_subagents_lock:
             _active_subagents.clear()
@@ -589,7 +590,9 @@ class TestLiveSubagentMessaging(unittest.TestCase):
         agent.queue_soft_interrupt.assert_called_once_with(
             "switch to seller follow-up",
             source="subagent_message",
+            client_message_id=result["targets"][0]["client_message_id"],
         )
+        self.assertTrue(result["targets"][0]["client_message_id"].startswith("steer."))
         self.assertEqual(
             result["targets"],
             [
@@ -600,6 +603,7 @@ class TestLiveSubagentMessaging(unittest.TestCase):
                     "parent_session_id": "parent-1",
                     "goal": "Assess pricing",
                     "task_index": 2,
+                    "client_message_id": result["targets"][0]["client_message_id"],
                 }
             ],
         )
@@ -612,6 +616,7 @@ class TestLiveSubagentMessaging(unittest.TestCase):
                 agent = MagicMock()
                 agent.session_id = f"child-{idx}"
                 agent._parent_session_id = "parent-1"
+                agent._session_db = None
                 agent.queue_soft_interrupt.return_value = True
                 agents.append(agent)
                 _active_subagents[f"sa-{idx}"] = {
@@ -632,7 +637,61 @@ class TestLiveSubagentMessaging(unittest.TestCase):
             agent.queue_soft_interrupt.assert_called_once_with(
                 "report status now",
                 source="subagent_message",
+                client_message_id=result["targets"][0]["client_message_id"],
             )
+        self.assertTrue(result["targets"][0]["client_message_id"].startswith("steer."))
+
+    def test_message_subagent_persists_accepted_steer_immediately(self):
+        class FakeDB:
+            def __init__(self):
+                self.rows = []
+
+            def ensure_session(self, *args, **kwargs):
+                return None
+
+            def get_messages(self, session_id):
+                return list(self.rows)
+
+            def append_message(self, **kwargs):
+                self.rows.append(kwargs)
+
+        agent = MagicMock()
+        agent.session_id = "child-1"
+        agent.platform = "tui"
+        agent.model = "gpt-test"
+        agent._parent_session_id = "parent-1"
+        agent._session_db = FakeDB()
+        agent.queue_soft_interrupt.return_value = True
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            _active_subagents["sa-1"] = {
+                "agent": agent,
+                "async_task_id": "dt-1",
+                "child_session_id": "child-1",
+                "parent_session_id": "parent-1",
+                "subagent_id": "sa-1",
+            }
+
+        result = message_subagent(
+            "focus only on seller follow-up",
+            child_session_id="child-1",
+            client_message_id="steer.fixed",
+        )
+
+        self.assertEqual(result["accepted"], 1)
+        agent.queue_soft_interrupt.assert_called_once_with(
+            "focus only on seller follow-up",
+            source="subagent_message",
+            client_message_id="steer.fixed",
+        )
+        self.assertEqual(len(agent._session_db.rows), 1)
+        self.assertEqual(agent._session_db.rows[0]["session_id"], "child-1")
+        self.assertEqual(agent._session_db.rows[0]["role"], "user")
+        self.assertEqual(
+            agent._session_db.rows[0]["content"],
+            "focus only on seller follow-up",
+        )
+        self.assertEqual(agent._session_db.rows[0]["client_message_id"], "steer.fixed")
 
 
 class TestToolNamePreservation(unittest.TestCase):

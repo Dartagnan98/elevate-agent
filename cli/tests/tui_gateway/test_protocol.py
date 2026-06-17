@@ -502,6 +502,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
         assert text == "model sees this"
         assert kwargs["child_session_id"] == "child-1"
         assert kwargs["source"] == "dashboard_steer"
+        assert kwargs["client_message_id"].startswith("steer.")
         return {
             "found": True,
             "accepted": 1,
@@ -513,6 +514,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
                     "parent_session_id": "parent-1",
                     "goal": "Assess pricing",
                     "task_index": 3,
+                    "client_message_id": kwargs["client_message_id"],
                 }
             ],
         }
@@ -549,6 +551,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert resp["result"]["found"] is True
     assert resp["result"]["accepted"] == 1
     assert resp["result"]["emitted"] == 1
+    assert resp["result"]["client_message_id"].startswith("steer.")
     assert [event["type"] for event in parent_session["events"][-2:]] == [
         "steer.queued",
         "subagent.message",
@@ -559,12 +562,14 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert queued_payload["subagent_id"] == "sa-1"
     assert queued_payload["task_id"] == "dt-1"
     assert queued_payload["task_index"] == 3
+    assert queued_payload["client_message_id"] == resp["result"]["client_message_id"]
     payload = parent_session["events"][-1]["payload"]
     assert payload["text"] == "UI shows this"
     assert payload["child_session_id"] == "child-1"
     assert payload["subagent_id"] == "sa-1"
     assert payload["task_id"] == "dt-1"
     assert payload["task_index"] == 3
+    assert payload["client_message_id"] == resp["result"]["client_message_id"]
     assert transport.frames[-1]["params"]["type"] == "subagent.message"
 
 

@@ -1528,6 +1528,10 @@ def _on_tool_progress(
         }
         if _kwargs.get("sources"):
             payload["sources"] = [str(s) for s in _kwargs["sources"]]
+        if _kwargs.get("client_message_ids"):
+            payload["client_message_ids"] = [
+                str(s) for s in _kwargs["client_message_ids"] if s
+            ]
         if _kwargs.get("child_session_id"):
             payload["child_session_id"] = str(_kwargs["child_session_id"])
         _emit("steer.applied", sid, payload)
@@ -3319,6 +3323,7 @@ def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
                 "goal": target.get("goal") or "",
                 "text": display,
                 "source": "subagent.message",
+                "client_message_id": target.get("client_message_id") or None,
             }
             # Direct child messages are soft steers, not fresh turns. Emit the
             # same queued marker parent steering uses so the drill-in holds the
@@ -3337,6 +3342,7 @@ def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
                     "text": display,
                     "status": "running",
                     "source": "user",
+                    "client_message_id": target.get("client_message_id") or None,
                 },
             )
             emitted += 1
@@ -3356,6 +3362,9 @@ def _(rid, params: dict) -> dict:
     task_id = str(params.get("task_id") or "").strip()
     if not subagent_id and not child_session_id and not task_id:
         return _err(rid, 4000, "subagent_id, child_session_id, or task_id required")
+    client_message_id = str(params.get("client_message_id") or "").strip()
+    if not client_message_id:
+        client_message_id = f"steer.{uuid.uuid4().hex}"
 
     result = message_subagent(
         text,
@@ -3363,6 +3372,7 @@ def _(rid, params: dict) -> dict:
         child_session_id=child_session_id,
         task_id=task_id,
         source="dashboard_steer",
+        client_message_id=client_message_id,
     )
     display_text = str(params.get("display_text") or "").strip() or text
     emitted = _emit_subagent_message_to_parent(
@@ -3376,6 +3386,7 @@ def _(rid, params: dict) -> dict:
             "accepted": int(result.get("accepted") or 0),
             "targets": result.get("targets") or [],
             "emitted": emitted,
+            "client_message_id": client_message_id,
         },
     )
 
@@ -3594,10 +3605,15 @@ def _forward_steer_to_children(parent_keys: set[str], text: str) -> int:
             if child_parent not in keys:
                 continue
             try:
-                if hasattr(child, "queue_soft_interrupt") and child.queue_soft_interrupt(
-                    text, source="dashboard_steer"
-                ):
-                    count += 1
+                child_session_id = str(getattr(child, "session_id", "") or "")
+                if not child_session_id:
+                    continue
+                result = _dt.message_subagent(
+                    text,
+                    child_session_id=child_session_id,
+                    source="dashboard_steer",
+                )
+                count += int(result.get("accepted") or 0)
             except Exception:
                 continue
     except Exception:

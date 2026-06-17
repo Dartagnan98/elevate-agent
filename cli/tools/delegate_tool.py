@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 import os
 import threading
 import time
+import uuid
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
@@ -274,6 +275,60 @@ def _record_parent_session_id(record: Dict[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _persist_subagent_steer_message(
+    agent: Any,
+    child_session_id: str,
+    message: str,
+    client_message_id: str,
+) -> bool:
+    """Persist an accepted live child steer before the child gets to apply it."""
+    if not child_session_id or not client_message_id:
+        return False
+    db = getattr(agent, "_session_db", None)
+    if db is None:
+        return False
+    append_message = getattr(db, "append_message", None)
+    if not callable(append_message):
+        return False
+    try:
+        get_messages = getattr(db, "get_messages", None)
+        if callable(get_messages):
+            for row in get_messages(child_session_id):
+                if (
+                    isinstance(row, dict)
+                    and row.get("client_message_id") == client_message_id
+                ):
+                    return True
+    except Exception as exc:
+        logger.debug(
+            "subagent steer duplicate lookup failed for %s: %s",
+            child_session_id,
+            exc,
+        )
+    try:
+        ensure_session = getattr(db, "ensure_session", None)
+        if callable(ensure_session):
+            ensure_session(
+                child_session_id,
+                source=getattr(agent, "platform", None) or "tui",
+                model=getattr(agent, "model", None),
+            )
+        append_message(
+            session_id=child_session_id,
+            role="user",
+            content=message,
+            client_message_id=client_message_id,
+        )
+        return True
+    except Exception as exc:
+        logger.debug(
+            "subagent steer persist failed for %s: %s",
+            child_session_id,
+            exc,
+        )
+        return False
+
+
 def message_subagent(
     text: str,
     *,
@@ -281,6 +336,7 @@ def message_subagent(
     child_session_id: str = "",
     task_id: str = "",
     source: str = "subagent_message",
+    client_message_id: str = "",
 ) -> Dict[str, Any]:
     """Queue a live steering message directly into a running child agent.
 
@@ -292,6 +348,9 @@ def message_subagent(
     subagent_id = str(subagent_id or "").strip()
     child_session_id = str(child_session_id or "").strip()
     task_id = str(task_id or "").strip()
+    client_message_id = str(client_message_id or "").strip()
+    if not client_message_id:
+        client_message_id = f"steer.{uuid.uuid4().hex}"
     if not message:
         return {"found": False, "accepted": 0, "targets": [], "error": "text required"}
     if not subagent_id and not child_session_id and not task_id:
@@ -329,13 +388,25 @@ def message_subagent(
         if not callable(queue_soft_interrupt):
             continue
         try:
-            ok = bool(queue_soft_interrupt(message, source=source))
+            ok = bool(
+                queue_soft_interrupt(
+                    message,
+                    source=source,
+                    client_message_id=client_message_id,
+                )
+            )
         except Exception as exc:
             logger.debug("message_subagent(%s) failed: %s", current_subagent_id, exc)
             ok = False
         if not ok:
             continue
 
+        _persist_subagent_steer_message(
+            agent,
+            current_child_session_id,
+            message,
+            client_message_id,
+        )
         accepted += 1
         targets.append(
             {
@@ -345,6 +416,7 @@ def message_subagent(
                 "parent_session_id": _record_parent_session_id(record) or None,
                 "goal": record.get("goal") or "",
                 "task_index": record.get("task_index") or 0,
+                "client_message_id": client_message_id,
             }
         )
 
