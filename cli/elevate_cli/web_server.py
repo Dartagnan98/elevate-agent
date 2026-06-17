@@ -3099,6 +3099,23 @@ def _live_running_session_keys() -> set[str]:
     return _gateway_session_run_states()[0]
 
 
+def _live_subagent_child_session_ids() -> set[str]:
+    """Child session ids currently present in the live delegation registry."""
+    ids: set[str] = set()
+    try:
+        from tools.delegate_tool import list_active_subagents
+
+        for record in list_active_subagents():
+            if not isinstance(record, dict):
+                continue
+            child_session_id = str(record.get("child_session_id") or "").strip()
+            if child_session_id:
+                ids.add(child_session_id)
+    except Exception:
+        pass
+    return ids
+
+
 def _mark_session_activity(sessions: list[dict[str, Any]], now: float) -> None:
     """Stamp ``is_active`` on session list rows.
 
@@ -5358,7 +5375,10 @@ async def get_session_children(session_id: str):
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
         try:
-            db.finalize_interrupted_delegate_children(active_id)
+            db.finalize_interrupted_delegate_children(
+                active_id,
+                active_child_session_ids=_live_subagent_child_session_ids(),
+            )
         except Exception as exc:
             logger.debug(
                 "Failed to finalize interrupted delegate children for %s: %s",

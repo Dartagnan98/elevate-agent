@@ -2735,6 +2735,15 @@ function eventString(ev: GatewayEvent, key: string): string {
   return typeof raw === "string" ? raw : "";
 }
 
+function timeValueMs(v: number | string | null | undefined): number | undefined {
+  if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v;
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : undefined;
+  }
+  return undefined;
+}
+
 function modelLabel(info: SessionInfo): string {
   const model = info.model || "model";
   return model.split("/").slice(-1)[0] || model;
@@ -7632,14 +7641,31 @@ export default function ChatPage() {
             children.filter((c) => c.ended_at).map((c) => c.id),
           );
           if (!endedIds.size) return;
+          const endedById = new Map(
+            children.filter((c) => c.ended_at).map((c) => [c.id, c]),
+          );
           setSubagents((prev) =>
-            prev.map((s) =>
-              s.status === "running" &&
-              s.child_session_id &&
-              endedIds.has(s.child_session_id)
-                ? { ...s, status: "done", completedAt: s.completedAt ?? Date.now() }
-                : s,
-            ),
+            prev.map((s) => {
+              if (
+                s.status !== "running" ||
+                !s.child_session_id ||
+                !endedIds.has(s.child_session_id)
+              ) {
+                return s;
+              }
+              const child = endedById.get(s.child_session_id);
+              const failed =
+                !!child?.end_reason && child.end_reason !== "delegation_complete";
+              return {
+                ...s,
+                status: failed ? "error" : "done",
+                completedAt:
+                  timeValueMs(child?.ended_at) ?? s.completedAt ?? Date.now(),
+                finalSummary: failed
+                  ? (child?.end_reason ?? s.finalSummary)
+                  : s.finalSummary,
+              };
+            }),
           );
         })
         .catch(() => {
@@ -7651,6 +7677,66 @@ export default function ChatPage() {
       window.clearInterval(iv);
     };
   }, [busy, sessionKind]);
+
+  const runningSubagentCount = useMemo(
+    () => subagents.filter((subagent) => subagent.status === "running").length,
+    [subagents],
+  );
+
+  // Async subagents can keep running after the parent turn has already ended.
+  // Keep reconciling from the durable child rows so completed/reaped children do
+  // not stay stuck as "running" until the user navigates away or restarts.
+  useEffect(() => {
+    if (sessionKind === "subagent" || runningSubagentCount <= 0) return;
+    let cancelled = false;
+
+    const refreshChildren = () => {
+      const pid = persistedSessionIdRef.current ?? resumeId ?? sessionId;
+      if (!pid) return;
+      void api
+        .getSessionChildren(pid)
+        .then((childResp) => {
+          if (cancelled) return;
+          const children = (childResp.children ?? []).filter(
+            (c) => c.session_kind === "subagent",
+          );
+          setChildSessions(children);
+          const endedById = new Map(
+            children.filter((c) => c.ended_at).map((c) => [c.id, c]),
+          );
+          if (!endedById.size) return;
+          setSubagents((prev) =>
+            prev.map((s) => {
+              const child = s.child_session_id
+                ? endedById.get(s.child_session_id)
+                : undefined;
+              if (s.status !== "running" || !child) return s;
+              const failed =
+                !!child.end_reason && child.end_reason !== "delegation_complete";
+              return {
+                ...s,
+                status: failed ? "error" : "done",
+                completedAt:
+                  timeValueMs(child.ended_at) ?? s.completedAt ?? Date.now(),
+                finalSummary: failed
+                  ? (child.end_reason ?? s.finalSummary)
+                  : s.finalSummary,
+              };
+            }),
+          );
+        })
+        .catch(() => {
+          /* additive — the next poll or navigation hydrate will reconcile */
+        });
+    };
+
+    refreshChildren();
+    const iv = window.setInterval(refreshChildren, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(iv);
+    };
+  }, [resumeId, runningSubagentCount, sessionId, sessionKind]);
 
   const hasReadyAttachment = attachments.some(
     (item) => item.status === "ready" && !!item.path,
@@ -8505,22 +8591,38 @@ export default function ChatPage() {
       if (child.id && typeof child.output_tokens === "number" && child.output_tokens > 0)
         childTokens.set(child.id, child.output_tokens);
     }
+    const childById = new Map(
+      childSessions
+        .filter((child) => child.id)
+        .map((child) => [child.id, child] as const),
+    );
     for (const s of subagents) {
+      const child = s.child_session_id ? childById.get(s.child_session_id) : undefined;
+      const childEnded = Boolean(child?.ended_at);
+      const childFailed =
+        childEnded &&
+        !!child?.end_reason &&
+        child.end_reason !== "delegation_complete";
+      const effectiveStatus: BackgroundTaskItem["status"] = childEnded
+        ? childFailed
+          ? "error"
+          : "done"
+        : s.status;
       const realTokens =
-        s.status !== "running" && s.child_session_id
+        effectiveStatus !== "running" && s.child_session_id
           ? childTokens.get(s.child_session_id)
           : undefined;
       items.push({
         id: s.id,
         kind: "subagent",
         label: s.goal || "Subagent",
-        status: s.status,
-        detail: s.finalSummary || s.preview,
+        status: effectiveStatus,
+        detail: childFailed ? child?.end_reason ?? "Interrupted" : s.finalSummary || s.preview,
         model: s.model,
         toolCount: s.toolCount,
         tokens: realTokens ?? s.thinkingTokens,
         startedAt: s.startedAt,
-        completedAt: s.completedAt,
+        completedAt: childEnded ? timeValueMs(child?.ended_at) : s.completedAt,
         child_session_id: s.child_session_id,
         task_id: s.task_id,
         subagent_id: s.subagent_id,
@@ -8555,17 +8657,9 @@ export default function ChatPage() {
     const liveChildIds = new Set(
       items.map((i) => i.child_session_id).filter(Boolean) as string[],
     );
-    const tsMs = (v: number | string | null | undefined): number | undefined => {
-      if (typeof v === "number" && v > 0) return v < 1e12 ? v * 1000 : v;
-      if (typeof v === "string") {
-        const t = Date.parse(v);
-        return Number.isFinite(t) ? t : undefined;
-      }
-      return undefined;
-    };
     for (const child of childSessions) {
       if (!child.id || liveChildIds.has(child.id)) continue;
-      const startedAt = tsMs(child.started_at);
+      const startedAt = timeValueMs(child.started_at);
       // Derive status from whether the child session actually ENDED — not a
       // blanket "done". A child still running has no ended_at; hardcoding
       // "done" made the panel flip running→done→running on navigation (the
@@ -8585,7 +8679,7 @@ export default function ChatPage() {
         toolCount: child.tool_call_count ?? undefined,
         tokens: childTokens.get(child.id),
         startedAt,
-        completedAt: ended ? tsMs(child.ended_at) : undefined,
+        completedAt: ended ? timeValueMs(child.ended_at) : undefined,
         child_session_id: child.id,
       });
     }

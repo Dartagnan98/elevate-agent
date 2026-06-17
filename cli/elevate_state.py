@@ -27,7 +27,7 @@ from pathlib import Path
 
 from agent.memory_manager import sanitize_context
 from elevate_constants import get_elevate_home
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -1201,26 +1201,42 @@ class SessionDB:
         session_id: str,
         *,
         grace_seconds: float = 60.0,
+        active_child_session_ids: Optional[Set[str]] = None,
     ) -> int:
         """Close spawned subagent sessions orphaned by an interrupted parent turn.
 
         Normal delegated children call ``end_session(..., 'delegation_complete')``
-        in ``delegate_tool`` once they finish. If the parent turn is interrupted
-        or the app restarts between spawn and cleanup, zero-output child rows can
-        stay ``ended_at=NULL`` forever. The background-task panel then reports
-        those stale rows as still running after every restart.
+        in ``delegate_tool`` once they finish. If the parent turn is interrupted,
+        the app restarts, or the async worker is lost between spawn and cleanup,
+        child rows can stay ``ended_at=NULL`` forever. The background-task panel
+        then reports those stale rows as still running after every restart.
 
-        Keep the repair narrow: only rows with no child work/output and an
-        explicit interrupted parent tool message are finalized.
+        Keep the repair narrow:
+        - zero-output rows still require an explicit interrupted parent tool row;
+        - rows with observed child work are only reaped when the caller proves the
+          child is not in the live subagent registry.
         """
         if not session_id:
             return 0
         cutoff = time.time() - float(grace_seconds)
         root_id = self._get_lineage_root_sqlite(session_id)
+        registry_provided = active_child_session_ids is not None
+        active_ids = {
+            str(sid)
+            for sid in (active_child_session_ids or set())
+            if str(sid or "").strip()
+        }
+
+        def _not_active_clause(prefix: str = "child") -> tuple[str, list[str]]:
+            if not active_ids:
+                return "", []
+            placeholders = ",".join("?" for _ in active_ids)
+            return f" AND {prefix}.id NOT IN ({placeholders})", sorted(active_ids)
 
         with self._lock:
+            not_active_sql, not_active_params = _not_active_clause("child")
             rows = self._conn.execute(
-                """
+                f"""
                 WITH RECURSIVE session_tree AS (
                     SELECT id
                     FROM sessions
@@ -1236,6 +1252,7 @@ class SessionDB:
                 WHERE child.ended_at IS NULL
                   AND child.parent_session_id IS NOT NULL
                   AND child.started_at < ?
+                  {not_active_sql}
                   AND COALESCE(child.message_count, 0) <= 1
                   AND COALESCE(child.tool_call_count, 0) = 0
                   AND COALESCE(child.output_tokens, 0) = 0
@@ -1257,10 +1274,56 @@ class SessionDB:
                   )
                 ORDER BY child.started_at ASC, child.id ASC
                 """,
-                (root_id, cutoff),
+                (root_id, cutoff, *not_active_params),
             ).fetchall()
 
         ids = [str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows]
+        if registry_provided:
+            # A child with output/tool activity can be abandoned by an app restart
+            # after doing real work but before delegate_tool.finally closes its
+            # session. Only reap those when the live registry proves the child is
+            # not actually running anymore.
+            with self._lock:
+                not_active_sql, not_active_params = _not_active_clause("child")
+                rows = self._conn.execute(
+                    f"""
+                    WITH RECURSIVE session_tree AS (
+                        SELECT id
+                        FROM sessions
+                        WHERE id = ?
+                      UNION ALL
+                        SELECT child.id
+                        FROM sessions child
+                        JOIN session_tree parent ON child.parent_session_id = parent.id
+                    )
+                    SELECT child.id
+                    FROM sessions child
+                    JOIN session_tree parent ON child.parent_session_id = parent.id
+                    WHERE child.ended_at IS NULL
+                      AND child.parent_session_id IS NOT NULL
+                      AND child.started_at < ?
+                      {not_active_sql}
+                      AND (
+                        COALESCE(child.message_count, 0) > 1
+                        OR COALESCE(child.tool_call_count, 0) > 0
+                        OR COALESCE(child.output_tokens, 0) > 0
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM sessions p
+                          WHERE p.id = child.parent_session_id
+                            AND p.end_reason = 'compression'
+                            AND p.ended_at IS NOT NULL
+                            AND child.started_at >= p.ended_at
+                      )
+                    ORDER BY child.started_at ASC, child.id ASC
+                    """,
+                    (root_id, cutoff, *not_active_params),
+                ).fetchall()
+            ids.extend(
+                str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows
+            )
+            ids = list(dict.fromkeys(ids))
         for child_id in ids:
             self.end_session(child_id, "delegation_interrupted")
         return len(ids)
