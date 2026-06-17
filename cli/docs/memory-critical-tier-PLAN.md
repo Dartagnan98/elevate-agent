@@ -69,13 +69,17 @@ v1.1 narrows scope per Dartagnan's corrections (2026-06-16). Grounded in
 
 ### Phase 2 — write path: set critical / task_tags (conservative)
 - Extend `quality.py::classify_fact_durability` to additionally return `critical` + `critical_reason`,
-  set ONLY for clear cases:
+  set ONLY for two clear cases (v1 auto-critical = correction OR compliance, precedence correction first):
   - corrections (existing `CORRECTION` signal): "you got X wrong", "I told you", "actually use…",
     "instead of", "renamed to", "no longer".
-  - explicit rules/conventions (existing `CONVENTIONS` signal): must / never / always / policy / rule /
-    "before filing".
   - compliance/legal/filing language (new narrow regex): signature/initials/disclosure/compliance/
     accepted offer/CPS/filing/seller-side/buyer-side.
+  - conventions (should/must/never/always/policy/rule) are deliberately NOT auto-critical in v1: a
+    read-only pass on a real 294-fact corpus showed convention = 72/92 critical candidates and pushed
+    the reserved lane to 31% of active facts, defeating the point of a RARE Must-Follow lane. Conventions
+    still add `durable_score` and keep the `convention` signal, but `critical` stays false. Making a
+    convention must-always requires a future deliberate pin action. (Tightening this to correction +
+    compliance only dropped the rate to 20/294 ≈ 7%.)
   - `pinned` is set ONLY by a deliberate pin action ("must-always"). In v1 there is NO pin action, so
     explicit/manual saves do NOT imply pinned; the lane's no-match bypass additionally requires the fact
     be critical.
@@ -159,8 +163,9 @@ v1.1 narrows scope per Dartagnan's corrections (2026-06-16). Grounded in
 ## Top residual risks + mitigation
 1. Prompt flooding / cost → hard cap `critical_recall_limit=2`, content clip, dedup vs durable lane,
    kill switch.
-2. Over-tagging critical (tier loses meaning) → conservative classifier (corrections + explicit
-   conventions + narrow compliance regex only); `pinned` for must-always; monitor critical count/account.
+2. Over-tagging critical (tier loses meaning) → conservative classifier (corrections + narrow
+   compliance regex only — conventions excluded, ~7% of facts on real data); `pinned` for
+   must-always; monitor critical count/account.
 3. Task mismatch on opaque "[Background task result]" queries → entity + session-text match as backstop;
    Phase 3b (skill-load re-prefetch) is the deferred deeper fix if soak shows misses.
 

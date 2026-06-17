@@ -129,7 +129,7 @@ def test_explicit_feedback_still_moves_trust_with_ratchet_off(tmp_path):
 # Phase 2 — classifier + merge
 # ---------------------------------------------------------------------------
 
-def test_classifier_marks_compliance_and_correction_critical():
+def test_classifier_marks_correction_and_compliance_critical_not_convention():
     comp = classify_fact_durability(
         "When uploading the accepted offer, verify initials and signatures for every named party."
     )
@@ -140,9 +140,15 @@ def test_classifier_marks_compliance_and_correction_critical():
     assert corr["critical"] is True
     assert corr["critical_reason"] == "correction"
 
-    conv = classify_fact_durability("CMA convention: comps must always be validated before send.")
-    assert conv["critical"] is True
-    assert conv["critical_reason"] in ("convention", "compliance")
+    # Conventions (should/must/never/always) are NOT auto-critical in v1 — they
+    # are too common on real corpora (~25% of facts) and would dilute the
+    # reserved Must-Follow lane. They stay durable + keep the "convention"
+    # signal, but critical=False. Must-always behavior needs a deliberate pin.
+    conv = classify_fact_durability("Convention: comps must always be validated before send.")
+    assert conv["durability"] == "durable"
+    assert conv["critical"] is False
+    assert conv["critical_reason"] == ""
+    assert "convention" in conv["signals"]
 
 
 def test_classifier_never_marks_generic_workflow_critical():
@@ -188,7 +194,7 @@ def test_merge_ors_pinned_metadata(tmp_path):
     store = provider._store
     base = "Zx9 the prospecting export job writes the weekly comparable digest for the jones account"
     fid = store.add_fact(base, category="project")
-    _flag_critical(store, fid, critical=True, pinned=True, task_tags="task:cma", reason="convention")
+    _flag_critical(store, fid, critical=True, pinned=True, task_tags="task:cma", reason="compliance")
 
     more_specific = base + " always"
     detailed = store.add_fact_detailed(more_specific, category="project", explicit=True)
