@@ -903,7 +903,11 @@ def test_chunk_embedding_backfill_indexes_document_chunks_with_hash_backend(tmp_
 
 
 def test_memory_remaining_cluster_tag_confidence_prune_and_benchmark(tmp_path):
-    provider = _provider(tmp_path)
+    # This test asserts the legacy ranking-driven trust boost/decay
+    # (boosted/decayed counts from confidence_maintenance). That behavior is
+    # now opt-in via trust_from_ranking_enabled (default false breaks the
+    # recall-starvation ratchet); enable it here to keep the legacy assertion.
+    provider = _provider(tmp_path, trust_from_ranking_enabled="true")
     a = _tool(provider, {"action": "add", "content": "Training Academy uses live client practice with instructor coaching.", "category": "project", "tags": "training"})["fact_id"]
     b = _tool(provider, {"action": "add", "content": "Lead Instructor anchors Training Academy training and student confidence.", "category": "project"})["fact_id"]
     c = _tool(provider, {"action": "add", "content": "Old weak note that should decay out.", "category": "general"})["fact_id"]

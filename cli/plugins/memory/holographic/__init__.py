@@ -102,6 +102,7 @@ FACT_STORE_SCHEMA = {
                     "rag_query",
                     "community_reports",
                     "relation_backfill",
+                    "backfill_critical",
                     "graph_reprocess",
                     "recall_route",
                     "document_add",
@@ -290,6 +291,20 @@ class HolographicMemoryProvider(MemoryProvider):
             4,
             minimum=1,
         )
+        # Trust ratchet + reserved critical recall lane.
+        self._trust_from_ranking_enabled = parse_bool(
+            self._config.get("trust_from_ranking_enabled"),
+            default=False,
+        )
+        self._critical_tier_enabled = parse_bool(
+            self._config.get("critical_tier_enabled"),
+            default=True,
+        )
+        self._critical_recall_limit = _parse_int(
+            self._config.get("critical_recall_limit"),
+            2,
+            minimum=1,
+        )
         self._graph_recall_limit = _parse_int(
             self._config.get("graph_recall_limit"),
             2,
@@ -391,6 +406,9 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "ephemeral_decay_enabled", "description": "Daily maintenance archives clear-cut task-chatter facts (never explicit/durable)", "default": "true", "choices": ["true", "false"]},
             {"key": "ephemeral_decay_min_age_days", "description": "Age (days) before unrecalled task-framed facts are archived", "default": "30"},
             {"key": "ephemeral_decay_max_archive", "description": "Max facts archived per daily decay run", "default": "200"},
+            {"key": "trust_from_ranking_enabled", "description": "Let the post-retrieval ranking outcome mutate trust_score/helpful_count (legacy ratchet). False = only explicit fact_feedback changes trust", "default": "false", "choices": ["true", "false"]},
+            {"key": "critical_tier_enabled", "description": "Inject a reserved 'Must-Follow Rules' lane of critical/pinned facts first, bypassing the trust floor and token-overlap verifier", "default": "true", "choices": ["true", "false"]},
+            {"key": "critical_recall_limit", "description": "Max facts injected in the Must-Follow Rules lane", "default": "2"},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
             {"key": "embedding_enabled", "description": "Enable semantic embeddings", "default": "false", "choices": ["true", "false"]},
@@ -437,6 +455,7 @@ class HolographicMemoryProvider(MemoryProvider):
             dedup_enabled=self._dedup_enabled,
             dedup_similarity_threshold=self._dedup_similarity_threshold,
             dedup_jaccard_threshold=self._dedup_jaccard_threshold,
+            trust_from_ranking_enabled=self._trust_from_ranking_enabled,
         )
         self._retriever = FactRetriever(
             store=self._store,
@@ -915,6 +934,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args["limit"]) if args.get("limit") is not None else None,
                 )
                 return json.dumps(result)
+
+            elif action == "backfill_critical":
+                # Dry-run by default; pass dry_run=false to apply.
+                result = store.backfill_critical(
+                    dry_run=parse_bool(args.get("dry_run"), default=True),
+                    limit=int(args["limit"]) if args.get("limit") is not None else None,
+                )
+                return json.dumps(result, default=str)
 
             elif action == "graph_reprocess":
                 result = store.reprocess_memory_graph(
@@ -1829,7 +1856,11 @@ class HolographicMemoryProvider(MemoryProvider):
         self._last_layered_chunks = []
 
         sections: list[str] = []
+        # fact_ids surfaced by the reserved critical lane — deduped out of the
+        # Durable + Semantic lane so a rule is never double-injected.
+        critical_ids: set[int] = set()
 
+        recent: list[dict] = []
         if self._recent_recall_enabled:
             recent = self._store.recent_turns(
                 session_id=session_id or self._session_id,
@@ -1837,14 +1868,49 @@ class HolographicMemoryProvider(MemoryProvider):
                 limit=self._recent_recall_limit,
                 include_assistant=False,
             )
-            if recent:
+
+        # Reserved Must-Follow Rules lane — assembled FIRST and PREPENDED so it
+        # renders before Recent Session / Durable + Semantic. Bypasses the
+        # trust floor and the token-overlap verifier.
+        if self._critical_tier_enabled:
+            try:
+                session_text = " ".join(
+                    str(t.get("user_content", "")) for t in recent
+                )
+                entities = self._store.entity_candidates(query, limit=self._graph_recall_limit)
+                critical_facts = self._store.critical_facts_matching(
+                    query=query,
+                    session_text=session_text,
+                    entities=entities,
+                    limit=self._critical_recall_limit,
+                )
+            except Exception as exc:
+                logger.debug("critical_facts_matching failed: %s", exc)
+                critical_facts = []
+            if critical_facts:
+                # CONSTRAINT 2: include critical fact_ids in _last_layered_facts
+                # so _record_context_injection logs them in memory_injections.
+                self._last_layered_facts = list(critical_facts)
+                critical_ids = {
+                    int(f.get("fact_id")) for f in critical_facts if f.get("fact_id")
+                }
                 lines = []
-                for turn in recent:
-                    text = self._clip(turn.get("user_content", ""), self._recent_turn_max_chars)
+                for fact in critical_facts:
+                    reason = str(fact.get("critical_reason") or "").strip()
+                    tag = " pinned" if fact.get("pinned") else (f" {reason}" if reason else "")
                     lines.append(
-                        f"- ({turn.get('session_day')}, {turn.get('session_id')}) {text}"
+                        f"- [must-follow{tag}] {self._clip(fact.get('content', ''), 320)}"
                     )
-                sections.append("### Recent Session\n" + "\n".join(lines))
+                sections.append("### Must-Follow Rules\n" + "\n".join(lines))
+
+        if recent:
+            lines = []
+            for turn in recent:
+                text = self._clip(turn.get("user_content", ""), self._recent_turn_max_chars)
+                lines.append(
+                    f"- ({turn.get('session_day')}, {turn.get('session_id')}) {text}"
+                )
+            sections.append("### Recent Session\n" + "\n".join(lines))
 
         durable_candidates = self._retriever.search(
             query,
@@ -1857,8 +1923,13 @@ class HolographicMemoryProvider(MemoryProvider):
             limit=self._durable_recall_limit,
             session_id=session_id or self._session_id,
         )
+        # Dedup the critical lane out of Durable + Semantic so a rule already
+        # surfaced as a Must-Follow Rule is not injected twice.
+        durable = [f for f in durable if int(f.get("fact_id") or 0) not in critical_ids]
         if durable:
-            self._last_layered_facts = list(durable)
+            # CONSTRAINT 2: APPEND — never overwrite the critical-lane facts
+            # already stashed in _last_layered_facts.
+            self._last_layered_facts = list(self._last_layered_facts) + list(durable)
             lines = []
             for fact in durable:
                 trust = float(fact.get("trust_score", fact.get("trust", 0.0)) or 0.0)
