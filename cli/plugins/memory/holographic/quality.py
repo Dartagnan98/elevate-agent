@@ -136,6 +136,20 @@ _COMPLIANCE_EXCLUDE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Dated state / data / status logs. These describe a point-in-time fact ("X as
+# of <date>", "credential file updated on <date>", "current buyers ...",
+# subject-removal/status snapshots, "main blocker: ...") rather than a durable
+# must-follow RULE. They stay durable but are NEVER auto-critical (they were
+# inflating correction-critical on real corpora).
+_STATE_LOG_RE = re.compile(
+    r"(\bas\s+of\s+\d|status\s+as\s+of|currentstage|"
+    r"(?:updated|corrected|moved)\s+(?:to\s+|on\s+)?\d{4}-\d{2}-\d{2}|"
+    r"credential\s+file|\bmain\s+blocker\b|status\s+note|"
+    r"current\s+buyers?|subject[-\s]removal|source-of-truth|"
+    r"dashboard\s+(?:status|source-of-truth)|was\s+(?:moved|updated|corrected)\s+(?:to|on))",
+    re.IGNORECASE,
+)
+
 # System / interruption / scaffolding notes that must NEVER be a "correction".
 _SYSTEM_NOTE_RE = re.compile(
     r"(previous\s+turn\s+was\s+interrupted|your\s+previous\s+turn|"
@@ -307,9 +321,14 @@ def classify_fact_durability(content: str) -> dict:
     has_rule_context = bool(_RULE_CONTEXT_RE.search(text))
     is_workflow_fp = bool(_COMPLIANCE_EXCLUDE_RE.search(text))
     is_strong_correction = bool(_CORRECTION_CRITICAL_RE.search(text))
+    # Dated state/data logs ("X as of <date>", credential-file updates,
+    # current-buyers/subject-removal snapshots, "main blocker"/status notes)
+    # stay durable but are never auto-critical — they are point-in-time data,
+    # not must-follow rules, and were inflating correction-critical.
+    is_state_log = bool(_STATE_LOG_RE.search(text))
     critical = False
     critical_reason = ""
-    if durability == "durable" and not is_system_note:
+    if durability == "durable" and not is_system_note and not is_state_log:
         if is_correction and is_strong_correction:
             critical, critical_reason = True, "correction"
         elif is_compliance and has_rule_context and not is_workflow_fp:
