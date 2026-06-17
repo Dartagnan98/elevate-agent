@@ -1196,6 +1196,75 @@ class SessionDB:
 
         return self._execute_write(_do) or 0
 
+    def finalize_interrupted_delegate_children(
+        self,
+        session_id: str,
+        *,
+        grace_seconds: float = 60.0,
+    ) -> int:
+        """Close spawned subagent sessions orphaned by an interrupted parent turn.
+
+        Normal delegated children call ``end_session(..., 'delegation_complete')``
+        in ``delegate_tool`` once they finish. If the parent turn is interrupted
+        or the app restarts between spawn and cleanup, zero-output child rows can
+        stay ``ended_at=NULL`` forever. The background-task panel then reports
+        those stale rows as still running after every restart.
+
+        Keep the repair narrow: only rows with no child work/output and an
+        explicit interrupted parent tool message are finalized.
+        """
+        if not session_id:
+            return 0
+        cutoff = time.time() - float(grace_seconds)
+        root_id = self._get_lineage_root_sqlite(session_id)
+
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                WITH RECURSIVE session_tree AS (
+                    SELECT id
+                    FROM sessions
+                    WHERE id = ?
+                  UNION ALL
+                    SELECT child.id
+                    FROM sessions child
+                    JOIN session_tree parent ON child.parent_session_id = parent.id
+                )
+                SELECT child.id
+                FROM sessions child
+                JOIN session_tree parent ON child.parent_session_id = parent.id
+                WHERE child.ended_at IS NULL
+                  AND child.parent_session_id IS NOT NULL
+                  AND child.started_at < ?
+                  AND COALESCE(child.message_count, 0) <= 1
+                  AND COALESCE(child.tool_call_count, 0) = 0
+                  AND COALESCE(child.output_tokens, 0) = 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM sessions p
+                      WHERE p.id = child.parent_session_id
+                        AND p.end_reason = 'compression'
+                        AND p.ended_at IS NOT NULL
+                        AND child.started_at >= p.ended_at
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM messages m
+                      WHERE m.session_id = child.parent_session_id
+                        AND m.role = 'tool'
+                        AND m.timestamp >= child.started_at
+                        AND m.content LIKE '[Session was interrupted before this tool call returned%'
+                  )
+                ORDER BY child.started_at ASC, child.id ASC
+                """,
+                (root_id, cutoff),
+            ).fetchall()
+
+        ids = [str(row["id"] if hasattr(row, "keys") else row[0]) for row in rows]
+        for child_id in ids:
+            self.end_session(child_id, "delegation_interrupted")
+        return len(ids)
+
     def reap_idle_sessions(
         self, idle_seconds: float = 7200.0, draft_idle_seconds: float = 1200.0
     ) -> int:

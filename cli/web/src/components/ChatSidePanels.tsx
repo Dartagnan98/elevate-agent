@@ -499,6 +499,22 @@ function TaskStatusBadge({
     );
   }
   if (status === "error") {
+    if (onDismiss) {
+      return (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDismiss();
+          }}
+          className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)] transition-colors hover:bg-[color-mix(in_srgb,var(--chat-danger)_22%,transparent)]"
+          title="Hide this failed task"
+        >
+          <AlertCircle className="h-3 w-3" />
+          Failed
+        </button>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-danger)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-danger)]">
         <AlertCircle className="h-3 w-3" />
@@ -580,7 +596,7 @@ function TaskCard({
         <TaskStatusBadge
           status={task.status}
           onDismiss={
-            task.status === "done" && onDismiss
+            task.status !== "running" && onDismiss
               ? () => onDismiss(task)
               : undefined
           }

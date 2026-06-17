@@ -1600,6 +1600,49 @@ class TestCompressionChainProjection:
         assert by_id["tip1"]["active_session_id"] == "tip1"
         assert by_id["tip1"]["is_active_session"] is True
 
+    def test_finalize_interrupted_delegate_children_closes_orphaned_spawn_rows(self, db):
+        import time as _time
+
+        t0 = _time.time() - 180
+        db.create_session("root", "tui")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?",
+            (t0, "root"),
+        )
+
+        db.create_session("orphan", "tui", parent_session_id="root")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=? WHERE id=?",
+            (t0 + 5, "orphan"),
+        )
+        db.append_message("orphan", "user", "child task prompt")
+
+        db.create_session("active", "tui", parent_session_id="root")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, output_tokens=? WHERE id=?",
+            (t0 + 6, 42, "active"),
+        )
+        db.append_message("active", "user", "child has produced output")
+
+        interrupted_msg_id = db.append_message(
+            "root",
+            "tool",
+            "[Session was interrupted before this tool call returned a result.]",
+        )
+        db._conn.execute(
+            "UPDATE messages SET timestamp=? WHERE id=?",
+            (t0 + 30, interrupted_msg_id),
+        )
+        db._conn.commit()
+
+        assert db.finalize_interrupted_delegate_children("root", grace_seconds=60) == 1
+
+        orphan = db.get_session("orphan")
+        active = db.get_session("active")
+        assert orphan["ended_at"] is not None
+        assert orphan["end_reason"] == "delegation_interrupted"
+        assert active["ended_at"] is None
+
     def test_get_compression_tip_skips_delegate_children(self, db):
         """Delegate subagents have parent_session_id set but were created
         BEFORE the parent ended. They must not be followed as compression

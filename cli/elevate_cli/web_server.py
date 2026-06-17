@@ -5357,6 +5357,14 @@ async def get_session_children(session_id: str):
     db = _get_session_db()
     try:
         sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
+        try:
+            db.finalize_interrupted_delegate_children(active_id)
+        except Exception as exc:
+            logger.debug(
+                "Failed to finalize interrupted delegate children for %s: %s",
+                active_id,
+                exc,
+            )
         children = db.list_child_sessions(active_id)
     finally:
         db.close()

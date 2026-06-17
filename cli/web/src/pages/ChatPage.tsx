@@ -1282,6 +1282,7 @@ export const __chatPageTestables = {
   isCompactSlashCommand,
   messageRowPropsEqual,
   mergeActiveTurnSnapshot,
+  mergeServerWithCache,
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
@@ -1912,10 +1913,15 @@ function mergeServerWithCache(
   // Re-attach them from the cached counterpart so the activity digest
   // renders on resumed turns. Match on the same fingerprint the tail
   // logic uses.
-  const cachedByFp = new Map<string, ChatMessage>();
-  for (const msg of cached) cachedByFp.set(fp(msg), msg);
+  const cachedByFp = new Map<string, ChatMessage[]>();
+  for (const msg of cached) {
+    const key = fp(msg);
+    const queue = cachedByFp.get(key) ?? [];
+    queue.push(msg);
+    cachedByFp.set(key, queue);
+  }
   const enriched = serverMessages.map((msg) => {
-    const match = cachedByFp.get(fp(msg));
+    const match = cachedByFp.get(fp(msg))?.shift();
     let next = msg;
     // No-shrink rule: the fingerprint says these are the same logical message
     // (same role + first 200 normalized chars). If the cached/rendered copy is
@@ -1981,15 +1987,7 @@ function mergeServerWithCache(
     }
     const merged = tail.length ? [...enriched, ...tail] : enriched;
     if (merged.length < 2) return merged;
-    const seen = new Set<string>();
-    const out: ChatMessage[] = [];
-    for (const m of merged) {
-      const key = fp(m);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(m);
-    }
-    const repaired = repairOutOfOrderUserTurns(out);
+    const repaired = repairOutOfOrderUserTurns(merged);
     blankTraceIfDropped(cached, repaired, fp, serverMessages.length);
     return repaired;
   }
@@ -2002,15 +2000,24 @@ function mergeServerWithCache(
   // vanish). Rebuild in CACHE order instead: emit the server-canonical copy
   // where the server has it (enriched with cache snapshots), otherwise recover
   // the cached copy verbatim. Nothing rendered is ever dropped.
-  const enrichedByFp = new Map<string, ChatMessage>();
-  for (const m of enriched) enrichedByFp.set(fp(m), m);
-  const seen = new Set<string>();
+  const enrichedByFp = new Map<string, ChatMessage[]>();
+  for (const m of enriched) {
+    const key = fp(m);
+    const queue = enrichedByFp.get(key) ?? [];
+    queue.push(m);
+    enrichedByFp.set(key, queue);
+  }
+  const remainingEnriched = new Set(enriched);
   const out: ChatMessage[] = [];
   for (const cm of cached) {
     const key = fp(cm);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(enrichedByFp.get(key) ?? cm);
+    const serverMatch = enrichedByFp.get(key)?.shift();
+    if (serverMatch) {
+      remainingEnriched.delete(serverMatch);
+      out.push(serverMatch);
+    } else {
+      out.push(cm);
+    }
   }
   // Anything the server has that the cache never saw (a turn that completed
   // server-side after the cache snapshot) — INSERT BY TIME, not blind-append.
@@ -2019,9 +2026,7 @@ function mergeServerWithCache(
   // answer already sits in the cache — appending pinned it below the answer
   // it prompted. Sliding it in by createdAt puts it back where it was sent.
   for (const sm of enriched) {
-    const key = fp(sm);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (!remainingEnriched.has(sm)) continue;
     const at = typeof sm.createdAt === "number" ? sm.createdAt : Number.POSITIVE_INFINITY;
     let idx = out.length;
     while (idx > 0) {
@@ -8416,12 +8421,16 @@ export default function ChatPage() {
       // persisted row briefly replaced the live "running" entry after a
       // remount, then the next live event flipped it back).
       const ended = Boolean(child.ended_at);
+      const failed =
+        ended &&
+        !!child.end_reason &&
+        child.end_reason !== "delegation_complete";
       items.push({
         id: `child-${child.id}`,
         kind: "subagent",
         label: child.title?.trim() || "Subagent",
-        status: ended ? "done" : "running",
-        detail: child.model ?? undefined,
+        status: failed ? "error" : ended ? "done" : "running",
+        detail: failed ? child.end_reason ?? "Interrupted" : child.model ?? undefined,
         toolCount: child.tool_call_count ?? undefined,
         tokens: childTokens.get(child.id),
         startedAt,

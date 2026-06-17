@@ -284,3 +284,24 @@ describe("active turn resume cache", () => {
     expect(merged).toEqual([completed]);
   });
 });
+
+describe("server/cache transcript merge", () => {
+  it("preserves repeated identical user prompts as separate turns", () => {
+    const prompt = "Use subagents if helpful. Compare three ways to improve listing conversion.";
+    const server = [
+      message({ content: prompt, createdAt: 1_000, id: "u1", role: "user" }),
+      message({ content: "First dispatch started.", createdAt: 1_010, id: "a1", role: "assistant" }),
+      message({ content: prompt, createdAt: 2_000, id: "u2", role: "user" }),
+      message({ content: "Second dispatch restarted.", createdAt: 2_010, id: "a2", role: "assistant" }),
+    ];
+    const cached = [
+      message({ content: prompt, createdAt: 1_000, id: "cached-u1", role: "user" }),
+      message({ content: "First dispatch started.", createdAt: 1_010, id: "cached-a1", role: "assistant" }),
+    ];
+
+    const merged = __chatPageTestables.mergeServerWithCache(server, cached, false);
+
+    expect(merged.map((item) => item.id)).toEqual(["u1", "a1", "u2", "a2"]);
+    expect(merged.filter((item) => item.role === "user" && item.content === prompt)).toHaveLength(2);
+  });
+});
