@@ -105,6 +105,42 @@ _COMPLIANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Imperative / rule / verification context. A compliance noun only counts as
+# CRITICAL when it co-occurs with one of these — that is what separates a
+# must-verify RULE ("verify initials before uploading", "do not use a CPS
+# that...") from ordinary domain workflow chatter ("when uploading the CPS,
+# automatically fill the deal sheet", "include the disclosure in the package",
+# a branded email signature). Deliberately excludes workflow verbs like
+# create/include/fill/automatically/when.
+_RULE_CONTEXT_RE = re.compile(
+    r"\b(verify|verified|verifying|ensure|confirm|make\s+sure|required|"
+    r"must|never|always|do\s+not|don'?t|"
+    r"check\s+(?:that|for|the)|enough\s+(?:initials|signatures)|"
+    r"before\s+(?:you\s+|the\s+)?(?:upload|uploading|file|filing|select|"
+    r"selecting|send|sending|submit|submitting|mark|marking|treating))\b",
+    re.IGNORECASE,
+)
+
+# System / interruption / scaffolding notes that must NEVER be a "correction".
+_SYSTEM_NOTE_RE = re.compile(
+    r"(previous\s+turn\s+was\s+interrupted|your\s+previous\s+turn|"
+    r"interrupted\s+before\s+you\s+could|was\s+interrupted\s+before|"
+    r"\[system\s+note|tool\s+result|new\s+message\s+is\s+asking)",
+    re.IGNORECASE,
+)
+
+# Strong correction cues — the agent was told it got something WRONG and must
+# remember the fix. Bare "instead of"/"rather than" (common in plain
+# preferences like "user prefers X instead of Y") is deliberately NOT here, so
+# a preference can't masquerade as a critical correction.
+_CORRECTION_CRITICAL_RE = re.compile(
+    r"\b(actually|correction|corrected|wrong|i\s+told\s+you|"
+    r"you\s+(?:got|sent|used|should\s+have|were\s+supposed)|"
+    r"we\s+(?:talked|discussed|spoke)\s+about\s+this|"
+    r"renamed\s+to|moved\s+to|no\s+longer)\b",
+    re.IGNORECASE,
+)
+
 # Verified values: filesystem paths, URLs, emails, money, versions, ports,
 # long hex ids, key:value config fragments.
 _VALUE_RES = [
@@ -239,21 +275,27 @@ def classify_fact_durability(content: str) -> dict:
 
     confidence = round(winner / total, 3) if total > 0 else 0.5
 
-    # Critical tier — clear-cut, RARE only. v1 auto-critical = correction OR
-    # compliance, precedence correction > compliance (a correction is the
-    # strongest "you got this wrong, remember it" signal). Conventions
-    # (should/must/never/always/policy/rule) are deliberately NOT auto-critical:
-    # on real corpora they are far too common (~25% of facts) and would dilute
-    # the reserved Must-Follow lane back toward the starvation problem. A
-    # convention still scores durable + keeps its "convention" signal; making
-    # one "must-always" requires a future deliberate pin action. Never critical
-    # when the fact reads as task chatter (ephemeral).
+    # Critical tier — clear-cut, RARE only. v1 auto-critical requires CONTEXT,
+    # not bare domain vocabulary, so a compliance-dense corpus (e.g. a realtor's)
+    # doesn't flood the reserved Must-Follow lane:
+    #   correction  -> a STRONG correction cue (the agent was told it got
+    #                  something wrong), and NOT a system/interruption note;
+    #                  bare "instead of"/"rather than" preferences don't count.
+    #   compliance  -> a legal/domain noun AND imperative/rule/verification
+    #                  context (verify/must/never/before-upload/...), never a
+    #                  bare mention in a workflow/marketing fact.
+    # Precedence correction > compliance. Conventions are NOT auto-critical (too
+    # common); making one must-always needs a future deliberate pin. Never
+    # critical when the fact reads as task chatter (ephemeral) or a system note.
+    is_system_note = bool(_SYSTEM_NOTE_RE.search(text))
+    has_rule_context = bool(_RULE_CONTEXT_RE.search(text))
+    is_strong_correction = bool(_CORRECTION_CRITICAL_RE.search(text))
     critical = False
     critical_reason = ""
-    if durability == "durable":
-        if is_correction:
+    if durability == "durable" and not is_system_note:
+        if is_correction and is_strong_correction:
             critical, critical_reason = True, "correction"
-        elif is_compliance:
+        elif is_compliance and has_rule_context:
             critical, critical_reason = True, "compliance"
 
     return {
