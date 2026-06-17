@@ -504,6 +504,41 @@ def _subagent_replay_from_live_parent(
     return (replay_events, replay_seq, attached, saw_terminal)
 
 
+def _live_subagent_resume_payload(
+    child_session_id: str,
+    parent_session_id: str | None,
+    running: bool,
+) -> dict | None:
+    if not running or not child_session_id:
+        return None
+    payload: dict[str, Any] = {
+        "child_session_id": child_session_id,
+        "parent_session_id": parent_session_id or None,
+    }
+    try:
+        from tools.delegate_tool import list_active_subagents
+
+        for record in list_active_subagents():
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("child_session_id") or "") != child_session_id:
+                continue
+            payload.update(
+                {
+                    "subagent_id": record.get("subagent_id") or None,
+                    "task_id": record.get("async_task_id") or None,
+                    "goal": record.get("goal") or "",
+                    "task_index": record.get("task_index") or 0,
+                }
+            )
+            if record.get("parent_session_id"):
+                payload["parent_session_id"] = record.get("parent_session_id")
+            break
+    except Exception:
+        pass
+    return payload
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
@@ -2669,6 +2704,11 @@ def _(rid, params: dict) -> dict:
         and isinstance(found, dict)
         and found.get("ended_at") is None
     )
+    live_subagent = _live_subagent_resume_payload(
+        target,
+        parent_session_id,
+        child_replay_running,
+    )
     for existing_sid, existing_session in list(_sessions.items()):
         existing_key = existing_session.get("session_key")
         if existing_key not in {target, active_target}:
@@ -2723,6 +2763,8 @@ def _(rid, params: dict) -> dict:
             "replay_seq": replay_seq,
             "running_tools": running_tools,
         }
+        if live_subagent is not None:
+            result["live_subagent"] = live_subagent
         if messages is not None:
             result["messages"] = messages
         return _ok(rid, result)
@@ -2878,6 +2920,8 @@ def _(rid, params: dict) -> dict:
         "replay_seq": child_replay_seq,
         "running_tools": [],
     }
+    if live_subagent is not None:
+        result["live_subagent"] = live_subagent
     if messages is not None:
         result["messages"] = messages
     return _ok(rid, result)
@@ -3226,6 +3270,87 @@ def _(rid, params: dict) -> dict:
             "subagent_id": subagent_id or None,
             "child_session_id": child_session_id or None,
             "task_id": task_id or None,
+        },
+    )
+
+
+def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
+    display = str(text or "").strip()
+    if not display:
+        return 0
+    emitted = 0
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        child_session_id = str(target.get("child_session_id") or "")
+        parent_session_id = str(target.get("parent_session_id") or "")
+        if not child_session_id or not parent_session_id:
+            continue
+        for gateway_sid, session in list(_sessions.items()):
+            if not isinstance(session, dict):
+                continue
+            session_key = str(session.get("session_key") or "")
+            agent_session_id = str(
+                getattr(session.get("agent"), "session_id", "") or ""
+            )
+            if parent_session_id not in {session_key, agent_session_id}:
+                continue
+            marker = (gateway_sid, child_session_id)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            _emit(
+                "subagent.message",
+                gateway_sid,
+                {
+                    "subagent_id": target.get("subagent_id") or None,
+                    "child_session_id": child_session_id,
+                    "task_id": target.get("task_id") or None,
+                    "task_index": target.get("task_index") or 0,
+                    "goal": target.get("goal") or "",
+                    "text": display,
+                    "status": "running",
+                    "source": "user",
+                },
+            )
+            emitted += 1
+    return emitted
+
+
+@method("subagent.message")
+def _(rid, params: dict) -> dict:
+    """Steer a currently running child subagent by child/session/task id."""
+    from tools.delegate_tool import message_subagent
+
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return _err(rid, 4002, "text is required")
+    subagent_id = str(params.get("subagent_id") or "").strip()
+    child_session_id = str(params.get("child_session_id") or "").strip()
+    task_id = str(params.get("task_id") or "").strip()
+    if not subagent_id and not child_session_id and not task_id:
+        return _err(rid, 4000, "subagent_id, child_session_id, or task_id required")
+
+    result = message_subagent(
+        text,
+        subagent_id=subagent_id,
+        child_session_id=child_session_id,
+        task_id=task_id,
+        source="dashboard_steer",
+    )
+    display_text = str(params.get("display_text") or "").strip() or text
+    emitted = _emit_subagent_message_to_parent(
+        result.get("targets") if isinstance(result.get("targets"), list) else [],
+        display_text,
+    )
+    return _ok(
+        rid,
+        {
+            "found": bool(result.get("found")),
+            "accepted": int(result.get("accepted") or 0),
+            "targets": result.get("targets") or [],
+            "emitted": emitted,
         },
     )
 

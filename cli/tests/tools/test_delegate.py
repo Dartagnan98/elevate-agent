@@ -24,6 +24,8 @@ from tools.delegate_tool import (
     _get_max_concurrent_children,
     _LEGACY_EVENT_MAP,
     MAX_DEPTH,
+    _active_subagents,
+    _active_subagents_lock,
     check_delegate_requirements,
     delegate_task,
     _build_child_agent,
@@ -32,6 +34,7 @@ from tools.delegate_tool import (
     _strip_blocked_tools,
     _resolve_child_credential_pool,
     _resolve_delegation_credentials,
+    message_subagent,
 )
 
 
@@ -556,6 +559,80 @@ class TestInstalledAgentParity(unittest.TestCase):
         self.assertTrue(kwargs["skip_memory"])
         self.assertIsNone(kwargs["clarify_callback"])
         self.assertIn("HANDOFF RULE", kwargs["ephemeral_system_prompt"])
+
+
+class TestLiveSubagentMessaging(unittest.TestCase):
+    def tearDown(self):
+        with _active_subagents_lock:
+            _active_subagents.clear()
+
+    def test_message_subagent_routes_by_child_session_id(self):
+        agent = MagicMock()
+        agent.session_id = "child-1"
+        agent._parent_session_id = "parent-1"
+        agent.queue_soft_interrupt.return_value = True
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            _active_subagents["sa-1"] = {
+                "agent": agent,
+                "async_task_id": "dt-1",
+                "goal": "Assess pricing",
+                "parent_session_id": "parent-1",
+                "subagent_id": "sa-1",
+                "task_index": 2,
+            }
+
+        result = message_subagent("switch to seller follow-up", child_session_id="child-1")
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["accepted"], 1)
+        agent.queue_soft_interrupt.assert_called_once_with(
+            "switch to seller follow-up",
+            source="subagent_message",
+        )
+        self.assertEqual(
+            result["targets"],
+            [
+                {
+                    "subagent_id": "sa-1",
+                    "child_session_id": "child-1",
+                    "task_id": "dt-1",
+                    "parent_session_id": "parent-1",
+                    "goal": "Assess pricing",
+                    "task_index": 2,
+                }
+            ],
+        )
+
+    def test_message_subagent_routes_all_children_for_task_id(self):
+        agents = []
+        with _active_subagents_lock:
+            _active_subagents.clear()
+            for idx in range(2):
+                agent = MagicMock()
+                agent.session_id = f"child-{idx}"
+                agent._parent_session_id = "parent-1"
+                agent.queue_soft_interrupt.return_value = True
+                agents.append(agent)
+                _active_subagents[f"sa-{idx}"] = {
+                    "agent": agent,
+                    "async_task_id": "dt-shared",
+                    "child_session_id": f"child-{idx}",
+                    "goal": f"Task {idx}",
+                    "parent_session_id": "parent-1",
+                    "subagent_id": f"sa-{idx}",
+                    "task_index": idx,
+                }
+
+        result = message_subagent("report status now", task_id="dt-shared")
+
+        self.assertTrue(result["found"])
+        self.assertEqual(result["accepted"], 2)
+        for agent in agents:
+            agent.queue_soft_interrupt.assert_called_once_with(
+                "report status now",
+                source="subagent_message",
+            )
 
 
 class TestToolNamePreservation(unittest.TestCase):

@@ -13,6 +13,7 @@ export interface ActivityItem {
 
 export interface SubagentProgress {
   apiCalls?: number
+  childSessionId?: string
   costUsd?: number
   depth: number
   durationSeconds?: number
@@ -32,6 +33,7 @@ export interface SubagentProgress {
   startedAt?: number
   status: 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
   summary?: string
+  taskId?: null | string
   taskCount: number
   thinking: string[]
   toolCount: number
@@ -66,13 +68,17 @@ export interface SubagentAggregate {
 
 export interface DelegationStatus {
   active: {
+    async_task_id?: null | string
+    child_session_id?: null | string
     depth?: number
     goal?: string
     model?: null | string
     parent_id?: null | string
+    parent_session_id?: null | string
     started_at?: number
     status?: string
     subagent_id?: string
+    task_index?: number
     tool_count?: number
   }[]
   max_concurrent_children?: number

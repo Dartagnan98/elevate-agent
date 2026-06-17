@@ -256,6 +256,101 @@ def interrupt_subagent_by_session(child_session_id: str) -> bool:
     return False
 
 
+def _record_child_session_id(record: Dict[str, Any]) -> str:
+    value = record.get("child_session_id")
+    if isinstance(value, str) and value:
+        return value
+    agent = record.get("agent")
+    value = getattr(agent, "session_id", None) if agent is not None else None
+    return value if isinstance(value, str) else ""
+
+
+def _record_parent_session_id(record: Dict[str, Any]) -> str:
+    value = record.get("parent_session_id")
+    if isinstance(value, str) and value:
+        return value
+    agent = record.get("agent")
+    value = getattr(agent, "_parent_session_id", None) if agent is not None else None
+    return value if isinstance(value, str) else ""
+
+
+def message_subagent(
+    text: str,
+    *,
+    subagent_id: str = "",
+    child_session_id: str = "",
+    task_id: str = "",
+    source: str = "subagent_message",
+) -> Dict[str, Any]:
+    """Queue a live steering message directly into a running child agent.
+
+    This is the child-addressable counterpart to session.steer. It keeps a
+    running subagent drill-in from creating a second resumed turn when the user
+    sends follow-up instructions mid-run.
+    """
+    message = str(text or "").strip()
+    subagent_id = str(subagent_id or "").strip()
+    child_session_id = str(child_session_id or "").strip()
+    task_id = str(task_id or "").strip()
+    if not message:
+        return {"found": False, "accepted": 0, "targets": [], "error": "text required"}
+    if not subagent_id and not child_session_id and not task_id:
+        return {
+            "found": False,
+            "accepted": 0,
+            "targets": [],
+            "error": "subagent_id, child_session_id, or task_id required",
+        }
+
+    with _active_subagents_lock:
+        records = list(_active_subagents.values())
+
+    matched = 0
+    accepted = 0
+    targets: List[Dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        current_subagent_id = str(record.get("subagent_id") or "")
+        current_child_session_id = _record_child_session_id(record)
+        current_task_id = str(record.get("async_task_id") or "")
+        if subagent_id and current_subagent_id != subagent_id:
+            continue
+        if child_session_id and current_child_session_id != child_session_id:
+            continue
+        if task_id and current_task_id != task_id:
+            continue
+
+        matched += 1
+        agent = record.get("agent")
+        queue_soft_interrupt = (
+            getattr(agent, "queue_soft_interrupt", None) if agent is not None else None
+        )
+        if not callable(queue_soft_interrupt):
+            continue
+        try:
+            ok = bool(queue_soft_interrupt(message, source=source))
+        except Exception as exc:
+            logger.debug("message_subagent(%s) failed: %s", current_subagent_id, exc)
+            ok = False
+        if not ok:
+            continue
+
+        accepted += 1
+        targets.append(
+            {
+                "subagent_id": current_subagent_id or None,
+                "child_session_id": current_child_session_id or None,
+                "task_id": current_task_id or None,
+                "parent_session_id": _record_parent_session_id(record) or None,
+                "goal": record.get("goal") or "",
+                "task_index": record.get("task_index") or 0,
+            }
+        )
+
+    return {"found": matched > 0, "accepted": accepted, "targets": targets}
+
+
 # Async (dispatched) delegations cancelled by the user. A cancelled task's
 # children are interrupted AND any late result is suppressed at the delivery
 # sink — "treat it as cancelled" must mean no ghost completion message
@@ -1928,8 +2023,11 @@ def _run_single_child(
         _register_subagent(
             {
                 "subagent_id": _subagent_id,
+                "task_index": task_index,
                 "parent_id": _parent_sid if isinstance(_parent_sid, str) else None,
                 "async_task_id": getattr(child, "_async_task_id", None),
+                "child_session_id": getattr(child, "session_id", None),
+                "parent_session_id": getattr(child, "_parent_session_id", None),
                 "depth": _tui_depth,
                 "goal": goal,
                 "model": (

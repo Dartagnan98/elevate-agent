@@ -378,6 +378,10 @@ def test_session_resume_replays_running_subagent_events_from_parent(server, monk
     result = resp["result"]
     assert result["persisted_session_id"] == "child-1"
     assert result["running"] is True
+    assert result["live_subagent"] == {
+        "child_session_id": "child-1",
+        "parent_session_id": "parent-1",
+    }
     assert [event["type"] for event in result["replay_events"]] == [
         "subagent.start",
         "subagent.thinking",
@@ -465,6 +469,10 @@ def test_session_resume_attaches_running_subagent_when_parent_ring_is_empty(serv
 
     assert "error" not in resp
     assert resp["result"]["running"] is True
+    assert resp["result"]["live_subagent"] == {
+        "child_session_id": "child-empty",
+        "parent_session_id": "parent-1",
+    }
     assert resp["result"]["replay_events"] == []
     assert transport in parent_session["transports"]
 
@@ -474,6 +482,81 @@ def test_session_resume_attaches_running_subagent_when_parent_ring_is_empty(serv
         {"child_session_id": "child-empty", "tool_name": "search"},
     )
     assert transport.frames[-1]["params"]["type"] == "subagent.tool"
+
+
+def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkeypatch):
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    import tools.delegate_tool as delegate_tool
+
+    def fake_message_subagent(text, **kwargs):
+        assert text == "model sees this"
+        assert kwargs["child_session_id"] == "child-1"
+        assert kwargs["source"] == "dashboard_steer"
+        return {
+            "found": True,
+            "accepted": 1,
+            "targets": [
+                {
+                    "subagent_id": "sa-1",
+                    "child_session_id": "child-1",
+                    "task_id": "dt-1",
+                    "parent_session_id": "parent-1",
+                    "goal": "Assess pricing",
+                    "task_index": 3,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(delegate_tool, "message_subagent", fake_message_subagent)
+    transport = _T()
+    parent_session = {
+        "agent": object(),
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "parent-1",
+        "transports": [transport],
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    resp = server.handle_request(
+        {
+            "id": "sub-msg",
+            "method": "subagent.message",
+            "params": {
+                "child_session_id": "child-1",
+                "display_text": "UI shows this",
+                "session_id": "child-gw",
+                "text": "model sees this",
+            },
+        }
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["found"] is True
+    assert resp["result"]["accepted"] == 1
+    assert resp["result"]["emitted"] == 1
+    assert parent_session["events"][-1]["type"] == "subagent.message"
+    payload = parent_session["events"][-1]["payload"]
+    assert payload["text"] == "UI shows this"
+    assert payload["child_session_id"] == "child-1"
+    assert payload["subagent_id"] == "sa-1"
+    assert payload["task_id"] == "dt-1"
+    assert payload["task_index"] == 3
+    assert transport.frames[-1]["params"]["type"] == "subagent.message"
 
 
 def test_session_resume_multicasts_events_to_all_attached_transports(server, monkeypatch):
