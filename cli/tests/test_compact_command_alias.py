@@ -1,8 +1,9 @@
-"""`/compact` is the canonical compaction command; `/compress` is a back-compat alias.
-
-Aligns Elevate with the industry-standard `/compact` (Claude Code, Codex, etc.).
-The old `/compact` display-mode toggle moved to `/compactview`.
+"""`/compact` is the sole compaction command (industry-standard, like Claude
+Code / Codex). `/compress` was removed entirely (no alias) to avoid a duplicate
+command. The old `/compact` display-mode toggle moved to `/compactview`.
 """
+import inspect
+
 from elevate_cli.commands import resolve_command, GATEWAY_KNOWN_COMMANDS
 
 
@@ -12,29 +13,26 @@ def test_compact_is_canonical():
     assert "compact" in d.description.lower()
 
 
-def test_compress_resolves_to_compact_alias():
-    d = resolve_command("compress")
-    assert d is not None and d.name == "compact", "/compress must alias to /compact"
+def test_compress_is_removed():
+    assert resolve_command("compress") is None, "/compress must be gone (no alias)"
+    assert "compress" not in GATEWAY_KNOWN_COMMANDS
 
 
-def test_both_names_known_to_gateway():
+def test_compact_known_to_gateway():
     assert "compact" in GATEWAY_KNOWN_COMMANDS
-    assert "compress" in GATEWAY_KNOWN_COMMANDS  # alias still accepted
 
 
-def test_gateway_dispatch_accepts_both_names():
-    # the gateway slash.exec / command.dispatch paths string-match the bare verb;
-    # both must route to the compaction handler.
+def test_gateway_dispatch_targets_compact_only():
     import tui_gateway.server as srv
-    src = __import__("inspect").getsource(srv)
-    assert '_cmd_base in ("compact", "compress")' in src
-    assert 'name in ("compact", "compress")' in src
-    assert '"compact"' in src and '"compress"' in src  # _MUTATES_WHILE_RUNNING
+    src = inspect.getsource(srv)
+    assert '_cmd_base == "compact"' in src
+    assert 'name == "compact"' in src
+    # no leftover alias tuple
+    assert 'in ("compact", "compress")' not in src
 
 
 def test_compact_display_toggle_renamed_to_compactview():
-    # the old display-mode toggle no longer squats on /compact
     import tui_gateway.server as srv
-    src = __import__("inspect").getsource(srv)
+    src = inspect.getsource(srv)
     assert '"/compactview"' in src
     assert '("/compact", "Toggle compact display mode", "TUI")' not in src

@@ -5627,7 +5627,7 @@ class GatewayRunner:
         if canonical == "sethome":
             return await self._handle_set_home_command(event)
 
-        if canonical == "compress":
+        if canonical == "compact":
             return await self._handle_compress_command(event)
 
         if canonical == "usage":

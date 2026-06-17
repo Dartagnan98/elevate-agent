@@ -7117,8 +7117,7 @@ class ElevateCLI:
         Accepts an optional focus topic: ``/compact <focus>`` guides the
         summariser to preserve information related to *focus* while being
         more aggressive about discarding everything else.  Inspired by
-        Claude Code's ``/compact <focus>`` feature. ``/compress`` is a
-        backward-compatible alias.
+        Claude Code's ``/compact <focus>`` feature.
         """
         if not self.conversation_history or len(self.conversation_history) < 4:
             print("(._.) Not enough conversation to compact (need at least 4 messages).")

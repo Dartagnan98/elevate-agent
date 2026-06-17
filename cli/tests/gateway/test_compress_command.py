@@ -1,4 +1,4 @@
-"""Tests for gateway /compress user-facing messaging."""
+"""Tests for gateway /compact user-facing messaging."""
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
@@ -20,7 +20,7 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str = "/compress") -> MessageEvent:
+def _make_event(text: str = "/compact") -> MessageEvent:
     return MessageEvent(text=text, source=_make_source(), message_id="m1")
 
 

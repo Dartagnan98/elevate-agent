@@ -1468,7 +1468,7 @@ def test_config_set_model_allowed_when_idle(monkeypatch):
 
 def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monkeypatch):
     """Slash worker passthrough (e.g. /model, /personality, /prompt,
-    /compress) must reject during an in-flight turn.  Same race as
+    /compact) must reject during an in-flight turn.  Same race as
     config.set — mutates live agent state while run_conversation is
     reading it."""
     import types
@@ -1493,7 +1493,7 @@ def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monke
         ("/model new/model", "model"),
         ("/personality default", "personality"),
         ("/prompt", "prompt"),
-        ("/compress", "compress"),
+        ("/compact", "compact"),
     ]:
         warning = server._mirror_slash_side_effects("sid", session, cmd)
         assert (
@@ -2102,35 +2102,33 @@ def test_async_delegate_sink_never_raises():
 
 
 def test_slash_exec_compact_routes_to_compaction_handler(monkeypatch):
-    """/compact (and its /compress alias) reach the in-process compaction
-    handler via slash.exec — proving the command rename is wired end to end,
-    not just that the strings exist in source."""
+    """/compact reaches the in-process compaction handler via slash.exec —
+    proving the command is wired end to end, not just that the strings exist
+    in source. (/compress was removed; only /compact compacts.)"""
     calls = []
     monkeypatch.setattr(
         server,
         "_run_direct_compress_slash",
         lambda sid, session, focus: (calls.append((sid, focus)), "COMPACTED")[1],
     )
-    for verb in ("compact", "compress"):
-        calls.clear()
-        server._sessions["sid"] = _session(
-            agent=types.SimpleNamespace(compression_enabled=True),
-            history=[{"role": "user", "content": str(i)} for i in range(6)],
+    server._sessions["sid"] = _session(
+        agent=types.SimpleNamespace(compression_enabled=True),
+        history=[{"role": "user", "content": str(i)} for i in range(6)],
+    )
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "slash.exec",
+                "params": {"session_id": "sid", "command": "/compact"},
+            }
         )
-        try:
-            resp = server.handle_request(
-                {
-                    "id": "1",
-                    "method": "slash.exec",
-                    "params": {"session_id": "sid", "command": f"/{verb}"},
-                }
-            )
-        finally:
-            server._sessions.pop("sid", None)
-        assert (
-            resp.get("result", {}).get("output") == "COMPACTED"
-        ), f"/{verb} did not route to the compaction handler: {resp}"
-        assert calls, f"/{verb} did not invoke _run_direct_compress_slash"
+    finally:
+        server._sessions.pop("sid", None)
+    assert (
+        resp.get("result", {}).get("output") == "COMPACTED"
+    ), f"/compact did not route to the compaction handler: {resp}"
+    assert calls, "/compact did not invoke _run_direct_compress_slash"
 
 
 def test_slash_exec_compact_short_session_uses_compact_wording():

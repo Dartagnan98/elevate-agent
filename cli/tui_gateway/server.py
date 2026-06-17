@@ -5974,7 +5974,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     # worker thread running agent.run_conversation is using.  Parity
     # with the session.compress / session.undo guards and the gateway
     # runner's running-agent /model guard.
-    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compact", "compress"}
+    _MUTATES_WHILE_RUNNING = {"model", "personality", "prompt", "compact"}
     if name in _MUTATES_WHILE_RUNNING and session.get("running"):
         return f"session busy — /interrupt the current turn before running /{name}"
 
@@ -5990,7 +5990,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             new_prompt = (cfg.get("agent") or {}).get("system_prompt", "") or ""
             agent.ephemeral_system_prompt = new_prompt or None
             agent._cached_system_prompt = None
-        elif name in ("compact", "compress") and agent:
+        elif name == "compact" and agent:
             with session["history_lock"]:
                 _compress_session_history(session, arg)
             _emit("session.info", sid, _session_info(agent))
@@ -6112,7 +6112,7 @@ def _(rid, params: dict) -> dict:
             rid, 4018, f"pending-input command: use command.dispatch for /{_cmd_base}"
         )
 
-    if _cmd_base in ("compact", "compress"):
+    if _cmd_base == "compact":
         _focus = " ".join(_cmd_parts[1:]).strip() if len(_cmd_parts) > 1 else ""
         with session["history_lock"]:
             if len(session.get("history", [])) < 4:

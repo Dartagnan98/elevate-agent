@@ -1,4 +1,4 @@
-"""Tests for /compress <focus> — guided compression with focus topic.
+"""Tests for /compact <focus> — guided compression with focus topic.
 
 Inspired by Claude Code's /compact <focus> feature.
 """
@@ -34,7 +34,7 @@ def test_focus_topic_extracted_and_passed(capsys):
         return 50
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough", side_effect=_estimate):
-        shell._manual_compress("/compress database schema")
+        shell._manual_compress("/compact database schema")
 
     output = capsys.readouterr().out
     assert 'focus: "database schema"' in output
@@ -56,7 +56,7 @@ def test_no_focus_topic_when_bare_command(capsys):
     shell.agent._compress_context.return_value = (list(history), "")
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress")
+        shell._manual_compress("/compact")
 
     shell.agent._compress_context.assert_called_once()
     call_kwargs = shell.agent._compress_context.call_args
@@ -64,7 +64,7 @@ def test_no_focus_topic_when_bare_command(capsys):
 
 
 def test_empty_focus_after_command_treated_as_none(capsys):
-    """Trailing whitespace after /compress does not produce a focus topic."""
+    """Trailing whitespace after /compact does not produce a focus topic."""
     shell = _make_cli()
     history = _make_history()
     shell.conversation_history = history
@@ -74,7 +74,7 @@ def test_empty_focus_after_command_treated_as_none(capsys):
     shell.agent._compress_context.return_value = (list(history), "")
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress   ")
+        shell._manual_compress("/compact   ")
 
     shell.agent._compress_context.assert_called_once()
     call_kwargs = shell.agent._compress_context.call_args
@@ -93,7 +93,7 @@ def test_focus_topic_printed_in_compression_banner(capsys):
     shell.agent._compress_context.return_value = (compressed, "")
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress API endpoints")
+        shell._manual_compress("/compact API endpoints")
 
     output = capsys.readouterr().out
     assert 'focus: "API endpoints"' in output
@@ -111,7 +111,7 @@ def test_no_focus_prints_standard_banner(capsys):
     shell.agent._compress_context.return_value = (compressed, "")
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress")
+        shell._manual_compress("/compact")
 
     output = capsys.readouterr().out
     assert "focus:" not in output

@@ -126,7 +126,6 @@ export const sessionCommands: SlashCommand[] = [
   {
     help: 'compact transcript',
     name: 'compact',
-    aliases: ['compress'],
     run: (arg, ctx) => {
       ctx.gateway
         .rpc<SessionCompressResponse>('session.compress', {
