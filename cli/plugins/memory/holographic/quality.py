@@ -239,10 +239,15 @@ def classify_fact_durability(content: str) -> dict:
 
     confidence = round(winner / total, 3) if total > 0 else 0.5
 
-    # Critical tier — clear-cut only. Correction > compliance > convention
-    # for the reason label (a correction is the strongest "you got this
-    # wrong, remember it" signal). Never critical when the fact reads as
-    # task chatter (ephemeral) — that's exactly the noise the tier excludes.
+    # Critical tier — clear-cut, RARE only. v1 auto-critical = correction OR
+    # compliance, precedence correction > compliance (a correction is the
+    # strongest "you got this wrong, remember it" signal). Conventions
+    # (should/must/never/always/policy/rule) are deliberately NOT auto-critical:
+    # on real corpora they are far too common (~25% of facts) and would dilute
+    # the reserved Must-Follow lane back toward the starvation problem. A
+    # convention still scores durable + keeps its "convention" signal; making
+    # one "must-always" requires a future deliberate pin action. Never critical
+    # when the fact reads as task chatter (ephemeral).
     critical = False
     critical_reason = ""
     if durability == "durable":
@@ -250,8 +255,6 @@ def classify_fact_durability(content: str) -> dict:
             critical, critical_reason = True, "correction"
         elif is_compliance:
             critical, critical_reason = True, "compliance"
-        elif is_convention:
-            critical, critical_reason = True, "convention"
 
     return {
         "durability": durability,
