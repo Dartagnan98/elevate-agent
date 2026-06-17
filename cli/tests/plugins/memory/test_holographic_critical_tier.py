@@ -523,3 +523,14 @@ def test_correction_false_positives_tightened():
     real = cls("Actually, you used the buyer checklist — we represent the seller on Columbia, "
                "use the seller accepted-offer checklist.")
     assert real["critical"] is True and real["critical_reason"] == "correction", real
+
+
+def test_compliance_workflow_with_imperative_is_excluded():
+    # Real fact 46/47 shape: domain noun (CPS/accepted offer) + imperative
+    # ("do not wait", "required") BUT it's autofill automation, not a verify
+    # rule -> the workflow exclusion must keep it critical=False.
+    from plugins.memory.holographic.quality import classify_fact_durability as cls
+    r = cls("Real-estate SkySlope workflow: when uploading a new accepted offer/CPS, "
+            "automatically fill out the SkySlope Deal Sheet/TRS from the signed CPS; do not "
+            "wait for a separate prompt unless required data is missing or submission is unsafe.")
+    assert r["critical"] is False, r
