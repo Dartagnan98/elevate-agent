@@ -2128,6 +2128,8 @@ def test_slash_exec_compact_routes_to_compaction_handler(monkeypatch):
     assert (
         resp.get("result", {}).get("output") == "COMPACTED"
     ), f"/compact did not route to the compaction handler: {resp}"
+    assert resp.get("result", {}).get("kind") == "compact"
+    assert resp.get("result", {}).get("display") == "Finished compacting"
     assert calls, "/compact did not invoke _run_direct_compress_slash"
 
 
@@ -2146,3 +2148,4 @@ def test_slash_exec_compact_short_session_uses_compact_wording():
         server._sessions.pop("sid", None)
     out = resp.get("result", {}).get("output", "")
     assert "compact" in out.lower() and "compress" not in out.lower(), out
+    assert "display" not in resp.get("result", {})

@@ -20,6 +20,8 @@
 import type { GatewayClient } from "@/lib/gatewayClient";
 
 export interface SlashExecResponse {
+  display?: string;
+  kind?: string;
   output?: string;
   warning?: string;
 }
@@ -31,6 +33,10 @@ export type CommandDispatchResponse =
   | { type: "send"; message: string };
 
 export interface SlashExecCallbacks {
+  /** Complete the manual /compact activity row without rendering raw diagnostics. */
+  compactDone?(text: string, rawOutput?: string): void;
+  /** Clear a manual /compact activity row and render the user-facing failure. */
+  compactFailed?(text: string): void;
   /** Render a transcript system message. */
   sys(text: string): void;
   /** Submit a user message to the agent (prompt.submit). */
@@ -68,7 +74,7 @@ export async function executeSlash({
   command,
   sessionId,
   gw,
-  callbacks: { sys, send, sendSkill },
+  callbacks: { compactDone, compactFailed, sys, send, sendSkill },
 }: SlashExecOptions): Promise<SlashExecResult> {
   const { name, arg } = parseSlash(command);
 
@@ -84,6 +90,20 @@ export async function executeSlash({
       session_id: sessionId,
     });
     const body = r?.output || `/${name}: no output`;
+    if (
+      name === "compact" &&
+      !r?.warning &&
+      ((r?.kind === "compact" && r.display) || compactOutputLooksCompleted(body))
+    ) {
+      const display = r?.display || "Finished compacting";
+      if (compactDone) compactDone(display, body);
+      else sys(display);
+      return "done";
+    }
+    if (name === "compact" && compactFailed) {
+      compactFailed(r?.warning ? `warning: ${r.warning}\n${body}` : body);
+      return "done";
+    }
     sys(r?.warning ? `warning: ${r.warning}\n${body}` : body);
     return "done";
   } catch {
@@ -115,7 +135,7 @@ export async function executeSlash({
           command: `/${d.target}${arg ? ` ${arg}` : ""}`,
           sessionId,
           gw,
-          callbacks: { sys, send, sendSkill },
+          callbacks: { compactDone, compactFailed, sys, send, sendSkill },
         });
 
       case "skill": {
@@ -149,6 +169,15 @@ export async function executeSlash({
 export function parseSlash(command: string): { name: string; arg: string } {
   const m = command.replace(/^\/+/, "").match(/^(\S+)\s*(.*)$/);
   return m ? { name: m[1], arg: m[2].trim() } : { name: "", arg: "" };
+}
+
+function compactOutputLooksCompleted(output: string): boolean {
+  const clean = output.toLowerCase();
+  return (
+    clean.includes("compressed:") ||
+    clean.includes("no changes from compression") ||
+    clean.includes("approx request size")
+  );
 }
 
 function parseCommandDispatch(raw: unknown): CommandDispatchResponse | null {

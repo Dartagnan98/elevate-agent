@@ -6013,7 +6013,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
 
 
 def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str:
-    """Handle /compress in-process instead of paying the slash-worker tax."""
+    """Handle /compact in-process instead of paying the slash-worker tax."""
     agent = session.get("agent")
     if session.get("running"):
         return "session busy — /interrupt the current turn before running /compact"
@@ -6088,6 +6088,21 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
     return "\n".join(lines)
 
 
+def _compact_slash_completed(output: str) -> bool:
+    """Return true when /compact reached the actual compaction path."""
+    clean = (output or "").strip().lower()
+    if not clean:
+        return False
+    failed_markers = (
+        "session busy",
+        "not enough conversation",
+        "no active agent",
+        "compression is disabled",
+        "live session sync failed",
+    )
+    return not any(marker in clean for marker in failed_markers)
+
+
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
@@ -6124,9 +6139,13 @@ def _(rid, params: dict) -> dict:
                 )
         if wait_err := _wait_agent(session, rid):
             return wait_err
+        output = _run_direct_compress_slash(params.get("session_id", ""), session, _focus)
+        payload = {"output": output}
+        if _compact_slash_completed(output):
+            payload.update({"kind": "compact", "display": "Finished compacting"})
         return _ok(
             rid,
-            {"output": _run_direct_compress_slash(params.get("session_id", ""), session, _focus)},
+            payload,
         )
 
     if wait_err := _wait_agent(session, rid):

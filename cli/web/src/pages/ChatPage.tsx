@@ -1273,8 +1273,10 @@ export const __chatPageTestables = {
   buildBreakdownSteps,
   defaultActivityDigestOpen,
   describeToolGroup,
+  isCompactSlashCommand,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
+  shouldStartManualCompactActivity,
   shouldKeepTranscriptMessage,
   toolTarget,
 };
@@ -3067,6 +3069,14 @@ function looksLikePlanRequest(text: string): boolean {
   return false;
 }
 
+function isCompactSlashCommand(text: string): boolean {
+  return /^\/+compact(?:\s|$)/i.test(text.trim());
+}
+
+function shouldStartManualCompactActivity(text: string, busy: boolean): boolean {
+  return isCompactSlashCommand(text) && !busy;
+}
+
 function isOpenPreviewIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksToOpen =
@@ -3638,6 +3648,7 @@ export default function ChatPage() {
   // looks frozen. Set on that status; cleared by the first resume signal
   // (delta/thinking/tool) and a !busy safety net below.
   const [compacting, setCompacting] = useState(false);
+  const manualCompactAssistantRef = useRef<string | null>(null);
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
@@ -3848,6 +3859,59 @@ export default function ChatPage() {
       });
     },
     [ensureAssistant],
+  );
+
+  const completeManualCompactAssistant = useCallback(
+    (text: string) => {
+      const messageId = manualCompactAssistantRef.current;
+      const completedAt = Date.now();
+      if (messageId) {
+        const traces = activityTraceRef.current
+          .filter((trace) => !trace.messageId || trace.messageId === messageId)
+          .map((trace) => ({ ...trace, messageId }));
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === messageId
+              ? {
+                  ...message,
+                  completedAt,
+                  content: text,
+                  status: "complete" as const,
+                  traces: traces.length ? traces : message.traces,
+                }
+              : message,
+          ),
+        );
+      } else {
+        appendMessage("assistant", text, { completedAt, status: "complete" });
+      }
+      if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
+      manualCompactAssistantRef.current = null;
+      setTools([]);
+      setActivityTrace([]);
+      setBusy(false);
+      setCompacting(false);
+      setStatusText("Ready");
+    },
+    [appendMessage],
+  );
+
+  const cancelManualCompactAssistant = useCallback(
+    (text: string) => {
+      const messageId = manualCompactAssistantRef.current;
+      if (messageId) {
+        setMessages((prev) => prev.filter((message) => message.id !== messageId));
+      }
+      if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
+      manualCompactAssistantRef.current = null;
+      setTools([]);
+      setActivityTrace([]);
+      setBusy(false);
+      setCompacting(false);
+      setStatusText("Ready");
+      appendMessage("system", text);
+    },
+    [appendMessage],
   );
 
   // On unmount, if a turn is still in flight, tell the sidebar the row is no
@@ -4669,7 +4733,7 @@ export default function ChatPage() {
   // catches the rest (errors, stop, interrupt, disconnect) so a stale
   // "Compacting…" banner can't get stuck on screen.
   useEffect(() => {
-    if (!busy && compacting) setCompacting(false);
+    if (!busy && compacting && !manualCompactAssistantRef.current) setCompacting(false);
   }, [busy, compacting]);
 
   useEffect(() => {
@@ -5595,8 +5659,13 @@ export default function ChatPage() {
           // a resume signal clears it. \bcompacted\b only matches the done
           // status, never the in-progress "Compacting context".
           if (/compacting context/i.test(text)) setCompacting(true);
-          else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text))
-            setCompacting(false);
+          else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
+            if (manualCompactAssistantRef.current) {
+              setStatusText("Finished compacting");
+            } else {
+              setCompacting(false);
+            }
+          }
         }
       }),
     );
@@ -7166,6 +7235,7 @@ export default function ChatPage() {
   // (~8s), force `busy` off so the queue drains live without a remount.
   useEffect(() => {
     if (!busy || state !== "open") return;
+    if (manualCompactAssistantRef.current) return;
     const sid = activeSessionRef.current;
     if (!sid) return;
     let misses = 0;
@@ -7399,17 +7469,54 @@ export default function ChatPage() {
           setStatusText("Connecting...");
           return;
         }
-        appendMessage("user", trimmed);
-        await executeSlash({
+        const manualCompact = shouldStartManualCompactActivity(trimmed, busy);
+        let manualCompactAssistantId: string | null = null;
+        if (manualCompact) {
+          flushSync(() => {
+            appendMessage("user", trimmed);
+            setTools([]);
+            setActivityTrace([]);
+            manualCompactAssistantId = ensureAssistant();
+            manualCompactAssistantRef.current = manualCompactAssistantId;
+            setBusy(true);
+            setCompacting(true);
+            setStatusText("Compacting context");
+          });
+          await afterNextPaint();
+        } else {
+          appendMessage("user", trimmed);
+        }
+        const slashResult = await executeSlash({
           callbacks: {
+            compactDone: (body) => completeManualCompactAssistant(body),
+            compactFailed: (body) => cancelManualCompactAssistant(body),
             send: submitPrompt,
             sendSkill: submitSkillInvocation,
-            sys: (body) => appendMessage("system", body),
+            sys: (body) =>
+              manualCompactAssistantId
+                ? cancelManualCompactAssistant(body)
+                : appendMessage("system", body),
           },
           command: trimmed,
           gw,
           sessionId: targetSessionId,
         });
+        if (
+          manualCompactAssistantId &&
+          manualCompactAssistantRef.current === manualCompactAssistantId &&
+          slashResult !== "sent"
+        ) {
+          completeManualCompactAssistant("Finished compacting");
+        }
+        if (slashResult !== "sent") {
+          const sidebarSessionId =
+            persistedSessionIdRef.current ?? activeSessionRef.current ?? targetSessionId;
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId },
+            }),
+          );
+        }
         if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
         return;
       }
@@ -7535,7 +7642,7 @@ export default function ChatPage() {
       );
       if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, attachments, busy, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
@@ -7632,7 +7739,10 @@ export default function ChatPage() {
       const now = Date.now();
       const dropped = state === "closed" || state === "error";
       const stalledMidTurn =
-        busy && state === "open" && now - lastFrameAtRef.current > STALL_MS;
+        busy &&
+        !manualCompactAssistantRef.current &&
+        state === "open" &&
+        now - lastFrameAtRef.current > STALL_MS;
       if (!dropped && !stalledMidTurn) return;
       const cooldown = dropped ? DROP_COOLDOWN_MS : STALL_MS;
       if (now - stallReconnectAtRef.current < cooldown) return;
