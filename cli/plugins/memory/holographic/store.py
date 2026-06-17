@@ -513,7 +513,7 @@ class MemoryStore:
             "reinforced_count": "INTEGER DEFAULT 0",
             "last_seen_at": "TIMESTAMP",
             "last_recalled_at": "TIMESTAMP",
-            # Critical / pinned recall-tier fields (migration 0032). Added
+            # Critical / pinned recall-tier fields (migration 0033). Added
             # here too so fresh/SQLite/test DBs gain them even if the numbered
             # migration hasn't run yet. Read/written directly off memory_facts.
             "critical": "BOOLEAN DEFAULT false",

@@ -7,7 +7,7 @@
 - Phase 3: reserved "Must-Follow Rules" recall lane (low-trust critical fact
   surfaces; tier kill-switch; absent when no critical facts; FACT-45 replay;
   injected critical fact_ids logged in memory_injections — CONSTRAINT 2).
-- Phase 1: 0032 columns exist on memory_facts and the `facts` view still works.
+- Phase 1: 0033 columns exist on memory_facts and the `facts` view still works.
 - Phase 5: backfill_critical dry-run report.
 """
 
@@ -323,7 +323,7 @@ def test_full_legacy_needs_both_tier_off_and_ratchet_on(tmp_path):
 # Phase 1 — migration / view compatibility
 # ---------------------------------------------------------------------------
 
-def test_0032_columns_exist_and_facts_view_still_selects(tmp_path):
+def test_0033_columns_exist_and_facts_view_still_selects(tmp_path):
     provider = _provider(tmp_path)
     store = provider._store
     cols = {

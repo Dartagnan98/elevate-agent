@@ -5,8 +5,10 @@ v1.1 narrows scope per Dartagnan's corrections (2026-06-16). Grounded in
 `elevate-memory-architecture-map.md`. Source: `~/elevate/cli` @ `main cccbb60f1`.
 
 ## Repo state confirmed (2026-06-16)
-- HEAD = `main @ cccbb60f1`. Migrations in `elevate_cli/data/migrations_pg/` run to **0031** → next real
-  number is **0032**.
+- HEAD = `main @ cccbb60f1`. Migrations in `elevate_cli/data/migrations_pg/` run to **0031**. NOTE: the
+  shipped desktop release already carries a `0032_chat_session_compaction.sql` that is NOT on main yet,
+  and the runner (`data/migrations.py`) HARD-ERRORS on a duplicate version number. So this migration uses
+  **0033** (0032 left as a reserved gap) to avoid colliding with that shipped 0032.
 - `MemoryManager.prefetch_all(query, *, session_id)` (memory_manager.py:437) takes **no task context**;
   prefetch fires before the tool loop (conversation_loop.py:657 / run_agent.py). Active-skill context is
   NOT plumbed into prefetch or fact writes today → confirms Phase 3b must be deferred.
@@ -59,7 +61,7 @@ v1.1 narrows scope per Dartagnan's corrections (2026-06-16). Grounded in
   `task_tags TEXT DEFAULT ''`, `critical_reason TEXT DEFAULT ''`.
 - **Approach (matches the existing plugin-owned metadata-column pattern):** add these in the `_init_db`
   ALTER column set (store.py ~540, idempotent `ADD COLUMN IF NOT EXISTS`), AND ship a real numbered
-  migration **`0032_memory_critical_fields.sql`** that performs the same `ALTER TABLE memory_facts ADD
+  migration **`0033_memory_critical_fields.sql`** that performs the same `ALTER TABLE memory_facts ADD
   COLUMN IF NOT EXISTS …` for versioned parity. Read/write these columns **directly against
   `memory_facts`** (like durability), NOT through the `facts` view. **Do NOT recreate the `facts` view**
   in v1 (lowest blast radius; the view's fixed column list is left exactly as-is).
@@ -139,7 +141,7 @@ v1.1 narrows scope per Dartagnan's corrections (2026-06-16). Grounded in
 5. No critical facts → no `### Must-Follow Rules` section.
 6. **Fact-45 replay:** seed the signature rule with `critical=true`, `task_tags=accepted-offer`; assert it
    lands in the injected prompt for an accepted-offer query (was 1/3693 pre-fix).
-7. Migration / view compatibility: 0032 applies cleanly; the `facts` view still works unchanged; new
+7. Migration / view compatibility: 0033 applies cleanly; the `facts` view still works unchanged; new
    columns are readable directly from `memory_facts`.
 8. Embedding auto/fallback: missing credentials do NOT break startup (degrades silently).
 
