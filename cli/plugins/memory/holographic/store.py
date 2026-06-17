@@ -4164,8 +4164,15 @@ class MemoryStore:
         *,
         dry_run: bool = True,
         limit: int | None = None,
+        force: bool = False,
     ) -> dict:
         """Backfill critical/pinned/task_tags/critical_reason on existing facts.
+
+        Returns a sanity ``verdict`` from the critical RATE over active facts:
+        great (<10%), inspect (10-15%), stop (>15%). On APPLY (``dry_run=False``)
+        a ``stop`` verdict REFUSES to write (returns ``blocked``) unless
+        ``force=True`` — a classifier blow-up must not silently mutate a huge
+        fraction of any box's facts.
 
         DRY-RUN BY DEFAULT. The dry-run report lists, per affected fact:
         ``fact_id``, current ``status``, and the proposed ``critical`` /
@@ -4200,6 +4207,8 @@ class MemoryStore:
 
         affected: list[dict] = []
         scanned = 0
+        active_total = 0
+        active_critical = 0
         for row in rows:
             fact = self._row_to_dict(row)
             scanned += 1
@@ -4222,6 +4231,11 @@ class MemoryStore:
             cur_critical = bool(fact.get("critical"))
             cur_pinned = bool(fact.get("pinned"))
             proposed_critical = cur_critical or bool(cls.get("critical"))
+            # Sanity-threshold accounting: critical RATE over ACTIVE facts.
+            if status == "active":
+                active_total += 1
+                if proposed_critical:
+                    active_critical += 1
             # Backfill NEVER derives pinned from an explicit/manual save —
             # pinned is a deliberate must-always signal only. Preserve existing.
             proposed_pinned = cur_pinned
@@ -4268,6 +4282,20 @@ class MemoryStore:
             if limit is not None and len(affected) >= int(limit):
                 break
 
+        critical_rate = (active_critical / active_total) if active_total else 0.0
+        if critical_rate > 0.15:
+            verdict = "stop"
+        elif critical_rate >= 0.10:
+            verdict = "inspect"
+        else:
+            verdict = "great"
+        rate_fields = {
+            "critical_count": active_critical,
+            "active_total": active_total,
+            "critical_rate": round(critical_rate, 4),
+            "verdict": verdict,
+        }
+
         if dry_run or not affected:
             return {
                 "ran": True,
@@ -4276,6 +4304,24 @@ class MemoryStore:
                 "applied": 0,
                 "unarchived": 0,
                 "affected": affected,
+                **rate_fields,
+            }
+
+        # Safety gate: a ``stop`` verdict (>15% critical) REFUSES to apply unless
+        # force=True, so a classifier blow-up can't silently mutate a huge share
+        # of a box's facts. Reviewed via the dry-run report first.
+        if verdict == "stop" and not force:
+            return {
+                "ran": False,
+                "dry_run": False,
+                "blocked": True,
+                "reason": f"critical rate {critical_rate:.1%} exceeds the 15% stop threshold; "
+                          "re-run with force=True only after manual review of the dry-run",
+                "scanned": scanned,
+                "applied": 0,
+                "unarchived": 0,
+                "affected": affected,
+                **rate_fields,
             }
 
         applied = 0
@@ -4316,6 +4362,7 @@ class MemoryStore:
             "applied": applied,
             "unarchived": unarchived,
             "affected": affected,
+            **rate_fields,
         }
 
     def memory_hygiene_report(self, limit: int = 20) -> dict:

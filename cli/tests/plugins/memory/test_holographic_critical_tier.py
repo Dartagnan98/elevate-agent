@@ -380,8 +380,9 @@ def test_backfill_critical_dry_run_reports_without_writing(tmp_path):
     # Dry-run did not write.
     assert _fact_row(store, fid)["critical"] is False
 
-    # Apply, then a second run is idempotent (nothing left to change for this fact).
-    applied = store.backfill_critical(dry_run=False)
+    # Apply (force past the rate gate — this test exercises apply/idempotency,
+    # not the >15% sanity threshold, and the shared test corpus runs hot).
+    applied = store.backfill_critical(dry_run=False, force=True)
     assert applied["applied"] >= 1
     assert _fact_row(store, fid)["critical"] is True
     rerun = store.backfill_critical(dry_run=True)
@@ -431,3 +432,43 @@ def test_explicit_manual_save_does_not_pin_or_squat_lane(tmp_path):
     assert "green tea" not in must_follow.lower(), "non-critical preference squatted the lane (P1)"
     # 5. The matching critical fact still appears.
     assert "initials and a signature" in must_follow
+
+
+# ---------------------------------------------------------------------------
+# Backfill critical-rate sanity threshold (great <10% / inspect 10-15% / stop >15%)
+# ---------------------------------------------------------------------------
+
+def test_backfill_rate_guard_blocks_above_15pct(tmp_path, monkeypatch):
+    import plugins.memory.holographic.store as storemod
+    provider = _provider(tmp_path)
+    store = provider._store
+    store.add_fact("Rate-guard probe fact about the listing admin process and naming rules")
+
+    CRIT = {"durability": "durable", "confidence": 1.0, "task_framed": False,
+            "signals": ["correction"], "critical": True, "critical_reason": "correction"}
+    NONE = {"durability": "durable", "confidence": 0.5, "task_framed": False,
+            "signals": [], "critical": False, "critical_reason": ""}
+
+    # 100% critical -> rate 1.0 -> verdict 'stop' -> apply is BLOCKED (writes
+    # nothing) unless force=True.
+    monkeypatch.setattr(storemod.fact_quality, "classify_fact_durability", lambda c: dict(CRIT))
+    dry = store.backfill_critical(dry_run=True)
+    assert dry["verdict"] == "stop"
+    assert dry["critical_rate"] > 0.15
+    assert dry["critical_count"] == dry["active_total"]  # all active flagged
+
+    blocked = store.backfill_critical(dry_run=False)
+    assert blocked.get("blocked") is True
+    assert blocked["applied"] == 0                 # nothing written while blocked
+    assert "force" in blocked["reason"].lower()
+
+    forced = store.backfill_critical(dry_run=False, force=True)
+    assert not forced.get("blocked")               # force overrides the stop gate
+    assert forced["applied"] >= 1
+    _clear_all_critical(store)                      # undo the forced mass-flag
+
+    # 0% critical -> rate 0 -> verdict 'great'.
+    monkeypatch.setattr(storemod.fact_quality, "classify_fact_durability", lambda c: dict(NONE))
+    great = store.backfill_critical(dry_run=True)
+    assert great["verdict"] == "great"
+    assert great["critical_rate"] < 0.10
