@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -84,6 +85,31 @@ def test_sanitizer_drops_forbidden_and_unknown_keys(recorder_home):
     assert "report.pdf" in raw
 
 
+def test_sanitizer_rejects_type_abuse_content_channels(recorder_home):
+    assert recorder.record_session_event(
+        "gateway.error",
+        session_id="s1",
+        payload={
+            "output_tokens": "raw prompt text",
+            "success": "raw answer text",
+            "status": {"content": "raw nested content"},
+            "prompt_hash": {"content": "raw nested hash"},
+            "retry_count": 2,
+            "failed": False,
+        },
+    )
+
+    raw = "\n".join(path.read_text(encoding="utf-8") for path in _jsonl_files(recorder_home))
+    event = _jsonl_events(recorder_home)[0]
+
+    assert event["payload"] == {"retry_count": 2, "failed": False}
+    assert "raw prompt text" not in raw
+    assert "raw answer text" not in raw
+    assert "raw nested content" not in raw
+    assert "raw nested hash" not in raw
+    assert event["redaction"]["unknown_keys_dropped"] == 4
+
+
 def test_event_name_is_not_a_content_channel(recorder_home):
     assert recorder.record_session_event(
         "Please sell 123 Main Street to joe@example.com",
@@ -95,6 +121,26 @@ def test_event_name_is_not_a_content_channel(recorder_home):
     assert event["event"] == "diagnostics.event"
     assert "Main Street" not in json.dumps(event)
     assert "joe@example.com" not in json.dumps(event)
+
+
+def test_envelope_strings_are_redacted(recorder_home):
+    assert recorder.record_session_event(
+        "gateway.error",
+        session_id="s1",
+        source="joe@example.com",
+        component="/Users/dartagnanpatricio/private/report.pdf",
+        app_version="https://user:pass@example.com/callback?token=abc123&ok=1",
+    )
+
+    raw = "\n".join(path.read_text(encoding="utf-8") for path in _jsonl_files(recorder_home))
+    event = _jsonl_events(recorder_home)[0]
+
+    assert event["source"] == "[redacted-email]"
+    assert event["component"] == "[path:report.pdf]"
+    assert "joe@example.com" not in raw
+    assert "/Users/dartagnanpatricio" not in raw
+    assert "pass@example.com" not in raw
+    assert "token=abc123" not in raw
 
 
 def test_collect_skips_malformed_lines(recorder_home):
@@ -145,6 +191,52 @@ def test_write_failure_returns_false(tmp_path, monkeypatch):
     monkeypatch.setenv("ELEVATE_HOME", str(bad_home))
 
     assert recorder.record_session_event("message.start", session_id="s1") is False
+
+
+def test_retention_prunes_old_jsonl(recorder_home):
+    base_dir = recorder_home / "logs" / "session-events"
+    base_dir.mkdir(parents=True)
+    old = base_dir / "2000-01-01.jsonl"
+    old.write_text('{"ts":1}\n', encoding="utf-8")
+    os.utime(old, (0, 0))
+
+    assert recorder.record_session_event("message.start", session_id="s1")
+
+    assert not old.exists()
+
+
+def test_directory_size_cap_prunes_existing_jsonl(recorder_home, monkeypatch):
+    base_dir = recorder_home / "logs" / "session-events"
+    base_dir.mkdir(parents=True)
+    now = time.time()
+    old_files = []
+    for idx in range(2):
+        path = base_dir / f"old-{idx}.jsonl"
+        path.write_text("x" * 100, encoding="utf-8")
+        os.utime(path, (now - idx, now - idx))
+        old_files.append(path)
+    monkeypatch.setattr(recorder, "DEFAULT_MAX_DIR_SIZE_BYTES", 50)
+
+    assert recorder.record_session_event("message.start", session_id="s1")
+
+    assert all(not path.exists() for path in old_files)
+
+
+def test_oversize_payload_is_truncated_before_write(recorder_home, monkeypatch):
+    monkeypatch.setattr(recorder, "DEFAULT_MAX_EVENT_BYTES", 600)
+
+    assert recorder.record_session_event(
+        "gateway.error",
+        session_id="s1",
+        payload={"error_message": "x" * 2000},
+    )
+
+    raw = "\n".join(path.read_text(encoding="utf-8") for path in _jsonl_files(recorder_home))
+    event = _jsonl_events(recorder_home)[0]
+
+    assert event["payload"] == {"payload_truncated": True}
+    assert event["redaction"]["oversize_payloads_truncated"] == 1
+    assert "x" * 100 not in raw
 
 
 def test_rotation_keeps_parseable_jsonl(recorder_home, monkeypatch):

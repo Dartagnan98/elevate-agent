@@ -83,6 +83,79 @@ def test_status_callback_accepts_single_message_argument():
     )
 
 
+def test_emit_records_content_free_session_breadcrumb(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    server._sessions["sid"] = {"events_seq": 7}
+    try:
+        server._emit(
+            "message.complete",
+            "sid",
+            {
+                "message_id": "assistant-1",
+                "status": "complete",
+                "text": "raw answer",
+                "reasoning": "private reasoning",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 3,
+                    "reasoning_tokens": 2,
+                },
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert len(calls) == 1
+    event_type, kwargs = calls[0]
+    assert event_type == "message.complete"
+    assert kwargs["session_id"] == "sid"
+    assert kwargs["source"] == "tui_gateway"
+    assert kwargs["component"] == "tui_gateway.server"
+    assert kwargs["payload"] == {
+        "event_seq": 7,
+        "message_id": "assistant-1",
+        "status": "complete",
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "reasoning_tokens": 2,
+        "reasoning_chars": len("private reasoning"),
+        "text_chars": len("raw answer"),
+    }
+
+
+def test_emit_throttles_delta_recorder(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    server._RECORDER_DELTA_LAST.clear()
+    server._sessions["sid"] = {"events_seq": 1}
+    try:
+        server._emit("message.delta", "sid", {"message_id": "m1", "text": "a"})
+        server._emit("message.delta", "sid", {"message_id": "m1", "text": "b"})
+        server._emit("message.delta", "sid", {"message_id": "m2", "text": "c"})
+    finally:
+        server._sessions.pop("sid", None)
+        server._RECORDER_DELTA_LAST.clear()
+
+    assert [call[0] for call in calls] == ["message.delta", "message.delta"]
+    assert calls[0][1]["payload"]["message_id"] == "m1"
+    assert calls[1][1]["payload"]["message_id"] == "m2"
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),

@@ -446,6 +446,92 @@ def _event_ts(event: dict) -> float:
         return 0.0
 
 
+_RECORDER_DELTA_EVENTS = {"message.delta", "thinking.delta", "reasoning.delta"}
+_RECORDER_DELTA_INTERVAL_SECONDS = 1.0
+_RECORDER_DELTA_LAST: dict[tuple[str, str, str], float] = {}
+_RECORDER_DELTA_LOCK = threading.Lock()
+
+
+def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
+    """Write a content-free breadcrumb for session timeline debugging."""
+    if not sid:
+        return
+    payload = payload if isinstance(payload, dict) else {}
+    message_id = str(payload.get("message_id") or "")
+    if event in _RECORDER_DELTA_EVENTS:
+        key = (sid, event, message_id)
+        now = time.monotonic()
+        with _RECORDER_DELTA_LOCK:
+            last = _RECORDER_DELTA_LAST.get(key)
+            if last is not None and now - last < _RECORDER_DELTA_INTERVAL_SECONDS:
+                return
+            _RECORDER_DELTA_LAST[key] = now
+
+    clean: dict[str, Any] = {}
+    session = _sessions.get(sid)
+    if session is not None:
+        try:
+            clean["event_seq"] = int(session.get("events_seq", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+    for key in (
+        "assistant_message_id",
+        "child_session_id",
+        "kind",
+        "message_id",
+        "model",
+        "parent_session_id",
+        "provider",
+        "reason",
+        "request_id",
+        "source",
+        "status",
+        "task_id",
+        "turn_id",
+        "user_message_id",
+        "where",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            clean[key] = value
+
+    for key in ("followup", "failed", "noop", "running", "success"):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            clean[key] = value
+
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                clean[key] = value
+
+    for key in ("api_calls", "duration_ms", "duration_seconds", "message_count", "tool_count"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            clean[key] = value
+
+    for key in ("message", "reasoning", "rendered", "text", "warning"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            clean[f"{key}_chars"] = len(value)
+
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=sid,
+            payload=clean,
+            source="tui_gateway",
+            component="tui_gateway.server",
+        )
+    except Exception:
+        logger.debug("session recorder write failed", exc_info=True)
+
+
 def _subagent_replay_from_live_parent(
     child_session_id: str,
     transport,
@@ -618,6 +704,7 @@ def _emit(event: str, sid: str, payload: dict | None = None):
     if payload is not None:
         params["payload"] = payload
     write_json({"jsonrpc": "2.0", "method": "event", "params": params})
+    _record_gateway_event(event, sid, payload)
 
 
 def _status_update(sid: str, kind: str, text: str | None = None, **extra):

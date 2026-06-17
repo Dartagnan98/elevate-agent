@@ -56,13 +56,19 @@ _SAFE_NUMERIC_KEYS = {
     "api_calls",
     "duration_ms",
     "duration_seconds",
+    "event_seq",
     "input_tokens",
     "message_count",
+    "message_chars",
     "output_tokens",
+    "rendered_chars",
     "reasoning_tokens",
+    "reasoning_chars",
     "replay_count",
     "retry_count",
+    "text_chars",
     "tool_count",
+    "warning_chars",
 }
 
 _SAFE_STATE_KEYS = {
@@ -74,13 +80,19 @@ _SAFE_STATE_KEYS = {
     "error_class",
     "error_message",
     "frontend_asset",
+    "assistant_message_id",
+    "kind",
+    "message_id",
     "model",
     "parent_session_id",
     "provider",
+    "reason",
+    "request_id",
     "source",
     "status",
     "task_id",
     "turn_id",
+    "user_message_id",
     "where",
 }
 
@@ -219,6 +231,21 @@ def sanitize_payload(event_type: str, payload: dict[str, Any] | None) -> tuple[d
         if lowered not in _SAFE_PAYLOAD_KEYS and not lowered.endswith("_hash"):
             report["unknown_keys_dropped"] += 1
             continue
+        if lowered in _SAFE_NUMERIC_KEYS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                report["unknown_keys_dropped"] += 1
+                continue
+            safe[key_str] = value
+            continue
+        if lowered in _SAFE_BOOL_KEYS:
+            if not isinstance(value, bool):
+                report["unknown_keys_dropped"] += 1
+                continue
+            safe[key_str] = value
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            report["unknown_keys_dropped"] += 1
+            continue
         safe[key_str] = _sanitize_value(value, report)
     return safe, report
 
@@ -276,9 +303,10 @@ def build_session_event(
         "event_id": uuid.uuid4().hex,
         "seq": _next_seq(),
         "event": _clean_event_name(event_type),
-        "severity": _coerce_str(severity or "info", max_len=24),
-        "source": _coerce_str(source or "backend", max_len=64),
-        "component": _coerce_str(component or source or "unknown", max_len=128),
+        "severity": _sanitize_envelope_field(severity or "info", report, max_len=24) or "info",
+        "source": _sanitize_envelope_field(source or "backend", report, max_len=64) or "backend",
+        "component": _sanitize_envelope_field(component or source or "unknown", report, max_len=128)
+        or "unknown",
         "pid": os.getpid(),
         "payload": clean_payload,
     }
@@ -490,25 +518,6 @@ def record_session_event(
         max_dir_size=DEFAULT_MAX_DIR_SIZE_BYTES,
     )
     return bool(ok)
-
-
-def record_frontend_trace(payload: dict[str, Any]) -> bool:
-    """Record a sanitized frontend event envelope."""
-    if not isinstance(payload, dict):
-        return False
-    event_type = str(payload.get("event") or payload.get("type") or "frontend.event")
-    return record_session_event(
-        event_type,
-        session_id=payload.get("session_id"),
-        turn_id=payload.get("turn_id"),
-        parent_session_id=payload.get("parent_session_id"),
-        child_session_id=payload.get("child_session_id"),
-        task_id=payload.get("task_id"),
-        payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else payload,
-        severity=str(payload.get("severity") or "info"),
-        source="frontend",
-        component=str(payload.get("component") or "frontend"),
-    )
 
 
 def _matches_event(
