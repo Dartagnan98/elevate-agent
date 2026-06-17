@@ -2432,7 +2432,18 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 entry["message_id"] = _stable_id(m)
             messages.append(entry)
             continue
-        display = _content_to_text(m.get("content"))
+        display_source = (
+            m.get("_display_content")
+            if (
+                role == "user"
+                and isinstance(m.get("client_message_id"), str)
+                and str(m.get("client_message_id")).startswith("steer.")
+                and isinstance(m.get("_display_content"), str)
+                and str(m.get("_display_content")).strip()
+            )
+            else m.get("content")
+        )
+        display = _content_to_text(display_source)
         if not display.strip():
             continue
         entry = {"role": role, "text": display}
@@ -3300,6 +3311,20 @@ def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
             if marker in seen:
                 continue
             seen.add(marker)
+            steer_payload = {
+                "subagent_id": target.get("subagent_id") or None,
+                "child_session_id": child_session_id,
+                "task_id": target.get("task_id") or None,
+                "task_index": target.get("task_index") or 0,
+                "goal": target.get("goal") or "",
+                "text": display,
+                "source": "subagent.message",
+            }
+            # Direct child messages are soft steers, not fresh turns. Emit the
+            # same queued marker parent steering uses so the drill-in holds the
+            # current run open and later folds the message into the timeline at
+            # steer.applied instead of rendering "Worked..." + a restarted run.
+            _emit("steer.queued", gateway_sid, steer_payload)
             _emit(
                 "subagent.message",
                 gateway_sid,

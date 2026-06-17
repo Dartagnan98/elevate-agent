@@ -549,7 +549,16 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert resp["result"]["found"] is True
     assert resp["result"]["accepted"] == 1
     assert resp["result"]["emitted"] == 1
-    assert parent_session["events"][-1]["type"] == "subagent.message"
+    assert [event["type"] for event in parent_session["events"][-2:]] == [
+        "steer.queued",
+        "subagent.message",
+    ]
+    queued_payload = parent_session["events"][-2]["payload"]
+    assert queued_payload["text"] == "UI shows this"
+    assert queued_payload["child_session_id"] == "child-1"
+    assert queued_payload["subagent_id"] == "sa-1"
+    assert queued_payload["task_id"] == "dt-1"
+    assert queued_payload["task_index"] == 3
     payload = parent_session["events"][-1]["payload"]
     assert payload["text"] == "UI shows this"
     assert payload["child_session_id"] == "child-1"

@@ -3700,6 +3700,15 @@ class AIAgent:
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
+                client_message_id = msg.get("client_message_id")
+                if (
+                    role == "user"
+                    and isinstance(client_message_id, str)
+                    and client_message_id.startswith("steer.")
+                    and isinstance(msg.get("_display_content"), str)
+                    and msg["_display_content"].strip()
+                ):
+                    content = msg["_display_content"].strip()
                 if isinstance(content, list):
                     # Multimodal turn — the SQLite `content` column is TEXT,
                     # so a raw block list would fail to bind.  Persist only
@@ -3743,7 +3752,7 @@ class AIAgent:
                     reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    client_message_id=msg.get("client_message_id"),
+                    client_message_id=client_message_id,
                 )
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
@@ -4702,6 +4711,16 @@ class AIAgent:
                 lines.append(f"- {content}")
         lines.append("Fold this into the current task before continuing. Do not restart work that is already complete.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _soft_interrupt_display_text(items: list[dict[str, Any]]) -> str:
+        """Return only the user-authored text from soft-interrupt items."""
+        parts: list[str] = []
+        for item in items or []:
+            content = str(item.get("content") or "").strip()
+            if content:
+                parts.append(content)
+        return "\n\n".join(parts)
 
 
     def _notify_steer_applied(self, items: list[dict[str, Any]] | None, *, via: str) -> None:
@@ -14142,16 +14161,32 @@ class AIAgent:
                         self._notify_steer_applied(_soft_items, via="after_text")
                         messages.append(final_msg)
                         _continuation_parts = []
+                        _display_parts = []
                         if _steer_after_text:
                             _continuation_parts.append(_steer_after_text)
+                            _display_parts.append(_steer_after_text)
                         if _soft_items:
                             _continuation_parts.append(
                                 self._soft_interrupt_text(_soft_items)
                             )
-                        messages.append({
+                            _soft_display = self._soft_interrupt_display_text(_soft_items)
+                            if _soft_display:
+                                _display_parts.append(_soft_display)
+                        _continuation_msg = {
                             "role": "user",
                             "content": "\n\n".join(_continuation_parts),
-                        })
+                            # Durable marker for transcript hydration: the
+                            # dashboard folds steer.* user rows back into the
+                            # previous assistant turn instead of showing a
+                            # new "Worked..." block for the continuation.
+                            "client_message_id": f"steer.{uuid.uuid4().hex}",
+                        }
+                        _display_content = "\n\n".join(
+                            p for p in _display_parts if str(p).strip()
+                        ).strip()
+                        if _display_content:
+                            _continuation_msg["_display_content"] = _display_content
+                        messages.append(_continuation_msg)
                         final_response = None
                         _turn_exit_reason = (
                             "steer_after_text_response"

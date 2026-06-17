@@ -5997,43 +5997,6 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
-      gw.on("subagent.message", (ev) => {
-        const payload = childPayloadFor(ev);
-        if (!payload) return;
-        const text = String(payload.text ?? "").trim();
-        if (!text) return;
-        const at = eventMillis(ev);
-        const childId =
-          typeof payload.child_session_id === "string" && payload.child_session_id
-            ? payload.child_session_id
-            : resumeId;
-        const replayId = `subagent-message-${childId}-${ev.seq ?? Math.round(at)}-${text.length}`;
-        setMessages((prev) => {
-          if (prev.some((message) => message.id === replayId)) return prev;
-          if (
-            prev.some(
-              (message) =>
-                message.role === "user" &&
-                message.content === text &&
-                Math.abs(message.createdAt - at) < 10_000,
-            )
-          ) {
-            return prev;
-          }
-          return [
-            ...prev,
-            {
-              content: text,
-              createdAt: at,
-              id: replayId,
-              role: "user" as const,
-              sessionKey: resumeId ?? undefined,
-            },
-          ];
-        });
-      }),
-    );
-    unsubs.push(
       gw.on("subagent.tool", (ev) => {
         const payload = childPayloadFor(ev);
         if (!payload) return;
@@ -6156,7 +6119,8 @@ export default function ChatPage() {
       // relayed from inside a running delegation). Flip the chip on the
       // steered bubble(s) from "steering…" to "applied".
       gw.on("steer.queued", (ev) => {
-        if (!accepts(ev)) return;
+        const childPayload = childPayloadFor(ev);
+        if (!childPayload && !accepts(ev)) return;
         // The gateway accepted a steer. It does NOT enter the timeline yet —
         // it inserts at the point it actually APPLIES (steer.applied), never
         // above thinking the user was watching when they sent it. Until
@@ -6187,7 +6151,8 @@ export default function ChatPage() {
     );
     unsubs.push(
       gw.on("steer.applied", (ev) => {
-        if (!accepts(ev)) return;
+        const childPayload = childPayloadFor(ev);
+        if (!childPayload && !accepts(ev)) return;
         // The run itself is untouched — same bubble, same status, same
         // timer. The steered message moves into the timeline as a marker.
         consumeAppliedSteers(eventMillis(ev));
@@ -7170,8 +7135,8 @@ export default function ChatPage() {
         setStatusText("Attachment blocked");
         return false;
       }
-      appendMessage("user", body);
       setStatusText("Messaging subagent...");
+      steerInFlightRef.current += 1;
       try {
         const response = await gw.request<SubagentMessageResponse>(
           "subagent.message",
@@ -7212,6 +7177,8 @@ export default function ChatPage() {
         });
         setStatusText("Message failed");
         return false;
+      } finally {
+        steerInFlightRef.current = Math.max(0, steerInFlightRef.current - 1);
       }
     },
     [appendMessage, attachments, gw, liveSubagent, sessionId],
