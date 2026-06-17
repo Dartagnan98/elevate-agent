@@ -113,11 +113,26 @@ _COMPLIANCE_RE = re.compile(
 # a branded email signature). Deliberately excludes workflow verbs like
 # create/include/fill/automatically/when.
 _RULE_CONTEXT_RE = re.compile(
-    r"\b(verify|verified|verifying|ensure|confirm|make\s+sure|required|"
-    r"must|never|always|do\s+not|don'?t|"
+    r"\b(verify|verified|verifying|ensure|confirm|validate|validated|validating|"
+    r"make\s+sure|required|must|never|do\s+not|don'?t|"
     r"check\s+(?:that|for|the)|enough\s+(?:initials|signatures)|"
     r"before\s+(?:you\s+|the\s+)?(?:upload|uploading|file|filing|select|"
     r"selecting|send|sending|submit|submitting|mark|marking|treating))\b",
+    re.IGNORECASE,
+)
+
+# Workflow / automation / marketing contexts that must NOT count as
+# compliance-critical even when they carry a domain noun + an imperative —
+# these are operational automation or branding, not must-verify rules:
+# accepted-offer reminders, CPS autofill/pull, disclosure-in-package, email
+# footer / signature block / marketing. (Verification rules like fact 45 ——
+# "verify enough initials/signatures before selecting or uploading" —— contain
+# none of these.)
+_COMPLIANCE_EXCLUDE_RE = re.compile(
+    r"(\breminders?\b|\bautomatically\b|auto-?fill|deal\s+sheet|\bthe\s+system\b|"
+    r"include\s+the\s+|in\s+the\s+accepted-offer\s+package|email\s+send\s+workflow|"
+    r"\bfooter\b|\bbranded\b|email\s+signature|signature\s+block|handwritten|"
+    r"marketing\s+(?:email|package|material))",
     re.IGNORECASE,
 )
 
@@ -125,7 +140,8 @@ _RULE_CONTEXT_RE = re.compile(
 _SYSTEM_NOTE_RE = re.compile(
     r"(previous\s+turn\s+was\s+interrupted|your\s+previous\s+turn|"
     r"interrupted\s+before\s+you\s+could|was\s+interrupted\s+before|"
-    r"\[system\s+note|tool\s+result|new\s+message\s+is\s+asking)",
+    r"\[system\s+note|tool\s+result|new\s+message\s+is\s+asking|"
+    r"runtime\s+note|internal\s+(?:agent|runtime)\s+note)",
     re.IGNORECASE,
 )
 
@@ -289,13 +305,14 @@ def classify_fact_durability(content: str) -> dict:
     # critical when the fact reads as task chatter (ephemeral) or a system note.
     is_system_note = bool(_SYSTEM_NOTE_RE.search(text))
     has_rule_context = bool(_RULE_CONTEXT_RE.search(text))
+    is_workflow_fp = bool(_COMPLIANCE_EXCLUDE_RE.search(text))
     is_strong_correction = bool(_CORRECTION_CRITICAL_RE.search(text))
     critical = False
     critical_reason = ""
     if durability == "durable" and not is_system_note:
         if is_correction and is_strong_correction:
             critical, critical_reason = True, "correction"
-        elif is_compliance and has_rule_context:
+        elif is_compliance and has_rule_context and not is_workflow_fp:
             critical, critical_reason = True, "compliance"
 
     return {
