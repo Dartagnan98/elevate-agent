@@ -306,6 +306,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
 
     class FakeCompressAgent:
         last_instance = None
+        last_kwargs = None
 
         def __init__(self, **kwargs):
             self.model = kwargs.get("model")
@@ -314,6 +315,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
             self.shutdown_memory_provider = MagicMock()
             self.close = MagicMock()
             type(self).last_instance = self
+            type(self).last_kwargs = kwargs
 
         def _compress_context(self, messages, *_args, **_kwargs):
             # Simulate real _compress_context: create a new session_id
@@ -352,7 +354,8 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     runner._pending_messages = {}
     runner._pending_approvals = {}
     runner._session_model_overrides = {}
-    runner._session_db = None
+    runner._session_db = MagicMock()
+    runner._session_db.get_session.return_value = {}
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._run_agent = AsyncMock(
@@ -392,6 +395,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
     # happens silently with server-side logging only.
     assert len(adapter.sent) == 0
     assert FakeCompressAgent.last_instance is not None
+    assert FakeCompressAgent.last_kwargs["session_db"] is runner._session_db
     FakeCompressAgent.last_instance.shutdown_memory_provider.assert_called_once()
     FakeCompressAgent.last_instance.close.assert_called_once()
 
