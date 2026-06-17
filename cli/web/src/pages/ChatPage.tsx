@@ -1270,8 +1270,10 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 }
 
 export const __chatPageTestables = {
+  describeToolGroup,
   normalizeStoredTranscript,
   shouldKeepTranscriptMessage,
+  toolTarget,
 };
 
 function readStoredTranscriptCache(): StoredTranscriptCache {
@@ -8396,6 +8398,7 @@ export default function ChatPage() {
       case "tasks":
         return (
           <BackgroundTasksPanel
+            sessionId={dataSessionId ?? ""}
             tasks={backgroundTasks}
             onClose={closeSidePanel}
             onDrillIn={handleOpenSubagent}
@@ -10226,15 +10229,25 @@ function toolCategory(name: string): ToolCategory {
   return "other";
 }
 
-// Pull the most label-worthy bit of a tool — a filename/skill/query — for the
-// "Read App.tsx" style single-item summary.
+function looksLikeCommandPreview(value: string): boolean {
+  return /(^|\s)(set\s+-[a-z]|npm|pnpm|yarn|bun|git|mkdir|rm|cp|mv|curl|ssh|rsync)\s/i.test(value) ||
+    /[$][(]|&&|\|\||;\s*/.test(value);
+}
+
+// Pull the most label-worthy, customer-safe bit of a tool — usually a
+// filename or skill name. Shell commands/search strings stay in the explicit
+// debug expansion instead of leaking into the normal live timeline.
 function toolTarget(tool: ToolStep, max = 44): string {
+  const category = toolCategory(tool.name);
+  if (category === "command" || category === "search" || category === "other") {
+    return "";
+  }
   const raw = (tool.context || "").trim();
   if (!raw) return "";
   let subject = "";
-  // Tool args usually arrive as JSON ({"command":…}, {"path":…}, {"query":…}).
-  // Pull the canonical field so the label reads "ran npm run build" / "edited
-  // App.tsx" / "searched psycopg" instead of a mangled JSON first-token.
+  // Tool args usually arrive as JSON ({"path":…}, {"file":…}, {"skill":…}).
+  // Pull the canonical field so safe labels read "edited App.tsx" instead of
+  // a mangled JSON first-token.
   if (raw.startsWith("{")) {
     try {
       const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -10248,6 +10261,7 @@ function toolTarget(tool: ToolStep, max = 44): string {
   }
   if (!subject) subject = raw;
   subject = subject.replace(/\s+/g, " ").trim();
+  if (looksLikeCommandPreview(subject)) return "";
   // Path-like single token → show the basename ("/a/b/App.tsx" → "App.tsx").
   if (!subject.includes(" ") && /[/\\]/.test(subject)) {
     subject = subject.split(/[/\\]/).pop() || subject;
@@ -10260,9 +10274,13 @@ function toolTarget(tool: ToolStep, max = 44): string {
 const TOOL_NAME_LABELS: Record<string, string> = {
   delegate: "Delegated a task",
   delegate_task: "Delegated a task",
+  exec_command: "Checked workspace",
   mixture_of_agents: "Ran a mixture of agents",
   agent_handoff: "Handed off to an agent",
+  read_file: "Read file",
   subagent: "Ran a subagent",
+  terminal: "Checked workspace",
+  todo: "Updated task list",
 };
 function humanizeToolName(name: string): string {
   const key = name.toLowerCase();
@@ -10272,8 +10290,21 @@ function humanizeToolName(name: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+function friendlyToolName(name: string): string {
+  const key = name.toLowerCase();
+  if (TOOL_NAME_LABELS[key]) return TOOL_NAME_LABELS[key];
+  switch (toolCategory(name)) {
+    case "command": return "Checked workspace";
+    case "search": return "Searched workspace";
+    case "edit": return "Edited file";
+    case "read": return "Read file";
+    case "skill": return "Loaded skill";
+    default: return humanizeToolName(name);
+  }
+}
+
 // Natural-language summary for a run of consecutive tool calls, e.g.
-// "Ran 2 commands", "Read App.tsx", "Ran a command, read a file".
+// "Checked workspace", "Read App.tsx", "Updated task list, read 5 files".
 function describeToolGroup(tools: ToolStep[]): string {
   const order: ToolCategory[] = [];
   const byCat = new Map<ToolCategory, ToolStep[]>();
@@ -10290,14 +10321,14 @@ function describeToolGroup(tools: ToolStep[]): string {
     const one = n === 1;
     const target = one ? toolTarget(items[0]) : "";
     switch (cat) {
-      case "command": return one ? (target ? `ran ${target}` : "ran a command") : `ran ${n} commands`;
-      case "search": return one ? (target ? `searched ${target}` : "ran a search") : `ran ${n} searches`;
+      case "command": return "checked workspace";
+      case "search": return one ? "searched workspace" : `searched ${n} times`;
       case "edit": return one ? (target ? `edited ${target}` : "edited a file") : `edited ${n} files`;
       case "read": return one ? (target ? `read ${target}` : "read a file") : `read ${n} files`;
       case "skill": return one ? (target ? `loaded ${target}` : "loaded a skill") : `loaded ${n} skills`;
       // For uncategorized tools, surface the actual tool name (e.g.
       // "delegate_task" → "Delegated a task") instead of a vague "ran a step".
-      default: return one ? humanizeToolName(items[0].name) : `ran ${n} steps`;
+      default: return one ? friendlyToolName(items[0].name) : `completed ${n} steps`;
     }
   };
   const parts = order.map((cat) => phrase(cat, byCat.get(cat)!));
@@ -10306,7 +10337,7 @@ function describeToolGroup(tools: ToolStep[]): string {
 }
 
 // Collapse runs of consecutive tool steps into a single labelled group, the
-// way image-2 shows "Ran 2 commands" instead of a row per call. Reasoning
+// way image-2 shows one compact activity row instead of a row per call. Reasoning
 // (trace) steps break a run and stay on their own line.
 function groupConsecutiveTools(steps: BreakdownStep[]): BreakdownStep[] {
   const out: BreakdownStep[] = [];
@@ -10495,6 +10526,7 @@ function splitReasoningSections(text: string): ReasoningSection[] {
 // is shown inline.
 function GroupToolDetail({ tool }: { tool: ToolStep }) {
   const Icon = breakdownToolIcon(tool.name);
+  const target = toolTarget(tool);
   const body = [
     tool.context && `context\n${tool.context}`,
     tool.preview && `streaming\n${tool.preview}`,
@@ -10515,8 +10547,8 @@ function GroupToolDetail({ tool }: { tool: ToolStep }) {
             tool.status === "running" && "animate-pulse",
           )}
         />
-        <span className="name">{tool.name}</span>
-        {tool.context && <span className="target">· {truncatePreview(tool.context)}</span>}
+        <span className="name">{friendlyToolName(tool.name)}</span>
+        {target && <span className="target">· {truncatePreview(target)}</span>}
         {tool.count > 1 && <span className="duration">×{tool.count}</span>}
       </div>
       {body && <div className="tool-body">{body}</div>}
@@ -10619,7 +10651,7 @@ function BreakdownRow({
           <span className={cn("name", running && "tool-shimmer")}>{step.label}</span>
         </button>
         {open && (
-          <div className="ml-4 border-l border-[var(--border-faint,rgba(255,255,255,0.08))] pl-2">
+          <div className="ml-4 space-y-0.5 pl-2">
             {step.tools.map((t) => (
               <GroupToolDetail key={t.id} tool={t} />
             ))}
@@ -10642,6 +10674,7 @@ function BreakdownRow({
   const hasBody = Boolean(toolBody);
   const open = userOpen ?? step.status === "error";
   const Icon = breakdownToolIcon(step.name);
+  const target = toolTarget(step);
   return (
     <div>
       <button
@@ -10660,11 +10693,11 @@ function BreakdownRow({
           )}
         />
         <span className={cn("name", step.status === "running" && "tool-shimmer")}>
-          {step.name}
+          {friendlyToolName(step.name)}
         </span>
-        {step.context && (
+        {target && (
           <span className="target">
-            · {truncatePreview(step.context)}
+            · {truncatePreview(target)}
           </span>
         )}
         {step.count > 1 && (
@@ -10908,7 +10941,12 @@ function ChatActivityDigest({
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
-  const expanded = open ?? true;
+  const hasErroredStep = steps.some((step) =>
+    step.type === "tool"
+      ? step.status === "error"
+      : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
+  );
+  const expanded = open ?? hasErroredStep;
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -11214,6 +11252,13 @@ function ArtifactPreviewPane({
   const copyText = artifact.path ?? artifact.content ?? artifact.detail ?? artifact.title;
   const pathForKind = artifact.path ?? artifact.title;
   const kind = artifact.path ? previewKind(pathForKind, contentType) : "text";
+  const previewHref = artifact.path ? api.previewFileUrl(artifact.path) : null;
+  const openPreviewHref =
+    kind === "pdf" && previewHref ? previewHref : blobUrl;
+  const pdfFrameSrc =
+    kind === "pdf" && previewHref
+      ? `${previewHref}#navpanes=0&view=FitH`
+      : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -11234,12 +11279,18 @@ function ArtifactPreviewPane({
       .previewFile(artifact.path)
       .then(async (response) => {
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(response.blob);
         const nextKind = previewKind(artifact.path ?? artifact.title, response.contentType);
+        const previewBlob =
+          nextKind === "pdf" && response.blob.type !== "application/pdf"
+            ? new Blob([response.blob], {
+                type: response.contentType || "application/pdf",
+              })
+            : response.blob;
+        objectUrl = URL.createObjectURL(previewBlob);
         setBlobUrl(objectUrl);
         setContentType(response.contentType);
         if (nextKind === "text") {
-          const text = await response.blob.text();
+          const text = await previewBlob.text();
           if (!cancelled) setTextPreview(text.slice(0, 250_000));
         }
       })
@@ -11257,8 +11308,8 @@ function ArtifactPreviewPane({
   }, [artifact]);
 
   const openExternal = () => {
-    if (!blobUrl) return;
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    if (!openPreviewHref) return;
+    window.open(openPreviewHref, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -11284,7 +11335,7 @@ function ArtifactPreviewPane({
           <Button
             aria-label="Open preview externally"
             className="hidden h-7 w-7 rounded-[7px] p-0 @[20rem]:inline-flex @[24rem]:h-8 @[24rem]:w-8"
-            disabled={!blobUrl}
+            disabled={!openPreviewHref}
             onClick={openExternal}
             size="sm"
             title="Open"
@@ -11369,11 +11420,11 @@ function ArtifactPreviewPane({
               <div className="mt-1 break-words text-xs opacity-90">{error}</div>
             </div>
           </div>
-        ) : kind === "pdf" && blobUrl ? (
+        ) : pdfFrameSrc ? (
           <div className="relative h-full w-full">
             <iframe
               className="absolute inset-0 h-full w-full bg-[var(--chat-bg)]"
-              src={`${blobUrl}#navpanes=0&view=FitH`}
+              src={pdfFrameSrc}
               title={artifact.title}
             />
             <noscript>
@@ -11416,7 +11467,7 @@ function ArtifactPreviewPane({
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button
-                  disabled={!blobUrl}
+                  disabled={!openPreviewHref}
                   onClick={openExternal}
                   size="sm"
                   type="button"

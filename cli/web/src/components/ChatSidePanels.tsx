@@ -477,7 +477,19 @@ function relativeTime(ts?: number): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function TaskStatusBadge({ status }: { status: BackgroundTaskItem["status"] }) {
+function taskDismissKey(task: BackgroundTaskItem): string {
+  return task.child_session_id
+    ? `child:${task.child_session_id}`
+    : `${task.kind}:${task.id}`;
+}
+
+function TaskStatusBadge({
+  onDismiss,
+  status,
+}: {
+  onDismiss?: () => void;
+  status: BackgroundTaskItem["status"];
+}) {
   if (status === "running") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_srgb,var(--chat-accent)_15%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-accent)]">
@@ -492,6 +504,22 @@ function TaskStatusBadge({ status }: { status: BackgroundTaskItem["status"] }) {
         <AlertCircle className="h-3 w-3" />
         Failed
       </span>
+    );
+  }
+  if (status === "done" && onDismiss) {
+    return (
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onDismiss();
+        }}
+        className="inline-flex items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)] transition-colors hover:bg-[color-mix(in_srgb,var(--fg)_10%,var(--chat-surface-strong))] hover:text-[var(--chat-text)]"
+        title="Hide this finished task"
+      >
+        <Check className="h-3 w-3" />
+        Done
+      </button>
     );
   }
   return (
@@ -511,10 +539,12 @@ const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
 
 function TaskCard({
   task,
+  onDismiss,
   onOpen,
   onStop,
 }: {
   task: BackgroundTaskItem;
+  onDismiss?: (task: BackgroundTaskItem) => void;
   onOpen?: (childSessionId: string) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
@@ -547,7 +577,14 @@ function TaskCard({
       }
     >
       <div className="flex items-center gap-2">
-        <TaskStatusBadge status={task.status} />
+        <TaskStatusBadge
+          status={task.status}
+          onDismiss={
+            task.status === "done" && onDismiss
+              ? () => onDismiss(task)
+              : undefined
+          }
+        />
         <span className="truncate text-[13px] font-medium text-[var(--chat-text)]">
           {task.label}
         </span>
@@ -611,27 +648,79 @@ function TaskCard({
 }
 
 export function BackgroundTasksPanel({
+  sessionId,
   tasks,
   onClose,
   onDrillIn,
   onStop,
 }: {
+  sessionId?: string;
   tasks: BackgroundTaskItem[];
   onClose: () => void;
   onDrillIn?: (childSessionId: string) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
-  const running = tasks.filter((task) => task.status === "running");
-  const finished = tasks.filter((task) => task.status !== "running");
+  const dismissedStorageKey = sessionId
+    ? `elevate.chat.backgroundTasks.dismissed.v1:${sessionId}`
+    : "";
+  const [dismissedTaskIds, setDismissedTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!dismissedStorageKey) {
+      setDismissedTaskIds(new Set());
+      return;
+    }
+    try {
+      const parsed = JSON.parse(
+        window.localStorage?.getItem(dismissedStorageKey) || "[]",
+      );
+      setDismissedTaskIds(
+        new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []),
+      );
+    } catch {
+      setDismissedTaskIds(new Set());
+    }
+  }, [dismissedStorageKey]);
+
+  const dismissTask = useCallback(
+    (task: BackgroundTaskItem) => {
+      const key = taskDismissKey(task);
+      setDismissedTaskIds((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        if (dismissedStorageKey) {
+          try {
+            window.localStorage?.setItem(
+              dismissedStorageKey,
+              JSON.stringify([...next]),
+            );
+          } catch {
+            /* ignore private mode / quota */
+          }
+        }
+        return next;
+      });
+    },
+    [dismissedStorageKey],
+  );
+
+  const visibleTasks = tasks.filter(
+    (task) =>
+      task.status === "running" || !dismissedTaskIds.has(taskDismissKey(task)),
+  );
+  const running = visibleTasks.filter((task) => task.status === "running");
+  const finished = visibleTasks.filter((task) => task.status !== "running");
 
   return (
     <PanelShell
       icon={<Boxes className="h-4.5 w-4.5" />}
       title="Background tasks"
-      subtitle={tasks.length ? `${tasks.length} this session` : "Subagent + handoff activity"}
+      subtitle={visibleTasks.length ? `${visibleTasks.length} this session` : "Subagent + handoff activity"}
       onClose={onClose}
     >
-      {tasks.length === 0 ? (
+      {visibleTasks.length === 0 ? (
         <PanelEmpty
           icon={<Boxes className="h-5 w-5" />}
           title="No background tasks"
@@ -654,7 +743,13 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Finished</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {finished.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onDismiss={dismissTask}
+                    onOpen={onDrillIn}
+                    onStop={onStop}
+                  />
                 ))}
               </div>
             </div>

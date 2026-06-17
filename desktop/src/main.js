@@ -1216,13 +1216,23 @@ function setupPermissions() {
   // 'self' backstop without this. The dashboard already serves only its own
   // bundled assets, so script-src 'self' is safe.
   ses.webRequest.onHeadersReceived((details, callback) => {
+    const isFilePreview = (() => {
+      try {
+        return new URL(details.url).pathname === "/api/files/preview";
+      } catch {
+        return false;
+      }
+    })();
+    const frameAncestors = isFilePreview ? "'self'" : "'none'";
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         // Permissive on passive resources (styles/fonts/images — the app loads
         // Google Fonts + data/blob) so this can't break rendering; strict where
-        // it matters: no plugins/embeds, no framing, scripts only from self +
-        // localhost (+ inline, which the bundled app needs).
+        // it matters: no plugins/embeds, no external framing, scripts only
+        // from self + localhost (+ inline, which the bundled app needs).
+        // File previews are the one same-origin frame: PDF artifacts need the
+        // local inline viewer to load /api/files/preview directly.
         "Content-Security-Policy": [
           "default-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; " +
             "script-src 'self' 'unsafe-inline' http://127.0.0.1:* http://localhost:*; " +
@@ -1230,7 +1240,8 @@ function setupPermissions() {
             "font-src 'self' https: data:; " +
             "img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; " +
             "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:* https:; " +
-            "object-src 'none'; frame-ancestors 'none'",
+            "frame-src 'self' blob: http://127.0.0.1:* http://localhost:*; " +
+            `object-src 'none'; frame-ancestors ${frameAncestors}`,
         ],
       },
     });

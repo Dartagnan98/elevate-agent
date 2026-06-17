@@ -929,8 +929,7 @@ html .font-courier {
   opacity: 1;
 }
 
-.session-row[data-status="needs-perms"] .title,
-.session-row[data-status="working"] .title {
+.session-row[data-status="needs-perms"] .title {
   color: var(--fg);
   font-weight: 500;
 }

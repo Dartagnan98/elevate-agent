@@ -438,6 +438,8 @@ export const api = {
     fetchJSON<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     }),
+  previewFileUrl: (path: string) =>
+    `${BASE}/api/files/preview?path=${encodeURIComponent(path)}`,
   previewFile: (path: string) =>
     fetchBlob(`/api/files/preview?path=${encodeURIComponent(path)}`),
   uploadChatAttachment: async (
