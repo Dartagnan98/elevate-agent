@@ -11186,14 +11186,12 @@ function resolveActivityDigestVisibility({
   userOpen: boolean | null;
 }): {
   expanded: boolean;
-  showPendingThinking: boolean;
   showSteps: boolean;
 } {
   const expanded =
     userOpen ?? defaultActivityDigestOpen({ busy, hasErroredStep, hasSteps });
   return {
     expanded,
-    showPendingThinking: expanded && busy && !hasSteps,
     showSteps: expanded && hasSteps,
   };
 }
@@ -11454,21 +11452,6 @@ function ChatActivityDigest({
           {steps.map((step) => (
             <BreakdownRow key={step.id} step={step} turnStartAt={start} />
           ))}
-        </div>
-      )}
-      {visibility.showPendingThinking && (
-        <div className="processing-body mt-1.5">
-          {/* Nothing has streamed yet (big prompt, model still ingesting) —
-              show a live thinking row immediately so the wait reads as
-              progress, not a frozen turn. Replaced by real reasoning the
-              moment the first delta lands. */}
-          <div className="reasoning-message flex items-center gap-1.5 animate-pulse">
-            <Sparkles className="h-3.5 w-3.5 shrink-0" />
-            <span>
-              Thinking
-              <span className="processing-ellipsis" aria-hidden="true" />
-            </span>
-          </div>
         </div>
       )}
     </section>

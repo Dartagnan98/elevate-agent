@@ -98,7 +98,7 @@ describe("ChatActivityDigest reasoning persistence", () => {
     expect(completed).toMatchObject({ expanded: true, showSteps: true });
   });
 
-  it("keeps live work expanded before the first step arrives", () => {
+  it("keeps the live header active before the first step arrives without a placeholder row", () => {
     expect(
       __chatPageTestables.defaultActivityDigestOpen({
         busy: true,
@@ -113,7 +113,7 @@ describe("ChatActivityDigest reasoning persistence", () => {
         hasSteps: false,
         userOpen: null,
       }),
-    ).toMatchObject({ expanded: true, showPendingThinking: true });
+    ).toEqual({ expanded: true, showSteps: false });
   });
 
   it("respects an explicit user close across completion", () => {
@@ -126,7 +126,6 @@ describe("ChatActivityDigest reasoning persistence", () => {
       }),
     ).toEqual({
       expanded: false,
-      showPendingThinking: false,
       showSteps: false,
     });
   });
