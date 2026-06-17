@@ -423,6 +423,87 @@ def _ring_append(ring, params: dict, event_type) -> None:
     ring.append(params)
 
 
+def _event_child_session_id(event: dict) -> str:
+    payload = event.get("payload") if isinstance(event, dict) else None
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("child_session_id") or "")
+
+
+def _is_subagent_event_for_child(event: dict, child_session_id: str) -> bool:
+    event_type = event.get("type") if isinstance(event, dict) else None
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("subagent.")
+        and _event_child_session_id(event) == child_session_id
+    )
+
+
+def _event_ts(event: dict) -> float:
+    try:
+        return float(event.get("ts") or 0.0) if isinstance(event, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _subagent_replay_from_live_parent(
+    child_session_id: str,
+    transport,
+    *,
+    parent_session_id: str | None = None,
+) -> tuple[list[dict], int, bool, bool]:
+    """Replay a running child subagent's parent-relayed event stream.
+
+    Subagent progress is emitted through the parent gateway session because the
+    parent owns the delegation tool callback. The child session row only gets
+    its assistant/tool transcript after the child finishes, so drilling into a
+    running child must replay the parent's child-scoped subagent frames.
+
+    Returns ``(events, replay_seq, attached, saw_terminal)``. ``attached`` is
+    true when the caller's transport was added to a matching parent stream, so
+    future child events will continue to arrive live.
+    """
+    child_session_id = str(child_session_id or "")
+    parent_session_id = str(parent_session_id or "")
+    if not child_session_id:
+        return ([], 0, False, False)
+
+    replay_events: list[dict] = []
+    replay_seq = 0
+    attached = False
+    saw_terminal = False
+    for _existing_sid, existing_session in list(_sessions.items()):
+        existing_key = str(existing_session.get("session_key") or "")
+        parent_key_match = bool(parent_session_id and existing_key == parent_session_id)
+        ring = existing_session.get("events")
+        events_lock = existing_session.get("events_lock")
+
+        def _snapshot_and_bind() -> None:
+            nonlocal replay_seq, attached, saw_terminal
+            events = [
+                event
+                for event in list(ring or [])
+                if _is_subagent_event_for_child(event, child_session_id)
+            ]
+            if not events and not parent_key_match:
+                return
+            _bind_session_transport(existing_session, transport)
+            attached = True
+            replay_seq = max(replay_seq, int(existing_session.get("events_seq", 0)))
+            replay_events.extend(events)
+            if any(event.get("type") == "subagent.complete" for event in events):
+                saw_terminal = True
+
+        if ring is not None and events_lock is not None:
+            with events_lock:
+                _snapshot_and_bind()
+        else:
+            _snapshot_and_bind()
+
+    replay_events.sort(key=_event_ts)
+    return (replay_events, replay_seq, attached, saw_terminal)
+
+
 def write_json(obj: dict) -> bool:
     """Emit one JSON frame. Routes via the most-specific transport available.
 
@@ -2568,6 +2649,26 @@ def _(rid, params: dict) -> dict:
     active_target = str(identity_payload.get("active_session_id") or target)
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    new_transport = current_transport() or _stdio_transport
+    parent_session_id = (
+        str(found.get("parent_session_id") or "") if isinstance(found, dict) else ""
+    )
+    (
+        child_replay_events,
+        child_replay_seq,
+        child_replay_attached,
+        child_replay_terminal,
+    ) = _subagent_replay_from_live_parent(
+        target,
+        new_transport,
+        parent_session_id=parent_session_id,
+    )
+    child_replay_running = bool(
+        child_replay_attached
+        and not child_replay_terminal
+        and isinstance(found, dict)
+        and found.get("ended_at") is None
+    )
     for existing_sid, existing_session in list(_sessions.items()):
         existing_key = existing_session.get("session_key")
         if existing_key not in {target, active_target}:
@@ -2583,7 +2684,6 @@ def _(rid, params: dict) -> dict:
         # transport, which starved every other live viewer of the same
         # session (the open chat went deaf mid-turn whenever a second
         # surface resumed it; only re-attaching stole the stream back).
-        new_transport = current_transport() or _stdio_transport
         replay_events: list[dict] = []
         replay_seq = 0
         running_tools: list[dict] = []
@@ -2601,6 +2701,10 @@ def _(rid, params: dict) -> dict:
             # Legacy sessions created before the ring existed — bind
             # transport without the snapshot; replay just stays empty.
             _bind_session_transport(existing_session, new_transport)
+        if child_replay_events:
+            replay_events.extend(child_replay_events)
+            replay_events.sort(key=_event_ts)
+            replay_seq = max(replay_seq, child_replay_seq)
         with existing_session.get("history_lock", threading.Lock()):
             history = list(existing_session.get("history", []))
         messages = _history_to_messages(history) if include_messages else None
@@ -2614,7 +2718,7 @@ def _(rid, params: dict) -> dict:
             "message_count": len(messages) if messages is not None else len(history),
             "agent_ready": bool(existing_session.get("agent")),
             "info": _light_session_info(existing_session.get("agent")),
-            "running": bool(existing_session.get("running")),
+            "running": bool(existing_session.get("running") or child_replay_running),
             "replay_events": replay_events,
             "replay_seq": replay_seq,
             "running_tools": running_tools,
@@ -2769,6 +2873,10 @@ def _(rid, params: dict) -> dict:
         "message_count": len(messages) if messages is not None else len(history),
         "agent_ready": False,
         "info": _light_session_info(),
+        "running": child_replay_running,
+        "replay_events": child_replay_events,
+        "replay_seq": child_replay_seq,
+        "running_tools": [],
     }
     if messages is not None:
         result["messages"] = messages

@@ -275,6 +275,207 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
     assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
 
 
+def test_session_resume_replays_running_subagent_events_from_parent(server, monkeypatch):
+    """A child drill-in opens by child session id, but live progress is relayed
+    through the parent gateway sid. Resume must replay the parent's child-scoped
+    subagent frames and attach to that parent stream for future events."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, sid):
+            assert sid == "child-1"
+            return {
+                "id": "child-1",
+                "parent_session_id": "parent-1",
+                "ended_at": None,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_messages_as_conversation(self, _sid):
+            return [{"role": "user", "content": "child goal"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+
+    lock = threading.Lock()
+    parent_session = {
+        "agent": object(),
+        "events": [
+            {
+                "type": "subagent.start",
+                "session_id": "parent-gw",
+                "ts": 1.0,
+                "payload": {"child_session_id": "child-1", "goal": "pricing"},
+            },
+            {
+                "type": "subagent.thinking",
+                "session_id": "parent-gw",
+                "ts": 2.0,
+                "payload": {"child_session_id": "child-2", "text": "wrong child"},
+            },
+            {
+                "type": "subagent.thinking",
+                "session_id": "parent-gw",
+                "ts": 3.0,
+                "payload": {"child_session_id": "child-1", "text": "checking comps"},
+            },
+            {
+                "type": "subagent.tool",
+                "session_id": "parent-gw",
+                "ts": 4.0,
+                "payload": {
+                    "child_session_id": "child-1",
+                    "tool_name": "read",
+                    "tool_preview": "opened listing notes",
+                },
+            },
+        ],
+        "events_lock": lock,
+        "events_seq": 4,
+        "history": [],
+        "history_lock": lock,
+        # Async delegations can continue after the parent turn is idle.
+        "running": False,
+        "session_key": "parent-1",
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    transport = _T()
+    token = bind_transport(transport)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r-child",
+                "method": "session.resume",
+                "params": {"session_id": "child-1", "include_messages": False},
+            }
+        )
+    finally:
+        reset_transport(token)
+
+    assert "error" not in resp
+    result = resp["result"]
+    assert result["persisted_session_id"] == "child-1"
+    assert result["running"] is True
+    assert [event["type"] for event in result["replay_events"]] == [
+        "subagent.start",
+        "subagent.thinking",
+        "subagent.tool",
+    ]
+    assert {
+        event["payload"]["child_session_id"] for event in result["replay_events"]
+    } == {"child-1"}
+    assert transport in parent_session["transports"]
+
+    server._emit(
+        "subagent.thinking",
+        "parent-gw",
+        {"child_session_id": "child-1", "text": "future frame"},
+    )
+    assert transport.frames[-1]["params"]["payload"]["text"] == "future frame"
+
+
+def test_session_resume_attaches_running_subagent_when_parent_ring_is_empty(server, monkeypatch):
+    """If the parent message.complete already cleared the ring, a running child
+    still needs the drill-in transport attached so future subagent frames land."""
+    from tui_gateway.transport import bind_transport, reset_transport
+
+    class _T:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, obj):
+            self.frames.append(obj)
+            return True
+
+        def close(self):
+            pass
+
+    class _DB:
+        def resolve_session_id(self, value):
+            return value
+
+        def get_session(self, sid):
+            assert sid == "child-empty"
+            return {
+                "id": "child-empty",
+                "parent_session_id": "parent-1",
+                "ended_at": None,
+            }
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_messages_as_conversation(self, _sid):
+            return [{"role": "user", "content": "child goal"}]
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+
+    parent_session = {
+        "agent": object(),
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "session_key": "parent-1",
+    }
+    server._sessions["parent-gw"] = parent_session
+
+    transport = _T()
+    token = bind_transport(transport)
+    try:
+        resp = server.handle_request(
+            {
+                "id": "r-child-empty",
+                "method": "session.resume",
+                "params": {"session_id": "child-empty", "include_messages": False},
+            }
+        )
+    finally:
+        reset_transport(token)
+
+    assert "error" not in resp
+    assert resp["result"]["running"] is True
+    assert resp["result"]["replay_events"] == []
+    assert transport in parent_session["transports"]
+
+    server._emit(
+        "subagent.tool",
+        "parent-gw",
+        {"child_session_id": "child-empty", "tool_name": "search"},
+    )
+    assert transport.frames[-1]["params"]["type"] == "subagent.tool"
+
+
 def test_session_resume_multicasts_events_to_all_attached_transports(server, monkeypatch):
     """Regression guard: a second client resuming a live session must ADD
     its transport to the fan-out, not replace the first client's. The old
