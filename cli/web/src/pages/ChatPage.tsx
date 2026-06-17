@@ -355,6 +355,11 @@ interface SubagentEntry {
   finalSummary?: string;
 }
 
+const EMPTY_ACTIVITY_TRACES: ActivityTrace[] = [];
+const EMPTY_ARTIFACTS: ArtifactEntry[] = [];
+const EMPTY_SUBAGENTS: SubagentEntry[] = [];
+const EMPTY_TOOLS: ToolEntry[] = [];
+
 interface UsageInfo {
   calls?: number;
   cache_read?: number;
@@ -1270,10 +1275,13 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 }
 
 export const __chatPageTestables = {
+  activeSnapshotAlreadyCompleted,
   buildBreakdownSteps,
   defaultActivityDigestOpen,
   describeToolGroup,
   isCompactSlashCommand,
+  messageRowPropsEqual,
+  mergeActiveTurnSnapshot,
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
@@ -1646,12 +1654,63 @@ function activeAssistantMessage(messages: ChatMessage[], preferredId?: string | 
   return null;
 }
 
+function normalizedSnapshotText(value: string | null | undefined, max = 260): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, max);
+}
+
+function activityTraceFingerprint(traces: ActivityTrace[] | null | undefined): string {
+  const text = (traces ?? [])
+    .filter((trace) =>
+      trace.kind === "reasoning" ||
+      trace.kind === "thinking" ||
+      trace.kind === "interim",
+    )
+    .map((trace) => trace.text)
+    .join("\n");
+  return normalizedSnapshotText(text, 360);
+}
+
+function completedAssistantMatchesActiveSnapshot(
+  completed: ChatMessage,
+  active: ChatMessage,
+): boolean {
+  if (completed.role !== "assistant" || completed.status === "streaming") {
+    return false;
+  }
+  if (completed.id === active.id) return true;
+
+  const activeText = normalizedSnapshotText(active.content);
+  const completedText = normalizedSnapshotText(completed.content);
+  if (
+    activeText.length >= 160 &&
+    (completedText.startsWith(activeText) || activeText.startsWith(completedText))
+  ) {
+    return true;
+  }
+
+  const activeTrace = activityTraceFingerprint(active.traces);
+  const completedTrace = activityTraceFingerprint(completed.traces);
+  return Boolean(
+    activeTrace.length >= 80 &&
+    completedTrace.length >= 80 &&
+    activeTrace === completedTrace,
+  );
+}
+
+function activeSnapshotAlreadyCompleted(
+  messages: ChatMessage[],
+  active: ChatMessage,
+): boolean {
+  return messages.some((message) => completedAssistantMatchesActiveSnapshot(message, active));
+}
+
 function mergeActiveTurnSnapshot(
   messages: ChatMessage[],
   snapshot: ActiveTurnSnapshot | null,
 ): ChatMessage[] {
   if (!snapshot) return messages;
   const active = snapshot.message;
+  if (activeSnapshotAlreadyCompleted(messages, active)) return messages;
   const mergedActive: ChatMessage = {
     ...active,
     status: "streaming",
@@ -1757,7 +1816,10 @@ function restoreTranscript(sessionId: string): ChatMessage[] | null {
 
 function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (!sessionId) return;
-  const cacheableMessages = repairOutOfOrderUserTurns(messages).filter(shouldCacheTranscriptMessage);
+  // Persistence is passive: it should snapshot the on-screen order, not repair
+  // or reshuffle it. Ordering repair happens only at explicit server/cache merge
+  // boundaries so a localStorage write can never create UI/cache churn.
+  const cacheableMessages = messages.filter(shouldCacheTranscriptMessage);
   if (!cacheableMessages.length) return;
   SESSION_MESSAGE_CACHE.delete(sessionId);
   SESSION_MESSAGE_CACHE.set(sessionId, cacheableMessages);
@@ -4272,6 +4334,12 @@ export default function ChatPage() {
       });
     },
     [openArtifactPreview],
+  );
+  const handleOpenPath = useCallback(
+    (path: string) => {
+      openFileInPreview(path, path.replace(/\/+$/, "").split("/").pop() || path);
+    },
+    [openFileInPreview],
   );
 
   const startPreviewResize = useCallback(
@@ -8853,7 +8921,7 @@ export default function ChatPage() {
                     <MemoMessageRow
                       key={message.id}
                       activityTrace={turnTraces}
-                      artifacts={turnArtifacts ?? []}
+                      artifacts={turnArtifacts ?? EMPTY_ARTIFACTS}
                       busy={isStreaming && busy}
                       compacting={isStreaming && compacting}
                       liveInput={
@@ -8864,12 +8932,7 @@ export default function ChatPage() {
                       message={message}
                       onEditMessage={handleEditMessage}
                       onOpenArtifact={openArtifactPreview}
-                      onOpenPath={(p) =>
-                        openFileInPreview(
-                          p,
-                          p.replace(/\/+$/, "").split("/").pop() || p,
-                        )
-                      }
+                      onOpenPath={handleOpenPath}
                       onOpenSubagent={handleOpenSubagent}
                       subagents={turnSubagents}
                       tools={turnTools}
@@ -10053,6 +10116,23 @@ function ComposerActionBar({
   );
 }
 
+interface MessageRowProps {
+  activityTrace?: ActivityTrace[];
+  artifacts: ArtifactEntry[];
+  busy?: boolean;
+  compacting?: boolean;
+  liveInput?: number;
+  onOpenPath?(path: string): void;
+  message: ChatMessage;
+  onEditMessage?(message: ChatMessage): void;
+  onOpenArtifact(artifact: ArtifactEntry): void;
+  onOpenSubagent?(childSessionId: string): void;
+  subagents?: SubagentEntry[];
+  tools?: ToolEntry[];
+  turnArtifacts?: ArtifactEntry[];
+  turnUsage?: TurnUsageEntry;
+}
+
 function MessageRow({
   activityTrace,
   artifacts,
@@ -10068,22 +10148,7 @@ function MessageRow({
   tools,
   turnArtifacts,
   turnUsage,
-}: {
-  activityTrace?: ActivityTrace[];
-  artifacts: ArtifactEntry[];
-  busy?: boolean;
-  compacting?: boolean;
-  liveInput?: number;
-  onOpenPath?(path: string): void;
-  message: ChatMessage;
-  onEditMessage?(message: ChatMessage): void;
-  onOpenArtifact(artifact: ArtifactEntry): void;
-  onOpenSubagent?(childSessionId: string): void;
-  subagents?: SubagentEntry[];
-  tools?: ToolEntry[];
-  turnArtifacts?: ArtifactEntry[];
-  turnUsage?: TurnUsageEntry;
-}) {
+}: MessageRowProps) {
   const { copied, copy } = useCopyToClipboard();
   const [menuOpen, setMenuOpen] = useState(false);
   const [pinned, setPinned] = useState(() => readPinnedMessageIds().has(message.id));
@@ -10185,8 +10250,8 @@ function MessageRow({
       >
         {showDigest ? (
           <ChatActivityDigest
-            activityTrace={activityTrace ?? []}
-            artifacts={turnArtifacts ?? []}
+            activityTrace={activityTrace ?? EMPTY_ACTIVITY_TRACES}
+            artifacts={turnArtifacts ?? EMPTY_ARTIFACTS}
             busy={!!busy}
             compacting={!!compacting}
             completedAt={message.completedAt}
@@ -10194,9 +10259,9 @@ function MessageRow({
             liveTokens={liveTokens}
             onOpenSubagent={onOpenSubagent}
             startedAt={message.createdAt}
-            subagents={subagents}
+            subagents={subagents ?? EMPTY_SUBAGENTS}
             tokenCount={message.tokenCount}
-            tools={tools ?? []}
+            tools={tools ?? EMPTY_TOOLS}
           />
         ) : null}
         <div
@@ -10412,7 +10477,31 @@ function MessageRow({
   );
 }
 
-const MemoMessageRow = memo(MessageRow);
+function sameOptionalArray<T>(a?: T[], b?: T[]): boolean {
+  if (a === b) return true;
+  return (a?.length ?? 0) === 0 && (b?.length ?? 0) === 0;
+}
+
+function messageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): boolean {
+  return (
+    prev.message === next.message &&
+    prev.busy === next.busy &&
+    prev.compacting === next.compacting &&
+    prev.liveInput === next.liveInput &&
+    prev.turnUsage === next.turnUsage &&
+    prev.onEditMessage === next.onEditMessage &&
+    prev.onOpenArtifact === next.onOpenArtifact &&
+    prev.onOpenPath === next.onOpenPath &&
+    prev.onOpenSubagent === next.onOpenSubagent &&
+    sameOptionalArray(prev.activityTrace, next.activityTrace) &&
+    sameOptionalArray(prev.artifacts, next.artifacts) &&
+    sameOptionalArray(prev.subagents, next.subagents) &&
+    sameOptionalArray(prev.tools, next.tools) &&
+    sameOptionalArray(prev.turnArtifacts, next.turnArtifacts)
+  );
+}
+
+const MemoMessageRow = memo(MessageRow, messageRowPropsEqual);
 
 /**
  * One row in the per-turn breakdown dropdown — either an individual tool

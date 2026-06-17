@@ -5,6 +5,7 @@ import { __chatPageTestables } from "../ChatPage";
 type TestTool = Parameters<typeof __chatPageTestables.describeToolGroup>[0][number];
 type TestTrace = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[1][number];
 type TestMessage = Parameters<typeof __chatPageTestables.repairOutOfOrderUserTurns>[0][number];
+type TestActiveSnapshot = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[1];
 
 function tool(overrides: Partial<TestTool>): TestTool {
   return {
@@ -191,5 +192,96 @@ describe("chat transcript ordering repair", () => {
     ];
 
     expect(__chatPageTestables.repairOutOfOrderUserTurns(ordered)).toBe(ordered);
+  });
+});
+
+describe("message row memoization", () => {
+  it("does not re-render a completed answer only because empty collection props were recreated", () => {
+    const answer = message({
+      content: "A long completed answer that should stay memoized.",
+      id: "assistant-answer",
+      role: "assistant",
+    });
+    const openArtifact = () => {};
+
+    expect(
+      __chatPageTestables.messageRowPropsEqual(
+        {
+          artifacts: [],
+          message: answer,
+          onOpenArtifact: openArtifact,
+        },
+        {
+          activityTrace: [],
+          artifacts: [],
+          message: answer,
+          onOpenArtifact: openArtifact,
+          subagents: [],
+          tools: [],
+          turnArtifacts: [],
+        },
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("active turn resume cache", () => {
+  it("does not turn a completed server answer back into a streaming active snapshot", () => {
+    const completed = message({
+      content: "Finished answer",
+      id: "assistant-server",
+      status: "complete",
+    });
+    const staleSnapshot: TestActiveSnapshot = {
+      message: message({
+        content: "Partial answer",
+        id: "assistant-server",
+        status: "streaming",
+      }),
+      tools: [],
+      traces: [],
+      updatedAt: Date.now(),
+    };
+
+    const merged = __chatPageTestables.mergeActiveTurnSnapshot(
+      [completed],
+      staleSnapshot,
+    );
+
+    expect(merged).toEqual([completed]);
+    expect(merged[0].status).toBe("complete");
+  });
+
+  it("does not append a duplicate completed answer when only the reasoning trace matches", () => {
+    const reasoning = [
+      "I need to create the requested checklist and keep the response structured.",
+      "The server has already persisted this assistant turn as complete.",
+    ].join(" ");
+    const completed = message({
+      content: "Here is the 60 item checklist.",
+      id: "assistant-server",
+      role: "assistant",
+      status: "complete",
+      traces: [trace({ id: "server-reasoning", messageId: "assistant-server", text: reasoning })],
+    });
+    const staleSnapshot: TestActiveSnapshot = {
+      message: message({
+        content: "",
+        id: "assistant-local-active",
+        role: "assistant",
+        status: "streaming",
+        traces: [trace({ id: "local-reasoning", messageId: "assistant-local-active", text: reasoning })],
+      }),
+      tools: [],
+      traces: [trace({ id: "snapshot-reasoning", messageId: "assistant-local-active", text: reasoning })],
+      updatedAt: Date.now(),
+    };
+
+    const merged = __chatPageTestables.mergeActiveTurnSnapshot(
+      [completed],
+      staleSnapshot,
+    );
+
+    expect(merged).toEqual([completed]);
   });
 });

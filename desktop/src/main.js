@@ -131,6 +131,20 @@ function finishStartup(reason) {
   log.info(`[startup-summary] ${reason} ${total}ms ${timeline}`);
 }
 
+function currentMainWindowUrl() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return "";
+    return mainWindow.webContents.getURL();
+  } catch {
+    return "";
+  }
+}
+
+function trimLogMessage(value, max = 1200) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 markStartup("main:module-loaded");
 
 function repoRoot() {
@@ -1014,6 +1028,44 @@ function createWindow() {
     const isDashboard = url.startsWith(backendUrl);
     markStartup("renderer:did-finish-load", isDashboard ? "dashboard" : path.basename(url));
     if (isDashboard) finishStartup("dashboard-loaded");
+  });
+
+  mainWindow.webContents.on("did-fail-load", (_event, code, description, validatedUrl) => {
+    log.warn(
+      `[renderer:did-fail-load] code=${code} desc=${trimLogMessage(description, 300)} url=${trimLogMessage(validatedUrl || currentMainWindowUrl(), 500)}`,
+    );
+  });
+
+  mainWindow.webContents.on("console-message", (_event, ...args) => {
+    const details =
+      args.length === 1 && args[0] && typeof args[0] === "object"
+        ? args[0]
+        : {
+            level: args[0],
+            message: args[1],
+            line: args[2],
+            sourceId: args[3],
+          };
+    const level = Number(details.level ?? 0);
+    if (level < 2) return;
+    const label = level >= 3 ? "error" : "warn";
+    log[label](
+      `[renderer:console:${level}] ${trimLogMessage(details.message)} (${trimLogMessage(details.sourceId || currentMainWindowUrl(), 500)}:${details.line ?? 0})`,
+    );
+  });
+
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    log.error(
+      `[renderer:gone] reason=${details.reason} exitCode=${details.exitCode} url=${trimLogMessage(currentMainWindowUrl(), 500)}`,
+    );
+  });
+
+  mainWindow.on("unresponsive", () => {
+    log.error(`[renderer:unresponsive] url=${trimLogMessage(currentMainWindowUrl(), 500)}`);
+  });
+
+  mainWindow.on("responsive", () => {
+    log.info(`[renderer:responsive] url=${trimLogMessage(currentMainWindowUrl(), 500)}`);
   });
 
   // Without this, a closed main window leaves `mainWindow` pointing at a
