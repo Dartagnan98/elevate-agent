@@ -15,6 +15,7 @@ import {
   Image as ImageIcon,
   ListChecks,
   Loader2,
+  MessageSquare,
   PanelRight,
   Square,
   X,
@@ -462,6 +463,8 @@ export interface BackgroundTaskItem {
   completedAt?: number;
   /** The subagent's own session id — when present the card opens its thread. */
   child_session_id?: string;
+  /** Async task id from live subagent events — message routing can target it. */
+  task_id?: string;
   /** Registry id from live subagent.* events — the kill switch targets this. */
   subagent_id?: string;
 }
@@ -556,16 +559,20 @@ const KIND_LABEL: Record<BackgroundTaskItem["kind"], string> = {
 function TaskCard({
   task,
   onDismiss,
+  onMessage,
   onOpen,
   onStop,
 }: {
   task: BackgroundTaskItem;
   onDismiss?: (task: BackgroundTaskItem) => void;
+  onMessage?: (task: BackgroundTaskItem) => void;
   onOpen?: (childSessionId: string) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
   const canOpen = !!task.child_session_id && !!onOpen;
   const open = () => task.child_session_id && onOpen?.(task.child_session_id);
+  const canMessage =
+    task.status === "running" && !!task.child_session_id && !!onMessage;
   const [stopping, setStopping] = useState(false);
   const canStop =
     task.status === "running" &&
@@ -609,6 +616,20 @@ function TaskCard({
             <ExternalLink className="h-3 w-3" />
             Open
           </span>
+        ) : null}
+        {canMessage ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMessage?.(task);
+            }}
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[var(--chat-surface-strong)] px-2 py-0.5 text-[10.5px] font-medium text-[var(--chat-muted-strong)] transition-colors hover:bg-[color-mix(in_srgb,var(--fg)_10%,var(--chat-surface-strong))] hover:text-[var(--chat-text)]"
+            title="Open this running subagent so the composer messages it directly."
+          >
+            <MessageSquare className="h-3 w-3" />
+            Message
+          </button>
         ) : null}
         {canStop ? (
           <button
@@ -668,12 +689,14 @@ export function BackgroundTasksPanel({
   tasks,
   onClose,
   onDrillIn,
+  onMessage,
   onStop,
 }: {
   sessionId?: string;
   tasks: BackgroundTaskItem[];
   onClose: () => void;
   onDrillIn?: (childSessionId: string) => void;
+  onMessage?: (task: BackgroundTaskItem) => void;
   onStop?: (task: BackgroundTaskItem) => void;
 }) {
   const dismissedStorageKey = sessionId
@@ -749,7 +772,13 @@ export function BackgroundTasksPanel({
               <PanelSectionLabel>Running</PanelSectionLabel>
               <div className="flex flex-col gap-2">
                 {running.map((task) => (
-                  <TaskCard key={task.id} task={task} onOpen={onDrillIn} onStop={onStop} />
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onMessage={onMessage}
+                    onOpen={onDrillIn}
+                    onStop={onStop}
+                  />
                 ))}
               </div>
             </div>
@@ -763,6 +792,7 @@ export function BackgroundTasksPanel({
                     key={task.id}
                     task={task}
                     onDismiss={dismissTask}
+                    onMessage={onMessage}
                     onOpen={onDrillIn}
                     onStop={onStop}
                   />

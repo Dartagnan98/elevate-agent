@@ -148,11 +148,29 @@ interface ResumeRunningTool {
   started_at?: number;
 }
 
+interface LiveSubagentTarget {
+  child_session_id: string;
+  parent_session_id?: string | null;
+  subagent_id?: string | null;
+  task_id?: string | null;
+  task_index?: number;
+  goal?: string;
+}
+
+interface SubagentMessageResponse {
+  found?: boolean;
+  accepted?: number;
+  emitted?: number;
+  targets?: unknown[];
+}
+
 interface SessionResumeResponse extends SessionCreateResponse {
   messages?: GatewayTranscriptMessage[];
   running?: boolean;
   replay_events?: GatewayEvent[];
   replay_seq?: number;
+  /** Running child target this resume can message directly. */
+  live_subagent?: LiveSubagentTarget | null;
   /**
    * Snapshot of tools still executing on the gateway at resume time.
    * The event ring can rotate a long turn's tool.start frames out, so
@@ -349,6 +367,8 @@ interface SubagentEntry {
   thinkingTokens?: number;
   /** The subagent's own session id — open + message it via ?resume=. */
   child_session_id?: string;
+  /** Async task id from the delegate registry, when present. */
+  task_id?: string;
   /** The parent assistant turn this subagent ran under. */
   messageId?: string;
   /** Final summary from subagent.complete (the child's answer). */
@@ -3714,12 +3734,14 @@ export default function ChatPage() {
   // it ran as (so the badge names it dynamically, not a hardcoded label).
   const [subagentParentId, setSubagentParentId] = useState<string | null>(null);
   const [subagentAgentName, setSubagentAgentName] = useState<string | null>(null);
+  const [liveSubagent, setLiveSubagent] = useState<LiveSubagentTarget | null>(null);
   useEffect(() => {
     // New chat (no resume target) → clear resume-scoped state so a subagent
     // banner / past child sessions / usage don't bleed across chats.
     if (!resumeId) {
       setSessionKind(null);
       setChildSessions([]);
+      setLiveSubagent(null);
       setTurnUsage([]);
     }
   }, [resumeId]);
@@ -4300,6 +4322,14 @@ export default function ChatPage() {
       setSearchParams({ resume: childSessionId });
     },
     [closeSidePanel, setSearchParams],
+  );
+
+  const handleMessageSubagent = useCallback(
+    (task: BackgroundTaskItem) => {
+      if (!task.child_session_id) return;
+      handleOpenSubagent(task.child_session_id);
+    },
+    [handleOpenSubagent],
   );
 
   // Kill switch for a running background task: interrupts the subagent (by
@@ -5014,6 +5044,7 @@ export default function ChatPage() {
       setSubagents([]);
       setSubagentParentId(null);
       setSubagentAgentName(null);
+      setLiveSubagent(null);
       setActivityTrace(activeTurnSnapshot?.traces ?? []);
       lastToolActivityAtRef.current = 0;
       setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
@@ -5460,6 +5491,10 @@ export default function ChatPage() {
         typeof payload.child_session_id === "string" && payload.child_session_id
           ? payload.child_session_id
           : undefined;
+      const taskId =
+        typeof payload.task_id === "string" && payload.task_id
+          ? payload.task_id
+          : undefined;
       const parentMessageId = currentAssistantRef.current ?? undefined;
       const finalSummary =
         ev.type === "subagent.complete"
@@ -5485,6 +5520,7 @@ export default function ChatPage() {
                         : subagent.toolCount,
                     thinkingTokens: (subagent.thinkingTokens ?? 0) + thinkingDelta,
                     child_session_id: childSessionId ?? subagent.child_session_id,
+                    task_id: taskId ?? subagent.task_id,
                     messageId: subagent.messageId ?? parentMessageId,
                     finalSummary: finalSummary ?? subagent.finalSummary,
                   }
@@ -5508,6 +5544,7 @@ export default function ChatPage() {
               typeof payload.tool_count === "number" ? payload.tool_count : undefined,
             thinkingTokens: thinkingDelta || undefined,
             child_session_id: childSessionId,
+            task_id: taskId,
             messageId: parentMessageId,
             finalSummary,
           },
@@ -5515,6 +5552,14 @@ export default function ChatPage() {
       });
 
       if (ev.type === "subagent.complete") {
+        setLiveSubagent((current) => {
+          if (!current) return current;
+          const matches =
+            (childSessionId && current.child_session_id === childSessionId) ||
+            (taskId && current.task_id === taskId) ||
+            (subagentId && current.subagent_id === subagentId);
+          return matches ? null : current;
+        });
         addArtifacts(
           artifactsFromSubagentEvent(payload, currentAssistantRef.current ?? undefined),
         );
@@ -5878,6 +5923,7 @@ export default function ChatPage() {
     // Child reasoning — without this a delegation that thinks before its
     // first tool call shows NOTHING in the chat for the whole stretch.
     unsubs.push(gw.on("subagent.thinking", trackSubagent));
+    unsubs.push(gw.on("subagent.message", trackSubagent));
     unsubs.push(gw.on("subagent.complete", trackSubagent));
 
     // ── Subagent DRILL-IN live feed ─────────────────────────────────────
@@ -5951,6 +5997,43 @@ export default function ChatPage() {
       }),
     );
     unsubs.push(
+      gw.on("subagent.message", (ev) => {
+        const payload = childPayloadFor(ev);
+        if (!payload) return;
+        const text = String(payload.text ?? "").trim();
+        if (!text) return;
+        const at = eventMillis(ev);
+        const childId =
+          typeof payload.child_session_id === "string" && payload.child_session_id
+            ? payload.child_session_id
+            : resumeId;
+        const replayId = `subagent-message-${childId}-${ev.seq ?? Math.round(at)}-${text.length}`;
+        setMessages((prev) => {
+          if (prev.some((message) => message.id === replayId)) return prev;
+          if (
+            prev.some(
+              (message) =>
+                message.role === "user" &&
+                message.content === text &&
+                Math.abs(message.createdAt - at) < 10_000,
+            )
+          ) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              content: text,
+              createdAt: at,
+              id: replayId,
+              role: "user" as const,
+              sessionKey: resumeId ?? undefined,
+            },
+          ];
+        });
+      }),
+    );
+    unsubs.push(
       gw.on("subagent.tool", (ev) => {
         const payload = childPayloadFor(ev);
         if (!payload) return;
@@ -6001,6 +6084,9 @@ export default function ChatPage() {
         const at = eventMillis(ev);
         const summary = compactLine(String(payload.summary ?? ""));
         const failed = /error|fail/i.test(String(payload.status ?? ""));
+        setLiveSubagent((current) =>
+          current && current.child_session_id === resumeId ? null : current,
+        );
         setTools((prev) =>
           prev.map((tool) =>
             tool.status === "running"
@@ -6364,6 +6450,11 @@ export default function ChatPage() {
         }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
+        setLiveSubagent(
+          "live_subagent" in created
+            ? (created as SessionResumeResponse).live_subagent ?? null
+            : null,
+        );
         if (resumeWarning) {
           setBanner(resumeWarning);
         } else if (created.info?.credential_warning || created.info?.config_warning) {
@@ -7060,6 +7151,70 @@ export default function ChatPage() {
       }
     },
     [appendMessage, attachments, gw, rememberSessionAgent, resumeId, sessionId],
+  );
+
+  const submitLiveSubagentMessage = useCallback(
+    async (text: string) => {
+      const body = text.trim();
+      if (!body) {
+        setBanner("Add text before messaging a running subagent.");
+        setStatusText("Message blocked");
+        return false;
+      }
+      const target = liveSubagent;
+      if (!target?.child_session_id || !sessionId) return false;
+      const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
+      const stillUploading = attachments.some((item) => item.status === "uploading");
+      if (stillUploading || readyAttachments.length) {
+        setBanner("Attachments cannot be added to a running subagent message yet.");
+        setStatusText("Attachment blocked");
+        return false;
+      }
+      appendMessage("user", body);
+      setStatusText("Messaging subagent...");
+      try {
+        const response = await gw.request<SubagentMessageResponse>(
+          "subagent.message",
+          {
+            child_session_id: target.child_session_id,
+            display_text: body,
+            session_id: sessionId,
+            subagent_id: target.subagent_id ?? "",
+            task_id: target.task_id ?? "",
+            text: body,
+          },
+          30_000,
+        );
+        const found = response?.found !== false;
+        const accepted = Number(response?.accepted ?? 0);
+        if (!found) {
+          setLiveSubagent(null);
+          setBusy(false);
+          setStatusText("Ready");
+          appendMessage("system", "That subagent is no longer running.", {
+            status: "error",
+          });
+          return false;
+        }
+        if (accepted <= 0) {
+          setStatusText("Message not accepted");
+          appendMessage("system", "The subagent did not accept the message.", {
+            status: "error",
+          });
+          return false;
+        }
+        setStatusText("Message sent to subagent");
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        appendMessage("system", `Subagent message failed: ${message}`, {
+          status: "error",
+        });
+        setStatusText("Message failed");
+        return false;
+      }
+    },
+    [appendMessage, attachments, gw, liveSubagent, sessionId],
   );
 
   // Skill slash commands (/cma-audit) load the full SKILL.md into the model's
@@ -7792,6 +7947,11 @@ export default function ChatPage() {
         }
       }
 
+      if (busy && sessionKind === "subagent" && liveSubagent?.child_session_id) {
+        await submitLiveSubagentMessage(trimmed);
+        return;
+      }
+
       if (busy) {
         // Honor display.busy_input_mode for plain sends during a busy turn:
         // "interrupt"/"steer" → soft mid-run injection (session.steer →
@@ -7848,7 +8008,7 @@ export default function ChatPage() {
       );
       if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, state, submitGatewayPrompt, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, liveSubagent, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, sessionKind, state, submitGatewayPrompt, submitLiveSubagentMessage, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
@@ -8395,6 +8555,7 @@ export default function ChatPage() {
         startedAt: s.startedAt,
         completedAt: s.completedAt,
         child_session_id: s.child_session_id,
+        task_id: s.task_id,
         subagent_id: s.subagent_id,
       });
     }
@@ -8725,6 +8886,7 @@ export default function ChatPage() {
             tasks={backgroundTasks}
             onClose={closeSidePanel}
             onDrillIn={handleOpenSubagent}
+            onMessage={handleMessageSubagent}
             onStop={handleStopBackgroundTask}
           />
         );
