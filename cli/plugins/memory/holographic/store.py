@@ -1319,7 +1319,32 @@ class MemoryStore:
             ),
             reverse=True,
         )
-        return [fact for _, _, fact in scored[:limit]]
+
+        # Near-duplicate dedup: a low-trust corpus often carries 2+ facts that
+        # say the same thing (re-saved across sessions). Two near-identical
+        # rules must NOT occupy both Must-Follow slots and crowd out a distinct
+        # rule. Walking the already-ranked list, keep the first of each cluster
+        # (highest pinned/strength/recency) and skip later near-identical ones
+        # (token-Jaccard >= 0.85, matching the cron-dedup convention).
+        kept: list[dict] = []
+        kept_token_sets: list[set] = []
+        for _, _, fact in scored:
+            tokens = self._tokens(str(fact.get("content") or "").lower())
+            is_dup = False
+            for prev in kept_token_sets:
+                union = tokens | prev
+                if not union:
+                    continue
+                if len(tokens & prev) / len(union) >= 0.85:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            kept.append(fact)
+            kept_token_sets.append(tokens)
+            if len(kept) >= limit:
+                break
+        return kept
 
     def search_facts(
         self,

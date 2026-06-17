@@ -534,3 +534,36 @@ def test_compliance_workflow_with_imperative_is_excluded():
             "automatically fill out the SkySlope Deal Sheet/TRS from the signed CPS; do not "
             "wait for a separate prompt unless required data is missing or submission is unsafe.")
     assert r["critical"] is False, r
+
+
+def test_dated_state_logs_are_not_correction_critical():
+    # State/data logs are durable point-in-time facts, NOT must-follow rules.
+    # They were inflating correction-critical on Skyleigh's corpus.
+    from plugins.memory.holographic.quality import classify_fact_durability as cls
+    # 1. B11 dashboard STATE as of <date> => NOT critical
+    b11 = cls("B11-7155 Dallas Drive dashboard status as of 2026-06-04: source-of-truth "
+              "deal was moved to currentStage 6; seller execution still pending.")
+    assert b11["critical"] is False, b11
+    # 2. SkySlope credential file updated/corrected on <date> => NOT critical
+    cred = cls("SkySlope credential file was corrected on 2026-06-07 — the stored login "
+               "for the seller-side transaction was updated.")
+    assert cred["critical"] is False, cred
+    # 3. 1127 Columbia current buyers corrected <date> / status snapshot => NOT critical
+    col = cls("1127 Columbia: old buyer Gajan removed, current buyers corrected 2026-06-13; "
+              "current signed $755,000 CPS buyers identified for subject-removal.")
+    assert col["critical"] is False, col
+    # "main blocker / status note" style => NOT critical
+    blocker = cls("Main blocker: seller execution not confirmed — Cole's initials/signature "
+                  "and final acceptance date still needed (STATUS note).")
+    assert blocker["critical"] is False, blocker
+    # 4. fact 45 still critical=compliance (state-log exclusion must not catch it)
+    fact45 = ("Real-estate accepted-offer document review: when there are multiple names on "
+              "either the buyer side or seller side, verify there are enough initials/signatures "
+              "for every named party before selecting or uploading the accepted offer. Do not use "
+              "a CPS that only has one seller/buyer initialed when multiple sellers/buyers are named.")
+    f45 = cls(fact45)
+    assert f45["critical"] is True and f45["critical_reason"] == "compliance", f45
+    # 5. a real correction RULE (not a dated log) still flags critical=correction
+    relist = cls("Correction: when Skyleigh says accepted offer, do NOT relist the property — "
+                 "move the existing listing into the accepted-offer transaction.")
+    assert relist["critical"] is True and relist["critical_reason"] == "correction", relist
