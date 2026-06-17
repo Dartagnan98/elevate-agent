@@ -2670,6 +2670,21 @@ class AIAgent:
                 except Exception:
                     logger.debug("status_callback error in _emit_status", exc_info=True)
 
+    def _emit_warning(self, message: str) -> None:
+        """Emit a non-terminal warning without risking the active turn."""
+        try:
+            logger.warning("%s", message)
+        except Exception:
+            pass
+        try:
+            self._emit_status(message)
+        except Exception:
+            if self.status_callback:
+                try:
+                    self.status_callback("lifecycle", message)
+                except Exception:
+                    logger.debug("status_callback error in _emit_warning", exc_info=True)
+
     def _emit_error(self, message: str) -> None:
         """Emit a terminal error to the gateway as a persistent transcript message.
 

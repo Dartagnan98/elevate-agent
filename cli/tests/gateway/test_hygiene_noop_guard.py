@@ -7,6 +7,7 @@ agent turn is handed an over-limit payload, the exact overflow hygiene prevents.
 """
 
 from gateway.run import (
+    _hygiene_effective_messages_for_pressure,
     _hygiene_should_skip,
     _hygiene_record,
     _HYGIENE_NOOP_RETRY_MARGIN,
@@ -100,3 +101,42 @@ def test_full_lifecycle():
 
 def test_margin_constant_is_25():
     assert _HYGIENE_NOOP_RETRY_MARGIN == 25
+
+
+def test_effective_messages_without_cursor_returns_original_history():
+    history = [{"role": "user", "content": "one"}]
+    assert _hygiene_effective_messages_for_pressure(history) is history
+
+
+def test_effective_messages_uses_summary_and_tail_after_cursor():
+    history = [
+        {"role": "user", "content": "old 1"},
+        {"role": "assistant", "content": "old 2"},
+        {"role": "user", "content": "tail"},
+    ]
+
+    effective = _hygiene_effective_messages_for_pressure(
+        history,
+        compaction_cursor=2,
+        compaction_summary="already summarized",
+    )
+
+    assert len(effective) == 2
+    assert effective[0]["role"] == "user"
+    assert "already summarized" in effective[0]["content"]
+    assert effective[1]["content"] == "tail"
+
+
+def test_effective_messages_clamps_cursor_to_keep_tail():
+    history = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "last"},
+    ]
+
+    effective = _hygiene_effective_messages_for_pressure(
+        history,
+        compaction_cursor=20,
+        compaction_summary="summary",
+    )
+
+    assert [m["content"] for m in effective[1:]] == ["last"]
