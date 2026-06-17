@@ -1274,6 +1274,7 @@ export const __chatPageTestables = {
   defaultActivityDigestOpen,
   describeToolGroup,
   isCompactSlashCommand,
+  repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
   shouldStartManualCompactActivity,
@@ -1353,6 +1354,81 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     });
   });
   return normalized.length ? normalized : null;
+}
+
+const OUT_OF_ORDER_TURN_WINDOW_MS = 30_000;
+
+function isConversationalRole(role: ChatRole): boolean {
+  return role === "assistant" || role === "user";
+}
+
+function previousConversationalMessage(
+  messages: ChatMessage[],
+  beforeIndex: number,
+): ChatMessage | null {
+  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (isConversationalRole(message.role)) return message;
+  }
+  return null;
+}
+
+function shouldSwapOutOfOrderTurn(
+  messages: ChatMessage[],
+  assistantIndex: number,
+): boolean {
+  const assistant = messages[assistantIndex];
+  const user = messages[assistantIndex + 1];
+  if (!assistant || !user) return false;
+  if (assistant.role !== "assistant" || user.role !== "user") return false;
+  if (assistant.status === "streaming") return false;
+  if (
+    !shouldKeepTranscriptMessage(assistant.role, assistant.content) ||
+    !shouldKeepTranscriptMessage(user.role, user.content)
+  ) {
+    return false;
+  }
+
+  // Normal follow-up shape is user -> assistant -> user. Only repair an
+  // orphan assistant that appears after another assistant/system/start, which
+  // is the hydrate/cache race shape: assistant answer first, prompting user
+  // bubble stuck below it.
+  const previous = previousConversationalMessage(messages, assistantIndex);
+  if (previous?.role === "user") return false;
+
+  const assistantAt = assistant.createdAt;
+  const userAt = user.createdAt;
+  if (
+    typeof assistantAt === "number" &&
+    typeof userAt === "number" &&
+    Number.isFinite(assistantAt) &&
+    Number.isFinite(userAt)
+  ) {
+    return Math.abs(assistantAt - userAt) <= OUT_OF_ORDER_TURN_WINDOW_MS;
+  }
+  return true;
+}
+
+function repairOutOfOrderUserTurns(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.length < 2) return messages;
+  let out: ChatMessage[] | null = null;
+  const list = () => out ?? messages;
+
+  for (let i = 0; i < list().length - 1; i += 1) {
+    if (!shouldSwapOutOfOrderTurn(list(), i)) continue;
+    out = list().slice();
+    const assistant = out[i];
+    out[i] = out[i + 1];
+    out[i + 1] = assistant;
+    if (i > 0) i -= 2;
+  }
+
+  if (out) {
+    blankTrace("repaired out-of-order user turn", {
+      count: messages.length,
+    });
+  }
+  return out ?? messages;
 }
 
 // Slim a turn's tool snapshot before it goes into localStorage. The
@@ -1681,7 +1757,7 @@ function restoreTranscript(sessionId: string): ChatMessage[] | null {
 
 function rememberTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (!sessionId) return;
-  const cacheableMessages = messages.filter(shouldCacheTranscriptMessage);
+  const cacheableMessages = repairOutOfOrderUserTurns(messages).filter(shouldCacheTranscriptMessage);
   if (!cacheableMessages.length) return;
   SESSION_MESSAGE_CACHE.delete(sessionId);
   SESSION_MESSAGE_CACHE.set(sessionId, cacheableMessages);
@@ -1757,7 +1833,7 @@ function mergeServerWithCache(
   // cache order so nothing rendered is lost.
   serverAuthoritative = false,
 ): ChatMessage[] {
-  if (!cached?.length) return serverMessages;
+  if (!cached?.length) return repairOutOfOrderUserTurns(serverMessages);
   // Fingerprint is whitespace-normalized: live-cached content vs
   // server-rehydrated content can diverge by trailing newlines or
   // doubled whitespace, and a raw slice(0,200) makes those two
@@ -1851,8 +1927,9 @@ function mergeServerWithCache(
       seen.add(key);
       out.push(m);
     }
-    blankTraceIfDropped(cached, out, fp, serverMessages.length);
-    return out;
+    const repaired = repairOutOfOrderUserTurns(out);
+    blankTraceIfDropped(cached, repaired, fp, serverMessages.length);
+    return repaired;
   }
 
   // Default (stale-server) path: the server can be missing MIDDLE turns, not
@@ -1893,8 +1970,9 @@ function mergeServerWithCache(
     }
     out.splice(idx, 0, sm);
   }
-  blankTraceIfDropped(cached, out, fp, serverMessages.length);
-  return out;
+  const repaired = repairOutOfOrderUserTurns(out);
+  blankTraceIfDropped(cached, repaired, fp, serverMessages.length);
+  return repaired;
 }
 
 // Shared whitespace-normalized fingerprint (same shape mergeServerWithCache

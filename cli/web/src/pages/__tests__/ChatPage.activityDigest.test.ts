@@ -4,6 +4,7 @@ import { __chatPageTestables } from "../ChatPage";
 
 type TestTool = Parameters<typeof __chatPageTestables.describeToolGroup>[0][number];
 type TestTrace = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[1][number];
+type TestMessage = Parameters<typeof __chatPageTestables.repairOutOfOrderUserTurns>[0][number];
 
 function tool(overrides: Partial<TestTool>): TestTool {
   return {
@@ -24,6 +25,17 @@ function trace(overrides: Partial<TestTrace>): TestTrace {
     id: "trace-1",
     kind: "reasoning",
     text: "",
+    ...overrides,
+  };
+}
+
+function message(overrides: Partial<TestMessage>): TestMessage {
+  return {
+    content: "",
+    createdAt: 1,
+    id: "message-1",
+    role: "assistant",
+    status: "complete",
     ...overrides,
   };
 }
@@ -145,5 +157,39 @@ describe("manual /compact activity", () => {
 
     expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", false)).toBe(true);
     expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", true)).toBe(false);
+  });
+});
+
+describe("chat transcript ordering repair", () => {
+  it("moves an orphan assistant answer below its prompting user bubble", () => {
+    const repaired = __chatPageTestables.repairOutOfOrderUserTurns([
+      message({
+        content: "Here is the detailed checklist.",
+        createdAt: 1_001,
+        id: "assistant-answer",
+        role: "assistant",
+      }),
+      message({
+        content: "Create a detailed checklist.",
+        createdAt: 1_000,
+        id: "user-prompt",
+        role: "user",
+      }),
+    ]);
+
+    expect(repaired.map((item) => item.id)).toEqual([
+      "user-prompt",
+      "assistant-answer",
+    ]);
+  });
+
+  it("leaves normal follow-up order alone", () => {
+    const ordered = [
+      message({ content: "First prompt", createdAt: 1_000, id: "u1", role: "user" }),
+      message({ content: "First answer", createdAt: 1_010, id: "a1", role: "assistant" }),
+      message({ content: "Follow up", createdAt: 2_000, id: "u2", role: "user" }),
+    ];
+
+    expect(__chatPageTestables.repairOutOfOrderUserTurns(ordered)).toBe(ordered);
   });
 });
