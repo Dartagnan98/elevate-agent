@@ -21,11 +21,15 @@ from agent.context_compressor import SUMMARY_PREFIX
 
 def _agent(cursor, summary, prefill=None):
     """Minimal stand-in carrying just the attrs messages_for_api reads."""
-    return types.SimpleNamespace(
+    agent = types.SimpleNamespace(
         compaction_cursor=cursor,
         compaction_summary=summary,
+        ephemeral_system_prompt=None,
         prefill_messages=prefill or [],
+        _plan_mode_suffix=lambda: "",
     )
+    agent.messages_for_api = types.MethodType(AIAgent.messages_for_api, agent)
+    return agent
 
 
 def _call(self_obj, api_messages, sys_offset):
@@ -81,6 +85,30 @@ def test_payload_is_system_summary_tail():
     assert out[2:] == transcript[4:]
     # total = 1 system + 1 summary + 4 tail
     assert len(out) == 6
+
+
+def test_pressure_payload_is_system_summary_tail_without_mutating():
+    transcript = _transcript(8)
+    transcript[5]["reasoning"] = "hidden chain"
+    snapshot = [dict(m) for m in transcript]
+    agent = _agent(4, "EARLIER WORK")
+
+    out = AIAgent._messages_for_compression_pressure(agent, transcript, "S")
+
+    assert transcript == snapshot
+    assert [m["role"] for m in out].count("system") == 1
+    assert out[0] == {"role": "system", "content": "S"}
+    assert out[1]["role"] == "user"
+    assert out[1]["content"].startswith(SUMMARY_PREFIX)
+    assert "EARLIER WORK" in out[1]["content"]
+    assert out[2:] == [
+        {
+            k: v
+            for k, v in msg.items()
+            if k not in {"reasoning", "finish_reason", "_thinking_prefill"}
+        }
+        for msg in transcript[4:]
+    ]
 
 
 def test_transcript_input_is_not_mutated():

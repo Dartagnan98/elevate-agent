@@ -44,6 +44,19 @@ import {
   useTranscript,
   type TranscriptMessage,
 } from "@/lib/transcriptStore";
+import {
+  blankTrace,
+  dropForeignMessages,
+  hasPendingTurn,
+  isRawToolPayload,
+  markStreamingTurnsInterrupted,
+  mergeServerWithCache,
+  parseObjectPayload,
+  reconcileWithServerTruth,
+  repairOutOfOrderUserTurns,
+  shouldKeepTranscriptMessage,
+  type ChatTimelineRole,
+} from "@/lib/chatTimeline";
 import { cn } from "@/lib/utils";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import {
@@ -160,8 +173,11 @@ interface LiveSubagentTarget {
 interface SubagentMessageResponse {
   found?: boolean;
   accepted?: number;
+  persisted?: number;
+  all_persisted?: boolean;
   emitted?: number;
   client_message_id?: string;
+  client_message_ids?: string[];
   targets?: unknown[];
 }
 
@@ -180,7 +196,7 @@ interface SessionResumeResponse extends SessionCreateResponse {
   running_tools?: ResumeRunningTool[];
 }
 
-type ChatRole = "assistant" | "system" | "tool" | "user";
+type ChatRole = ChatTimelineRole;
 
 interface ChatMessageAttachment {
   name: string;
@@ -250,6 +266,12 @@ interface QueuedInput {
   id: string;
   routedText: string;
   status: "queued" | "error" | "steering";
+  text: string;
+}
+
+interface HeldSteer {
+  id: string;
+  legacy?: boolean;
   text: string;
 }
 
@@ -883,77 +905,6 @@ function stableHydrateId(
   return id(fallbackPrefix);
 }
 
-function parseObjectPayload(text: string): Record<string, unknown> | null {
-  const clean = text.trim();
-  if (!clean || (!clean.startsWith("{") && !clean.startsWith("["))) return null;
-  try {
-    const parsed = JSON.parse(clean);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function isRawToolPayload(text: string): boolean {
-  const clean = text.trim();
-  if (!clean) return false;
-  const parsed = parseObjectPayload(clean);
-  if (parsed) {
-    return [
-      "content",
-      "duration_seconds",
-      "error",
-      "files",
-      "is_binary",
-      "matches",
-      "output",
-      "status",
-      "tool_calls_made",
-      "total_count",
-      "total_lines",
-    ].some((key) => key in parsed);
-  }
-  return clean.length > 420 && /^(?:\{|\[)/.test(clean);
-}
-
-function shouldKeepTranscriptMessage(role: ChatRole, content: string): boolean {
-  const clean = content.trim();
-  if (!clean) return false;
-  if (role === "tool") return false;
-  if (role !== "user" && isRawToolPayload(clean)) return false;
-  if (clean.startsWith("[CONTEXT COMPACTION")) return false;
-  // Compaction-internal scaffolding persisted as role="user" rows. The REST
-  // path (web_server.get_session_messages) hides these; the gateway-resume path
-  // does not, so without matching them here the client renders them as user
-  // bubbles after a compaction (cold resume / reopened run / second surface).
-  if (clean.startsWith("[Your latest Plan panel plan was preserved")) return false;
-  if (clean.startsWith("[Your active task list was preserved")) return false;
-  if (clean.startsWith("[RECENT AUTONOMOUS ACTIVITY")) return false;
-  if (role === "system") {
-    if (/^⚡\s*loaded skill:/i.test(clean)) return false;
-    if (/^session busy\b/i.test(clean)) return false;
-  }
-  if (role === "user") {
-    if (/^\[SYSTEM:/.test(clean)) {
-      // Skill invocations pass through — collapseSkillInvocation handles them
-      if (/^\[SYSTEM: (?:The user |The ")/.test(clean)) return true;
-      return false;
-    }
-    if (clean.startsWith("[System note:")) return false;
-    if (clean.startsWith("You've reached the maximum number of tool-calling iterations")) return false;
-    if (clean.startsWith("[Elevation Hub interface context]")) return false;
-    if (clean.startsWith("User follow-up received while you were already working:")) return false;
-    // Legacy async-delegation marker (pre-1.2.x): older installs persisted the
-    // result as a user-role "[Delegated task result …]" message that wrongly
-    // rendered as if the user typed it. Drop it from display. New installs use
-    // the ⟦subagent-result⟧ marker (kept + rendered as a completion card).
-    if (clean.startsWith("[Delegated task result")) return false;
-  }
-  return true;
-}
-
 const SUBAGENT_RESULT_PREFIX = "⟦subagent-result";
 
 /** Parse a stored ⟦subagent-result:<status>⟧ <goal>\n\n<summary> marker. */
@@ -1329,6 +1280,7 @@ export const __chatPageTestables = {
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
+  shouldClearUsageForStatus,
   shouldStartManualCompactActivity,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
@@ -1407,81 +1359,6 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     });
   });
   return normalized.length ? normalized : null;
-}
-
-const OUT_OF_ORDER_TURN_WINDOW_MS = 30_000;
-
-function isConversationalRole(role: ChatRole): boolean {
-  return role === "assistant" || role === "user";
-}
-
-function previousConversationalMessage(
-  messages: ChatMessage[],
-  beforeIndex: number,
-): ChatMessage | null {
-  for (let i = beforeIndex - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (isConversationalRole(message.role)) return message;
-  }
-  return null;
-}
-
-function shouldSwapOutOfOrderTurn(
-  messages: ChatMessage[],
-  assistantIndex: number,
-): boolean {
-  const assistant = messages[assistantIndex];
-  const user = messages[assistantIndex + 1];
-  if (!assistant || !user) return false;
-  if (assistant.role !== "assistant" || user.role !== "user") return false;
-  if (assistant.status === "streaming") return false;
-  if (
-    !shouldKeepTranscriptMessage(assistant.role, assistant.content) ||
-    !shouldKeepTranscriptMessage(user.role, user.content)
-  ) {
-    return false;
-  }
-
-  // Normal follow-up shape is user -> assistant -> user. Only repair an
-  // orphan assistant that appears after another assistant/system/start, which
-  // is the hydrate/cache race shape: assistant answer first, prompting user
-  // bubble stuck below it.
-  const previous = previousConversationalMessage(messages, assistantIndex);
-  if (previous?.role === "user") return false;
-
-  const assistantAt = assistant.createdAt;
-  const userAt = user.createdAt;
-  if (
-    typeof assistantAt === "number" &&
-    typeof userAt === "number" &&
-    Number.isFinite(assistantAt) &&
-    Number.isFinite(userAt)
-  ) {
-    return Math.abs(assistantAt - userAt) <= OUT_OF_ORDER_TURN_WINDOW_MS;
-  }
-  return true;
-}
-
-function repairOutOfOrderUserTurns(messages: ChatMessage[]): ChatMessage[] {
-  if (messages.length < 2) return messages;
-  let out: ChatMessage[] | null = null;
-  const list = () => out ?? messages;
-
-  for (let i = 0; i < list().length - 1; i += 1) {
-    if (!shouldSwapOutOfOrderTurn(list(), i)) continue;
-    out = list().slice();
-    const assistant = out[i];
-    out[i] = out[i + 1];
-    out[i + 1] = assistant;
-    if (i > 0) i -= 2;
-  }
-
-  if (out) {
-    blankTrace("repaired out-of-order user turn", {
-      count: messages.length,
-    });
-  }
-  return out ?? messages;
 }
 
 // Slim a turn's tool snapshot before it goes into localStorage. The
@@ -1915,340 +1792,6 @@ function attachLiveActivitySnapshots(
     };
   });
 
-  return changed ? next : messages;
-}
-
-// Merge a fresh server transcript with whatever the client cached locally.
-// The server persists messages only when a turn completes, so a refresh that
-// happens mid-turn returns a transcript that's missing the user's just-sent
-// message. Anything in the cache whose id isn't in the server response is
-// almost certainly an in-flight message — keep it appended.
-//
-// Match by role+content fingerprint, not by id: server and client generate
-// independent random IDs for the same logical message, so id-based matching
-// incorrectly treats every cached message as "not on server" and appends the
-// entire cache as a duplicate tail.
-function mergeServerWithCache(
-  serverMessages: ChatMessage[],
-  cached: ChatMessage[] | null,
-  // When true the server transcript is AUTHORITATIVE and may legitimately be
-  // shorter than the cache (a compaction summarized older turns away). Only the
-  // contiguous unsynced tail is recovered then; compacted messages stay gone.
-  // When false (the default — plain resume/reconnect/rehydrate) the server may
-  // instead be STALE: a WS that dropped mid-turn never flushed the streamed
-  // answers, so the server can be missing MIDDLE turns. There we rebuild in
-  // cache order so nothing rendered is lost.
-  serverAuthoritative = false,
-): ChatMessage[] {
-  if (!cached?.length) return repairOutOfOrderUserTurns(serverMessages);
-  // Fingerprint is whitespace-normalized: live-cached content vs
-  // server-rehydrated content can diverge by trailing newlines or
-  // doubled whitespace, and a raw slice(0,200) makes those two
-  // versions of the same message hash differently — which then sends
-  // the cached copy down the tail-walk path and renders the Q+A
-  // doubled in the chat panel.
-  const fp = (m: ChatMessage) => {
-    const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
-    return `${m.role}:${c}`;
-  };
-  const serverFingerprints = new Set(serverMessages.map(fp));
-
-  // The server transcript doesn't carry tool/trace/token snapshots.
-  // Re-attach them from the cached counterpart so the activity digest
-  // renders on resumed turns. Match on the same fingerprint the tail
-  // logic uses.
-  const cachedByFp = new Map<string, ChatMessage[]>();
-  for (const msg of cached) {
-    const key = fp(msg);
-    const queue = cachedByFp.get(key) ?? [];
-    queue.push(msg);
-    cachedByFp.set(key, queue);
-  }
-  const enriched = serverMessages.map((msg) => {
-    const match = cachedByFp.get(fp(msg))?.shift();
-    let next = msg;
-    // No-shrink rule: the fingerprint says these are the same logical message
-    // (same role + first 200 normalized chars). If the cached/rendered copy is
-    // LONGER, the server copy is a stale partial persisted mid-stream —
-    // keeping it visibly truncates an answer the user already read (the
-    // 945→417 shrink in blank-trace). The longer content wins.
-    if (
-      match &&
-      (match.content?.length ?? 0) > (next.content?.length ?? 0)
-    ) {
-      next = { ...next, content: match.content };
-    }
-    // The server transcript never stores attachment metadata. Re-attach
-    // it from the cache so a sent image still shows its chip on resume.
-    if (
-      msg.role === "user" &&
-      !msg.attachments?.length &&
-      match?.attachments?.length
-    ) {
-      next = { ...next, attachments: match.attachments };
-    }
-    const hasSnapshot =
-      !!next.tools?.length ||
-      !!next.traces?.length ||
-      typeof next.completedAt === "number" ||
-      typeof next.tokenCount === "number";
-    if (hasSnapshot) return next;
-    if (
-      match &&
-      (match.tools?.length ||
-        match.traces?.length ||
-        typeof match.tokenCount === "number" ||
-        typeof match.completedAt === "number")
-    ) {
-      return {
-        ...next,
-        // Preserve the cached START time, not just completedAt. The server
-        // stores a single timestamp per message (~completion), so keeping
-        // next.createdAt collapses the turn duration to ~0 ("Worked for 0s")
-        // on re-hydrate. The cached createdAt is the true turn-start captured
-        // live, so completedAt - createdAt stays the real elapsed time.
-        createdAt:
-          typeof match.createdAt === "number" ? match.createdAt : next.createdAt,
-        completedAt: match.completedAt,
-        tools: match.tools,
-        traces: match.traces,
-        tokenCount: match.tokenCount,
-      };
-    }
-    return next;
-  });
-
-  if (serverAuthoritative) {
-    // Compaction path: trust the server's (intentionally shorter) transcript and
-    // only re-append the contiguous tail of cached messages it doesn't yet have
-    // (a turn that streamed after the compaction snapshot). Walking from the end
-    // and breaking at the first server-known message keeps compacted-away turns
-    // gone — resurrecting them would make compaction visually do nothing.
-    const tail: ChatMessage[] = [];
-    for (let i = cached.length - 1; i >= 0; i--) {
-      if (serverFingerprints.has(fp(cached[i]))) break;
-      tail.unshift(cached[i]);
-    }
-    const merged = tail.length ? [...enriched, ...tail] : enriched;
-    if (merged.length < 2) return merged;
-    const repaired = repairOutOfOrderUserTurns(merged);
-    blankTraceIfDropped(cached, repaired, fp, serverMessages.length);
-    return repaired;
-  }
-
-  // Default (stale-server) path: the server can be missing MIDDLE turns, not
-  // just a clean suffix (the throttled persist never flushed them before the WS
-  // dropped). The old contiguous-tail recovery broke the instant it hit a
-  // server-known message — so a truncated server list that still ended on a
-  // cached message recovered NOTHING and silently dropped the gap (the 14->4
-  // vanish). Rebuild in CACHE order instead: emit the server-canonical copy
-  // where the server has it (enriched with cache snapshots), otherwise recover
-  // the cached copy verbatim. Nothing rendered is ever dropped.
-  const enrichedByFp = new Map<string, ChatMessage[]>();
-  for (const m of enriched) {
-    const key = fp(m);
-    const queue = enrichedByFp.get(key) ?? [];
-    queue.push(m);
-    enrichedByFp.set(key, queue);
-  }
-  const remainingEnriched = new Set(enriched);
-  const out: ChatMessage[] = [];
-  for (const cm of cached) {
-    const key = fp(cm);
-    const serverMatch = enrichedByFp.get(key)?.shift();
-    if (serverMatch) {
-      remainingEnriched.delete(serverMatch);
-      out.push(serverMatch);
-    } else {
-      out.push(cm);
-    }
-  }
-  // Anything the server has that the cache never saw (a turn that completed
-  // server-side after the cache snapshot) — INSERT BY TIME, not blind-append.
-  // The user's own message persists only at turn flush: leave mid-turn and
-  // come back, and it arrives here as a server-only row AFTER the streamed
-  // answer already sits in the cache — appending pinned it below the answer
-  // it prompted. Sliding it in by createdAt puts it back where it was sent.
-  for (const sm of enriched) {
-    if (!remainingEnriched.has(sm)) continue;
-    const at = typeof sm.createdAt === "number" ? sm.createdAt : Number.POSITIVE_INFINITY;
-    let idx = out.length;
-    while (idx > 0) {
-      const prev = out[idx - 1];
-      const prevAt = typeof prev.createdAt === "number" ? prev.createdAt : 0;
-      if (prevAt <= at) break;
-      idx--;
-    }
-    out.splice(idx, 0, sm);
-  }
-  const repaired = repairOutOfOrderUserTurns(out);
-  blankTraceIfDropped(cached, repaired, fp, serverMessages.length);
-  return repaired;
-}
-
-// Shared whitespace-normalized fingerprint (same shape mergeServerWithCache
-// uses internally) for the server-truth reconciliation below.
-function messageFingerprint(m: ChatMessage): string {
-  const c = (m.content ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
-  return `${m.role}:${c}`;
-}
-
-// Tolerance window for optimistic/in-flight messages the server hasn't acked
-// yet (a just-sent user bubble, a queued follow-up). Anything older that the
-// server disowns is cross-chat cache pollution, not an unsynced send.
-const RECONCILE_RECENT_MS = 120_000;
-
-/**
- * SELF-HEALING HYDRATION (layer 1 of the cross-chat bleed fix). When the
- * server transcript for a session arrives, the server is CANONICAL for which
- * user/assistant messages belong to this chat. The on-screen/cached list can
- * carry messages leaked from ANOTHER chat (a late async write repainted old
- * state after a chat switch, then the polluted view was persisted into this
- * session's localStorage cache — surviving reload forever). Drop every
- * user/assistant message the server does not contain, tolerating:
- *  - the CURRENT streaming turn (status "streaming" / currentAssistantId),
- *  - very recent messages (optimistic sends the server hasn't acked yet),
- *  - messages TAGGED as belonging to one of this view's own session ids
- *    (an unsynced turn the throttled persist saved but a dropped WS never
- *    flushed server-side — legitimate content, keep it).
- * Count-aware: a fingerprint the server holds N times justifies at most N
- * non-streaming copies here, so an identical message duplicated by pollution
- * collapses back to the server's count. System/tool rows are client-local
- * and pass through untouched. Heals past AND future pollution on re-entry.
- */
-function reconcileWithServerTruth(
-  merged: ChatMessage[],
-  serverMessages: ChatMessage[],
-  ownedSessionIds: Set<string>,
-  currentAssistantId: string | null,
-): ChatMessage[] {
-  if (!merged.length || !serverMessages.length) return merged;
-  const counts = new Map<string, number>();
-  for (const sm of serverMessages) {
-    if (sm.role !== "user" && sm.role !== "assistant") continue;
-    const key = messageFingerprint(sm);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const now = Date.now();
-  const keep = new Array<boolean>(merged.length).fill(true);
-  // Walk newest-first so the latest copy of a duplicated bubble claims the
-  // server slot and the stale older duplicate is the one that drops.
-  for (let i = merged.length - 1; i >= 0; i--) {
-    const m = merged[i];
-    if (m.role !== "user" && m.role !== "assistant") continue;
-    if (m.status === "streaming" || (currentAssistantId && m.id === currentAssistantId)) {
-      continue;
-    }
-    const key = messageFingerprint(m);
-    const remaining = counts.get(key) ?? 0;
-    if (remaining > 0) {
-      counts.set(key, remaining - 1);
-      continue;
-    }
-    if (m.sessionKey) {
-      keep[i] = ownedSessionIds.has(m.sessionKey);
-      continue;
-    }
-    keep[i] = now - (m.createdAt ?? 0) < RECONCILE_RECENT_MS;
-  }
-  if (keep.every(Boolean)) return merged;
-  const out = merged.filter((_, i) => keep[i]);
-  blankTrace("reconciled transcript against server truth", {
-    droppedCount: merged.length - out.length,
-    mergedLen: merged.length,
-    serverLen: serverMessages.length,
-  });
-  return out;
-}
-
-/**
- * Layer-2 guard for every transcript-cache WRITE: a message tagged with a
- * foreign session id must never be persisted under this session's cache key
- * (that write is exactly how one chat's bubbles became permanent residents of
- * another chat's transcript). Untagged messages (pre-mint optimistic sends,
- * pre-fix cached rows) pass through — the hydrate reconciliation above owns
- * those.
- */
-function dropForeignMessages(
-  messages: ChatMessage[],
-  ownedSessionIds: Set<string>,
-): ChatMessage[] {
-  if (!messages.length || !ownedSessionIds.size) return messages;
-  const out = messages.filter(
-    (m) => !m.sessionKey || ownedSessionIds.has(m.sessionKey),
-  );
-  return out.length === messages.length ? messages : out;
-}
-
-// Debug tracer: forwarded to the gateway (debug.trace -> blank-trace.log) and
-// the console. Set window.__elevateBlankTraceSink from the component.
-function blankTrace(message: string, data: Record<string, unknown>): void {
-  try {
-    // eslint-disable-next-line no-console
-    console.error("[BLANK-TRACE]", message, data);
-    (window as unknown as {
-      __elevateBlankTraceSink?: (m: string, d: Record<string, unknown>) => void;
-    }).__elevateBlankTraceSink?.(message, data);
-  } catch {
-    /* tracing must never break the app */
-  }
-}
-
-// Flags when a substantial assistant message present in `cached` is absent from
-// the merge output `out` — i.e. the merge erased a rendered answer.
-function blankTraceIfDropped(
-  cached: ChatMessage[] | null,
-  out: ChatMessage[],
-  fp: (m: ChatMessage) => string,
-  serverLen: number,
-): void {
-  try {
-    const big = (m: ChatMessage) =>
-      m.role === "assistant" && (m.content ?? "").replace(/\s+/g, "").length > 80;
-    const outFps = new Set(out.map(fp));
-    const dropped = (cached ?? []).filter((m) => big(m) && !outFps.has(fp(m)));
-    if (dropped.length) {
-      blankTrace("merge dropped a rendered assistant answer", {
-        serverLen,
-        cachedLen: (cached ?? []).length,
-        outLen: out.length,
-        droppedLens: dropped.map((m) => (m.content ?? "").length),
-        stack: new Error().stack?.split("\n").slice(2, 7).join(" | "),
-      });
-    }
-  } catch {
-    /* never break merge */
-  }
-}
-
-// Detect whether the cached transcript ends with a user message that has no
-// following assistant reply — the telltale sign that a turn was in flight
-// when the user refreshed.
-function hasPendingTurn(messages: ChatMessage[]): boolean {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === "assistant") return msg.status === "streaming";
-    if (msg.role === "user") return true;
-  }
-  return false;
-}
-
-function markStreamingTurnsInterrupted(
-  messages: ChatMessage[],
-  completedAt = Date.now(),
-): ChatMessage[] {
-  let changed = false;
-  const next = messages.map((message) => {
-    if (message.role !== "assistant" || message.status !== "streaming") {
-      return message;
-    }
-    changed = true;
-    return {
-      ...message,
-      completedAt: message.completedAt ?? completedAt,
-      status: "interrupted" as const,
-    };
-  });
   return changed ? next : messages;
 }
 
@@ -2734,6 +2277,15 @@ function eventString(ev: GatewayEvent, key: string): string {
   if (!payload || typeof payload !== "object") return "";
   const raw = (payload as Record<string, unknown>)[key];
   return typeof raw === "string" ? raw : "";
+}
+
+function eventStringArray(ev: GatewayEvent, key: string): string[] {
+  const payload = ev.payload;
+  if (!payload || typeof payload !== "object") return [];
+  const raw = (payload as Record<string, unknown>)[key];
+  return Array.isArray(raw)
+    ? raw.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
 }
 
 function timeValueMs(v: number | string | null | undefined): number | undefined {
@@ -3275,6 +2827,10 @@ function shouldStartManualCompactActivity(text: string, busy: boolean): boolean 
   return isCompactSlashCommand(text) && !busy;
 }
 
+function shouldClearUsageForStatus(text: string): boolean {
+  return /compacting context/i.test(text);
+}
+
 function isOpenPreviewIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksToOpen =
@@ -3394,17 +2950,10 @@ export default function ChatPage() {
   const seedKey = searchParams.get("seed");
   const draftChat = Boolean(newChatId && !resumeId && !seedKey);
   const seededRef = useRef(false);
-  // Auto-resume gate. When the user lands on /chat with no ?resume= and no
-  // ?new=, we look up the most-recent TUI session and redirect with
-  // ?resume=<id> instead of minting a fresh session. The bootstrap effect
-  // waits on this gate so it doesn't mint a session before the redirect
-  // lands. Initialized to true when the URL already disambiguates (resume
-  // or new) — no probe needed there.
+  // Auto-resume gate. Bare /chat opens a fresh draft on full page load; an
+  // explicit ?resume= or ?new= already disambiguates and must not be rewritten.
   const [autoResumeDecided, setAutoResumeDecided] = useState(
-    // On the very first mount of a fresh page load, keep the gate closed so the
-    // startup effect can force a new draft chat (even if the URL still carries a
-    // ?resume= from before the reload). After that, the URL disambiguates.
-    () => (forcedNewChatThisLoad ? Boolean(resumeId || newChatId) : false),
+    () => Boolean(resumeId || newChatId || seedKey),
   );
   const [version, setVersion] = useState(0);
   // The chat key (resume/new/seed) that the currently-displayed messages were
@@ -3541,7 +3090,7 @@ export default function ChatPage() {
   // Steered messages accepted by the gateway but not yet APPLIED. They stay
   // visible in the queue strip ("steering…") and only enter the timeline —
   // bubble + marker together — at the insertion point (steer.applied).
-  const heldSteersRef = useRef<string[]>([]);
+  const heldSteersRef = useRef<HeldSteer[]>([]);
   // display.busy_input_mode from config — what a plain send does while a turn
   // is busy: "queue" (chip, waits for next turn) or "interrupt"/"steer"
   // (soft mid-run injection via session.steer). Loaded once; default queue.
@@ -3598,6 +3147,13 @@ export default function ChatPage() {
     [storeMessages],
   );
   const messages = TRANSCRIPT_STORE_ENABLED ? storeMessagesAsChat : messagesRaw;
+
+  useEffect(() => {
+    const current = currentAssistantRef.current;
+    if (current && !messages.some((message) => message.id === current)) {
+      currentAssistantRef.current = null;
+    }
+  }, [messages]);
 
   // Activate the store once when the flag is on (this is what authorizes the
   // legacy-cache purge + localStorage write-through).
@@ -4956,29 +4512,26 @@ export default function ChatPage() {
     writeQueue(persisted, queuedInputs);
   }, [queuedInputs, sessionId]);
 
-  // Startup behavior: on every full page load (app launch / reload) open a
-  // fresh draft chat — ready to type — instead of reopening the last session.
-  // It mints no row (a draft only persists once you send) and the sidebar still
-  // lets you reopen prior chats by hand. The module-level guard fires this once
-  // per page load, so client-side navigations (sidebar clicks -> ?resume=) are
-  // untouched.
+  // Startup behavior: bare /chat opens a fresh draft. Reloading a concrete
+  // ?resume= must keep that session; otherwise users land on a blank new chat
+  // and have to re-enter the session to see the answer/reasoning again.
   useEffect(() => {
     if (autoResumeDecided) return;
-    if (!forcedNewChatThisLoad) {
-      // First load of this page → force a fresh draft chat (drop any resume).
-      forcedNewChatThisLoad = true;
-      if (!newChatId) {
-        const next = new URLSearchParams();
-        next.set("new", String(Date.now()));
-        setSearchParams(next, { replace: true });
-      }
+    if (resumeId || newChatId || seedKey) {
       setAutoResumeDecided(true);
       return;
     }
-    // A later bare /chat (no resume / no new): just release the gate so the
-    // bootstrap mints a fresh session instead of auto-resuming.
+    if (!forcedNewChatThisLoad) {
+      // First bare /chat load → force a fresh draft chat.
+      forcedNewChatThisLoad = true;
+      const next = new URLSearchParams();
+      next.set("new", String(Date.now()));
+      setSearchParams(next, { replace: true });
+      setAutoResumeDecided(true);
+      return;
+    }
     setAutoResumeDecided(true);
-  }, [autoResumeDecided, newChatId, searchParams, setSearchParams]);
+  }, [autoResumeDecided, newChatId, resumeId, seedKey, setSearchParams]);
 
   useEffect(() => {
     if (!autoResumeDecided) return;
@@ -5887,7 +5440,10 @@ export default function ChatPage() {
           // Latch the banner on; "Session compacted" (manual /compress end) or
           // a resume signal clears it. \bcompacted\b only matches the done
           // status, never the in-progress "Compacting context".
-          if (/compacting context/i.test(text)) setCompacting(true);
+          if (shouldClearUsageForStatus(text)) {
+            setCompacting(true);
+            setUsage(null);
+          }
           else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
             if (manualCompactAssistantRef.current) {
               setStatusText("Finished compacting");
@@ -6138,19 +5694,27 @@ export default function ChatPage() {
         // driven so a reattach mid-wait restores the same state.
         const text = eventString(ev, "text");
         if (!text) return;
-        if (!heldSteersRef.current.includes(text)) {
-          heldSteersRef.current.push(text);
+        const clientMessageId = eventString(ev, "client_message_id");
+        const steerId = clientMessageId || id("steering");
+        const alreadyHeld = heldSteersRef.current.some((item) =>
+          clientMessageId ? item.id === clientMessageId : item.text === text,
+        );
+        if (!alreadyHeld) {
+          heldSteersRef.current.push({ id: steerId, legacy: !clientMessageId, text });
           pendingSteerCountRef.current = heldSteersRef.current.length;
         }
         setQueuedInputs((prev) =>
-          prev.some((q) => q.status === "steering" && q.text === text)
+          prev.some((q) =>
+            q.status === "steering" &&
+            (clientMessageId ? q.id === clientMessageId : q.text === text),
+          )
             ? prev
             : [
                 ...prev,
                 {
                   agentId: "",
                   createdAt: eventMillis(ev),
-                  id: id("steering"),
+                  id: steerId,
                   routedText: text,
                   status: "steering" as const,
                   text,
@@ -6165,7 +5729,7 @@ export default function ChatPage() {
         if (!childPayload && !accepts(ev)) return;
         // The run itself is untouched — same bubble, same status, same
         // timer. The steered message moves into the timeline as a marker.
-        consumeAppliedSteers(eventMillis(ev));
+        consumeAppliedSteers(eventMillis(ev), eventStringArray(ev, "client_message_ids"));
       }),
     );
     unsubs.push(
@@ -7178,6 +6742,17 @@ export default function ChatPage() {
           });
           return false;
         }
+        const persisted = Number(response?.persisted ?? 0);
+        const allPersisted = response?.all_persisted === true;
+        if (!allPersisted || persisted < accepted) {
+          setStatusText("Message not saved");
+          appendMessage(
+            "system",
+            "The subagent accepted the message, but Elevate could not save it for app reopen.",
+            { status: "error" },
+          );
+          return true;
+        }
         setStatusText("Message sent to subagent");
         return true;
       } catch (error) {
@@ -7364,11 +6939,22 @@ export default function ChatPage() {
   //      AT the insertion point (never above thinking the user watched);
   //   3. the "Conversation steered" marker lands right after it.
   const consumeAppliedSteers = useCallback(
-    (at: number) => {
+    (at: number, clientMessageIds: string[] = []) => {
       const held = heldSteersRef.current;
       const ids = pendingSteerIdsRef.current;
-      if (!held.length && !ids.length) return;
-      heldSteersRef.current = [];
+      const scopedIds = clientMessageIds.filter(Boolean);
+      const applyAll = scopedIds.length === 0;
+      let appliedHeld = applyAll
+        ? held
+        : held.filter((item) => scopedIds.includes(item.id));
+      if (!applyAll && appliedHeld.length === 0) {
+        appliedHeld = held.filter((item) => item.legacy);
+      }
+      const appliedIds = new Set(appliedHeld.map((item) => item.id));
+      if (!appliedHeld.length && !ids.length) return;
+      heldSteersRef.current = applyAll
+        ? []
+        : held.filter((item) => !appliedIds.has(item.id));
       pendingSteerCountRef.current = 0;
       flushAssistantDelta();
       let interim = "";
@@ -7386,8 +6972,9 @@ export default function ChatPage() {
         );
       }
       contentStartRef.current = 0;
-      for (const text of held) {
-        addActivityTrace("steer", text, at);
+      pendingSteerCountRef.current = heldSteersRef.current.length;
+      for (const item of appliedHeld) {
+        addActivityTrace("steer", item.text, at);
       }
       addActivityTrace("marker", "Conversation steered", at + 1);
       stretchStartRef.current = at + 2;
@@ -7403,7 +6990,13 @@ export default function ChatPage() {
         );
       }
       // the strip items for these steers are done
-      setQueuedInputs((prev) => prev.filter((q) => q.status !== "steering"));
+      setQueuedInputs((prev) =>
+        prev.filter(
+          (q) =>
+            q.status !== "steering" ||
+            (!applyAll && !appliedIds.has(q.id)),
+        ),
+      );
     },
     [addActivityTrace, flushAssistantDelta, updateAssistant],
   );
@@ -7915,13 +7508,6 @@ export default function ChatPage() {
           );
           reconnect();
           return;
-        }
-        if (
-          manualCompactAssistantId &&
-          manualCompactAssistantRef.current === manualCompactAssistantId &&
-          slashResult !== "sent"
-        ) {
-          completeManualCompactAssistant("Finished compacting");
         }
         if (slashResult !== "sent") {
           const sidebarSessionId =

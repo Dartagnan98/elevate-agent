@@ -1193,25 +1193,50 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     return {"value": result.new_model, "warning": result.warning_message or ""}
 
 
+def _estimate_compaction_request_tokens(agent, history: list[dict]) -> int:
+    from agent.model_metadata import (
+        estimate_messages_tokens_rough,
+        estimate_request_tokens_rough,
+    )
+
+    pressure_builder = getattr(type(agent), "_messages_for_compression_pressure", None)
+    if callable(pressure_builder):
+        try:
+            payload = agent._messages_for_compression_pressure(
+                history,
+                getattr(agent, "_cached_system_prompt", "") or "",
+            )
+            return estimate_request_tokens_rough(
+                payload,
+                system_prompt="",
+                tools=getattr(agent, "tools", None) or None,
+            )
+        except Exception:
+            pass
+    return estimate_messages_tokens_rough(history)
+
+
 def _compress_session_history(
     session: dict, focus_topic: str | None = None
 ) -> tuple[int, dict]:
-    from agent.model_metadata import estimate_messages_tokens_rough
 
     agent = session["agent"]
     history = list(session.get("history", []))
     if len(history) < 4:
         return 0, _get_usage(agent)
-    approx_tokens = estimate_messages_tokens_rough(history)
+    cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+    approx_tokens = _estimate_compaction_request_tokens(agent, history)
     compressed, _ = agent._compress_context(
         history,
         getattr(agent, "_cached_system_prompt", "") or "",
         approx_tokens=approx_tokens,
         focus_topic=focus_topic or None,
     )
+    cursor_after = int(getattr(agent, "compaction_cursor", 0) or 0)
     session["history"] = compressed
     session["history_version"] = int(session.get("history_version", 0)) + 1
-    return len(history) - len(compressed), _get_usage(agent)
+    removed = max(len(history) - len(compressed), cursor_after - cursor_before, 0)
+    return removed, _get_usage(agent)
 
 
 def _get_usage(agent) -> dict:
@@ -3324,6 +3349,7 @@ def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
                 "text": display,
                 "source": "subagent.message",
                 "client_message_id": target.get("client_message_id") or None,
+                "persisted": bool(target.get("persisted")),
             }
             # Direct child messages are soft steers, not fresh turns. Emit the
             # same queued marker parent steering uses so the drill-in holds the
@@ -3343,6 +3369,7 @@ def _emit_subagent_message_to_parent(targets: list[dict], text: str) -> int:
                     "status": "running",
                     "source": "user",
                     "client_message_id": target.get("client_message_id") or None,
+                    "persisted": bool(target.get("persisted")),
                 },
             )
             emitted += 1
@@ -3379,14 +3406,28 @@ def _(rid, params: dict) -> dict:
         result.get("targets") if isinstance(result.get("targets"), list) else [],
         display_text,
     )
+    targets = result.get("targets") if isinstance(result.get("targets"), list) else []
+    client_message_ids = [
+        str(t.get("client_message_id"))
+        for t in targets
+        if isinstance(t, dict) and t.get("client_message_id")
+    ]
+    response_client_message_id = (
+        client_message_ids[0]
+        if len(client_message_ids) == 1
+        else (client_message_id if not client_message_ids else None)
+    )
     return _ok(
         rid,
         {
             "found": bool(result.get("found")),
             "accepted": int(result.get("accepted") or 0),
-            "targets": result.get("targets") or [],
+            "persisted": int(result.get("persisted") or 0),
+            "all_persisted": bool(result.get("all_persisted")),
+            "targets": targets,
             "emitted": emitted,
-            "client_message_id": client_message_id,
+            "client_message_id": response_client_message_id,
+            "client_message_ids": client_message_ids,
         },
     )
 
@@ -6302,9 +6343,9 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
             return "(._.) Not enough conversation to compact (need at least 4 messages)."
 
         from agent.manual_compression_feedback import summarize_manual_compression
-        from agent.model_metadata import estimate_messages_tokens_rough
 
-        approx_tokens = estimate_messages_tokens_rough(original_history)
+        cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+        approx_tokens = _estimate_compaction_request_tokens(agent, original_history)
         # Surface the pill during the ~24-36s summary call. Manual /compress
         # runs OUTSIDE run_conversation, so the agent's status callbacks never
         # reach the client — without this the chat sits silent (no "Compacting
@@ -6325,6 +6366,7 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         except Exception:
             _status_update(sid, "session_compacted", "Session compacted")  # release the pill
             raise
+        cursor_after = int(getattr(agent, "compaction_cursor", 0) or 0)
         session["history"] = compressed
         session["history_version"] = int(session.get("history_version", 0)) + 1
 
@@ -6341,12 +6383,14 @@ def _run_direct_compress_slash(sid: str, session: dict, focus_topic: str) -> str
         except Exception:
             logger.exception("manual /compress: failed to persist compressed history")
 
-        new_tokens = estimate_messages_tokens_rough(compressed)
+        new_tokens = _estimate_compaction_request_tokens(agent, compressed)
         summary = summarize_manual_compression(
             original_history,
             compressed,
             approx_tokens,
             new_tokens,
+            cursor_before=cursor_before,
+            cursor_after=cursor_after,
         )
 
     # Clear the pill and mark the moment done (client maps "compacted" → off).

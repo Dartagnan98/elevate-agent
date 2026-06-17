@@ -7144,6 +7144,7 @@ class ElevateCLI:
             from agent.manual_compression_feedback import summarize_manual_compression
             original_history = list(self.conversation_history)
             approx_tokens = estimate_messages_tokens_rough(original_history)
+            cursor_before = int(getattr(self.agent, "compaction_cursor", 0) or 0)
             if focus_topic:
                 print(f"🗜️  Compressing {original_count} messages (~{approx_tokens:,} tokens), "
                       f"focus: \"{focus_topic}\"...")
@@ -7157,6 +7158,7 @@ class ElevateCLI:
                 focus_topic=focus_topic or None,
             )
             self.conversation_history = compressed
+            cursor_after = int(getattr(self.agent, "compaction_cursor", 0) or 0)
             # _compress_context ends the old session and creates a new child
             # session on the agent (run_agent.py::_compress_context). Sync the
             # CLI's session_id so /status, /resume, exit summary, and title
@@ -7175,6 +7177,8 @@ class ElevateCLI:
                 self.conversation_history,
                 approx_tokens,
                 new_tokens,
+                cursor_before=cursor_before,
+                cursor_after=cursor_after,
             )
             icon = "🗜️" if summary["noop"] else "✅"
             print(f"  {icon} {summary['headline']}")

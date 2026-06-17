@@ -587,6 +587,8 @@ class TestLiveSubagentMessaging(unittest.TestCase):
 
         self.assertTrue(result["found"])
         self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["persisted"], 0)
+        self.assertFalse(result["all_persisted"])
         agent.queue_soft_interrupt.assert_called_once_with(
             "switch to seller follow-up",
             source="subagent_message",
@@ -604,6 +606,7 @@ class TestLiveSubagentMessaging(unittest.TestCase):
                     "goal": "Assess pricing",
                     "task_index": 2,
                     "client_message_id": result["targets"][0]["client_message_id"],
+                    "persisted": False,
                 }
             ],
         )
@@ -633,11 +636,13 @@ class TestLiveSubagentMessaging(unittest.TestCase):
 
         self.assertTrue(result["found"])
         self.assertEqual(result["accepted"], 2)
-        for agent in agents:
+        client_message_ids = [target["client_message_id"] for target in result["targets"]]
+        self.assertEqual(len(set(client_message_ids)), 2)
+        for idx, agent in enumerate(agents):
             agent.queue_soft_interrupt.assert_called_once_with(
                 "report status now",
                 source="subagent_message",
-                client_message_id=result["targets"][0]["client_message_id"],
+                client_message_id=client_message_ids[idx],
             )
         self.assertTrue(result["targets"][0]["client_message_id"].startswith("steer."))
 
@@ -679,6 +684,8 @@ class TestLiveSubagentMessaging(unittest.TestCase):
         )
 
         self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["persisted"], 1)
+        self.assertTrue(result["all_persisted"])
         agent.queue_soft_interrupt.assert_called_once_with(
             "focus only on seller follow-up",
             source="subagent_message",
@@ -692,6 +699,7 @@ class TestLiveSubagentMessaging(unittest.TestCase):
             "focus only on seller follow-up",
         )
         self.assertEqual(agent._session_db.rows[0]["client_message_id"], "steer.fixed")
+        self.assertTrue(result["targets"][0]["persisted"])
 
 
 class TestToolNamePreservation(unittest.TestCase):

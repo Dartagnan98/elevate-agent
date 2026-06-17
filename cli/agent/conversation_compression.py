@@ -1038,6 +1038,7 @@ def resolve_compression_pressure(
     *,
     output_reserve_tokens: int,
     threshold_pinned: bool,
+    fallback_messages: Optional[list] = None,
 ) -> Tuple[int, int, bool]:
     """Measurement + trigger line for the iteration-boundary check.
 
@@ -1051,8 +1052,9 @@ def resolve_compression_pressure(
          for the compacted conversation (#14695 guard).
       3. Stale-but-real last_prompt_tokens (list shape changed since) —
          estimate mode, matches the historical behavior.
-      4. Full chars/4 estimate of the message list (#2153 fallback when
-         usage was never reported).
+      4. Full chars/4 estimate of the effective payload list (#2153 fallback
+         when usage was never reported). For cursor-compacted sessions this is
+         summary + tail, not the append-only transcript.
     """
     projected = projector.project(messages) if projector is not None else None
     real_mode = projected is not None
@@ -1065,7 +1067,10 @@ def resolve_compression_pressure(
         elif last > 0:
             measured = last
         else:
-            measured = estimate_messages_tokens_rough(messages)
+            effective_messages = (
+                messages if fallback_messages is None else fallback_messages
+            )
+            measured = estimate_messages_tokens_rough(effective_messages)
 
     trigger = effective_compression_trigger_tokens(
         compressor,

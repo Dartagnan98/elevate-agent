@@ -4,7 +4,7 @@ import { __chatPageTestables } from "../ChatPage";
 
 type TestTool = Parameters<typeof __chatPageTestables.describeToolGroup>[0][number];
 type TestTrace = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[1][number];
-type TestMessage = Parameters<typeof __chatPageTestables.repairOutOfOrderUserTurns>[0][number];
+type TestMessage = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[0][number];
 type TestActiveSnapshot = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[1];
 type TestBackgroundTask = Parameters<typeof __chatPageTestables.sortBackgroundTasksForDisplay>[0][number];
 
@@ -169,6 +169,11 @@ describe("manual /compact activity", () => {
     expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", false)).toBe(true);
     expect(__chatPageTestables.shouldStartManualCompactActivity("/compact", true)).toBe(false);
   });
+
+  it("clears stale context usage only when compaction starts", () => {
+    expect(__chatPageTestables.shouldClearUsageForStatus("Compacting context")).toBe(true);
+    expect(__chatPageTestables.shouldClearUsageForStatus("Session compacted")).toBe(false);
+  });
 });
 
 describe("chat transcript ordering repair", () => {
@@ -297,6 +302,22 @@ describe("active turn resume cache", () => {
 });
 
 describe("server/cache transcript merge", () => {
+  it("drops a stale streaming placeholder once the server has the completed answer", () => {
+    const prompt = "Check the timeline race.";
+    const server = [
+      message({ content: prompt, createdAt: 1_000, id: "u1", role: "user" }),
+      message({ content: "The completed answer with reasoning restored.", createdAt: 2_000, id: "a1", role: "assistant" }),
+    ];
+    const cached = [
+      message({ content: prompt, createdAt: 1_000, id: "cached-u1", role: "user" }),
+      message({ content: "", createdAt: 1_010, id: "assistant-live", role: "assistant", status: "streaming" }),
+    ];
+
+    const merged = __chatPageTestables.mergeServerWithCache(server, cached, false);
+
+    expect(merged.map((item) => item.id)).toEqual(["u1", "a1"]);
+  });
+
   it("preserves repeated identical user prompts as separate turns", () => {
     const prompt = "Use subagents if helpful. Compare three ways to improve listing conversion.";
     const server = [

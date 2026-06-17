@@ -348,9 +348,7 @@ def message_subagent(
     subagent_id = str(subagent_id or "").strip()
     child_session_id = str(child_session_id or "").strip()
     task_id = str(task_id or "").strip()
-    client_message_id = str(client_message_id or "").strip()
-    if not client_message_id:
-        client_message_id = f"steer.{uuid.uuid4().hex}"
+    requested_client_message_id = str(client_message_id or "").strip()
     if not message:
         return {"found": False, "accepted": 0, "targets": [], "error": "text required"}
     if not subagent_id and not child_session_id and not task_id:
@@ -366,7 +364,9 @@ def message_subagent(
 
     matched = 0
     accepted = 0
+    persisted = 0
     targets: List[Dict[str, Any]] = []
+    direct_target = bool(subagent_id or child_session_id)
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -387,12 +387,17 @@ def message_subagent(
         )
         if not callable(queue_soft_interrupt):
             continue
+        target_client_message_id = (
+            requested_client_message_id
+            if requested_client_message_id and direct_target
+            else f"steer.{uuid.uuid4().hex}"
+        )
         try:
             ok = bool(
                 queue_soft_interrupt(
                     message,
                     source=source,
-                    client_message_id=client_message_id,
+                    client_message_id=target_client_message_id,
                 )
             )
         except Exception as exc:
@@ -401,12 +406,14 @@ def message_subagent(
         if not ok:
             continue
 
-        _persist_subagent_steer_message(
+        target_persisted = _persist_subagent_steer_message(
             agent,
             current_child_session_id,
             message,
-            client_message_id,
+            target_client_message_id,
         )
+        if target_persisted:
+            persisted += 1
         accepted += 1
         targets.append(
             {
@@ -416,11 +423,18 @@ def message_subagent(
                 "parent_session_id": _record_parent_session_id(record) or None,
                 "goal": record.get("goal") or "",
                 "task_index": record.get("task_index") or 0,
-                "client_message_id": client_message_id,
+                "client_message_id": target_client_message_id,
+                "persisted": target_persisted,
             }
         )
 
-    return {"found": matched > 0, "accepted": accepted, "targets": targets}
+    return {
+        "found": matched > 0,
+        "accepted": accepted,
+        "persisted": persisted,
+        "all_persisted": accepted > 0 and persisted == accepted,
+        "targets": targets,
+    }
 
 
 # Async (dispatched) delegations cancelled by the user. A cancelled task's

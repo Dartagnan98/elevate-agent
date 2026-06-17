@@ -373,6 +373,25 @@ class TestModeThresholds:
         assert real_mode is False
         assert measured == estimate_messages_tokens_rough(msgs)
 
+    def test_estimate_fallback_can_use_effective_cursor_payload(self, compressor):
+        """Resumed cursor sessions estimate summary+tail, not full transcript."""
+        full_transcript = _msgs(8, chars=4_000)
+        effective_payload = _msgs(2, chars=400)
+        compressor.last_prompt_tokens = 0
+
+        measured, _trigger, real_mode = resolve_compression_pressure(
+            compressor,
+            RealUsageProjector(),
+            full_transcript,
+            output_reserve_tokens=DEFAULT_RESERVE,
+            threshold_pinned=False,
+            fallback_messages=effective_payload,
+        )
+
+        assert real_mode is False
+        assert measured == estimate_messages_tokens_rough(effective_payload)
+        assert measured < estimate_messages_tokens_rough(full_transcript)
+
     def test_anti_thrash_backoff_still_applies(self, compressor):
         """#14695: two ineffective compressions in a row veto the trigger."""
         compressor._ineffective_compression_count = 2

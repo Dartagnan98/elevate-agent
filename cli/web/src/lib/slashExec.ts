@@ -177,6 +177,7 @@ function compactOutputLooksCompleted(output: string): boolean {
   const clean = output.toLowerCase();
   return (
     clean.includes("compressed:") ||
+    clean.includes("compacted earlier turns:") ||
     clean.includes("no changes from compression") ||
     clean.includes("approx request size")
   );

@@ -59,6 +59,20 @@ def test_percent_omitted_when_no_current_measurement():
     assert "context_used" not in u
 
 
+def test_percent_omitted_after_compaction_sentinel():
+    # -1 means compaction just invalidated the stale prompt count. The ring
+    # must stay pending until fresh provider usage arrives.
+    u = _get_usage(
+        _agent(
+            last_prompt_tokens=-1,
+            context_length=272000,
+            session_total_tokens=1_800_000,
+        )
+    )
+    assert "context_percent" not in u
+    assert "context_used" not in u
+
+
 def test_percent_clamped_to_100():
     u = _get_usage(
         _agent(last_prompt_tokens=300000, context_length=272000, session_total_tokens=0)

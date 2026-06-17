@@ -37,6 +37,10 @@ def _make_runner():
     runner._provider_routing = {}
     runner._fallback_model = None
     runner._running_agents = {}
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = gateway_run.threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = gateway_run.threading.Lock()
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.hooks.loaded_hooks = []

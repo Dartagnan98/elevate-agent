@@ -506,6 +506,8 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
         return {
             "found": True,
             "accepted": 1,
+            "persisted": 1,
+            "all_persisted": True,
             "targets": [
                 {
                     "subagent_id": "sa-1",
@@ -515,6 +517,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
                     "goal": "Assess pricing",
                     "task_index": 3,
                     "client_message_id": kwargs["client_message_id"],
+                    "persisted": True,
                 }
             ],
         }
@@ -550,8 +553,11 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert "error" not in resp
     assert resp["result"]["found"] is True
     assert resp["result"]["accepted"] == 1
+    assert resp["result"]["persisted"] == 1
+    assert resp["result"]["all_persisted"] is True
     assert resp["result"]["emitted"] == 1
     assert resp["result"]["client_message_id"].startswith("steer.")
+    assert resp["result"]["client_message_ids"] == [resp["result"]["client_message_id"]]
     assert [event["type"] for event in parent_session["events"][-2:]] == [
         "steer.queued",
         "subagent.message",
@@ -563,6 +569,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert queued_payload["task_id"] == "dt-1"
     assert queued_payload["task_index"] == 3
     assert queued_payload["client_message_id"] == resp["result"]["client_message_id"]
+    assert queued_payload["persisted"] is True
     payload = parent_session["events"][-1]["payload"]
     assert payload["text"] == "UI shows this"
     assert payload["child_session_id"] == "child-1"
@@ -570,6 +577,7 @@ def test_subagent_message_routes_to_running_child_and_parent_ring(server, monkey
     assert payload["task_id"] == "dt-1"
     assert payload["task_index"] == 3
     assert payload["client_message_id"] == resp["result"]["client_message_id"]
+    assert payload["persisted"] is True
     assert transport.frames[-1]["params"]["type"] == "subagent.message"
 
 

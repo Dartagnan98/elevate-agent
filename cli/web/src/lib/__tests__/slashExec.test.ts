@@ -53,6 +53,40 @@ describe("executeSlash /compact rendering", () => {
     expect(cb.sys).not.toHaveBeenCalled();
   });
 
+  it("treats cursor compact summaries as successful compact completions", async () => {
+    const cb = callbacks();
+    const gw = {
+      request: vi.fn().mockResolvedValue({
+        output:
+          "Compacted earlier turns: 66 messages summarized\nApprox request size: ~4,000 -> ~1,200 tokens",
+      }),
+    } as unknown as GatewayClient;
+
+    await executeSlash({ callbacks: cb, command: "/compact", gw, sessionId: "sid" });
+
+    expect(cb.compactDone).toHaveBeenCalledWith(
+      "Finished compacting",
+      expect.stringContaining("Compacted earlier turns"),
+    );
+    expect(cb.compactFailed).not.toHaveBeenCalled();
+    expect(cb.sys).not.toHaveBeenCalled();
+  });
+
+  it("does not fabricate compact success for unexpected compact output", async () => {
+    const cb = callbacks();
+    const gw = {
+      request: vi.fn().mockResolvedValue({
+        output: "still compacting",
+      }),
+    } as unknown as GatewayClient;
+
+    await executeSlash({ callbacks: cb, command: "/compact", gw, sessionId: "sid" });
+
+    expect(cb.compactFailed).toHaveBeenCalledWith("still compacting");
+    expect(cb.compactDone).not.toHaveBeenCalled();
+    expect(cb.sys).not.toHaveBeenCalled();
+  });
+
   it("routes compact preflight failures back through the compact failure callback", async () => {
     const cb = callbacks();
     const gw = {

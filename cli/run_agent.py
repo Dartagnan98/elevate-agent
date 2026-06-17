@@ -5582,6 +5582,38 @@ class AIAgent:
 
         return api_messages[:sys_offset] + [synthetic] + api_messages[cut:]
 
+    def _messages_for_compression_pressure(
+        self,
+        messages: List[Dict[str, Any]],
+        active_system_prompt: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Non-mutating API-shaped payload used only for rough pressure checks."""
+        api_messages: List[Dict[str, Any]] = []
+        for msg in messages:
+            api_msg = msg.copy()
+            for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+                api_msg.pop(internal_field, None)
+            api_messages.append(api_msg)
+
+        effective_system = active_system_prompt or ""
+        if self.ephemeral_system_prompt:
+            effective_system = (
+                effective_system + "\n\n" + self.ephemeral_system_prompt
+            ).strip()
+        _plan_suffix = self._plan_mode_suffix()
+        if _plan_suffix:
+            effective_system = (effective_system + "\n\n" + _plan_suffix).strip()
+
+        if effective_system:
+            api_messages = [{"role": "system", "content": effective_system}] + api_messages
+        if self.prefill_messages:
+            sys_offset = 1 if effective_system else 0
+            for idx, pfm in enumerate(self.prefill_messages):
+                api_messages.insert(sys_offset + idx, pfm.copy())
+
+        sys_offset = (1 if effective_system else 0) + len(self.prefill_messages or [])
+        return self.messages_for_api(api_messages, sys_offset)
+
     @staticmethod
     def _sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Fix orphaned tool_call / tool_result pairs before every LLM call.
@@ -10677,12 +10709,15 @@ class AIAgent:
                 if _preflight_projector is not None else None
             )
             _preflight_real_mode = _preflight_projected is not None
+            _preflight_effective_messages = self._messages_for_compression_pressure(
+                messages, active_system_prompt or ""
+            )
             if _preflight_real_mode:
                 _preflight_tokens = _preflight_projected
             else:
                 _preflight_tokens = estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=active_system_prompt or "",
+                    _preflight_effective_messages,
+                    system_prompt="",
                     tools=self.tools or None,
                 )
             _preflight_trigger = _effective_trigger_tokens(
@@ -10734,17 +10769,20 @@ class AIAgent:
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
                     _orig_len = len(messages)
+                    _pre_cursor = int(getattr(self, "compaction_cursor", 0) or 0)
                     messages, active_system_prompt = self._compress_context(
                         messages, system_message, approx_tokens=_preflight_tokens,
                         task_id=effective_task_id,
                     )
-                    if len(messages) >= _orig_len:
+                    _cursor_advanced = (
+                        int(getattr(self, "compaction_cursor", 0) or 0) > _pre_cursor
+                    )
+                    if len(messages) >= _orig_len and not _cursor_advanced:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
-                    # pre-compression length.
+                    # Cursor-model compaction changes the API payload via
+                    # metadata, not necessarily the transcript length. Clear
+                    # the loaded-history reference so persistence does not use
+                    # a stale pre-compaction offset.
                     conversation_history = None
                     # Fix: reset retry counters after compression so the model
                     # gets a fresh budget on the compressed context.  Without
@@ -10758,9 +10796,12 @@ class AIAgent:
                     self._mute_post_response = False
                     # Re-estimate after compression (the projector was
                     # invalidated by compaction, so this is estimate mode).
+                    _preflight_effective_messages = self._messages_for_compression_pressure(
+                        messages, active_system_prompt or ""
+                    )
                     _preflight_tokens = estimate_request_tokens_rough(
-                        messages,
-                        system_prompt=active_system_prompt or "",
+                        _preflight_effective_messages,
+                        system_prompt="",
                         tools=self.tools or None,
                     )
                     _preflight_trigger = _effective_trigger_tokens(
@@ -13828,6 +13869,9 @@ class AIAgent:
                         should_prune_only_now as _should_prune_only_now,
                     )
                     _compressor = self.context_compressor
+                    _pressure_fallback_messages = self._messages_for_compression_pressure(
+                        messages, active_system_prompt or ""
+                    )
                     _real_tokens, _trigger_tokens, _real_mode = _resolve_pressure(
                         _compressor,
                         getattr(self, "_usage_projector", None),
@@ -13838,6 +13882,7 @@ class AIAgent:
                         threshold_pinned=getattr(
                             self, "_compression_threshold_pinned", False
                         ),
+                        fallback_messages=_pressure_fallback_messages,
                     )
 
                     # Critical line (0.95 of the window): force a synchronous
@@ -13871,7 +13916,7 @@ class AIAgent:
                         )
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
-                            approx_tokens=self.context_compressor.last_prompt_tokens,
+                            approx_tokens=_real_tokens,
                             task_id=effective_task_id,
                             force=_critical_compact,
                         )

@@ -146,6 +146,38 @@ class _FakeAgent:
         return None
 
 
+class _CursorAgent:
+    """Cursor compaction keeps the transcript but advances compaction metadata."""
+
+    compression_enabled = True
+    model = "fake-model"
+    tools = []
+    session_id = "sess-cursor"
+    _cached_system_prompt = "sys"
+
+    def __init__(self):
+        self.compaction_cursor = 0
+        self.compaction_summary = ""
+
+    def _messages_for_compression_pressure(self, history, system_prompt):
+        leader = [{"role": "system", "content": system_prompt}] if system_prompt else []
+        if not self.compaction_cursor:
+            return leader + list(history)
+        return (
+            leader
+            + [{"role": "user", "content": self.compaction_summary or "summary"}]
+            + list(history[self.compaction_cursor :])
+        )
+
+    def _compress_context(self, history, system_prompt, approx_tokens=0, focus_topic=None):
+        self.compaction_cursor = 3
+        self.compaction_summary = "earlier work"
+        return list(history), system_prompt
+
+    def _persist_session(self, compressed, _):
+        return None
+
+
 def test_run_direct_compress_slash_emits_pill_on_status_update_channel(server, monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -189,3 +221,37 @@ def test_run_direct_compress_slash_emits_pill_on_status_update_channel(server, m
     assert "Compressed:" in out
     assert session["history_version"] == 1
     assert len(session["history"]) == 3
+
+
+def test_run_direct_compress_slash_reports_cursor_compaction(server, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        server, "_emit", lambda event, sid, payload=None: calls.append((event, payload))
+    )
+    monkeypatch.setattr(server, "_session_info", lambda agent: {"model": "fake-model"})
+
+    import threading
+
+    original = [
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "three"},
+        {"role": "assistant", "content": "four"},
+    ]
+    agent = _CursorAgent()
+    session = {
+        "agent": agent,
+        "running": False,
+        "session_key": "sess-cursor",
+        "history_lock": threading.RLock(),
+        "history": list(original),
+        "history_version": 0,
+    }
+
+    out = server._run_direct_compress_slash("sess-cursor", session, "")
+
+    assert "Compacted earlier turns: 3 messages summarized" in out
+    assert "No changes from compression" not in out
+    assert session["history"] == original
+    assert session["history_version"] == 1
+    assert agent.compaction_cursor == 3
