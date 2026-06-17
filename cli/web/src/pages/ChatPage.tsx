@@ -7471,9 +7471,10 @@ export default function ChatPage() {
         }
         const manualCompact = shouldStartManualCompactActivity(trimmed, busy);
         let manualCompactAssistantId: string | null = null;
+        let slashUserMessageId = "";
         if (manualCompact) {
           flushSync(() => {
-            appendMessage("user", trimmed);
+            slashUserMessageId = appendMessage("user", trimmed);
             setTools([]);
             setActivityTrace([]);
             manualCompactAssistantId = ensureAssistant();
@@ -7484,7 +7485,7 @@ export default function ChatPage() {
           });
           await afterNextPaint();
         } else {
-          appendMessage("user", trimmed);
+          slashUserMessageId = appendMessage("user", trimmed);
         }
         const slashResult = await executeSlash({
           callbacks: {
@@ -7501,6 +7502,37 @@ export default function ChatPage() {
           gw,
           sessionId: targetSessionId,
         });
+        if (slashResult === "transport-error") {
+          setMessages((prev) =>
+            prev.filter(
+              (message) =>
+                message.id !== slashUserMessageId &&
+                (!manualCompactAssistantId || message.id !== manualCompactAssistantId),
+            ),
+          );
+          if (currentAssistantRef.current === manualCompactAssistantId) {
+            currentAssistantRef.current = null;
+          }
+          if (manualCompactAssistantRef.current === manualCompactAssistantId) {
+            manualCompactAssistantRef.current = null;
+          }
+          setTools([]);
+          setActivityTrace([]);
+          setBusy(false);
+          setCompacting(false);
+          setInput(trimmed);
+          setCaretIndex(trimmed.length);
+          setStatusText("Reconnecting...");
+          const sidebarSessionId =
+            persistedSessionIdRef.current ?? activeSessionRef.current ?? targetSessionId;
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId },
+            }),
+          );
+          reconnect();
+          return;
+        }
         if (
           manualCompactAssistantId &&
           manualCompactAssistantRef.current === manualCompactAssistantId &&

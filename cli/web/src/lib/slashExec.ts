@@ -64,7 +64,7 @@ export interface SlashExecOptions {
   callbacks: SlashExecCallbacks;
 }
 
-export type SlashExecResult = "done" | "sent" | "error";
+export type SlashExecResult = "done" | "sent" | "error" | "transport-error";
 
 /**
  * Run a slash command. Returns the terminal state so callers can decide
@@ -106,7 +106,8 @@ export async function executeSlash({
     }
     sys(r?.warning ? `warning: ${r.warning}\n${body}` : body);
     return "done";
-  } catch {
+  } catch (err) {
+    if (isGatewayTransportError(err)) return "transport-error";
     /* fall through to command.dispatch */
   }
 
@@ -161,6 +162,7 @@ export async function executeSlash({
       }
     }
   } catch (err) {
+    if (isGatewayTransportError(err)) return "transport-error";
     sys(`error: ${err instanceof Error ? err.message : String(err)}`);
     return "error";
   }
@@ -178,6 +180,11 @@ function compactOutputLooksCompleted(output: string): boolean {
     clean.includes("no changes from compression") ||
     clean.includes("approx request size")
   );
+}
+
+function isGatewayTransportError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /gateway not connected|websocket (?:closed|connection failed)/i.test(message);
 }
 
 function parseCommandDispatch(raw: unknown): CommandDispatchResponse | null {

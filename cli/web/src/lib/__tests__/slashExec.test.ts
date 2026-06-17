@@ -69,4 +69,20 @@ describe("executeSlash /compact rendering", () => {
     expect(cb.compactDone).not.toHaveBeenCalled();
     expect(cb.sys).not.toHaveBeenCalled();
   });
+
+  it("does not render disconnected gateway errors into the transcript", async () => {
+    const cb = callbacks();
+    const gw = {
+      request: vi.fn().mockRejectedValue(new Error("gateway not connected (state=closed)")),
+    } as unknown as GatewayClient;
+
+    await expect(
+      executeSlash({ callbacks: cb, command: "/compact", gw, sessionId: "sid" }),
+    ).resolves.toBe("transport-error");
+
+    expect(gw.request).toHaveBeenCalledTimes(1);
+    expect(cb.compactDone).not.toHaveBeenCalled();
+    expect(cb.compactFailed).not.toHaveBeenCalled();
+    expect(cb.sys).not.toHaveBeenCalled();
+  });
 });
