@@ -166,15 +166,15 @@ def test_merge_preserves_incoming_critical_metadata(tmp_path):
     # CONSTRAINT 1.
     provider = _provider(tmp_path)
     store = provider._store
-    base = "Qz1 the dashboard widget renders the listing summary panel for the smith account view"
-    # Non-critical original (generic workflow content).
+    # Base carries verify/before context but NO compliance noun -> not critical.
+    base = "Qz1 the dashboard panel must always verify and render the listing summary before showing the smith account overview"
     fid = store.add_fact(base, category="project")
     row0 = _fact_row(store, fid)
     assert not row0["critical"]
 
-    # Near-duplicate (jaccard >= 0.88), strictly more specific, classifies
-    # critical (compliance — "signature"). Explicit save, but explicit no
-    # longer implies pinned (P1 fix).
+    # Near-duplicate (jaccard >= 0.88) that adds the compliance NOUN ("signature")
+    # to the existing verify/before context -> now classifies critical=compliance.
+    # Explicit save, but explicit no longer implies pinned (P1 fix).
     crit = base + " signature"
     detailed = store.add_fact_detailed(crit, category="project", explicit=True)
     assert detailed["outcome"] == "merged"
@@ -472,3 +472,54 @@ def test_backfill_rate_guard_blocks_above_15pct(tmp_path, monkeypatch):
     great = store.backfill_critical(dry_run=True)
     assert great["verdict"] == "great"
     assert great["critical_rate"] < 0.10
+
+
+# ---------------------------------------------------------------------------
+# Skyleigh false-positive tightening: compliance needs rule/verify context,
+# correction needs a strong cue (not system notes / bare "instead of").
+# ---------------------------------------------------------------------------
+
+def test_skyleigh_compliance_false_positives_and_fact45(tmp_path):
+    from plugins.memory.holographic.quality import classify_fact_durability as cls
+    # 1. accepted-offer reminder workflow => NOT critical
+    f1 = cls("Accepted-offer listing workflow: when a listing moves to Accepted Offer, "
+             "create reminders/tasks to order the BIR and strata documents.")
+    assert f1["critical"] is False, f1
+    # 2. accepted-offer/CPS autofill workflow => NOT critical
+    f2 = cls("Real-estate SkySlope workflow: when uploading a new accepted offer/CPS, "
+             "automatically fill out the SkySlope Deal Sheet from the signed CPS.")
+    assert f2["critical"] is False, f2
+    # 3. disclosure document workflow mention => NOT critical
+    f3 = cls("SkySlope accepted-offer workflow: include the Disclosure to Seller of "
+             "Expected Remuneration in the accepted-offer package.")
+    assert f3["critical"] is False, f3
+    # 4. branded email signature/footer => NOT critical
+    f4 = cls("For seller-facing marketing emails, Skyleigh likes a branded footer with a "
+             "handwritten-style 'forever real estate group' signature and the eXp logo.")
+    assert f4["critical"] is False, f4
+    # 5. fact 45 signature/initials VERIFY rule => critical=compliance + task_tags
+    fact45 = ("Real-estate accepted-offer document review: when there are multiple names on "
+              "either the buyer side or seller side, verify there are enough initials/signatures "
+              "for every named party before selecting or uploading the accepted offer. Do not use "
+              "a CPS that only has one seller/buyer initialed when multiple sellers/buyers are named.")
+    f5 = cls(fact45)
+    assert f5["critical"] is True and f5["critical_reason"] == "compliance", f5
+    provider = _provider(tmp_path)
+    tags = provider._store._infer_task_tags(fact45)
+    assert "task:accepted-offer" in tags and "task:filing" in tags, tags
+
+
+def test_correction_false_positives_tightened():
+    from plugins.memory.holographic.quality import classify_fact_durability as cls
+    # system/interruption note => NOT critical
+    note = cls("Your previous turn was interrupted before you could process the last tool "
+               "result(s), and the user's new message is asking for status.")
+    assert note["critical"] is False, note
+    # generic preference matched by "instead of" => NOT critical
+    pref = cls("User prefers that browser-assisted work continue in the already-open visible "
+               "tab instead of opening a new one.")
+    assert pref["critical"] is False, pref
+    # a real correction still flags critical=correction
+    real = cls("Actually, you used the buyer checklist — we represent the seller on Columbia, "
+               "use the seller accepted-offer checklist.")
+    assert real["critical"] is True and real["critical_reason"] == "correction", real
