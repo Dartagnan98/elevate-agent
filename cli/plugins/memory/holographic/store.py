@@ -454,6 +454,7 @@ class MemoryStore:
         dedup_similarity_threshold: float = 0.92,
         dedup_jaccard_threshold: float = 0.88,
         dedup_candidate_limit: int = 1000,
+        trust_from_ranking_enabled: bool = False,
     ) -> None:
         # ``db_path`` is preserved as an attribute for callers that probe
         # it (tests, doctor, backup tooling), but the holographic store no
@@ -476,6 +477,11 @@ class MemoryStore:
         self.dedup_similarity_threshold = float(dedup_similarity_threshold)
         self.dedup_jaccard_threshold = float(dedup_jaccard_threshold)
         self.dedup_candidate_limit = max(1, int(dedup_candidate_limit))
+        # Trust ratchet switch. When False (default), post-retrieval ranking
+        # outcomes do NOT mutate trust_score / helpful_count — only explicit
+        # fact_feedback does. Telemetry (counts, links, clustering) is kept
+        # regardless. True restores the legacy ranking-driven trust deltas.
+        self.trust_from_ranking_enabled = bool(trust_from_ranking_enabled)
         # Extraction-pass throttle state (None = no pass active; see
         # begin_extraction_pass/end_extraction_pass). Only the automated
         # extraction/organize paths set this; explicit adds are unthrottled.
@@ -507,6 +513,13 @@ class MemoryStore:
             "reinforced_count": "INTEGER DEFAULT 0",
             "last_seen_at": "TIMESTAMP",
             "last_recalled_at": "TIMESTAMP",
+            # Critical / pinned recall-tier fields (migration 0032). Added
+            # here too so fresh/SQLite/test DBs gain them even if the numbered
+            # migration hasn't run yet. Read/written directly off memory_facts.
+            "critical": "BOOLEAN DEFAULT false",
+            "pinned": "BOOLEAN DEFAULT false",
+            "task_tags": "TEXT DEFAULT ''",
+            "critical_reason": "TEXT DEFAULT ''",
         }
         with self._lock:
             try:
@@ -637,6 +650,26 @@ class MemoryStore:
                 )
 
             classification = fact_quality.classify_fact_durability(content)
+            # Critical-tier metadata (Phase 2). critical/critical_reason from
+            # the classifier; task_tags inferred from write-time context.
+            # Pinned is "must-always" and is NEVER derived from an explicit/
+            # manual save (explicit only bypasses the durability gate). v1 has
+            # no explicit pin action, so pinned stays False here; a future pin
+            # path must also be critical to occupy a no-match lane slot.
+            incoming_critical = bool(classification.get("critical"))
+            incoming_reason = str(classification.get("critical_reason") or "")
+            incoming_pinned = False
+            try:
+                inferred_entities = self._extract_entities(content)
+            except Exception:
+                inferred_entities = []
+            incoming_task_tags = self._infer_task_tags(
+                content,
+                category=category,
+                tags=tags,
+                source_uri=source_uri,
+                entities=inferred_entities,
+            )
             warning = ""
             if (
                 self.durability_gate_enabled
@@ -677,7 +710,13 @@ class MemoryStore:
                 duplicate = self._find_near_duplicate(content)
                 if duplicate is not None:
                     merged_id = self._merge_duplicate_fact(
-                        duplicate, content, tags=tags
+                        duplicate,
+                        content,
+                        tags=tags,
+                        incoming_critical=incoming_critical,
+                        incoming_pinned=incoming_pinned,
+                        incoming_task_tags=incoming_task_tags,
+                        incoming_reason=incoming_reason,
                     )
                     return {
                         "fact_id": merged_id,
@@ -725,6 +764,15 @@ class MemoryStore:
                 fact_id = int(row["fact_id"])
                 self._embed_fact(fact_id, content)
                 self._bump_fact_reinforcement(fact_id)
+                # CONSTRAINT 1: don't drop incoming critical metadata on an
+                # exact-content duplicate (the older row is kept).
+                self._merge_critical_metadata(
+                    fact_id,
+                    incoming_critical=incoming_critical,
+                    incoming_pinned=incoming_pinned,
+                    incoming_task_tags=incoming_task_tags,
+                    incoming_reason=incoming_reason,
+                )
                 return {
                     "fact_id": fact_id,
                     "outcome": "duplicate",
@@ -746,10 +794,21 @@ class MemoryStore:
                 durability=classification["durability"],
                 confidence=classification["confidence"],
             )
+            self._set_critical_metadata(
+                fact_id,
+                critical=incoming_critical,
+                pinned=incoming_pinned,
+                task_tags=incoming_task_tags,
+                critical_reason=incoming_reason,
+            )
 
             return {
                 "fact_id": fact_id,
                 "outcome": "added",
+                "critical": incoming_critical,
+                "pinned": incoming_pinned,
+                "task_tags": incoming_task_tags,
+                "critical_reason": incoming_reason,
                 "durability": classification["durability"],
                 "durability_confidence": classification["confidence"],
                 "warning": warning,
@@ -777,6 +836,150 @@ class MemoryStore:
                 self._conn.rollback()
             except Exception:
                 pass
+
+    # Task-tag inference rules: (compiled regex, tag). First-match-wins is NOT
+    # used — every matching rule contributes its tag (a fact can carry several
+    # task tags). Conservative, keyword-anchored; matched against the combined
+    # content + category + tags + source_uri + linked-entity text.
+    _TASK_TAG_RULES = [
+        (re.compile(r"\b(accepted\s+offer|contract\s+of\s+purchase|\bcps\b|skyslope)\b", re.IGNORECASE), "task:accepted-offer"),
+        (re.compile(r"\b(cma|comps?|comparables?|comparative\s+market)\b", re.IGNORECASE), "task:cma"),
+        (re.compile(r"\b(post|posts|reel|reels|caption|captions|carousel|story|stories|instagram|tiktok)\b", re.IGNORECASE), "task:social"),
+        (re.compile(r"\b(filing|disclosure|disclosures|signatures?|initials?)\b", re.IGNORECASE), "task:filing"),
+    ]
+
+    @classmethod
+    def _infer_task_tags(
+        cls,
+        content: str,
+        *,
+        category: str = "",
+        tags: str = "",
+        source_uri: str = "",
+        entities: "list[str] | None" = None,
+    ) -> str:
+        """Infer comma-joined ``task:*`` tags from write-time context.
+
+        Pure rules. NOT derived from active-skill context (which isn't plumbed
+        into the write path). Dedup-stable order. Returns "" when nothing fires.
+        """
+        haystack = " ".join(
+            str(part or "")
+            for part in (content, category, tags, source_uri, " ".join(entities or []))
+        )
+        found: list[str] = []
+        for pattern, tag in cls._TASK_TAG_RULES:
+            if pattern.search(haystack) and tag not in found:
+                found.append(tag)
+        return ",".join(found)
+
+    @staticmethod
+    def _union_task_tags(*tag_strings: str) -> str:
+        """Union comma-joined task-tag strings, dedup-stable."""
+        out: list[str] = []
+        for s in tag_strings:
+            for t in str(s or "").split(","):
+                t = t.strip()
+                if t and t not in out:
+                    out.append(t)
+        return ",".join(out)
+
+    def _set_critical_metadata(
+        self,
+        fact_id: int,
+        *,
+        critical: bool,
+        pinned: bool,
+        task_tags: str,
+        critical_reason: str,
+    ) -> None:
+        """Persist critical/pinned/task_tags/critical_reason DIRECTLY on
+        memory_facts (the columns are plugin-owned and absent from the compat
+        ``facts`` view — never write them through the view). Guarded: a
+        partially-migrated DB may lack the columns and quality paths tolerate
+        that."""
+        try:
+            self._conn.execute(
+                """
+                UPDATE memory_facts
+                SET critical = ?, pinned = ?, task_tags = ?, critical_reason = ?,
+                    last_seen_at = CURRENT_TIMESTAMP
+                WHERE fact_id = ?
+                """,
+                (
+                    bool(critical),
+                    bool(pinned),
+                    str(task_tags or ""),
+                    str(critical_reason or ""),
+                    int(fact_id),
+                ),
+            )
+            self._conn.commit()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+
+    def _get_critical_metadata(self, fact_id: int) -> dict:
+        """Read the current critical-tier columns off memory_facts (guarded)."""
+        try:
+            row = self._conn.execute(
+                """
+                SELECT COALESCE(critical, false) AS critical,
+                       COALESCE(pinned, false) AS pinned,
+                       COALESCE(task_tags, '') AS task_tags,
+                       COALESCE(critical_reason, '') AS critical_reason
+                FROM memory_facts WHERE fact_id = ?
+                """,
+                (int(fact_id),),
+            ).fetchone()
+            if row is None:
+                return {"critical": False, "pinned": False, "task_tags": "", "critical_reason": ""}
+            return dict(row)
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            return {"critical": False, "pinned": False, "task_tags": "", "critical_reason": ""}
+
+    def _merge_critical_metadata(
+        self,
+        fact_id: int,
+        *,
+        incoming_critical: bool,
+        incoming_pinned: bool,
+        incoming_task_tags: str,
+        incoming_reason: str,
+    ) -> None:
+        """CONSTRAINT 1: merging a duplicate must NOT discard incoming critical
+        metadata. Merge into the surviving (older) fact by OR/union/preserve:
+          critical = old OR incoming; pinned = old OR incoming;
+          task_tags = union(old, incoming); critical_reason kept, incoming
+          appended only when new/useful.
+        """
+        if not (incoming_critical or incoming_pinned or incoming_task_tags):
+            return
+        old = self._get_critical_metadata(fact_id)
+        merged_critical = bool(old.get("critical")) or bool(incoming_critical)
+        merged_pinned = bool(old.get("pinned")) or bool(incoming_pinned)
+        merged_tags = self._union_task_tags(old.get("task_tags", ""), incoming_task_tags)
+        old_reason = str(old.get("critical_reason") or "").strip()
+        new_reason = str(incoming_reason or "").strip()
+        if not old_reason:
+            merged_reason = new_reason
+        elif new_reason and new_reason not in [r.strip() for r in old_reason.split(",")]:
+            merged_reason = f"{old_reason},{new_reason}"
+        else:
+            merged_reason = old_reason
+        self._set_critical_metadata(
+            fact_id,
+            critical=merged_critical,
+            pinned=merged_pinned,
+            task_tags=merged_tags,
+            critical_reason=merged_reason,
+        )
 
     def _bump_fact_reinforcement(self, fact_id: int) -> None:
         """Bump reinforced_count/last_seen_at when a write re-asserts a fact."""
@@ -897,13 +1100,28 @@ class MemoryStore:
             return best
         return None
 
-    def _merge_duplicate_fact(self, existing: dict, new_content: str, *, tags: str = "") -> int:
+    def _merge_duplicate_fact(
+        self,
+        existing: dict,
+        new_content: str,
+        *,
+        tags: str = "",
+        incoming_critical: bool = False,
+        incoming_pinned: bool = False,
+        incoming_task_tags: str = "",
+        incoming_reason: str = "",
+    ) -> int:
         """Merge a near-duplicate write into the existing (older) fact.
 
         Keeps the older fact. Updates its content ONLY when the new content
         is strictly more specific (longer AND contains the old content's key
         tokens). Tags are unioned. ``reinforced_count``/``last_seen_at`` are
         bumped, and the merge is logged to memory_events.
+
+        CONSTRAINT 1: the incoming critical metadata is NOT discarded even
+        though the older fact_id wins and the incoming trust is dropped —
+        critical/pinned OR together, task_tags union, critical_reason kept
+        (incoming appended when new). See ``_merge_critical_metadata``.
 
         NOTE: this is fact-level dedup only. Existing memory_relations rows
         are NEVER collapsed or deleted here — multi-source relation rows are
@@ -945,6 +1163,14 @@ class MemoryStore:
             self._conn.commit()
 
         self._bump_fact_reinforcement(fact_id)
+        # CONSTRAINT 1: preserve/raise critical metadata from the incoming write.
+        self._merge_critical_metadata(
+            fact_id,
+            incoming_critical=incoming_critical,
+            incoming_pinned=incoming_pinned,
+            incoming_task_tags=incoming_task_tags,
+            incoming_reason=incoming_reason,
+        )
         self.record_memory_event(
             "memory.fact.merged",
             detail={
@@ -957,6 +1183,143 @@ class MemoryStore:
             },
         )
         return fact_id
+
+    # Bare task words (without the task: prefix) that signal a task domain in
+    # free query/session text. Maps a keyword to the canonical task tag so a
+    # query like "uploading the accepted offer" matches a task:accepted-offer
+    # fact even when the fact carries the tag but the query carries the words.
+    _TASK_WORD_HINTS = {
+        "accepted offer": "task:accepted-offer",
+        "accepted-offer": "task:accepted-offer",
+        "contract of purchase": "task:accepted-offer",
+        "cps": "task:accepted-offer",
+        "skyslope": "task:accepted-offer",
+        "cma": "task:cma",
+        "comps": "task:cma",
+        "comparable": "task:cma",
+        "social": "task:social",
+        "post": "task:social",
+        "reel": "task:social",
+        "caption": "task:social",
+        "carousel": "task:social",
+        "filing": "task:filing",
+        "disclosure": "task:filing",
+        "signature": "task:filing",
+        "initials": "task:filing",
+    }
+
+    def critical_facts_matching(
+        self,
+        query: str = "",
+        session_text: str = "",
+        entities: "list[str] | None" = None,
+        limit: int = 2,
+    ) -> list[dict]:
+        """Reserved Must-Follow Rules lane.
+
+        Selects ACTIVE facts flagged ``critical`` OR ``pinned`` and matches
+        them to the turn by:
+          - task_tags tokens present in the query / session text, OR
+          - entity overlap (names appearing in the fact content/tags), OR
+          - category / task words present in the query / session text.
+
+        Deliberately BYPASSES the min-trust floor, the trust multiplier, and
+        the token-overlap verifier — this is exactly the path a low-trust,
+        low-overlap compliance rule needs to survive. Ordered: pinned DESC,
+        then match strength, then recency (updated_at DESC). Capped at limit.
+        """
+        limit = max(1, int(limit))
+        match_text = " ".join(str(p or "") for p in (query, session_text)).lower()
+        entity_set = {str(e or "").strip().lower() for e in (entities or []) if str(e or "").strip()}
+        query_tokens = self._tokens(match_text)
+
+        # Which task tags are implied by the free text (word hints).
+        implied_tags: set[str] = set()
+        for word, tag in self._TASK_WORD_HINTS.items():
+            if word in match_text:
+                implied_tags.add(tag)
+
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    """
+                    SELECT fact_id, content, category, tags,
+                           trust_score, retrieval_count, helpful_count,
+                           created_at, updated_at, source_type, source_uri,
+                           source_excerpt, observed_at, memory_space, status,
+                           superseded_by,
+                           COALESCE(critical, false) AS critical,
+                           COALESCE(pinned, false) AS pinned,
+                           COALESCE(task_tags, '') AS task_tags,
+                           COALESCE(critical_reason, '') AS critical_reason
+                    FROM memory_facts
+                    WHERE (COALESCE(critical, false) OR COALESCE(pinned, false))
+                      AND COALESCE(status, 'active') = 'active'
+                    ORDER BY updated_at DESC NULLS LAST, fact_id DESC
+                    LIMIT ?
+                    """,
+                    (max(limit * 20, 50),),
+                ).fetchall()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            return []
+
+        scored: list[tuple[float, datetime | str, dict]] = []
+        for row in rows:
+            fact = self._row_to_dict(row)
+            fact_tags = {
+                t.strip().lower()
+                for t in str(fact.get("task_tags") or "").split(",")
+                if t.strip()
+            }
+            content_l = str(fact.get("content") or "").lower()
+            cat_l = str(fact.get("category") or "").lower()
+
+            strength = 0.0
+            # (1) task_tag overlap with implied tags from query/session text.
+            tag_overlap = fact_tags & implied_tags
+            if tag_overlap:
+                strength += 3.0 * len(tag_overlap)
+            # task_tag tokens literally present in the text (e.g. "cma").
+            for tag in fact_tags:
+                bare = tag.split(":", 1)[-1].replace("-", " ")
+                if bare and bare in match_text:
+                    strength += 1.5
+            # (2) entity overlap.
+            if entity_set:
+                for ent in entity_set:
+                    if ent and ent in content_l:
+                        strength += 2.0
+            # (3) category / task words present, or plain token overlap on the
+            # fact content (cheap relevance, NOT a gate).
+            if cat_l and cat_l in match_text:
+                strength += 1.0
+            content_tokens = self._tokens(content_l)
+            strength += 0.25 * len(query_tokens & content_tokens)
+
+            pinned = bool(fact.get("pinned"))
+            critical = bool(fact.get("critical"))
+            # Pinned facts surface even with no textual match (must-always) —
+            # but ONLY when also critical, so a non-critical pin can never
+            # squat the lane on an unrelated task.
+            if strength <= 0 and not (pinned and critical):
+                continue
+            recency = fact.get("updated_at") or fact.get("created_at") or ""
+            scored.append((strength, recency, fact))
+
+        # Order: pinned DESC, then match strength DESC, then recency DESC.
+        scored.sort(
+            key=lambda item: (
+                1 if item[2].get("pinned") else 0,
+                item[0],
+                str(item[1]),
+            ),
+            reverse=True,
+        )
+        return [fact for _, _, fact in scored[:limit]]
 
     def search_facts(
         self,
@@ -1572,18 +1935,23 @@ class MemoryStore:
         rejected = sorted({int(x) for x in (rejected_ids or []) if str(x).isdigit()} - set(verified))
         boosted = decayed = links = 0
         with self._lock:
-            for fact_id in verified:
-                cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.03), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
-                    (fact_id,),
-                )
-                boosted += cur.rowcount or 0
-            for fact_id in rejected:
-                cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.01), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
-                    (fact_id,),
-                )
-                decayed += cur.rowcount or 0
+            # Trust ratchet (gated): the ranking outcome only mutates trust
+            # when trust_from_ranking_enabled is True. Off by default — only
+            # explicit fact_feedback moves trust. Telemetry below (fact_links,
+            # clustering, tags, events) is recorded either way.
+            if self.trust_from_ranking_enabled:
+                for fact_id in verified:
+                    cur = self._conn.execute(
+                        "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.03), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                        (fact_id,),
+                    )
+                    boosted += cur.rowcount or 0
+                for fact_id in rejected:
+                    cur = self._conn.execute(
+                        "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.01), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                        (fact_id,),
+                    )
+                    decayed += cur.rowcount or 0
             for i, src in enumerate(verified):
                 for dst in verified[i + 1:]:
                     self._conn.execute(
@@ -2007,18 +2375,26 @@ class MemoryStore:
         rejected = sorted({int(x) for x in (rejected_ids or []) if str(x).isdigit()} - set(verified))
         boosted = decayed = archived = 0
         with self._lock:
-            for fid in verified:
-                cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.05), helpful_count = helpful_count + 1, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
-                    (fid,),
-                )
-                boosted += cur.rowcount or 0
-            for fid in rejected:
-                cur = self._conn.execute(
-                    "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.02), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
-                    (fid,),
-                )
-                decayed += cur.rowcount or 0
+            # Trust ratchet (gated): ranking-verified facts only gain trust +
+            # helpful_count, and ranking-rejected facts only lose trust, when
+            # trust_from_ranking_enabled is True. Off by default. NOTE: gating
+            # helpful_count here is what stops a never-injected fact from being
+            # frozen out of recall — but it also means a fact's first injection
+            # no longer auto-exempts it from the archive sweep, so critical
+            # facts rely on the reserved lane (critical/pinned) instead.
+            if self.trust_from_ranking_enabled:
+                for fid in verified:
+                    cur = self._conn.execute(
+                        "UPDATE facts SET trust_score = LEAST(1.0, trust_score + 0.05), helpful_count = helpful_count + 1, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                        (fid,),
+                    )
+                    boosted += cur.rowcount or 0
+                for fid in rejected:
+                    cur = self._conn.execute(
+                        "UPDATE facts SET trust_score = GREATEST(0.0, trust_score - 0.02), updated_at = CURRENT_TIMESTAMP WHERE fact_id = ? AND COALESCE(status, 'active') = 'active'",
+                        (fid,),
+                    )
+                    decayed += cur.rowcount or 0
             if prune:
                 cur = self._conn.execute(
                     """
@@ -3775,6 +4151,171 @@ class MemoryStore:
             "scanned": scanned,
             "archived": len(ids),
             "candidates": candidates,
+        }
+
+    # Markers that flag a fact as explicitly outdated — never auto-unarchived.
+    _OUTDATED_RE = re.compile(
+        r"\b(outdated|deprecated|obsolete|no\s+longer\s+(?:valid|true|used)|superseded)\b",
+        re.IGNORECASE,
+    )
+
+    def backfill_critical(
+        self,
+        *,
+        dry_run: bool = True,
+        limit: int | None = None,
+    ) -> dict:
+        """Backfill critical/pinned/task_tags/critical_reason on existing facts.
+
+        DRY-RUN BY DEFAULT. The dry-run report lists, per affected fact:
+        ``fact_id``, current ``status``, and the proposed ``critical`` /
+        ``pinned`` / ``task_tags`` / ``critical_reason``. Pass ``dry_run=False``
+        to apply.
+
+        Scope: scans active AND archived facts (so an archived rule can be
+        rescued), classifies each with the durability classifier + task-tag
+        inference, and records a fact as "affected" only when the proposal
+        DIFFERS from what's stored (idempotent — a second run reports nothing
+        to change).
+
+        UNARCHIVE RULE: a fact is un-archived ONLY when it classifies critical
+        AND its status is not ``superseded`` AND it is not explicitly outdated.
+        Superseded / explicitly-outdated facts are NEVER auto-unarchived (they
+        may still gain critical metadata in place, but stay archived/superseded).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT fact_id, content, category, tags, source_type, source_uri,
+                       COALESCE(status, 'active') AS status,
+                       COALESCE(critical, false) AS critical,
+                       COALESCE(pinned, false) AS pinned,
+                       COALESCE(task_tags, '') AS task_tags,
+                       COALESCE(critical_reason, '') AS critical_reason
+                FROM memory_facts
+                WHERE COALESCE(status, 'active') IN ('active', 'archived')
+                ORDER BY fact_id ASC
+                """
+            ).fetchall()
+
+        affected: list[dict] = []
+        scanned = 0
+        for row in rows:
+            fact = self._row_to_dict(row)
+            scanned += 1
+            content = str(fact.get("content") or "")
+            status = str(fact.get("status") or "active")
+            cls = fact_quality.classify_fact_durability(content)
+            try:
+                entities = self._extract_entities(content)
+            except Exception:
+                entities = []
+            proposed_tags = self._infer_task_tags(
+                content,
+                category=str(fact.get("category") or ""),
+                tags=str(fact.get("tags") or ""),
+                source_uri=str(fact.get("source_uri") or ""),
+                entities=entities,
+            )
+            # Proposed critical/pinned MERGE with existing (never downgrade an
+            # already-flagged fact) — keeps the op idempotent + non-destructive.
+            cur_critical = bool(fact.get("critical"))
+            cur_pinned = bool(fact.get("pinned"))
+            proposed_critical = cur_critical or bool(cls.get("critical"))
+            # Backfill NEVER derives pinned from an explicit/manual save —
+            # pinned is a deliberate must-always signal only. Preserve existing.
+            proposed_pinned = cur_pinned
+            cur_reason = str(fact.get("critical_reason") or "").strip()
+            cls_reason = str(cls.get("critical_reason") or "").strip()
+            if not cur_reason:
+                proposed_reason = cls_reason
+            elif cls_reason and cls_reason not in [r.strip() for r in cur_reason.split(",")]:
+                proposed_reason = f"{cur_reason},{cls_reason}"
+            else:
+                proposed_reason = cur_reason
+            merged_tags = self._union_task_tags(str(fact.get("task_tags") or ""), proposed_tags)
+
+            # Unarchive decision (conservative).
+            outdated = bool(self._OUTDATED_RE.search(content))
+            will_unarchive = (
+                status == "archived"
+                and proposed_critical
+                and status != "superseded"
+                and not outdated
+            )
+
+            changed = (
+                proposed_critical != cur_critical
+                or proposed_pinned != cur_pinned
+                or merged_tags != str(fact.get("task_tags") or "")
+                or proposed_reason != cur_reason
+                or will_unarchive
+            )
+            if not changed:
+                continue
+            affected.append(
+                {
+                    "fact_id": int(fact["fact_id"]),
+                    "status": status,
+                    "critical": proposed_critical,
+                    "pinned": proposed_pinned,
+                    "task_tags": merged_tags,
+                    "critical_reason": proposed_reason,
+                    "unarchive": will_unarchive,
+                    "content": self._clip_text(content, 200),
+                }
+            )
+            if limit is not None and len(affected) >= int(limit):
+                break
+
+        if dry_run or not affected:
+            return {
+                "ran": True,
+                "dry_run": dry_run,
+                "scanned": scanned,
+                "applied": 0,
+                "unarchived": 0,
+                "affected": affected,
+            }
+
+        applied = 0
+        unarchived = 0
+        with self._lock:
+            for item in affected:
+                fid = int(item["fact_id"])
+                self._set_critical_metadata(
+                    fid,
+                    critical=bool(item["critical"]),
+                    pinned=bool(item["pinned"]),
+                    task_tags=str(item["task_tags"]),
+                    critical_reason=str(item["critical_reason"]),
+                )
+                applied += 1
+                if item.get("unarchive"):
+                    try:
+                        self._conn.execute(
+                            "UPDATE memory_facts SET status = 'active', updated_at = CURRENT_TIMESTAMP "
+                            "WHERE fact_id = ? AND COALESCE(status,'active') = 'archived'",
+                            (fid,),
+                        )
+                        self._conn.commit()
+                        unarchived += 1
+                    except Exception:
+                        try:
+                            self._conn.rollback()
+                        except Exception:
+                            pass
+        self.record_memory_event(
+            "memory.fact.backfill_critical",
+            detail={"applied": applied, "unarchived": unarchived, "scanned": scanned},
+        )
+        return {
+            "ran": True,
+            "dry_run": False,
+            "scanned": scanned,
+            "applied": applied,
+            "unarchived": unarchived,
+            "affected": affected,
         }
 
     def memory_hygiene_report(self, limit: int = 20) -> dict:

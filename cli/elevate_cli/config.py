@@ -1071,6 +1071,14 @@ DEFAULT_CONFIG = {
             "recent_turn_max_chars": 240,
             "default_trust": 0.5,
             "min_trust_threshold": 0.3,
+            # Trust ratchet: when False (default), the post-retrieval ranking
+            # outcome no longer mutates trust_score / helpful_count (only
+            # explicit fact_feedback does). Telemetry still records normally.
+            # True = byte-identical to legacy behavior.
+            "trust_from_ranking_enabled": False,
+            # Reserved "Must-Follow Rules" recall lane (critical/pinned facts).
+            "critical_tier_enabled": True,
+            "critical_recall_limit": 2,
             "temporal_decay_half_life": 0,
             "hrr_dim": 1024,
             "embedding_enabled": False,

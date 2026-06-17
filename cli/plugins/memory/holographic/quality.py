@@ -94,6 +94,17 @@ _CORRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Compliance / legal / filing language — narrow, high-stakes. These are the
+# rules a model must never silently forget (signatures, disclosures, accepted
+# offers, the contract of purchase and sale). Deliberately conservative: only
+# clear compliance terms fire it, never generic workflow words.
+_COMPLIANCE_RE = re.compile(
+    r"\b(signatures?|initials?|disclosures?|compliance|"
+    r"accepted\s+offer|cps|contract\s+of\s+purchase|filing|"
+    r"seller-?\s?side|buyer-?\s?side)\b",
+    re.IGNORECASE,
+)
+
 # Verified values: filesystem paths, URLs, emails, money, versions, ports,
 # long hex ids, key:value config fragments.
 _VALUE_RES = [
@@ -146,6 +157,12 @@ def classify_fact_durability(content: str) -> dict:
 
     Conservative bias: with no signals either way the result is ``durable``
     at low confidence — the gate only refuses clearly task-shaped chatter.
+
+    Additionally returns ``critical`` (bool) + ``critical_reason`` (str). A
+    fact is marked critical ONLY for clear-cut cases — a correction, an
+    explicit convention/rule, or compliance/legal/filing language — never for
+    generic workflow content. ``critical_reason`` names the firing signal
+    (``correction`` | ``convention`` | ``compliance``).
     """
     text = " ".join(str(content or "").strip().split())
     signals: list[str] = []
@@ -174,15 +191,21 @@ def classify_fact_durability(content: str) -> dict:
         ephemeral_score += 2.0
         signals.append("placeholder")
 
-    if _CONVENTION_RE.search(text):
+    is_convention = bool(_CONVENTION_RE.search(text))
+    is_correction = bool(_CORRECTION_RE.search(text))
+    is_compliance = bool(_COMPLIANCE_RE.search(text))
+    if is_convention:
         durable_score += 2.0
         signals.append("convention")
     if _PREFERENCE_RE.search(text):
         durable_score += 2.0
         signals.append("preference")
-    if _CORRECTION_RE.search(text):
+    if is_correction:
         durable_score += 2.0
         signals.append("correction")
+    if is_compliance:
+        durable_score += 1.5
+        signals.append("compliance")
     if _SCOPE_RE.search(text):
         durable_score += 1.0
         signals.append("scoped")
@@ -216,11 +239,27 @@ def classify_fact_durability(content: str) -> dict:
 
     confidence = round(winner / total, 3) if total > 0 else 0.5
 
+    # Critical tier — clear-cut only. Correction > compliance > convention
+    # for the reason label (a correction is the strongest "you got this
+    # wrong, remember it" signal). Never critical when the fact reads as
+    # task chatter (ephemeral) — that's exactly the noise the tier excludes.
+    critical = False
+    critical_reason = ""
+    if durability == "durable":
+        if is_correction:
+            critical, critical_reason = True, "correction"
+        elif is_compliance:
+            critical, critical_reason = True, "compliance"
+        elif is_convention:
+            critical, critical_reason = True, "convention"
+
     return {
         "durability": durability,
         "confidence": confidence,
         "task_framed": task_framed,
         "signals": signals,
+        "critical": critical,
+        "critical_reason": critical_reason,
     }
 
 
