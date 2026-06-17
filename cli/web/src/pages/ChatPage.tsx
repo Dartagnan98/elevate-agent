@@ -1270,6 +1270,8 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 }
 
 export const __chatPageTestables = {
+  buildBreakdownSteps,
+  defaultActivityDigestOpen,
   describeToolGroup,
   normalizeStoredTranscript,
   shouldKeepTranscriptMessage,
@@ -10440,13 +10442,13 @@ function buildBreakdownSteps(
       continue;
     }
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
-    const text = compactLine(trace.text);
+    const text = trace.text.trim();
     if (!text) continue;
     // Drop transient single-word pills ("brainstorming", "Working...", etc.) —
     // they belong on the rotating header pill, not as permanent rows. Uses the
     // non-mangling check so real reasoning prose (which mentions "thinking"/
     // "reasoning") is kept intact.
-    if (isTransientStatus(text)) continue;
+    if (isTransientStatus(trace.text)) continue;
     raw.push({ type: "trace", id: trace.id, at: trace.createdAt || 0, text });
   }
 
@@ -10850,12 +10852,23 @@ function useRotatingVerb(busy: boolean): string {
   return verb;
 }
 
+function defaultActivityDigestOpen({
+  busy,
+  hasErroredStep,
+  hasSteps,
+}: {
+  busy: boolean;
+  hasErroredStep: boolean;
+  hasSteps: boolean;
+}): boolean {
+  return hasErroredStep || hasSteps || busy;
+}
+
 // Working/worked digest. While a turn streams, the header is the live
 // meter: pulsing accent mark + a cycling thinking verb + elapsed + running
 // token count, and the breakdown is expanded by default so reasoning (grey)
 // and tool calls scroll in chronologically as they happen. Once the turn
-// completes the same header collapses into "Worked for ..." with the real
-// token count, and the breakdown defaults to collapsed.
+// completes, the same full breakdown stays open unless the user closes it.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -10946,7 +10959,11 @@ function ChatActivityDigest({
       ? step.status === "error"
       : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
   );
-  const expanded = open ?? hasErroredStep;
+  const expanded = open ?? defaultActivityDigestOpen({
+    busy,
+    hasErroredStep,
+    hasSteps: steps.length > 0,
+  });
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -11103,7 +11120,7 @@ function ChatActivityDigest({
           ))}
         </div>
       )}
-      {busy && steps.length === 0 && (
+      {expanded && busy && steps.length === 0 && (
         <div className="processing-body mt-1.5">
           {/* Nothing has streamed yet (big prompt, model still ingesting) —
               show a live thinking row immediately so the wait reads as
