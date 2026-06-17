@@ -1,4 +1,4 @@
--- 0032_memory_critical_fields.sql
+-- 0033_memory_critical_fields.sql
 --
 -- Critical / pinned recall-tier fields on memory_facts.
 --
