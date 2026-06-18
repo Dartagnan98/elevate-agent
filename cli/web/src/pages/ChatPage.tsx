@@ -2570,6 +2570,8 @@ function routePromptForAgent(text: string): string {
   return [HUB_INTERFACE_CONTEXT, `User request: ${text}`].join("\n\n");
 }
 
+const PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS = 20_000;
+
 function nowLabel(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "numeric",
@@ -6703,7 +6705,7 @@ export default function ChatPage() {
           payload.user_message_id = effectiveUserMessageId;
         }
 
-        await gw.request("prompt.submit", payload);
+        await gw.request("prompt.submit", payload, PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS);
         setAttachments([]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

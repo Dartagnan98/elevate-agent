@@ -226,9 +226,14 @@ export class GatewayClient {
     params: Record<string, unknown> = {},
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    if (!this.ws || this._state !== "open") {
+    if (!this.ws || this._state !== "open" || this.ws.readyState !== WebSocket.OPEN) {
+      if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+        this.setState("closed");
+      }
       return Promise.reject(
-        new Error(`gateway not connected (state=${this._state})`),
+        new Error(
+          `gateway not connected (state=${this._state}, readyState=${this.ws?.readyState ?? "none"})`,
+        ),
       );
     }
 
