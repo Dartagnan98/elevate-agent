@@ -313,6 +313,8 @@ Detailed plans currently created:
 - `cli/docs/plans/compaction-issue-04-context-ui-clarity.md`
 - `cli/docs/plans/compaction-issue-05-installed-runtime-smoke.md`
 - `cli/docs/plans/compaction-issue-06-legacy-transcript-recovery.md`
+- `cli/docs/plans/compaction-issue-07-timeline-reasoning-soak.md`
+- `cli/docs/plans/compaction-issue-08-release-checklist.md`
 
 Execution tracker:
 
@@ -325,7 +327,7 @@ Execution tracker:
 | 5. Installed-runtime smoke | implemented and extended with close/resume check plus disposable Telegram fixture; provider-call rerun currently auth-gated by expired local license | yes | rerun provider-call/close-resume after license refresh |
 | 6. Legacy transcript recovery | implemented in source and installed parity smoke; raw-history inventory complete | yes | provider-call installed soak after license refresh |
 | 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed and resume smoke added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
-| 8. Release checklist | stub only | no | release candidate exists |
+| 8. Release checklist | checklist created; blocked until installed provider-call smoke passes with refreshed license | yes | license refreshed and real desktop/Telegram soak pass |
 
 Next action rule:
 
