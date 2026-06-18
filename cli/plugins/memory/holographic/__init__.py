@@ -305,6 +305,11 @@ class HolographicMemoryProvider(MemoryProvider):
             2,
             minimum=1,
         )
+        self._recorder_context_budget_chars = _parse_int(
+            self._config.get("recorder_context_budget_chars"),
+            12000,
+            minimum=1,
+        )
         self._graph_recall_limit = _parse_int(
             self._config.get("graph_recall_limit"),
             2,
@@ -320,6 +325,7 @@ class HolographicMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.RLock()
         self._last_layered_facts: list[dict] = []
         self._last_layered_chunks: list[dict] = []
+        self._recorder_layer_health_sessions: set[str] = set()
         self._session_topic_tokens: dict[str, set[str]] = {}
         self._session_turn_counts: dict[str, int] = {}
         self._topic_extraction_enabled = parse_bool(
@@ -1849,6 +1855,36 @@ class HolographicMemoryProvider(MemoryProvider):
 
     # -- Layered recall ------------------------------------------------------
 
+    def _record_layer_health(
+        self,
+        session_id: str,
+        *,
+        critical_item_count: int,
+        context_chars: int,
+    ) -> None:
+        sid = session_id or self._session_id
+        if not sid or sid in self._recorder_layer_health_sessions:
+            return
+        self._recorder_layer_health_sessions.add(sid)
+        try:
+            from elevate_cli.diagnostics.session_recorder import record_session_event
+
+            record_session_event(
+                "memory.layer_health",
+                session_id=sid,
+                payload={
+                    "provider": "holographic",
+                    "status": "active",
+                    "critical_item_count": max(0, int(critical_item_count)),
+                    "context_tokens": (max(0, int(context_chars)) + 3) // 4,
+                    "context_limit": (self._recorder_context_budget_chars + 3) // 4,
+                },
+                source="memory",
+                component="memory.holographic",
+            )
+        except Exception:
+            pass
+
     def _build_layered_context(self, query: str, *, session_id: str = "") -> str:
         if not self._store or not self._retriever:
             return ""
@@ -1856,6 +1892,8 @@ class HolographicMemoryProvider(MemoryProvider):
         self._last_layered_chunks = []
 
         sections: list[str] = []
+        critical_chars = 0
+        critical_facts: list[dict] = []
         # fact_ids surfaced by the reserved critical lane — deduped out of the
         # Durable + Semantic lane so a rule is never double-injected.
         critical_ids: set[int] = set()
@@ -1887,6 +1925,8 @@ class HolographicMemoryProvider(MemoryProvider):
             except Exception as exc:
                 logger.debug("critical_facts_matching failed: %s", exc)
                 critical_facts = []
+            if not isinstance(critical_facts, list):
+                critical_facts = list(critical_facts or [])
             if critical_facts:
                 # CONSTRAINT 2: include critical fact_ids in _last_layered_facts
                 # so _record_context_injection logs them in memory_injections.
@@ -1901,7 +1941,9 @@ class HolographicMemoryProvider(MemoryProvider):
                     lines.append(
                         f"- [must-follow{tag}] {self._clip(fact.get('content', ''), 320)}"
                     )
-                sections.append("### Must-Follow Rules\n" + "\n".join(lines))
+                critical_section = "### Must-Follow Rules\n" + "\n".join(lines)
+                critical_chars = len(critical_section)
+                sections.append(critical_section)
 
         if recent:
             lines = []
@@ -1983,8 +2025,34 @@ class HolographicMemoryProvider(MemoryProvider):
                 sections.append("### Graph Wiki\n" + "\n".join(graph_lines))
 
         if not sections:
+            self._record_layer_health(
+                session_id,
+                critical_item_count=len(critical_facts),
+                context_chars=0,
+            )
             return ""
-        return "## Elevate Memory Core\n" + "\n\n".join(sections)
+        context = "## Elevate Memory Core\n" + "\n\n".join(sections)
+        self._record_layer_health(
+            session_id,
+            critical_item_count=len(critical_facts),
+            context_chars=len(context),
+        )
+        if self._critical_tier_enabled:
+            try:
+                from elevate_cli.diagnostics.session_recorder import (
+                    record_memory_critical_sample,
+                )
+
+                record_memory_critical_sample(
+                    session_id or self._session_id,
+                    critical_chars=critical_chars,
+                    critical_item_count=len(critical_facts),
+                    context_budget_chars=self._recorder_context_budget_chars,
+                    provider="holographic",
+                )
+            except Exception:
+                pass
+        return context
 
     # -- Turn-journal organization / auto-extraction -------------------------
 

@@ -47,6 +47,74 @@ from agent.model_metadata import (
 logger = logging.getLogger(__name__)
 
 
+try:
+    from agent.context_compressor import _LOW_YIELD_REMOVED_MESSAGES
+except Exception:  # pragma: no cover - defensive import fallback
+    _LOW_YIELD_REMOVED_MESSAGES = 1
+
+
+def _compaction_reason(force: bool) -> str:
+    return "critical_compact" if force else "full_compact"
+
+
+def _context_limit(agent: Any) -> int:
+    try:
+        return int(getattr(agent.context_compressor, "context_length", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _low_yield_count(agent: Any) -> int:
+    try:
+        return max(
+            0,
+            int(
+                getattr(
+                    agent.context_compressor,
+                    "_consecutive_low_yield_compactions",
+                    0,
+                )
+                or 0
+            ),
+        )
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_compaction_event(
+    agent: Any,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    severity: str = "info",
+) -> None:
+    session_id = str(getattr(agent, "session_id", "") or "")
+    if not session_id:
+        return
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=session_id,
+            payload=payload,
+            severity=severity,
+            source="agent",
+            component="agent.conversation_compression",
+        )
+    except Exception:
+        logger.debug("compaction recorder write failed", exc_info=True)
+
+
+def _estimated_saved_tokens(messages: list, start: int, end: int, summary_text: str) -> int:
+    try:
+        raw_tokens = estimate_messages_tokens_rough(messages[max(0, start) : max(0, end)])
+    except Exception:
+        raw_tokens = 0
+    summary_tokens = (len(summary_text or "") + 3) // 4
+    return max(0, raw_tokens - summary_tokens)
+
+
 def _content_text(content: Any) -> str:
     if content is None:
         return ""
@@ -488,10 +556,23 @@ def compress_context(
 
     _pre_msg_count = len(messages)
     _cursor_before = int(getattr(agent, "compaction_cursor", 0) or 0)
+    _reason = _compaction_reason(force)
+    _start_payload = {
+        "stage": "compaction",
+        "reason": _reason,
+        "status": "started",
+        "outcome": "started",
+        "message_count": _pre_msg_count,
+        "context_limit": _context_limit(agent),
+        "low_yield_count": _low_yield_count(agent),
+    }
+    if approx_tokens is not None:
+        _start_payload["context_tokens"] = int(approx_tokens)
+    _record_compaction_event(agent, "compact.health_sample", _start_payload)
     logger.info(
         "compaction.started reason=%s session=%s "
         "messages=%d tokens=~%s cursor_before=%d",
-        "critical_compact" if force else "full_compact",
+        _reason,
         agent.session_id or "none",
         _pre_msg_count,
         f"{approx_tokens:,}" if approx_tokens else "unknown",
@@ -587,10 +668,29 @@ def compress_context(
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        _error_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "aborted",
+            "outcome": "aborted",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "compaction_removed_messages": 0,
+            "low_yield_count": _low_yield_count(agent),
+            "error_class": "compression_aborted",
+        }
+        if approx_tokens is not None:
+            _error_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(
+            agent,
+            "compact.error",
+            _error_payload,
+            severity="error",
+        )
         logger.warning(
             "compaction.failed reason=%s source=compress_context session=%s "
             "raw_messages=%d tokens_before=%s cursor_before=%d aborted=true error=%s",
-            "critical_compact" if force else "full_compact",
+            _reason,
             agent.session_id or "none",
             _pre_msg_count,
             approx_tokens if approx_tokens is not None else "unknown",
@@ -611,6 +711,25 @@ def compress_context(
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
     if summary_error:
+        _summary_error_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "summary_failed",
+            "outcome": "recovered",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "low_yield_count": _low_yield_count(agent),
+            "error_class": "summary_failed",
+            "recovered": True,
+        }
+        if approx_tokens is not None:
+            _summary_error_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(
+            agent,
+            "compact.error",
+            _summary_error_payload,
+            severity="warning",
+        )
         if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
             agent._last_compression_summary_warning = summary_error
             agent._emit_warning(
@@ -641,10 +760,31 @@ def compress_context(
     # backs off. Leave cursor/summary AND the usage projector untouched — the
     # payload did not shrink — and return the transcript unchanged.
     if summary_text is None:
+        _noop_payload = {
+            "stage": "compaction",
+            "reason": _reason,
+            "status": "noop",
+            "outcome": "noop",
+            "message_count": _pre_msg_count,
+            "context_limit": _context_limit(agent),
+            "compaction_removed_messages": 0,
+            "compaction_saved_tokens": 0,
+            "low_yield_count": _low_yield_count(agent),
+            "noop": True,
+        }
+        if approx_tokens is not None:
+            _noop_payload["context_tokens"] = int(approx_tokens)
+        _record_compaction_event(agent, "compact.health_sample", _noop_payload)
+        _record_compaction_event(
+            agent,
+            "compact.low_yield",
+            _noop_payload,
+            severity="warning",
+        )
         logger.info(
             "compaction.skipped reason=%s source=compress_context session=%s "
             "raw_messages=%d tokens_before=%s cursor_before=%d note=no_cursor_advance",
-            "critical_compact" if force else "full_compact",
+            _reason,
             agent.session_id or "none",
             _pre_msg_count,
             approx_tokens if approx_tokens is not None else "unknown",
@@ -672,6 +812,25 @@ def compress_context(
                 agent.session_id, summary_text, compacted_idx
             )
         except Exception as _meta_err:
+            _meta_payload = {
+                "stage": "compaction",
+                "reason": _reason,
+                "status": "metadata_write_failed",
+                "outcome": "metadata_write_failed",
+                "message_count": _pre_msg_count,
+                "context_limit": _context_limit(agent),
+                "compaction_removed_messages": max(0, compacted_idx - _prev_cursor),
+                "low_yield_count": _low_yield_count(agent),
+                "error_class": type(_meta_err).__name__,
+            }
+            if approx_tokens is not None:
+                _meta_payload["context_tokens"] = int(approx_tokens)
+            _record_compaction_event(
+                agent,
+                "compact.error",
+                _meta_payload,
+                severity="error",
+            )
             logger.warning(
                 "Compaction metadata write failed for %s: %s",
                 agent.session_id, _meta_err,
@@ -728,8 +887,10 @@ def compress_context(
             or str(getattr(agent, "_agent_id", "") or "")
             or os.environ.get("ELEVATE_AGENT_ID", "")
         ).strip()
-        _context_limit = int(getattr(agent.context_compressor, "context_length", 0) or 0)
-        if _pressure_agent_id and _context_limit:
+        _pressure_context_limit = int(
+            getattr(agent.context_compressor, "context_length", 0) or 0
+        )
+        if _pressure_agent_id and _pressure_context_limit:
             from elevate_cli.agent_policy import record_agent_context_pressure
             from elevate_cli.data import connect
 
@@ -738,7 +899,7 @@ def compress_context(
                     _pressure_agent_id,
                     session_id=str(getattr(agent, "session_id", "") or ""),
                     current_tokens=int(approx_tokens or 0),
-                    context_limit=_context_limit,
+                    context_limit=_pressure_context_limit,
                     summary=str(summary_text or "")[:4000],
                     conn=_conn,
                     actor=_pressure_agent_id,
@@ -755,11 +916,40 @@ def compress_context(
     except Exception:
         pass
 
+    _removed_messages = max(0, compacted_idx - _prev_cursor)
+    _complete_payload = {
+        "stage": "compaction",
+        "reason": _reason,
+        "status": "complete",
+        "outcome": "complete",
+        "message_count": _pre_msg_count,
+        "context_limit": _context_limit(agent),
+        "compaction_removed_messages": _removed_messages,
+        "compaction_saved_tokens": _estimated_saved_tokens(
+            messages,
+            _prev_cursor,
+            compacted_idx,
+            summary_text or "",
+        ),
+        "low_yield_count": _low_yield_count(agent),
+        "success": True,
+    }
+    if approx_tokens is not None:
+        _complete_payload["context_tokens"] = int(approx_tokens)
+    _record_compaction_event(agent, "compact.health_sample", _complete_payload)
+    if _removed_messages <= _LOW_YIELD_REMOVED_MESSAGES:
+        _record_compaction_event(
+            agent,
+            "compact.low_yield",
+            _complete_payload,
+            severity="warning",
+        )
+
     logger.info(
         "compaction.completed reason=%s source=compress_context session=%s "
         "raw_messages=%d tokens_before=%s cursor_before=%d cursor_after=%d "
         "summary_chars=%d aborted=false sentinel=-1",
-        "critical_compact" if force else "full_compact",
+        _reason,
         agent.session_id or "none",
         _pre_msg_count,
         approx_tokens if approx_tokens is not None else "unknown",

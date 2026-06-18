@@ -15,6 +15,7 @@ redesign invariants:
   - the abort contract (summary fails) freezes: no cursor, no metadata write
 """
 
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -252,3 +253,81 @@ def test_cursor_summary_window_capped_before_llm_call():
     assert cursor < 100
     assert seen
     assert seen[0][1] <= compressor._summary_input_token_budget()
+
+
+def _capture_recorder_events(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    return calls
+
+
+def test_successful_compaction_records_health_sample(tmp_path, monkeypatch):
+    recorder_events = _capture_recorder_events(monkeypatch)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    compressor = _make_compressor()
+    agent = _make_agent(db, compressor)
+    messages = _transcript(30)
+
+    with patch(
+        "agent.context_compressor.call_llm", return_value=_summary_response()
+    ):
+        compress_context(agent, messages, "SYSTEM", approx_tokens=12345)
+
+    complete = [
+        call for call in recorder_events
+        if call[0] == "compact.health_sample"
+        and call[1]["payload"].get("status") == "complete"
+    ]
+    assert len(complete) == 1
+    payload = complete[0][1]["payload"]
+    assert payload["outcome"] == "complete"
+    assert payload["context_tokens"] == 12345
+    assert payload["compaction_removed_messages"] == agent.compaction_cursor
+    assert payload["compaction_saved_tokens"] >= 0
+    assert "summary" not in payload
+
+
+def test_noop_compaction_records_low_yield(tmp_path, monkeypatch):
+    recorder_events = _capture_recorder_events(monkeypatch)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    compressor = _make_compressor()
+    agent = _make_agent(db, compressor)
+    messages = _transcript(30)
+
+    with patch.object(compressor, "summarize_to_cursor", return_value=(None, 0)):
+        compress_context(agent, messages, "SYSTEM", approx_tokens=1000)
+
+    low_yield = [call for call in recorder_events if call[0] == "compact.low_yield"]
+    assert len(low_yield) == 1
+    payload = low_yield[0][1]["payload"]
+    assert payload["outcome"] == "noop"
+    assert payload["compaction_removed_messages"] == 0
+    assert payload["noop"] is True
+
+
+def test_summary_failure_records_compact_error(tmp_path, monkeypatch):
+    recorder_events = _capture_recorder_events(monkeypatch)
+    db = SessionDB(db_path=tmp_path / "state.db")
+    compressor = _make_compressor()
+    agent = _make_agent(db, compressor)
+    messages = _transcript(30)
+
+    with patch(
+        "agent.context_compressor.call_llm",
+        side_effect=RuntimeError("no provider"),
+    ):
+        compress_context(agent, messages, "SYSTEM", approx_tokens=54321)
+
+    errors = [call for call in recorder_events if call[0] == "compact.error"]
+    assert errors
+    payload = errors[0][1]["payload"]
+    assert payload["status"] == "aborted"
+    assert payload["outcome"] == "aborted"
+    assert payload["error_class"] == "compression_aborted"
+    assert "no provider" not in json.dumps(payload)
