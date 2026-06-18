@@ -29,6 +29,13 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
 - The smoke harness now also closes the live sidecar session after a completed
   turn, resumes the persisted session id, and asserts the final assistant text
   reloads from transcript.
+- The smoke harness now supports `--telegram-fixture`, which imports installed
+  gateway code under a disposable `ELEVATE_HOME` and verifies Telegram-shaped
+  raw history trims to cursor summary plus tail while the failed-recovery retry
+  guard reloads after a simulated restart.
+- Latest Telegram fixture smoke:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750968.json`.
 - Current provider-call smoke is auth-gated until the installed app license is
   refreshed; latest auth-gated result:
   `/tmp/elevate-installed-smoke-1781749410.json`.
@@ -159,15 +166,13 @@ Assertions:
 
 - cursor session estimates `summary + tail` and does not run pre-agent hygiene
   just because raw history is large
-- legacy no-cursor session runs recovery once
-- recovery persists cursor/summary before the normal agent turn
-- raw transcript remains append-only
-- next resumed turn does not compact again when effective payload is under
-  threshold
+- persisted no-op retry guard reloads after a simulated restart
+- same raw message count skips the same failed legacy recovery retry
+- growth past the retry margin allows a fresh recovery attempt
 
-If stubbing the provider inside the installed runtime is too invasive, keep
-Tier 4 as a source integration test and document it as the boundary. Do not
-fake a provider inside the user's real app data.
+Full provider-backed recovery remains source-test coverage until the installed
+app license is refreshed. Do not fake a provider inside the user's real app
+data.
 
 ## Minimal implementation plan
 

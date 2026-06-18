@@ -19,7 +19,9 @@ import argparse
 import asyncio
 import filecmp
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -27,6 +29,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 try:
@@ -62,6 +65,7 @@ class SmokeResult:
     license_authenticated: bool | None = None
     license_expired: bool | None = None
     license_status_text: str | None = None
+    telegram_fixture: dict[str, Any] | None = None
     log_hits: list[str] = field(default_factory=list)
     output_path: str | None = None
 
@@ -167,6 +171,124 @@ def read_license_state() -> tuple[bool | None, bool | None, str | None]:
     if expired:
         return True, True, "Subscribed, but local access token is expired."
     return True, False, f"Subscribed, token has {remaining // 60}m left."
+
+
+def run_installed_telegram_fixture(
+    *,
+    installed_cli: Path,
+    timeout: float,
+    result: SmokeResult,
+) -> None:
+    """Exercise installed gateway hygiene helpers with Telegram-shaped data."""
+
+    code = r"""
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+from gateway.run import (
+    _HYGIENE_NOOP_RETRY_MARGIN,
+    _hygiene_effective_messages_for_pressure,
+    _hygiene_load_persisted_guard,
+    _hygiene_persist_guard,
+    _hygiene_record,
+    _hygiene_should_skip,
+)
+
+history = [
+    {
+        "role": "user" if i % 2 == 0 else "assistant",
+        "content": f"telegram fixture message {i}",
+    }
+    for i in range(450)
+]
+
+effective = _hygiene_effective_messages_for_pressure(
+    history,
+    compaction_cursor=440,
+    compaction_summary="earlier Telegram context",
+)
+assert len(effective) == 11, len(effective)
+assert "earlier Telegram context" in effective[0]["content"]
+assert effective[1]["content"] == "telegram fixture message 440"
+
+guard = {}
+session_id = "telegram-fixture-session"
+_hygiene_record(guard, session_id, msg_count=len(history), ineffective=True)
+
+class FakeDB:
+    def __init__(self):
+        self.values = {}
+
+    def get_meta(self, key):
+        return self.values.get(key)
+
+    def set_meta(self, key, value):
+        self.values[key] = value
+
+db = FakeDB()
+_hygiene_persist_guard(db, guard)
+reloaded = _hygiene_load_persisted_guard(db)
+
+same_count_skips = _hygiene_should_skip(
+    reloaded,
+    session_id,
+    msg_count=len(history),
+    margin=_HYGIENE_NOOP_RETRY_MARGIN,
+    reason="message_count",
+    approx_tokens=100_000,
+    warn_tokens=190_000,
+)
+grown_retries = not _hygiene_should_skip(
+    reloaded,
+    session_id,
+    msg_count=len(history) + _HYGIENE_NOOP_RETRY_MARGIN + 1,
+    margin=_HYGIENE_NOOP_RETRY_MARGIN,
+    reason="message_count",
+    approx_tokens=100_000,
+    warn_tokens=190_000,
+)
+
+assert same_count_skips is True
+assert grown_retries is True
+
+print(json.dumps({
+    "raw_messages": len(history),
+    "effective_messages": len(effective),
+    "same_count_skips": same_count_skips,
+    "grown_retries": grown_retries,
+    "guard_reloaded": session_id in _hygiene_load_persisted_guard(db),
+}, sort_keys=True))
+"""
+    with TemporaryDirectory(prefix="elevate-telegram-fixture-") as tmp:
+        env = os.environ.copy()
+        env["ELEVATE_HOME"] = tmp
+        env["PYTHONPATH"] = (
+            str(installed_cli)
+            + os.pathsep
+            + env.get("PYTHONPATH", "")
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(installed_cli)],
+            cwd=tmp,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"telegram fixture failed: {stderr}")
+
+    line = completed.stdout.strip().splitlines()[-1]
+    payload = json.loads(line)
+    result.telegram_fixture = payload
+    result.pass_check(
+        "telegram fixture: cursor raw history trims to summary+tail and retry guard reloads"
+    )
 
 
 async def run_sidecar_smoke(
@@ -364,6 +486,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--skip-sidecar", action="store_true")
     parser.add_argument(
+        "--telegram-fixture",
+        action="store_true",
+        help=(
+            "Run a disposable installed-code Telegram-style compaction fixture "
+            "without touching real Telegram/session data."
+        ),
+    )
+    parser.add_argument(
         "--main-log",
         type=Path,
         default=Path.home() / "Library/Logs/Elevate/main.log",
@@ -400,6 +530,16 @@ def main(argv: list[str]) -> int:
                 result.fail(f"installed check-file differs: {installed_rel}")
             else:
                 result.pass_check(f"installed {installed_rel} matches repo")
+
+    if args.telegram_fixture:
+        try:
+            run_installed_telegram_fixture(
+                installed_cli=installed_cli,
+                timeout=args.timeout,
+                result=result,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            result.fail(str(exc))
 
     if not args.skip_sidecar:
         (

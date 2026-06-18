@@ -33,11 +33,19 @@ source, persisted across gateway restarts, and patched into installed app
 - Installed parity smoke after persisted-guard patch:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar`
   -> `PASS`, output `/tmp/elevate-installed-smoke-1781750758.json`.
+- Disposable Telegram fixture:
+  `cli/scripts/installed_runtime_smoke.py --telegram-fixture` imports installed
+  gateway code under a temporary `ELEVATE_HOME` and verifies a 450-message raw
+  Telegram-shaped transcript trims to 11 effective messages with cursor
+  metadata, the failed-recovery guard reloads after a simulated restart, the
+  same raw count skips the retry, and growth past the retry margin retries.
+- Latest Telegram fixture smoke:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750968.json`.
 
 Remaining work:
 
 - inventory every legacy raw-history source
-- add Telegram fixture coverage with disposable `ELEVATE_HOME`
 - define the final support-facing recovery failure message
 
 ## Goal
