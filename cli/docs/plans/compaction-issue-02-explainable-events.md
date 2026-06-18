@@ -2,8 +2,8 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: partially implemented in source; shared compression structured logs are
-in; support-facing summary still open
+Status: source support coverage implemented; installed Telegram/provider soak
+still pending license refresh
 
 ## Implementation evidence
 
@@ -21,6 +21,20 @@ in; support-facing summary still open
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py`
   -> `PASS`, session `20260617_191844_20d46b`, output
   `/tmp/elevate-installed-smoke-1781749137.json`.
+- Support-facing summary script:
+  `cli/scripts/compaction_log_summary.py` reads existing structured
+  `compaction.*` log lines and summarizes event/reason/source/session plus
+  recent raw/effective/cursor/token fields.
+- Support summary regression coverage:
+  `cli/tests/test_compaction_log_summary.py`.
+- Gateway legacy hygiene log coverage now asserts
+  failed recovery with `reason=legacy_hygiene`, `trigger=message_count`, and
+  `retry_guard=recorded`, plus no-op skip with `reason=legacy_hygiene` and
+  `trigger=noop_guard`, in
+  `cli/tests/gateway/test_session_hygiene.py::test_session_hygiene_records_failed_message_count_recovery_guard`.
+- Focused support/gateway check:
+  `cli/.venv/bin/python -m pytest cli/tests/gateway/test_session_hygiene.py cli/tests/gateway/test_hygiene_noop_guard.py cli/tests/test_compaction_log_summary.py -q`
+  -> 44 passed.
 
 ## Problem
 
@@ -39,6 +53,10 @@ Support currently has to reconstruct behavior from separate logs and code paths:
 - prune-only cleanup
 - manual `/compact`
 - UI status pill and context ring updates
+
+Support now has a small log summary command for the structured backend records.
+The remaining verification gap is real installed Telegram/provider traffic after
+the local installed license is refreshed.
 
 The immediate production bug is fixed, but the next customer report should not
 require another source-level forensic pass to answer "why did it compact here?"
@@ -137,6 +155,8 @@ Minimum proof:
 - one manual `/compact` test proving status still rides `status.update`
 - one gateway hygiene log test proving `legacy_hygiene` is distinguishable from
   normal agent compaction
+- one support summary script/test proving support can summarize recent
+  compaction records without hand-reading raw logs
 - one test proving automatic compaction does not create a fake "Finished
   compacting" user-visible completion state
 
@@ -290,6 +310,7 @@ Tests:
    - caplog test for gateway legacy hygiene and no-op guard skip
    - test that failed logging/formatting cannot raise into the active turn
    - manual `/compact` status/update test with optional `reason/source` payload
+   - support summary parser test for `compaction.*` log records
 
    Frontend:
 
@@ -323,6 +344,7 @@ Required new/changed tests:
 - `test_compaction_decision_logs_prune_only`
 - `test_gateway_hygiene_logs_legacy_recovery_reason`
 - `test_gateway_hygiene_logs_noop_guard_skip`
+- `cli/tests/test_compaction_log_summary.py`
 - frontend test that stale usage clears on compact-start only
 
 Tests that should keep passing:
@@ -342,7 +364,8 @@ After source tests pass and the installed bundle is patched:
 3. Resume a compacted desktop session and send one message.
 4. Confirm no immediate repeat compaction unless effective payload is over
    threshold.
-5. Run a Telegram oversized-session smoke.
+5. Run a Telegram oversized-session smoke after the installed license is
+   refreshed.
 6. Confirm gateway logs say whether it was `legacy_hygiene`,
    `critical_compact`, or skipped due to cursor-effective payload.
 7. Confirm the context ring goes pending after compact-start and only repopulates

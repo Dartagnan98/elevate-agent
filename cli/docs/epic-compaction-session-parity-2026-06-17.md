@@ -2,9 +2,9 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: active local epic; foundation and Issues 3-4 are implemented; Issues
-1-2 are partially implemented and need installed Telegram-style soak/support
-coverage
+Status: active local epic; foundation and Issues 2-4 are implemented in
+source; Issues 1-2 still need installed Telegram-style/provider soak after
+license refresh
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -103,6 +103,9 @@ Verified fixes already in source and patched into the installed desktop app:
 - Follow-up/steer `message.complete` events now preserve the replay ring, so
   reattaching mid-continuation can replay the full live run instead of losing
   thinking/timeline rows.
+- Support can summarize structured compaction logs with
+  `cli/scripts/compaction_log_summary.py`, and gateway legacy hygiene tests now
+  assert failed-recovery and no-op-guard compaction log records.
 - Installed app was patched under
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/`
   for touched CLI/web files, and `app.asar` was patched for the Electron shell.
@@ -321,7 +324,7 @@ Execution tracker:
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
 | 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
-| 2. Explainable compaction events | partially implemented; shared compression structured logs added, support summary still open | yes | close after support summary and Telegram-style event coverage |
+| 2. Explainable compaction events | source support coverage implemented; shared structured logs plus support summary script added | yes | close after installed Telegram-style/provider event coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented and extended with close/resume check plus disposable Telegram fixture; provider-call rerun currently auth-gated by expired local license | yes | rerun provider-call/close-resume after license refresh |
@@ -333,8 +336,7 @@ Next action rule:
 
 1. Use Issue 5's installed-runtime smoke harness while implementing Issue 6's legacy recovery retry guard
    and source tests.
-2. Then close Issue 1/2 verification gaps with Telegram-style installed soak
-   and support-facing explanation coverage.
+2. Then close Issue 1/2 verification gaps with Telegram-style installed soak.
 
 Deep-dive branching model:
 
@@ -456,8 +458,9 @@ compaction feel like a visible chat event.
   example "Compacted earlier turns: 66 more messages summarized."
 - **2.5** Keep auto-compaction user-visible copy quiet; reserve explicit
   "compacted" completion copy for manual `/compact` or exceptional recovery.
-- **2.6** Add a focused support/debug view or command output that can summarize
-  the last compaction reason without reading raw logs.
+- **2.6** Add a focused support/debug command output that can summarize the last
+  compaction reason without reading raw logs. Implemented by
+  `cli/scripts/compaction_log_summary.py`.
 
 **Acceptance:** Given any future "why did it compact here?" report, we can
 answer from one event record instead of reconstructing from multiple layers.
@@ -647,7 +650,8 @@ Telegram path, not only localhost.
 1. **Ship guardrails already fixed:** keep the current commits together because
    they close the active Telegram crash and cursor persistence failure.
 2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps;
-   shared compression event logs are in, Telegram-style event coverage remains.
+   shared compression event logs and support summary are in, Telegram-style
+   installed event coverage remains.
 3. **P1 product clarity is built:** Issue 3 and Issue 4 are source + installed
    app patched; keep them in soak.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
@@ -666,8 +670,8 @@ Telegram path, not only localhost.
   construct a temporary `AIAgent` and use the shared compressor path?
 - Should the context ring display "used" everywhere instead of "left" to match
   threshold language?
-- Do we want a support command that prints the last compaction event for a
-  session without requiring log spelunking?
+- Do we need to wire the support summary command into an operator-facing CLI, or
+  is the repo script enough for this release?
 
 ## Current local state
 

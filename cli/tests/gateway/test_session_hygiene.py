@@ -10,6 +10,7 @@ so CLI and messaging platforms behave identically.
 
 import importlib
 import json
+import logging
 import sys
 import types
 from datetime import datetime
@@ -720,6 +721,7 @@ async def test_session_hygiene_skips_message_count_for_cursor_compacted_session(
 async def test_session_hygiene_records_failed_message_count_recovery_guard(
     monkeypatch,
     tmp_path,
+    caplog,
 ):
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -746,6 +748,7 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
 
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
+    caplog.set_level(logging.INFO, logger=gateway_run.__name__)
 
     adapter = HygieneCaptureAdapter()
     runner = object.__new__(GatewayRunner)
@@ -813,6 +816,9 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
     assert await runner._handle_message(event) == "ok"
     assert FakeCompressAgent.calls == 1
     assert runner._hygiene_noop_guard == {"sess-fail": 450}
+    assert "compaction.failed reason=legacy_hygiene" in caplog.text
+    assert "trigger=message_count" in caplog.text
+    assert "retry_guard=recorded" in caplog.text
     runner._session_db.set_meta.assert_called_with(
         gateway_run._HYGIENE_NOOP_GUARD_META_KEY,
         json.dumps({"sess-fail": 450}),
@@ -821,6 +827,8 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
     assert await runner._handle_message(event) == "ok"
     assert FakeCompressAgent.calls == 1
     assert runner._run_agent.await_count == 2
+    assert "compaction.skipped reason=legacy_hygiene" in caplog.text
+    assert "trigger=noop_guard" in caplog.text
     runner.session_store.rewrite_transcript.assert_not_called()
 
     del runner._hygiene_noop_guard
