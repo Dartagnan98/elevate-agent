@@ -46,6 +46,8 @@ const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
 const HOST = "127.0.0.1";
 const HOME = os.homedir();
 const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/chat";
+const DASHBOARD_LOAD_RETRY_LIMIT = 3;
+const DASHBOARD_LOAD_RETRY_DELAY_MS = 750;
 const HQ_BASE_URL = (process.env.ELEVATE_BACKEND_URL || "https://api.elevationrealestatehq.com").replace(/\/+$/, "");
 const LICENSE_PATH = path.join(HOME, ".elevate", "license.json");
 // Refresh access tokens with this much headroom before expiry. Mirrors
@@ -83,6 +85,9 @@ let backendReady = false;
 let installProcess = null;
 let backendPort = PREFERRED_PORT;
 let backendUrl = `http://${HOST}:${backendPort}`;
+let dashboardLoadRetryCount = 0;
+let dashboardLoadRetryTimer = null;
+let lastDashboardPath = START_PATH;
 const startupStartedAt = Date.now();
 const startupEvents = [];
 let startupSummaryLogged = false;
@@ -1027,13 +1032,21 @@ function createWindow() {
     const url = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
     const isDashboard = url.startsWith(backendUrl);
     markStartup("renderer:did-finish-load", isDashboard ? "dashboard" : path.basename(url));
-    if (isDashboard) finishStartup("dashboard-loaded");
+    if (isDashboard) {
+      clearDashboardLoadRetryTimer();
+      dashboardLoadRetryCount = 0;
+      finishStartup("dashboard-loaded");
+    }
   });
 
   mainWindow.webContents.on("did-fail-load", (_event, code, description, validatedUrl) => {
+    const failedUrl = validatedUrl || currentMainWindowUrl();
     log.warn(
-      `[renderer:did-fail-load] code=${code} desc=${trimLogMessage(description, 300)} url=${trimLogMessage(validatedUrl || currentMainWindowUrl(), 500)}`,
+      `[renderer:did-fail-load] code=${code} desc=${trimLogMessage(description, 300)} url=${trimLogMessage(failedUrl, 500)}`,
     );
+    if (code !== -3 && failedUrl.startsWith(backendUrl)) {
+      scheduleDashboardLoadRetry(`did-fail-load:${code}`);
+    }
   });
 
   mainWindow.webContents.on("console-message", (_event, ...args) => {
@@ -1217,6 +1230,40 @@ function loadLocalPage(fileName) {
   mainWindow.loadFile(path.join(__dirname, fileName));
 }
 
+function clearDashboardLoadRetryTimer() {
+  if (!dashboardLoadRetryTimer) return;
+  clearTimeout(dashboardLoadRetryTimer);
+  dashboardLoadRetryTimer = null;
+}
+
+function scheduleDashboardLoadRetry(reason) {
+  if (!mainWindow || mainWindow.isDestroyed() || dashboardLoadRetryTimer) return;
+  if (dashboardLoadRetryCount >= DASHBOARD_LOAD_RETRY_LIMIT) {
+    markStartup("window:dashboard-retry-exhausted", reason);
+    loadLocalPage("install.html");
+    return;
+  }
+
+  dashboardLoadRetryCount += 1;
+  const attempt = dashboardLoadRetryCount;
+  const pathname = lastDashboardPath || START_PATH;
+  markStartup("window:dashboard-retry", `${attempt}:${reason}`);
+  loadLocalPage("loading.html");
+
+  dashboardLoadRetryTimer = setTimeout(async () => {
+    dashboardLoadRetryTimer = null;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!(await backendMatchesDesktopMode())) {
+      scheduleDashboardLoadRetry("backend-not-ready");
+      return;
+    }
+    loadAppPath(pathname, { retry: true });
+  }, DASHBOARD_LOAD_RETRY_DELAY_MS);
+  if (typeof dashboardLoadRetryTimer.unref === "function") {
+    dashboardLoadRetryTimer.unref();
+  }
+}
+
 // The dashboard renders a full-screen <LoginCard /> whenever there's no valid
 // license (see cli/web App.tsx's license gate), so the sign-in screen lives
 // inside the app itself. We deliberately do NOT pop a separate native login
@@ -1241,10 +1288,19 @@ function openLoginWindow() {
   }
 }
 
-function loadAppPath(pathname = START_PATH) {
+function loadAppPath(pathname = START_PATH, options = {}) {
   if (!mainWindow) return;
+  lastDashboardPath = pathname || START_PATH;
+  if (!options.retry) {
+    dashboardLoadRetryCount = 0;
+    clearDashboardLoadRetryTimer();
+  }
   markStartup("window:load-dashboard", pathname);
-  mainWindow.loadURL(`${backendUrl}${pathname}`);
+  mainWindow.loadURL(`${backendUrl}${pathname}`).catch((err) => {
+    if (String(err && err.message ? err.message : err).includes("ERR_ABORTED")) return;
+    log.warn(`[renderer:loadURL] ${trimLogMessage(err && err.message ? err.message : err, 500)}`);
+    scheduleDashboardLoadRetry("loadURL-rejected");
+  });
 }
 
 // Grant microphone access to the in-app voice-input feature. Without an
