@@ -13,7 +13,9 @@ import {
   FilesPanel,
   PlanPanel,
   SidePanelSelector,
+  StackedWorkPanels,
   type SidePanelMode,
+  type WorkPanelMode,
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -259,6 +261,31 @@ interface ArtifactEntry {
   source?: string;
   status?: "error" | "ok";
   title: string;
+}
+
+type ActiveSidePanelMode = Exclude<SidePanelMode, "none">;
+
+function SidePanelMotionSlot({
+  children,
+  mobile = false,
+  mode,
+}: {
+  children: ReactNode;
+  mobile?: boolean;
+  mode: ActiveSidePanelMode;
+}) {
+  return (
+    <div
+      className={cn(
+        "chat-side-panel-motion",
+        mobile && "chat-side-panel-motion--mobile",
+        mode === "preview" && "chat-side-panel-motion--preview",
+      )}
+      data-panel-mode={mode}
+    >
+      {children}
+    </div>
+  );
 }
 
 interface QueuedInput {
@@ -1276,14 +1303,17 @@ export const __chatPageTestables = {
   defaultActivityDigestOpen,
   describeToolGroup,
   isCompactSlashCommand,
+  isOpenPreviewIntent,
   messageRowPropsEqual,
   mergeActiveTurnSnapshot,
   mergeServerWithCache,
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
+  routePromptForAgent,
   shouldClearUsageForStatus,
   shouldClearUsageForStatusUpdate,
+  shouldHandlePreviewShortcut,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   toolTarget,
@@ -2566,11 +2596,23 @@ const HUB_INTERFACE_CONTEXT = [
   ].join(" "),
 ].join("\n");
 
-function routePromptForAgent(text: string): string {
+function routePromptForAgent(
+  text: string,
+  options?: { previewAlreadyOpen?: boolean },
+): string {
   // The active agent lane is now applied server-side via the agent_id
   // param on prompt.submit, so the prompt itself only carries the Hub
   // interface context. No per-agent prompt prefix is injected here.
-  return [HUB_INTERFACE_CONTEXT, `User request: ${text}`].join("\n\n");
+  const previewState = options?.previewAlreadyOpen
+    ? [
+        "[Hub preview state]",
+        "The requested artifact is already open in the side preview.",
+        "Treat this message as a normal instruction for the agent; do not answer by saying the preview is open again.",
+      ].join("\n")
+    : "";
+  return [HUB_INTERFACE_CONTEXT, previewState, `User request: ${text}`]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 const PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS = 20_000;
@@ -2863,6 +2905,21 @@ function isOpenPreviewIntent(text: string): boolean {
   return /\b(it|this|that|pdf|document|doc|file|artifact|report|output|result|local|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub)\b/.test(
     lower,
   );
+}
+
+function shouldHandlePreviewShortcut({
+  currentKey,
+  sidePanel,
+  targetKey,
+  text,
+}: {
+  currentKey: string | null;
+  sidePanel: SidePanelMode;
+  targetKey: string | null;
+  text: string;
+}): boolean {
+  if (!isOpenPreviewIntent(text) || !targetKey) return false;
+  return !(sidePanel === "preview" && currentKey === targetKey);
 }
 
 function artifactsFromToolComplete(
@@ -7413,7 +7470,6 @@ export default function ChatPage() {
       };
 
       const isSlashCommand = trimmed.startsWith("/");
-      const previewIntent = !!trimmed && isOpenPreviewIntent(trimmed);
       const stillUploading = attachments.some((item) => item.status === "uploading");
       if (!isSlashCommand && stillUploading) {
         setBanner("Wait for attachments to finish uploading before sending.");
@@ -7429,6 +7485,22 @@ export default function ChatPage() {
           previewUrl: att.previewUrl,
         }),
       );
+      const rawPreviewIntent = !!trimmed && isOpenPreviewIntent(trimmed);
+      const historyArtifacts = rawPreviewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
+      const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
+      const previewTarget = rawPreviewIntent ? bestSidePreviewArtifact(availableArtifacts) : null;
+      const previewAlreadyOpen = Boolean(
+        previewTarget &&
+          sidePanel === "preview" &&
+          previewArtifact &&
+          artifactDismissKey(previewArtifact) === artifactDismissKey(previewTarget),
+      );
+      const previewIntent = shouldHandlePreviewShortcut({
+        currentKey: previewArtifact ? artifactDismissKey(previewArtifact) : null,
+        sidePanel,
+        targetKey: previewTarget ? artifactDismissKey(previewTarget) : null,
+        text: trimmed,
+      });
       const showedUserMessage = !isSlashCommand && !previewIntent && !busy && !!trimmed;
 
       // Capture the optimistic bubble's id so the gateway persists the SAME id
@@ -7461,10 +7533,7 @@ export default function ChatPage() {
         }),
       );
 
-      const historyArtifacts = previewIntent && !artifacts.length ? artifactsFromMessages(messages) : [];
-      const availableArtifacts = artifacts.length ? artifacts : historyArtifacts;
-      const previewTarget = previewIntent ? bestSidePreviewArtifact(availableArtifacts) : null;
-      if (previewTarget) {
+      if (previewIntent && previewTarget) {
         if (historyArtifacts.length) {
           addArtifacts(historyArtifacts);
         }
@@ -7563,7 +7632,7 @@ export default function ChatPage() {
         return;
       }
 
-      const routedText = routePromptForAgent(trimmed);
+      const routedText = routePromptForAgent(trimmed, { previewAlreadyOpen });
       let targetSessionId = sessionId;
 
       // New-chat cold start: creating the session takes a few seconds, so the
@@ -7689,7 +7758,7 @@ export default function ChatPage() {
       );
       if (submitGen === connectGenRef.current) pinCreatedSessionInUrl();
     },
-    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, liveSubagent, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, selectedAgent, sessionId, sessionKind, state, submitGatewayPrompt, submitLiveSubagentMessage, submitSkillInvocation],
+    [addArtifacts, appendMessage, artifacts, attachments, busy, cancelManualCompactAssistant, completeManualCompactAssistant, createSessionForSend, draftChat, ensureAssistant, gw, hasReadyAttachment, liveSubagent, messages, openArtifactPreview, permissionModeId, pinCreatedSessionInUrl, previewArtifact, selectedAgent, sessionId, sessionKind, sidePanel, state, submitGatewayPrompt, submitLiveSubagentMessage, submitSkillInvocation],
   );
 
   // Claude-Code-style plan approval: leave plan mode and immediately execute the
@@ -8346,6 +8415,39 @@ export default function ChatPage() {
       setSidePanel("tasks");
     }
   }, [runningBackgroundTasks, sidePanel]);
+
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      const mod = event.metaKey || event.ctrlKey;
+      if (!mod || event.altKey) return;
+      const key = event.key.toLowerCase();
+
+      if (key === "\\") {
+        event.preventDefault();
+        if (sidePanel === "plan" || sidePanel === "tasks") {
+          closeSidePanel();
+          return;
+        }
+        openSidePanel(backgroundTasks.length > 0 ? "tasks" : "plan");
+        return;
+      }
+
+      if (!event.shiftKey) return;
+      if (key === "p") {
+        event.preventDefault();
+        setSidePanel("preview");
+      } else if (key === "b") {
+        event.preventDefault();
+        openSidePanel("tasks");
+      } else if (key === "o") {
+        event.preventDefault();
+        openSidePanel("plan");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [backgroundTasks.length, closeSidePanel, openSidePanel, sidePanel]);
+
   const tracesByMessage = useMemo(() => {
     const grouped = new Map<string, ActivityTrace[]>();
     for (const trace of activityTrace) {
@@ -8533,6 +8635,11 @@ export default function ChatPage() {
   // Files / Background tasks are just breakdowns (lists) — they get a compact
   // fixed width and no resize handle.
   const isPreviewPanel = sidePanel === "preview";
+  const activeSidePanelMode = sidePanel === "none" ? null : sidePanel;
+  const sidePanelMotionKey =
+    sidePanel === "preview"
+      ? `preview:${previewArtifact?.id ?? previewArtifact?.path ?? "empty"}`
+      : sidePanel;
   const previewPanelLayoutStyle = {
     // Every side panel (Preview / Plan / Files / Tasks / Artifacts) shares the
     // same drag-resizable width var, so they're all resizable, not just Preview.
@@ -8545,6 +8652,30 @@ export default function ChatPage() {
   // dismissals key on.
   const dataSessionId = artifactStateSessionId();
   const renderSidePanel = () => {
+    const renderPlanPanel = () => (
+      <PlanPanel
+        sessionId={dataSessionId ?? ""}
+        refreshSignal={planRefreshSignal}
+        onClose={closeSidePanel}
+      />
+    );
+    const renderTasksPanel = () => (
+      <BackgroundTasksPanel
+        sessionId={dataSessionId ?? ""}
+        tasks={backgroundTasks}
+        onClose={closeSidePanel}
+        onDrillIn={handleOpenSubagent}
+        onMessage={handleMessageSubagent}
+        onStop={handleStopBackgroundTask}
+      />
+    );
+    const isWorkPanel = sidePanel === "plan" || sidePanel === "tasks";
+    const shouldStackWork =
+      isWorkPanel &&
+      ((sidePanel === "plan" && backgroundTasks.length > 0) ||
+        (sidePanel === "tasks" &&
+          (planReadyForApproval || permissionModeId === "plan")));
+
     switch (sidePanel) {
       case "preview":
         return previewArtifact ? (
@@ -8561,24 +8692,17 @@ export default function ChatPage() {
           />
         );
       case "plan":
-        return (
-          <PlanPanel
-            sessionId={dataSessionId ?? ""}
-            refreshSignal={planRefreshSignal}
-            onClose={closeSidePanel}
-          />
-        );
       case "tasks":
-        return (
-          <BackgroundTasksPanel
-            sessionId={dataSessionId ?? ""}
-            tasks={backgroundTasks}
-            onClose={closeSidePanel}
-            onDrillIn={handleOpenSubagent}
-            onMessage={handleMessageSubagent}
-            onStop={handleStopBackgroundTask}
-          />
-        );
+        if (shouldStackWork) {
+          return (
+            <StackedWorkPanels
+              primary={sidePanel as WorkPanelMode}
+              plan={renderPlanPanel()}
+              tasks={renderTasksPanel()}
+            />
+          );
+        }
+        return sidePanel === "plan" ? renderPlanPanel() : renderTasksPanel();
       case "files":
         return (
           <FilesPanel
@@ -8648,12 +8772,20 @@ export default function ChatPage() {
       <>
         <button
           aria-label="Close panel"
-          className="fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
+          className="chat-side-panel-backdrop fixed inset-0 z-[65] bg-black/60 backdrop-blur-sm"
           onClick={sidePanel === "preview" ? dismissPreviewArtifact : closeSidePanel}
           type="button"
         />
-        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70] animate-in fade-in slide-in-from-bottom-4 duration-200">
-          {renderSidePanel()}
+        <aside className="fixed inset-x-3 bottom-3 top-3 z-[70]">
+          {activeSidePanelMode ? (
+            <SidePanelMotionSlot
+              key={`mobile:${sidePanelMotionKey}`}
+              mode={activeSidePanelMode}
+              mobile
+            >
+              {renderSidePanel()}
+            </SidePanelMotionSlot>
+          ) : null}
         </aside>
       </>,
       portalRoot,
@@ -8903,23 +9035,23 @@ export default function ChatPage() {
                 <span className="h-16 w-1 rounded-full bg-transparent" />
               </button>
               {permissionModeId === "plan" && !busy && planReadyForApproval && (
-                  <div className="mb-2 flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
-                    <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
-                    <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">
-                      <span className="font-medium">Plan ready.</span>{" "}
-                      <span className="text-[var(--chat-muted-strong)]">
-                        Reply to refine it, or approve to run.
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void approvePlanAndRun()}
-                      className="shrink-0 rounded-[7px] bg-[var(--chat-accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--chat-bg)] transition-opacity hover:opacity-90"
-                    >
-                      Approve &amp; run
-                    </button>
+                <div className="plan-approval-bar flex items-center gap-3 rounded-[10px] border border-[color-mix(in_srgb,var(--chat-accent)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_8%,var(--chat-bg))] px-3 py-2">
+                  <Eye className="h-4 w-4 shrink-0 text-[var(--chat-accent)]" />
+                  <div className="min-w-0 flex-1 text-[12.5px] leading-snug text-[var(--chat-text)]">
+                    <span className="font-medium">Plan ready.</span>{" "}
+                    <span className="text-[var(--chat-muted-strong)]">
+                      Reply to refine it, or approve to run.
+                    </span>
                   </div>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => void approvePlanAndRun()}
+                    className="shrink-0 rounded-[7px] bg-[var(--chat-accent)] px-3 py-1.5 text-[12px] font-semibold text-[var(--chat-bg)] transition-opacity hover:opacity-90"
+                  >
+                    Approve &amp; run
+                  </button>
+                </div>
+              )}
               {queuedInputs.length ? (
                 <QueuedInputStrip
                   busy={busy}
@@ -9119,7 +9251,14 @@ export default function ChatPage() {
             {/* Activity card removed per request — the right area only shows a
                 side panel (Preview / Artifacts / Files / Background tasks / Plan)
                 when one is open; otherwise nothing. */}
-            {wideOpen ? renderSidePanel() : null}
+            {wideOpen && activeSidePanelMode ? (
+              <SidePanelMotionSlot
+                key={`desktop:${sidePanelMotionKey}`}
+                mode={activeSidePanelMode}
+              >
+                {renderSidePanel()}
+              </SidePanelMotionSlot>
+            ) : null}
           </div>
         </aside>
       </div>
@@ -9853,7 +9992,6 @@ function ComposerActionBar({
             title={`Permission mode: ${permissionMode.label}`}
             aria-label="Choose permission mode"
           >
-            {permissionMode.id === "bypassPermissions" && <span className="pill-dot" />}
             <permissionMode.icon className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">{permissionMode.short}</span>
             <ChevronUp className="h-3 w-3 shrink-0 opacity-50" />

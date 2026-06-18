@@ -145,9 +145,9 @@ const SELECTOR_ROWS: {
 }[] = [
   { mode: "preview", label: "Preview", icon: <FileText className="h-4 w-4" />, hint: "⇧⌘P" },
   { mode: "artifacts", label: "Artifacts", icon: <FileStack className="h-4 w-4" /> },
-  { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" />, hint: "⇧⌘F" },
-  { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" /> },
-  { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" /> },
+  { mode: "files", label: "Files", icon: <Folder className="h-4 w-4" /> },
+  { mode: "tasks", label: "Background tasks", icon: <Boxes className="h-4 w-4" />, hint: "⇧⌘B" },
+  { mode: "plan", label: "Plan", icon: <ListChecks className="h-4 w-4" />, hint: "⇧⌘O" },
 ];
 
 export function SidePanelSelector({
@@ -280,6 +280,27 @@ export function SidePanelSelector({
           )
         : null}
     </>
+  );
+}
+
+export type WorkPanelMode = "plan" | "tasks";
+
+export function StackedWorkPanels({
+  primary,
+  plan,
+  tasks,
+}: {
+  primary: WorkPanelMode;
+  plan: ReactNode;
+  tasks: ReactNode;
+}) {
+  const first = primary === "plan" ? plan : tasks;
+  const second = primary === "plan" ? tasks : plan;
+  return (
+    <div className="stacked-work-panels flex h-full min-h-0 flex-col gap-2">
+      <div className="stacked-work-panel min-h-[14rem] flex-[1.25] overflow-hidden">{first}</div>
+      <div className="stacked-work-panel min-h-[11rem] flex-1 overflow-hidden">{second}</div>
+    </div>
   );
 }
 

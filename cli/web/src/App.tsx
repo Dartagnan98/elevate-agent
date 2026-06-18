@@ -1325,8 +1325,8 @@ function writeCachedSessions(sessions: SessionInfo[]) {
 
 function DesktopSidebar({
   embeddedChat,
-  // navItems no longer rendered in the sidebar (Tools moved to the profile
-  // menu); the prop stays on the type/caller but is unused here.
+  // navItems no longer rendered in the sidebar; the prop stays on the
+  // type/caller but is unused here.
   onNavigate,
   onPreloadRoute,
   onToggleSidebar,
@@ -1384,23 +1384,7 @@ function DesktopSidebar({
       /* ignore */
     }
   }, [automationsOpen]);
-  const [agentMoreOpen, setAgentMoreOpen] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem("elevate.sidebar.agentMore.v1") === "1";
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        "elevate.sidebar.agentMore.v1",
-        agentMoreOpen ? "1" : "0",
-      );
-    } catch {
-      /* ignore */
-    }
-  }, [agentMoreOpen]);
+  const [agentMoreOpen, setAgentMoreOpen] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
     try {
       const raw = window.localStorage.getItem("elevate.sidebar.sections.v1");
@@ -1892,16 +1876,14 @@ function DesktopSidebar({
     { icon: CheckCheck, label: "Approvals", path: "/approvals" },
     { icon: MessageSquare, label: "Comms", path: "/comms" },
     { icon: Activity, label: "Activity", path: "/activity" },
+    { icon: Puzzle, label: "Skills", path: "/skills" },
+    { icon: Brain, label: "Memory graph", path: "/memory" },
   ];
   const agentMoreActive = agentMoreNavItems.some((item) =>
     location.pathname === item.path || location.pathname.startsWith(`${item.path}/`),
   );
   const showAgentMoreItems = agentMoreOpen || agentMoreActive;
   const realEstateNavItems = [...agentPrimaryNavItems, ...agentMoreNavItems];
-  const toolsNavItems: NavItem[] = [
-    { icon: Puzzle, label: "Skills", path: "/skills" },
-    { icon: Brain, label: "Memory graph", path: "/memory" },
-  ];
   const go = (path: string) => {
     onPreloadRoute?.(path);
     navigate(path);
@@ -2304,29 +2286,6 @@ function DesktopSidebar({
           sessionsByJobId={cronSessionsByJobId}
           onOpenSession={openSession}
         />
-
-        <div className="mt-3 lg:mt-2.5">
-          <SidebarSectionLabel
-            collapsed={collapsedSections.tools}
-            onToggle={() => toggleSection("tools")}
-          >
-            Tools
-          </SidebarSectionLabel>
-          {!collapsedSections.tools && (
-            <div className="space-y-0.5">
-              {toolsNavItems.map((item) => (
-                <SidebarAction
-                  key={item.path}
-                  icon={item.icon}
-                  label={item.label}
-                  path={item.path}
-                  onNavigate={go}
-                  onPreload={onPreloadRoute}
-                />
-              ))}
-            </div>
-          )}
-        </div>
 
       </div>
 

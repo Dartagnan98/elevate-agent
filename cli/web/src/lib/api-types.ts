@@ -2493,19 +2493,6 @@ export interface SessionPlanResponse {
   updated_at?: number | string | null;
 }
 
-export interface FileTreeNode {
-  name: string;
-  type: "dir" | "file";
-  path: string;
-  children?: FileTreeNode[];
-}
-
-export interface FilesTreeResponse {
-  root: string;
-  name: string;
-  tree: FileTreeNode[];
-}
-
 export interface SessionFileItem {
   path: string;
   name: string;

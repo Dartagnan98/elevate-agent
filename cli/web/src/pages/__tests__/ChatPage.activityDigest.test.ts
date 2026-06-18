@@ -232,6 +232,42 @@ describe("manual /compact activity", () => {
   });
 });
 
+describe("preview shortcuts", () => {
+  it("does not swallow preview-open prompts when the artifact is already visible", () => {
+    expect(__chatPageTestables.isOpenPreviewIntent("open it")).toBe(true);
+    expect(
+      __chatPageTestables.shouldHandlePreviewShortcut({
+        currentKey: "pdf:listing-plan",
+        sidePanel: "preview",
+        targetKey: "pdf:listing-plan",
+        text: "open it",
+      }),
+    ).toBe(false);
+    expect(
+      __chatPageTestables.routePromptForAgent("open it", { previewAlreadyOpen: true }),
+    ).toContain("do not answer by saying the preview is open again");
+  });
+
+  it("still handles preview-open prompts when the artifact is not already visible", () => {
+    expect(
+      __chatPageTestables.shouldHandlePreviewShortcut({
+        currentKey: "pdf:old-report",
+        sidePanel: "preview",
+        targetKey: "pdf:new-report",
+        text: "open the pdf",
+      }),
+    ).toBe(true);
+    expect(
+      __chatPageTestables.shouldHandlePreviewShortcut({
+        currentKey: null,
+        sidePanel: "none",
+        targetKey: "pdf:new-report",
+        text: "open the pdf",
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("chat transcript ordering repair", () => {
   it("moves an orphan assistant answer below its prompting user bubble", () => {
     const repaired = __chatPageTestables.repairOutOfOrderUserTurns([

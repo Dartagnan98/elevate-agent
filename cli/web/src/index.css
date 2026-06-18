@@ -1930,6 +1930,96 @@ html .font-courier {
   color: var(--fg);
 }
 
+.plan-approval-bar {
+  max-width: calc(var(--chat-layout-width) - 48px);
+  width: 100%;
+  margin: 0 auto 8px;
+  box-sizing: border-box;
+}
+
+@keyframes chat-side-panel-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(18px, 0, 0) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes chat-side-panel-mobile-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes chat-side-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes stacked-work-panel-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.chat-side-panel-motion {
+  height: 100%;
+  min-height: 0;
+  transform-origin: right center;
+  animation: chat-side-panel-enter 220ms var(--ease-out-quart) both;
+  will-change: transform, opacity;
+}
+
+.chat-side-panel-motion--preview {
+  animation-duration: 260ms;
+}
+
+.chat-side-panel-motion--mobile {
+  transform-origin: center bottom;
+  animation-name: chat-side-panel-mobile-enter;
+}
+
+.chat-side-panel-motion > * {
+  height: 100%;
+  min-height: 0;
+}
+
+.chat-side-panel-backdrop {
+  animation: chat-side-backdrop-enter 160ms ease-out both;
+}
+
+.chat-side-panel-motion .stacked-work-panel {
+  animation: stacked-work-panel-enter 210ms var(--ease-out-quart) both;
+}
+
+.chat-side-panel-motion .stacked-work-panel:nth-child(2) {
+  animation-delay: 45ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-side-panel-motion,
+  .chat-side-panel-backdrop,
+  .chat-side-panel-motion .stacked-work-panel {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    will-change: auto;
+  }
+}
+
 .composer {
   position: relative;
   /* Align with the message content box (column width minus chat-inner padding). */
@@ -1993,6 +2083,14 @@ html .font-courier {
   min-height: 22px;
   max-height: 200px;
   width: 100%;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.composer-input::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .composer-input::placeholder {
@@ -2074,14 +2172,6 @@ html .font-courier {
 .foot-btn.warn {
   color: var(--status-warn);
   padding-left: 4px;
-}
-
-.foot-btn.warn .pill-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--status-warn);
-  margin: 0 6px 0 4px;
 }
 
 .foot-btn.warn:hover {

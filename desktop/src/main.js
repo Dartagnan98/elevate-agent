@@ -956,6 +956,10 @@ function createMenu() {
         // freshly deployed bundle (you'd have to fully quit + reopen).
         { role: "reload", accelerator: "CmdOrCtrl+R" },
         { role: "forceReload", accelerator: "Shift+CmdOrCtrl+R" },
+        { type: "separator" },
+        { role: "resetZoom", accelerator: "CmdOrCtrl+0" },
+        { role: "zoomIn", accelerator: "CmdOrCtrl+Plus" },
+        { role: "zoomOut", accelerator: "CmdOrCtrl+-" },
       ],
     },
     {
@@ -971,7 +975,7 @@ function createMenu() {
     {
       label: "Window",
       submenu: [
-        { role: "minimize" },
+        { role: "minimize", accelerator: "CmdOrCtrl+M" },
         { role: "zoom" },
         { type: "separator" },
         { role: "togglefullscreen" },
