@@ -3,7 +3,7 @@
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
 Status: partially implemented; failed message-count recovery retry guard is in
-source and patched into installed app
+source, persisted across gateway restarts, and patched into installed app
 
 ## Implementation evidence
 
@@ -20,11 +20,23 @@ source and patched into installed app
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/gateway/run.py`
 - Installed smoke after patch:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py` -> `PASS`
+- Persistent retry guard:
+  failed message-count recovery now persists the bounded hygiene no-op guard in
+  `state_meta` under `gateway:hygiene_noop_guard:v1`, so a gateway restart does
+  not immediately retry the same oversized raw transcript.
+- Regression extension:
+  `cli/tests/gateway/test_session_hygiene.py::test_session_hygiene_records_failed_message_count_recovery_guard`
+  now simulates a restart by reloading the persisted guard.
+- Broader source checks:
+  `cli/.venv/bin/python -m pytest cli/tests/gateway/test_session_hygiene.py cli/tests/gateway/test_hygiene_noop_guard.py cli/tests/agent/test_compress_context_cursor.py cli/tests/run_agent/test_compaction_resume_hydration.py cli/tests/tui_gateway/test_protocol.py -q`
+  -> 95 passed.
+- Installed parity smoke after persisted-guard patch:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750758.json`.
 
 Remaining work:
 
 - inventory every legacy raw-history source
-- decide whether retry state must persist across gateway restarts
 - add Telegram fixture coverage with disposable `ELEVATE_HOME`
 - define the final support-facing recovery failure message
 

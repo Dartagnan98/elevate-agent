@@ -86,6 +86,8 @@ Verified fixes already in source and patched into the installed desktop app:
 - Failed legacy message-count recovery now records the hygiene no-op guard when
   it is below the critical token line, so the same failed summary input does not
   retry on every incoming Telegram-style message.
+- The failed legacy recovery guard now persists in `state_meta`, so a gateway
+  restart does not forget the failed oversized input and immediately retry it.
 - The desktop Electron shell retries failed dashboard navigation after backend
   readiness, which covers the black-shell startup race that manual reload fixed.
 - The installed smoke now attempts close-and-resume transcript verification and
@@ -313,7 +315,7 @@ Execution tracker:
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented and extended with close/resume check; provider-call rerun currently auth-gated by expired local license | yes | rerun after license refresh, then add Telegram fixture |
-| 6. Legacy transcript recovery | partially implemented; failed message-count recovery retry guard patched and smoke-tested | yes | inventory sources and decide persisted retry state |
+| 6. Legacy transcript recovery | partially implemented; failed message-count recovery retry guard persists across restarts and is smoke-tested | yes | add Telegram fixture and support-facing recovery message |
 | 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed and resume smoke added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
 | 8. Release checklist | stub only | no | release candidate exists |
 

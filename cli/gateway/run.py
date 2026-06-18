@@ -150,6 +150,7 @@ def _gateway_platform_value(platform: Any) -> str:
 # session compacted with no reduction at ~this message count".
 _HYGIENE_NOOP_RETRY_MARGIN = 25
 _HYGIENE_NOOP_GUARD_MAX = 2048
+_HYGIENE_NOOP_GUARD_META_KEY = "gateway:hygiene_noop_guard:v1"
 
 
 def _hygiene_should_skip(
@@ -206,6 +207,52 @@ def _hygiene_record(
     guard[session_id] = msg_count
     while len(guard) > max_entries:
         guard.pop(next(iter(guard)), None)
+
+
+def _hygiene_load_persisted_guard(session_db: Any) -> dict:
+    getter = getattr(session_db, "get_meta", None)
+    if not callable(getter):
+        return {}
+    try:
+        raw = getter(_HYGIENE_NOOP_GUARD_META_KEY)
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = OrderedDict()
+    for session_id, count in data.items():
+        try:
+            msg_count = int(count)
+        except (TypeError, ValueError):
+            continue
+        sid = str(session_id or "")
+        if sid and msg_count > 0:
+            out[sid] = msg_count
+    while len(out) > _HYGIENE_NOOP_GUARD_MAX:
+        out.popitem(last=False)
+    return dict(out)
+
+
+def _hygiene_persist_guard(session_db: Any, guard: dict) -> None:
+    setter = getattr(session_db, "set_meta", None)
+    if not callable(setter):
+        return
+    try:
+        bounded = OrderedDict()
+        for session_id, count in guard.items():
+            try:
+                msg_count = int(count)
+            except (TypeError, ValueError):
+                continue
+            sid = str(session_id or "")
+            if sid and msg_count > 0:
+                bounded[sid] = msg_count
+        while len(bounded) > _HYGIENE_NOOP_GUARD_MAX:
+            bounded.popitem(last=False)
+        setter(_HYGIENE_NOOP_GUARD_META_KEY, json.dumps(bounded))
+    except Exception:
+        pass
 
 
 def _hygiene_effective_messages_for_pressure(
@@ -6576,9 +6623,12 @@ class GatewayRunner:
                 # never skips near the 95% critical line).
                 _noop_guard = getattr(self, "_hygiene_noop_guard", None)
                 if _noop_guard is None:
-                    _noop_guard = {}
+                    _noop_guard = _hygiene_load_persisted_guard(
+                        getattr(self, "_session_db", None)
+                    )
                     self._hygiene_noop_guard = _noop_guard
-                if _needs_compress and _hygiene_should_skip(
+                _guard_before = dict(_noop_guard)
+                _should_skip_hygiene = _needs_compress and _hygiene_should_skip(
                     _noop_guard,
                     session_entry.session_id,
                     msg_count=_msg_count,
@@ -6586,7 +6636,10 @@ class GatewayRunner:
                     reason=_hyg_reason,
                     approx_tokens=_approx_tokens,
                     warn_tokens=_warn_token_threshold,
-                ):
+                )
+                if _noop_guard != _guard_before:
+                    _hygiene_persist_guard(getattr(self, "_session_db", None), _noop_guard)
+                if _should_skip_hygiene:
                     _needs_compress = False
                     _prev_noop = _noop_guard.get(session_entry.session_id)
                     logger.info(
@@ -6782,6 +6835,10 @@ class GatewayRunner:
                                     # clear any stale guard entry under the OLD id too.
                                     if _hyg_original_sid != session_entry.session_id:
                                         _noop_guard.pop(_hyg_original_sid, None)
+                                    _hygiene_persist_guard(
+                                        getattr(self, "_session_db", None),
+                                        _noop_guard,
+                                    )
 
                                     if _new_tokens >= _warn_token_threshold:
                                         logger.warning(
@@ -6805,6 +6862,10 @@ class GatewayRunner:
                                 session_entry.session_id,
                                 msg_count=_msg_count,
                                 ineffective=True,
+                            )
+                            _hygiene_persist_guard(
+                                getattr(self, "_session_db", None),
+                                _noop_guard,
                             )
                             logger.info(
                                 "compaction.failed reason=legacy_hygiene "

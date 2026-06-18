@@ -9,6 +9,7 @@ so CLI and messaging platforms behave identically.
 """
 
 import importlib
+import json
 import sys
 import types
 from datetime import datetime
@@ -573,6 +574,7 @@ async def test_session_hygiene_runs_gateway_recovery_for_critical_or_legacy(
     runner._session_model_overrides = {}
     runner._session_db = MagicMock()
     runner._session_db.get_session.return_value = {}
+    runner._session_db.get_meta.return_value = None
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._run_agent = AsyncMock(
@@ -776,6 +778,7 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
     runner._session_model_overrides = {}
     runner._session_db = MagicMock()
     runner._session_db.get_session.return_value = {}
+    runner._session_db.get_meta.return_value = None
     runner._is_user_authorized = lambda _source: True
     runner._set_session_env = lambda _context: None
     runner._run_agent = AsyncMock(
@@ -810,8 +813,19 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
     assert await runner._handle_message(event) == "ok"
     assert FakeCompressAgent.calls == 1
     assert runner._hygiene_noop_guard == {"sess-fail": 450}
+    runner._session_db.set_meta.assert_called_with(
+        gateway_run._HYGIENE_NOOP_GUARD_META_KEY,
+        json.dumps({"sess-fail": 450}),
+    )
 
     assert await runner._handle_message(event) == "ok"
     assert FakeCompressAgent.calls == 1
     assert runner._run_agent.await_count == 2
     runner.session_store.rewrite_transcript.assert_not_called()
+
+    del runner._hygiene_noop_guard
+    runner._session_db.get_meta.return_value = json.dumps({"sess-fail": 450})
+
+    assert await runner._handle_message(event) == "ok"
+    assert FakeCompressAgent.calls == 1
+    assert runner._run_agent.await_count == 3
