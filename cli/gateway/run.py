@@ -311,6 +311,19 @@ def _gateway_provider_error_reply(text: str) -> str:
     )
 
 
+def _legacy_transcript_recovery_reply(platform: Any) -> str:
+    label = (
+        "Telegram thread"
+        if _gateway_platform_value(platform) == "telegram"
+        else "chat thread"
+    )
+    return (
+        f"⚠️ This older {label} is too large to recover automatically.\n"
+        "Start a new thread with /new, or ask support to archive the legacy "
+        "transcript."
+    )
+
+
 _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     r"^\s*(\W*\s*)?("
     r"api\s+(?:call\s+)?failed"
@@ -6107,6 +6120,7 @@ class GatewayRunner:
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
+        _legacy_recovery_failed = False
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
         logger.info(
             "inbound message: platform=%s user=%s chat=%s msg=%r",
@@ -6857,6 +6871,7 @@ class GatewayRunner:
                             _hyg_reason == "message_count"
                             and _approx_tokens < _warn_token_threshold
                         ):
+                            _legacy_recovery_failed = True
                             _hygiene_record(
                                 _noop_guard,
                                 session_entry.session_id,
@@ -7082,11 +7097,14 @@ class GatewayRunner:
                 )
 
                 if _is_ctx_fail:
-                    response = (
-                        "⚠️ Session too large for the model's context window.\n"
-                        "Use /compact to compress the conversation, or "
-                        "/reset to start fresh."
-                    )
+                    if _legacy_recovery_failed:
+                        response = _legacy_transcript_recovery_reply(source.platform)
+                    else:
+                        response = (
+                            "⚠️ Session too large for the model's context window.\n"
+                            "Use /compact to compress the conversation, or "
+                            "/reset to start fresh."
+                        )
                 else:
                     response = (
                         f"The request failed: {str(error_detail)[:300]}\n"
@@ -7361,6 +7379,8 @@ class GatewayRunner:
                 # 500 with a large session often means the payload is too large
                 # for the API to process — treat it the same way.
                 if _hist_len > 50:
+                    if locals().get("_legacy_recovery_failed"):
+                        return _legacy_transcript_recovery_reply(source.platform)
                     return (
                         "⚠️ Session too large for the model's context window.\n"
                         "Use /compact to compress the conversation, or "

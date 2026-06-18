@@ -829,3 +829,25 @@ async def test_session_hygiene_records_failed_message_count_recovery_guard(
     assert await runner._handle_message(event) == "ok"
     assert FakeCompressAgent.calls == 1
     assert runner._run_agent.await_count == 3
+
+    runner.session_store.load_transcript.return_value = _make_history(
+        476,
+        content_size=20,
+    )
+    runner._run_agent.return_value = {
+        "final_response": "",
+        "messages": [],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "failed": True,
+        "error": "Your input exceeds the context window of this model",
+    }
+
+    response = await runner._handle_message(event)
+
+    assert FakeCompressAgent.calls == 2
+    assert runner._run_agent.await_count == 4
+    assert "older Telegram thread is too large to recover automatically" in response
+    assert "/new" in response
+    assert "Use /compact" not in response

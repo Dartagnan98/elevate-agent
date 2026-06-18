@@ -41,12 +41,20 @@ source, persisted across gateway restarts, and patched into installed app
   same raw count skips the retry, and growth past the retry margin retries.
 - Latest Telegram fixture smoke:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture`
-  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750968.json`.
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781751188.json`.
+- Support-facing failure message:
+  when legacy message-count recovery fails and the normal agent turn then hits
+  context overflow, gateway returns the clean older-thread recovery message
+  instead of the generic `/compact` advice or a raw stack/error.
+- Regression extension:
+  `cli/tests/gateway/test_session_hygiene.py::test_session_hygiene_records_failed_message_count_recovery_guard`
+  now proves the same-count retry is skipped, growth past the retry margin
+  retries once, and context overflow after failed legacy recovery returns the
+  older Telegram thread message.
 
 Remaining work:
 
 - inventory every legacy raw-history source
-- define the final support-facing recovery failure message
 
 ## Goal
 

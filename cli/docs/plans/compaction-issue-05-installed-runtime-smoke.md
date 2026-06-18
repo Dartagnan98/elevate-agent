@@ -35,7 +35,7 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
   guard reloads after a simulated restart.
 - Latest Telegram fixture smoke:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture`
-  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750968.json`.
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781751188.json`.
 - Current provider-call smoke is auth-gated until the installed app license is
   refreshed; latest auth-gated result:
   `/tmp/elevate-installed-smoke-1781749410.json`.
