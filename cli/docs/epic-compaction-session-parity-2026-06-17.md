@@ -90,6 +90,9 @@ Verified fixes already in source and patched into the installed desktop app:
   readiness, which covers the black-shell startup race that manual reload fixed.
 - The installed smoke now attempts close-and-resume transcript verification and
   reports expired license auth gating explicitly.
+- Follow-up/steer `message.complete` events now preserve the replay ring, so
+  reattaching mid-continuation can replay the full live run instead of losing
+  thinking/timeline rows.
 - Installed app was patched under
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/`
   for touched CLI/web files, and `app.asar` was patched for the Electron shell.
@@ -311,7 +314,7 @@ Execution tracker:
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented and extended with close/resume check; provider-call rerun currently auth-gated by expired local license | yes | rerun after license refresh, then add Telegram fixture |
 | 6. Legacy transcript recovery | partially implemented; failed message-count recovery retry guard patched and smoke-tested | yes | inventory sources and decide persisted retry state |
-| 7. Timeline/reasoning soak | plan created; smoke resume check added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
+| 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed and resume smoke added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
 | 8. Release checklist | stub only | no | release candidate exists |
 
 Next action rule:

@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +22,9 @@ def _restore_stdout():
 @pytest.fixture()
 def server():
     with patch.dict("sys.modules", {
-        "elevate_constants": MagicMock(get_elevate_home=MagicMock(return_value="/tmp/elevate_test")),
+        "elevate_constants": MagicMock(
+            get_elevate_home=MagicMock(return_value=Path("/tmp/elevate_test"))
+        ),
         "elevate_cli.env_loader": MagicMock(),
         "elevate_cli.banner": MagicMock(),
         "elevate_state": MagicMock(),
@@ -106,6 +109,56 @@ def test_emit_without_payload(capture):
     assert isinstance(params["ts"], float)
 
 
+def test_event_ring_coalesces_thinking_deltas_for_resume(server):
+    ring = []
+
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "first "}, "thinking.delta"
+    )
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "second"}, "thinking.delta"
+    )
+    server._ring_append(
+        ring, {"type": "message.delta", "payload": {"text": "answer"}}, "message.delta"
+    )
+    server._ring_append(
+        ring, {"type": "thinking.delta", "text": "later"}, "thinking.delta"
+    )
+
+    assert ring == [
+        {"type": "thinking.delta", "text": "first second", "_coalesced": True},
+        {"type": "message.delta", "payload": {"text": "answer"}},
+        {"type": "thinking.delta", "text": "later", "_coalesced": True},
+    ]
+
+
+def test_event_ring_clears_only_terminal_complete(server):
+    server._sessions["live"] = {
+        "events": [],
+        "events_lock": threading.Lock(),
+        "events_seq": 0,
+        "transport": None,
+    }
+    try:
+        server._emit("message.start", "live", {"message_id": "m1"})
+        assert [event["type"] for event in server._sessions["live"]["events"]] == [
+            "message.start"
+        ]
+
+        server._emit(
+            "message.complete", "live", {"message_id": "m1", "followup": True}
+        )
+        assert [event["type"] for event in server._sessions["live"]["events"]] == [
+            "message.start",
+            "message.complete",
+        ]
+
+        server._emit("message.complete", "live", {"message_id": "m1"})
+        assert list(server._sessions["live"]["events"]) == []
+    finally:
+        server._sessions.pop("live", None)
+
+
 # ── Blocking prompt round-trip ───────────────────────────────────────
 
 
@@ -161,6 +214,17 @@ def test_sess_found(server):
 # ── session.resume payload ────────────────────────────────────────────
 
 
+def _disable_background_session_build(server, monkeypatch):
+    class _NoopThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Thread", _NoopThread)
+
+
 def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     class _DB:
         def get_session(self, _sid):
@@ -185,7 +249,9 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_init_session", lambda sid, key, agent, history, cols=80: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
 
     resp = server.handle_request(
         {
@@ -317,6 +383,7 @@ def test_session_resume_replays_running_subagent_events_from_parent(server, monk
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
 
     lock = threading.Lock()
     parent_session = {
@@ -441,6 +508,7 @@ def test_session_resume_attaches_running_subagent_when_parent_ring_is_empty(serv
     monkeypatch.setattr(server, "_make_agent", lambda sid, key, session_id=None: object())
     monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test/model"})
+    _disable_background_session_build(server, monkeypatch)
 
     parent_session = {
         "agent": object(),

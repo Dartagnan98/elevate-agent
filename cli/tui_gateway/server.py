@@ -423,6 +423,14 @@ def _ring_append(ring, params: dict, event_type) -> None:
     ring.append(params)
 
 
+def _event_is_followup(params: dict) -> bool:
+    payload = params.get("payload") if isinstance(params, dict) else None
+    return bool(
+        params.get("followup")
+        or (isinstance(payload, dict) and payload.get("followup"))
+    )
+
+
 def _event_child_session_id(event: dict) -> str:
     payload = event.get("payload") if isinstance(event, dict) else None
     if not isinstance(payload, dict):
@@ -664,12 +672,12 @@ def write_json(obj: dict) -> bool:
                         # followup-flagged complete is a steer continuation
                         # of the same visual run — keep the ring so a
                         # reattach mid-steer replays the whole run.
-                        if event_type == "message.complete" and not params.get("followup"):
+                        if event_type == "message.complete" and not _event_is_followup(params):
                             ring.clear()
                 else:
                     sess["events_seq"] = int(sess.get("events_seq", 0)) + 1
                     _ring_append(ring, params, event_type)
-                    if event_type == "message.complete" and not params.get("followup"):
+                    if event_type == "message.complete" and not _event_is_followup(params):
                         ring.clear()
         if sess is not None:
             transports = sess.get("transports")

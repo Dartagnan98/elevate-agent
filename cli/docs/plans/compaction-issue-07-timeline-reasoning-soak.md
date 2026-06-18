@@ -2,9 +2,9 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: planned; installed smoke now has a close-and-resume transcript check,
-but provider-call verification is blocked until the installed app license is
-refreshed
+Status: partially implemented; protocol replay/follow-up ring coverage is in,
+installed smoke has a close-and-resume transcript check, and provider-call
+verification is blocked until the installed app license is refreshed
 
 ## Current evidence
 
@@ -20,6 +20,22 @@ refreshed
 - The smoke output now reports `license_authenticated`, `license_expired`, and
   a non-secret license status string so auth gating is not mistaken for a
   timeline or compaction regression.
+- Source fix:
+  `cli/tui_gateway/server.py` now preserves the replay ring for
+  follow-up/steer `message.complete` events where the `followup` flag lives
+  inside the event payload.
+- Regression coverage:
+  `cli/tests/tui_gateway/test_protocol.py::test_event_ring_coalesces_thinking_deltas_for_resume`
+  and
+  `cli/tests/tui_gateway/test_protocol.py::test_event_ring_clears_only_terminal_complete`.
+- Focused checks:
+  `cli/.venv/bin/python -m pytest cli/tests/tui_gateway/test_protocol.py cli/tests/tui_gateway/test_message_ids.py cli/tests/test_tui_gateway_server.py -q`
+  -> 129 passed.
+- Installed app patch:
+  `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/tui_gateway/server.py`
+- Installed parity smoke after patch:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781750199.json`.
 
 ## Goal
 
