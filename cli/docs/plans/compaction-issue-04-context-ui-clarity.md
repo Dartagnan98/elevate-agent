@@ -2,7 +2,24 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: detailed build plan, not implemented
+Status: implemented in `0a74c5e61`; patched into installed desktop app
+
+## Implementation evidence
+
+- Source commit: `0a74c5e61 fix(web): clarify compaction context status`
+- Rebuilt web asset: `ChatPage-B0tDyOWz.js`
+- Installed app path patched:
+  `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/elevate_cli/web_dist/`
+- Focused tests:
+  `npm --prefix cli/web test -- slashExec ChatPage.activityDigest` -> 25 passed
+- Focused backend checks:
+  `pytest cli/tests/gateway/test_usage_context_percent.py cli/tests/tui_gateway/test_status_update_pill.py cli/tests/test_tui_gateway_server.py cli/tests/elevate_cli/test_session_recorder.py -q` -> 94 passed
+- Installed app smoke:
+  created session `20260617_184548_505e53`, streamed
+  `message.start`, `thinking.delta`, `status.update`, `message.delta`,
+  `reasoning.available`, `message.complete`, and rendered
+  `issue 4 context UI smoke ok` in Electron with the context ring showing
+  `91%` left.
 
 ## Problem
 

@@ -2,8 +2,9 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: active local epic; foundation and Issues 1-2 are partially implemented;
-Issues 3-4 now have detailed build plans
+Status: active local epic; foundation and Issues 3-4 are implemented; Issues
+1-2 are partially implemented and need installed Telegram-style soak/support
+coverage
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -44,6 +45,10 @@ compaction around 49 percent or 29 percent context remaining.
 Recent commits in the current stack:
 
 ```text
+0a74c5e61 fix(web): clarify compaction context status
+d27bdcd94 fix(web): reconnect stale gateway sockets before submit
+806dabd9a fix(compaction): align default threshold policy
+39a1180f3 docs(compaction): plan threshold and context ui cleanup
 9f5abb026 fix(desktop): retry failed dashboard loads
 38b549190 fix(web): fail fast on stale gateway sockets
 df0848c57 fix(diagnostics): record content-free session timeline events
@@ -72,6 +77,12 @@ Verified fixes already in source and patched into the installed desktop app:
   and `message.complete` are recorded in the local session event recorder.
 - The web gateway client now rejects stale non-open sockets before sending,
   instead of letting submit hang on a dead WebSocket.
+- The default compaction threshold/copy is now aligned around the
+  `85-90%` policy, with real-count mode allowed to use `0.90` unless the user
+  pins a custom threshold.
+- The context ring now stays pending after compaction until fresh usage arrives,
+  labels left-vs-used clearly, and no longer lets generic status text fabricate
+  a manual "Finished compacting" transcript result.
 - The desktop Electron shell retries failed dashboard navigation after backend
   readiness, which covers the black-shell startup race that manual reload fixed.
 - Installed app was patched under
@@ -289,8 +300,8 @@ Execution tracker:
 | --- | --- | --- | --- |
 | 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
 | 2. Explainable compaction events | partially implemented; recorder/logs improved, support summary still open | yes | close after one-event explanation coverage |
-| 3. Threshold policy | detailed plan ready | yes | build next |
-| 4. Claude-style context UI clarity | detailed plan ready | yes | build after Issue 3 or alongside if diff stays small |
+| 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
+| 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | stub only | no | Issue 1 behavior is stable |
 | 6. Legacy transcript recovery | stub only | no | Issue 1 separates legacy vs normal |
 | 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
@@ -298,12 +309,12 @@ Execution tracker:
 
 Next action rule:
 
-1. Build Issue 3 so the product has one threshold ladder instead of stale
-   `0.85`/`0.90`/`0.95` explanations scattered across code and copy.
-2. Build Issue 4 so the context ring/status UI matches the policy and stays
-   quiet during automatic maintenance.
-3. Then turn Issue 5 and Issue 6 into detailed plans for installed-runtime
+1. Soak Issues 3-4 against resumed compacted sessions and real auto/manual
+   compaction flows.
+2. Turn Issue 5 and Issue 6 into detailed plans for installed-runtime
    smoke and legacy transcript recovery.
+3. Then close Issue 1/2 verification gaps with Telegram-style installed soak
+   and support-facing explanation coverage.
 
 Deep-dive branching model:
 
@@ -617,9 +628,9 @@ Telegram path, not only localhost.
    they close the active Telegram crash and cursor persistence failure.
 2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps
    while building the next policy/UI slices.
-3. **Next P1 product clarity:** Issue 3 and Issue 4. Normalize thresholds and
-   make the context UI honest.
-4. **Then test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
+3. **P1 product clarity is built:** Issue 3 and Issue 4 are source + installed
+   app patched; keep them in soak.
+4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
 5. **Then soak:** Issue 7 across real desktop and Telegram sessions.
 6. **Release gate:** Issue 8 before any customer-visible update.
