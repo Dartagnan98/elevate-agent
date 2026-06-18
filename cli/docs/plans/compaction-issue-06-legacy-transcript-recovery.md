@@ -54,7 +54,7 @@ source, persisted across gateway restarts, and patched into installed app
 
 Remaining work:
 
-- inventory every legacy raw-history source
+- real provider-call installed soak after local license refresh
 
 ## Goal
 
@@ -84,21 +84,17 @@ strategy still needs a clear, repeatable contract.
 
 ## Sources of legacy raw history
 
-Audit and document each source before patching behavior:
+Inventory status: audited in source on 2026-06-17.
 
-- Telegram JSONL transcript loaded through gateway session store
-- SQLite session rows from desktop chat
-- old compression-continuation chains
-- resumed sessions opened by original id instead of compression tip
-- rotated or manually reset Telegram agent lanes
-- imported or restored history where `compaction_cursor` is absent
-
-For each source, record:
-
-- where the raw messages load from
-- whether cursor metadata is available
-- whether a compression tip/child session exists
-- whether the session is live-mapped from Telegram/desktop
+| Source | Where it loads | Cursor metadata | Compression tip / child | Live mapping risk | Recovery note |
+| --- | --- | --- | --- | --- | --- |
+| Gateway platform mapping | `cli/gateway/session.py:617-650`, `789-888` loads/saves `sessions.json` and maps a Telegram/Slack/etc. `session_key` to the active `session_id`. | `sessions.json` has `last_prompt_tokens`, but not cursor fields. Cursor lives in DB. | No tip lookup here. It only points the live lane to a physical session id. | High for Telegram: a restart keeps the same live lane pointed at an oversized old id. | Gateway hygiene must inspect the DB row for cursor metadata before using raw message count. |
+| Legacy JSONL transcript | `cli/gateway/session.py:1178-1281` writes every turn to `<session_id>.jsonl` and `load_transcript()` chooses JSONL when it has more rows than SQLite. | None in the file. Cursor must come from `SessionDB.get_session(session_id)`. | None in the file. | High for old Telegram sessions, because JSONL can be the longest source and can stay append-only forever. | Raw count over 400 with no DB cursor is the true legacy-recovery trigger. Raw count over 400 with DB cursor is normal cursor state. |
+| SQLite session/messages | `cli/elevate_state.py:192-235`, `975-995`, `2443-2488` stores sessions, messages, `compaction_summary`, and `compaction_cursor`. | Yes: `sessions.compaction_summary` and `sessions.compaction_cursor`. | Child linkage exists through `parent_session_id`, but cursor compaction no longer rotates. | Medium: desktop and gateway both read this path; stale/missing cursor makes an old session look raw. | This is the source of truth for cursor-aware pressure checks. |
+| Legacy compression-continuation chain | `cli/elevate_state.py:1598-1645` walks children where parent ended with `end_reason='compression'`; `cli/tui_gateway/server.py:2911-2957` tip-walks only when no cursor exists. | Old rotated children may not have cursor metadata; the child itself carries the smaller transcript. | Yes. | Medium: resuming an original pre-redesign id can reload the full parent unless tip-walk happens. | Keep the tip-walk for old rotated sessions, but skip it for cursor sessions. |
+| Desktop/web transcript display | `cli/elevate_cli/web_server.py:4865-4915` resolves active id, loads DB messages, hides internal compaction rows, and adds stable legacy ids. | Indirect: active id resolution uses DB identity, not JSONL. | Yes through `_resolve_active_session_or_404(...)`. | Low for model payload, but high for user perception if internal rows or stale active ids display wrong. | Display filtering must not be confused with model-facing compaction. |
+| Agent payload builder | `cli/run_agent.py:5538-5614` applies `compaction_cursor + compaction_summary` only when building API messages. | Hydrated on `AIAgent` from DB session metadata before payload build. | No tip walk; it trims the current transcript copy. | High if gateway pressure checks count raw history instead of this effective payload. | This remains the canonical model-facing contract: append-only transcript, summary-plus-tail request. |
+| Manual resume/switch | `cli/gateway/session.py:1109-1138` can repoint a live session key to a previous physical session id. | Depends on the target DB row. | Does not tip-walk by itself. | Medium: a user/admin can point Telegram or desktop at an old raw id. | The next turn must run the same cursor/legacy hygiene gate, not a separate resume rule. |
 
 ## Recovery decision contract
 

@@ -98,6 +98,8 @@ Verified fixes already in source and patched into the installed desktop app:
 - Legacy recovery failure now returns a clean older-thread recovery message
   when the same oversized Telegram-style transcript cannot be recovered and the
   normal agent turn hits context overflow.
+- Legacy raw-history sources are inventoried in the Issue 6 plan with their
+  exact load paths, cursor metadata availability, and live mapping risks.
 - Follow-up/steer `message.complete` events now preserve the replay ring, so
   reattaching mid-continuation can replay the full live run instead of losing
   thinking/timeline rows.
@@ -321,7 +323,7 @@ Execution tracker:
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented and extended with close/resume check plus disposable Telegram fixture; provider-call rerun currently auth-gated by expired local license | yes | rerun provider-call/close-resume after license refresh |
-| 6. Legacy transcript recovery | partially implemented; failed retry guard persists, Telegram fixture is smoke-tested, and support-facing failure message is wired | yes | inventory legacy raw-history sources |
+| 6. Legacy transcript recovery | implemented in source and installed parity smoke; raw-history inventory complete | yes | provider-call installed soak after license refresh |
 | 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed and resume smoke added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
 | 8. Release checklist | stub only | no | release candidate exists |
 
