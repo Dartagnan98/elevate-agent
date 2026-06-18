@@ -6,7 +6,7 @@ export interface UseAdminDealsResult {
   deals: AdminDeal[];
   loading: boolean;
   error: string | null;
-  refresh: () => Promise<void>;
+  refresh: (options?: { silent?: boolean }) => Promise<void>;
   moveDeal: (dealId: string, toStage: number) => Promise<void>;
 }
 
@@ -20,7 +20,7 @@ export function useAdminDeals(): UseAdminDealsResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (signal?: { cancelled: boolean }) => {
+  const load = useCallback(async (signal?: { cancelled: boolean }, options?: { keepData?: boolean }) => {
     try {
       const response = await api.getAdminDeals({ status: null, limit: 200 });
       if (signal?.cancelled) return;
@@ -29,15 +29,15 @@ export function useAdminDeals(): UseAdminDealsResult {
     } catch (e) {
       if (signal?.cancelled) return;
       setError(errMsg(e, "Admin deals failed"));
-      setDeals([]);
+      if (!options?.keepData) setDeals([]);
     } finally {
       if (!signal?.cancelled) setLoading(false);
     }
   }, []);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    await load();
+  const refresh = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
+    await load(undefined, { keepData: options?.silent });
   }, [load]);
 
   // Optimistic stage move (kanban drag-and-drop). Update currentStage locally so

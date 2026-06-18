@@ -367,6 +367,11 @@ export interface AdminDealScorecard {
   missingCount: number;
   stageName?: string | null;
   nextStageName?: string | null;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
 }
 
 export interface AdminDeal {

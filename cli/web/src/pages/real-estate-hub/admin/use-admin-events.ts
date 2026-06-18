@@ -9,7 +9,7 @@ export interface UseAdminEventsResult {
   events: AdminEvent[];
   loading: boolean;
   error: string | null;
-  refresh: () => Promise<void>;
+  refresh: (options?: { silent?: boolean }) => Promise<void>;
 }
 
 function errMsg(e: unknown, fallback: string): string {
@@ -23,7 +23,7 @@ export function useAdminEvents(days = 21): UseAdminEventsResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (signal?: { cancelled: boolean }) => {
+  const load = useCallback(async (signal?: { cancelled: boolean }, options?: { keepData?: boolean }) => {
     try {
       const response = await api.getAdminUpcomingEvents(days);
       if (signal?.cancelled) return;
@@ -32,17 +32,19 @@ export function useAdminEvents(days = 21): UseAdminEventsResult {
       setError(null);
     } catch (e) {
       if (signal?.cancelled) return;
-      setRawEvents([]);
-      setEvents([]);
+      if (!options?.keepData) {
+        setRawEvents([]);
+        setEvents([]);
+      }
       setError(errMsg(e, "Admin events failed"));
     } finally {
       if (!signal?.cancelled) setLoading(false);
     }
   }, [days]);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    await load();
+  const refresh = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
+    await load(undefined, { keepData: options?.silent });
   }, [load]);
 
   useEffect(() => {

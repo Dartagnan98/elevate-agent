@@ -17,6 +17,7 @@ export type PipelinePhase = {
 
 export type Deal = {
   id: string;
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -28,6 +29,11 @@ export type Deal = {
   blocked?: boolean;
   canAdvance?: boolean;
   missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
 };
@@ -35,6 +41,7 @@ export type Deal = {
 export type BuyerDeal = {
   id: string;
   side: "buyer";
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -44,6 +51,11 @@ export type BuyerDeal = {
   blocked?: boolean;
   canAdvance?: boolean;
   missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
 };
@@ -134,7 +146,7 @@ export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
   { id: "offer",        stage: "S0",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
   { id: "accepted",     stage: "S1",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
   { id: "conditions",   stage: "S2",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
-  { id: "closed",       stage: "S4",  name: "Closed",              motion: "manual", next: "Moves on file archived",                  hint: "Archive + nurture" },
+  { id: "removed",      stage: "S3",  name: "Subjects Off",        motion: "manual", next: "Moves on file archived",                  hint: "Deposit + dates" },
 ];
 
 // ---------------------------------------------------------------------------

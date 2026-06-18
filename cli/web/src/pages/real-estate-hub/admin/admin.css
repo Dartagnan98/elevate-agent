@@ -1999,7 +1999,11 @@
   margin-left: auto;
   font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--status-warn);
+  white-space: nowrap;
 }
+.ab-deal-flag.working { color: var(--accent); }
+.ab-deal-flag.waiting,
+.ab-deal-flag.failed { color: var(--status-warn); }
 .ab-deal-addr {
   font: 500 13.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);

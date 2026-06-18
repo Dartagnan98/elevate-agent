@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   Plus,
   Refresh,
@@ -165,6 +165,7 @@ function PipelineVelocity({ dealsByPhase }: { dealsByPhase: Record<string, Deal[
 
 interface Deal {
   id: string;
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -182,6 +183,42 @@ interface Deal {
   side?: string;
   canAdvance?: boolean;
   missingCount?: number;
+  activeRunCount?: number;
+  runningRunCount?: number;
+  waitingHumanCount?: number;
+  activeRunLabel?: string | null;
+  activeRunStatus?: string | null;
+}
+
+const DEAL_DRAG_MIME = "application/x-elevate-admin-deal-id";
+const POST_DRAG_CLICK_SUPPRESS_MS = 500;
+
+function phaseStageNumber(phase: PipelinePhase): number | null {
+  const value = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+function dealDragId(dataTransfer: DataTransfer, fallback?: string | null): string {
+  return (
+    dataTransfer.getData(DEAL_DRAG_MIME) ||
+    dataTransfer.getData("text/plain") ||
+    fallback ||
+    ""
+  );
+}
+
+function shouldDropDeal(
+  deals: Deal[],
+  draggedDeal: Deal | null | undefined,
+  stageNum: number | null,
+): stageNum is number {
+  if (!draggedDeal?.id || stageNum == null) return false;
+  if (deals.some((deal) => deal.id === draggedDeal.id)) return false;
+
+  const fromStage = typeof draggedDeal.stage === "number" ? draggedDeal.stage : null;
+  if (fromStage == null || stageNum === fromStage) return false;
+  if (stageNum < fromStage) return true;
+  return draggedDeal.canAdvance === true && stageNum === fromStage + 1;
 }
 
 function DealCard({
@@ -193,21 +230,55 @@ function DealCard({
 }: {
   deal: Deal;
   onOpen?: (deal: Deal) => void;
-  onDragStart?: (id: string) => void;
+  onDragStart?: (deal: Deal) => void;
   onDragEnd?: () => void;
   dragging?: boolean;
 }) {
+  const lastDragAtRef = useRef(0);
+  const waitingCount = deal.waitingHumanCount ?? 0;
+  const runningCount = deal.runningRunCount ?? 0;
+  const activityLabel = deal.activeRunLabel || `${deal.daysInStage || "3d"} in stage`;
+  const statusLabel =
+    waitingCount > 0
+      ? "Waiting on you"
+      : runningCount > 0
+        ? runningCount > 1
+          ? `${runningCount} working`
+          : "Working"
+        : deal.activeRunStatus === "failed"
+          ? "Needs review"
+          : deal.blocked
+            ? "Blocked"
+            : null;
+  const statusClass =
+    waitingCount > 0
+      ? " waiting"
+      : runningCount > 0
+        ? " working"
+        : deal.activeRunStatus === "failed"
+          ? " failed"
+          : "";
+
   return (
     <div
       className={"ab-deal" + (deal.blocked ? " blocked" : "") + (dragging ? " dragging" : "")}
       draggable
       onDragStart={(e) => {
+        lastDragAtRef.current = Date.now();
         e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData(DEAL_DRAG_MIME, deal.id);
         e.dataTransfer.setData("text/plain", deal.id);
-        onDragStart?.(deal.id);
+        onDragStart?.(deal);
       }}
       onDragEnd={() => onDragEnd?.()}
-      onClick={() => onOpen?.(deal)}
+      onClick={(e) => {
+        if (Date.now() - lastDragAtRef.current < POST_DRAG_CLICK_SUPPRESS_MS) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        onOpen?.(deal);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -236,8 +307,8 @@ function DealCard({
         <span className="ab-deal-owner" title={deal.owner || "Demo Agent"}>
           {deal.ownerInitial || "A"}
         </span>
-        <span className="ab-deal-time">{deal.daysInStage || "3d"} in stage</span>
-        {deal.blocked && <span className="ab-deal-flag">Blocked</span>}
+        <span className="ab-deal-time" title={activityLabel}>{activityLabel}</span>
+        {statusLabel && <span className={`ab-deal-flag${statusClass}`}>{statusLabel}</span>}
       </div>
     </div>
   );
@@ -254,28 +325,28 @@ function PipelineColumn({
   onDropDeal,
   onCardDragStart,
   onCardDragEnd,
-  draggingId,
+  draggingDeal,
   canDrop,
 }: {
   phase: PipelinePhase;
   deals: Deal[];
   onOpenDeal: (deal: Deal) => void;
   onDropDeal?: (dealId: string, toStage: number) => void;
-  onCardDragStart?: (id: string) => void;
+  onCardDragStart?: (deal: Deal) => void;
   onCardDragEnd?: () => void;
-  draggingId?: string | null;
+  draggingDeal?: Deal | null;
   canDrop?: boolean;
 }) {
   const motion = phase.motion || phase.note;
   const [isOver, setIsOver] = useState(false);
   // phase.stage is "S<n>" — the numeric stage the move endpoint expects.
-  const stageNum = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
-  const dndEnabled = Boolean(onDropDeal) && Number.isFinite(stageNum);
+  const stageNum = phaseStageNumber(phase);
+  const dndEnabled = Boolean(onDropDeal) && stageNum != null;
   return (
     <div
       className={"ab-col" + (isOver && canDrop ? " drop-over" : "")}
       onDragOver={(e) => {
-        if (!dndEnabled || !draggingId) return;
+        if (!dndEnabled || !canDrop) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
         if (!isOver) setIsOver(true);
@@ -287,8 +358,10 @@ function PipelineColumn({
         if (!dndEnabled) return;
         e.preventDefault();
         setIsOver(false);
-        const id = e.dataTransfer.getData("text/plain") || draggingId;
-        if (id) onDropDeal?.(id, stageNum);
+        const id = dealDragId(e.dataTransfer, draggingDeal?.id);
+        if (id === draggingDeal?.id && shouldDropDeal(deals, draggingDeal, stageNum)) {
+          onDropDeal?.(id, stageNum);
+        }
       }}
     >
       <header className="ab-col-head">
@@ -312,7 +385,7 @@ function PipelineColumn({
               onOpen={onOpenDeal}
               onDragStart={onCardDragStart}
               onDragEnd={onCardDragEnd}
-              dragging={draggingId === d.id}
+              dragging={draggingDeal?.id === d.id}
             />
           ))
         )}
@@ -340,7 +413,7 @@ function Top25Deals({
       "offer", "conditions", "closing", "closed",
     ];
     const buyerOrder = [
-      "offer", "accepted", "conditions", "closed",
+      "offer", "accepted", "conditions", "removed",
     ];
     const order = mode === "buyer" ? buyerOrder : listingOrder;
     const score = (d: Deal) => {
@@ -916,7 +989,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [query, setQuery] = useState("");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [showNewDeal, setShowNewDeal] = useState(false);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [draggingDeal, setDraggingDeal] = useState<Deal | null>(null);
 
   // Never fall back to the ADMIN_DEALS / ADMIN_BUYER_DEALS demo fixtures: a
   // real account with no deals must see an empty board, not fabricated sample
@@ -1046,10 +1119,10 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 deals={dealsByPhase[p.id] || []}
                 onOpenDeal={handleOpenDeal}
                 onDropDeal={onMoveDeal}
-                onCardDragStart={(id) => setDraggingId(id)}
-                onCardDragEnd={() => setDraggingId(null)}
-                draggingId={draggingId}
-                canDrop={Boolean(draggingId)}
+                onCardDragStart={(deal) => setDraggingDeal(deal)}
+                onCardDragEnd={() => setDraggingDeal(null)}
+                draggingDeal={draggingDeal}
+                canDrop={shouldDropDeal(dealsByPhase[p.id] || [], draggingDeal, phaseStageNumber(p))}
               />
             ))}
           </div>
@@ -1067,6 +1140,13 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
 }
 
 export default AdminBoard;
+
+export const __adminBoardTestables = {
+  DEAL_DRAG_MIME,
+  dealDragId,
+  phaseStageNumber,
+  shouldDropDeal,
+};
 
 // Components defined above for future live-data wiring; reference them here
 // so noUnusedLocals stays quiet until they're rendered.

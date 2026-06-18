@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from elevate_cli.data import (
+    add_deal_attachment,
     complete_admin_setup,
     connect,
     create_action,
@@ -368,7 +369,7 @@ def test_admin_setup_verify_endpoint_uses_agent_telegram_env(monkeypatch):
     assert by_key["approval_channel"]["provider"] == "telegram"
 
 
-def _create(title="Deal", side="listing", current_stage=0):
+def _create(title="Deal", side="listing", current_stage=0, dispatch_initial_stage=True):
     with connect() as conn:
         return create_deal(
             conn,
@@ -376,6 +377,7 @@ def _create(title="Deal", side="listing", current_stage=0):
             side=side,
             current_stage=current_stage,
             actor="human:test",
+            dispatch_initial_stage=dispatch_initial_stage,
         )
 
 
@@ -468,6 +470,33 @@ def test_create_deal_can_suppress_initial_stage_dispatch_for_imports(client):
     assert runs[0]["payload"]["toStage"] == 4
 
 
+def test_admin_deal_scorecard_surfaces_active_run_state(client):
+    with connect() as conn:
+        create_action(
+            conn,
+            name="Live card action",
+            trigger="stage_entry",
+            skill="listing-build",
+            side="listing",
+            to_stage=2,
+        )
+
+    created = client.post(
+        "/api/admin/deals",
+        json={"title": "Live card deal", "side": "listing", "currentStage": 2},
+    )
+    assert created.status_code == 200, created.text
+
+    listed = client.get("/api/admin/deals")
+    assert listed.status_code == 200, listed.text
+    item = next(row for row in listed.json()["items"] if row["id"] == created.json()["id"])
+    scorecard = item["scorecard"]
+    assert scorecard["activeRunCount"] == 1
+    assert scorecard["runningRunCount"] == 1
+    assert scorecard["waitingHumanCount"] == 0
+    assert scorecard["activeRunLabel"] == "Live card action"
+    assert scorecard["activeRunStatus"] == "running"
+
 
 def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_values(client):
     resp = client.get("/api/admin/jurisdiction")
@@ -554,6 +583,46 @@ def test_move_deal_endpoint_blocks_incomplete_forward_stage_move(client):
     assert detail["gate"]["stage"] == 1
     # Stage 1 is CMA / Evaluation — its recommended list price gates the advance.
     assert any(item["field"] == "listPrice" for item in detail["gate"]["missingFields"])
+
+
+def test_move_deal_endpoint_reports_clear_gate_skip_as_wrong_target(client):
+    with connect() as conn:
+        deal = create_deal(
+            conn,
+            title="Skip me",
+            side="listing",
+            current_stage=1,
+            actor="human:test",
+            fields={
+                "cma_pdf_ready": True,
+                "pricing_story_approved": True,
+                "client_yes_to_listing": True,
+                "workflow_cma_date_requested": "2026-05-01",
+            },
+            dispatch_initial_stage=False,
+        )
+        add_deal_attachment(
+            conn,
+            deal["id"],
+            kind="cma_report",
+            file_path="/tmp/cma.pdf",
+            summary="CMA ready",
+            actor="human:test",
+        )
+        conn.execute("UPDATE deals SET list_price=? WHERE id=?", (799000, deal["id"]))
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/move",
+        json={"toStage": 3},
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["message"] == "deal must move through the next phase gate"
+    assert detail["gate"]["stage"] == 1
+    assert detail["gate"]["canAdvance"] is True
+    assert detail["gate"]["nextStage"] == 2
+    assert detail["gate"]["targetStage"] == 3
 
 
 def test_force_move_deal_endpoint_persists_stage_and_audits_override(client):

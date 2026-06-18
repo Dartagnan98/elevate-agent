@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import AdminBoard from "./components/admin-board";
 import { useAdminDeals } from "./use-admin-deals";
 import { adminDealToDeal, adminDealToBuyerDeal } from "./admin-mappers";
@@ -63,9 +64,26 @@ export function AdminDesignShell() {
   const fallbackEvents = useMemo(() => computeAdminEvents(deals), [deals]);
   const events = syncedEvents.length > 0 ? syncedEvents : fallbackEvents;
   const visibleError = error || (eventsError && fallbackEvents.length === 0 ? eventsError : null);
-  const handleRefresh = async () => {
-    await Promise.all([refresh(), refreshEvents()]);
-  };
+  const handleRefresh = useCallback(async (options?: { silent?: boolean }) => {
+    await Promise.all([refresh(options), refreshEvents(options)]);
+  }, [refresh, refreshEvents]);
+
+  useRefreshOnAgentTurn(() => handleRefresh({ silent: true }));
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    const refreshVisible = () => {
+      if (!document.hidden) void handleRefresh({ silent: true });
+    };
+    const interval = window.setInterval(refreshVisible, 25_000);
+    document.addEventListener("visibilitychange", refreshVisible);
+    window.addEventListener("focus", refreshVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshVisible);
+      window.removeEventListener("focus", refreshVisible);
+    };
+  }, [handleRefresh]);
 
   return (
     <div className="app admin-design-embedded" {...rootAttrs}>
@@ -107,7 +125,7 @@ export function AdminDesignShell() {
           events={events}
           loading={loading}
           error={visibleError}
-          onRefresh={handleRefresh}
+          onRefresh={() => handleRefresh()}
           onMoveDeal={moveDeal}
           onReRunOnboarding={() => setForceOnboarding(true)}
         />

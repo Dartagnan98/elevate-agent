@@ -1106,8 +1106,11 @@ def move_deal_stage(
     gate_snapshot: dict[str, Any] | None = None
     if to_stage > from_stage and not force and not gate_checked:
         gate_snapshot = _resolved_phase_gate(conn, deal_id, expected_stage=int(from_stage or 0))
-        if not gate_snapshot.get("canAdvance") or gate_snapshot.get("nextStage") != to_stage:
+        if not gate_snapshot.get("canAdvance"):
             raise DealPhaseGateBlocked("deal phase gate is blocked", gate=gate_snapshot)
+        if gate_snapshot.get("nextStage") != to_stage:
+            gate_with_target = {**gate_snapshot, "targetStage": to_stage}
+            raise DealPhaseGateBlocked("deal must move through the next phase gate", gate=gate_with_target)
     now = now_iso()
     conn.execute(
         """
@@ -1945,16 +1948,37 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
         + len(gate.get("missingFields") or [])
         + len(gate.get("missingDocs") or [])
     )
-    blocking = len(gate.get("blockingRuns") or [])
+    blocking_runs = [
+        run for run in (gate.get("blockingRuns") or []) if isinstance(run, Mapping)
+    ]
+    status_rank = {
+        "waiting_human": 0,
+        "failed": 1,
+        "running": 2,
+        "queued": 3,
+        "waiting_external": 4,
+    }
+    active_run = min(
+        blocking_runs,
+        key=lambda run: status_rank.get(str(run.get("status") or ""), 9),
+        default={},
+    )
+    waiting_human = sum(1 for run in blocking_runs if run.get("status") == "waiting_human")
+    running = sum(1 for run in blocking_runs if run.get("status") in {"queued", "running"})
     return {
         "progress": f"{completed}/{total}" if total else None,
         "completedChecklist": completed,
         "totalChecklist": total,
         "canAdvance": bool(gate.get("canAdvance")),
-        "blocked": blocking > 0,
+        "blocked": len(blocking_runs) > 0,
         "missingCount": missing,
         "stageName": gate.get("stageName"),
         "nextStageName": gate.get("nextStageName"),
+        "activeRunCount": len(blocking_runs),
+        "runningRunCount": running,
+        "waitingHumanCount": waiting_human,
+        "activeRunLabel": active_run.get("label"),
+        "activeRunStatus": active_run.get("status"),
     }
 
 

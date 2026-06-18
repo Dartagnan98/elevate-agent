@@ -151,6 +151,74 @@ function clearGetCache(): void {
   GET_CACHE.clear();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function itemLabel(item: unknown): string {
+  if (!isRecord(item)) return "";
+  for (const key of ["label", "field", "kind", "name", "id"]) {
+    const value = stringValue(item[key]);
+    if (value) return value;
+  }
+  return "";
+}
+
+function compactList(items: unknown, limit = 4): string {
+  if (!Array.isArray(items)) return "";
+  const labels = items.map(itemLabel).filter(Boolean);
+  if (!labels.length) return "";
+  const shown = labels.slice(0, limit);
+  const hidden = labels.length - shown.length;
+  return hidden > 0 ? `${shown.join(", ")}, +${hidden} more` : shown.join(", ");
+}
+
+function formatGateError(detail: Record<string, unknown>): string | null {
+  const gate = isRecord(detail.gate) ? detail.gate : null;
+  if (!gate) return null;
+
+  const message = stringValue(detail.message);
+  const stageName = stringValue(gate.stageName) || "This stage";
+  const nextStageName = stringValue(gate.nextStageName);
+
+  if (message === "deal must move through the next phase gate") {
+    return nextStageName
+      ? `Move through ${nextStageName} first.`
+      : "Move through the next phase first.";
+  }
+
+  const missing = [
+    ...(Array.isArray(gate.missingChecklist) ? gate.missingChecklist : []),
+    ...(Array.isArray(gate.missingFields) ? gate.missingFields : []),
+    ...(Array.isArray(gate.missingDocs) ? gate.missingDocs : []),
+  ];
+  const needs = compactList(missing);
+  const runs = Array.isArray(gate.blockingRuns) ? gate.blockingRuns.filter(isRecord) : [];
+  const waiting = compactList(runs.filter((run) => stringValue(run.status) === "waiting_human"), 2);
+  const runningCount = runs.filter((run) => stringValue(run.status) !== "waiting_human").length;
+
+  const parts = [`${stageName} is blocked.`];
+  if (needs) parts.push(`Need: ${needs}.`);
+  if (waiting) parts.push(`Waiting on you: ${waiting}.`);
+  if (runningCount > 0) parts.push(`Running: ${runningCount} task${runningCount === 1 ? "" : "s"}.`);
+  return parts.join(" ");
+}
+
+function formatStructuredErrorDetail(value: unknown): string {
+  if (!isRecord(value)) return "";
+  const gateMessage = formatGateError(value);
+  if (gateMessage) return gateMessage;
+  for (const key of ["message", "error", "reason"]) {
+    const text = stringValue(value[key]);
+    if (text) return text;
+  }
+  return "";
+}
+
 function extractErrorDetail(body: string): string {
   const trimmed = body.trim();
   if (!trimmed) return "";
@@ -163,6 +231,8 @@ function extractErrorDetail(body: string): string {
         if (typeof value === "string" && value.trim()) {
           return value.trim();
         }
+        const formatted = formatStructuredErrorDetail(value);
+        if (formatted) return formatted;
       }
       return JSON.stringify(parsed);
     }
@@ -2050,6 +2120,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...crm, action: "test" }),
     }),
+};
+
+export const __apiTestables = {
+  extractErrorDetail,
 };
 
 export type * from "./api-types";

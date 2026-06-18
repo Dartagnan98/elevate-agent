@@ -33,28 +33,28 @@ const BUYER_STAGE_TO_PHASE: Record<number, string> = {
   0: "offer",
   1: "accepted",
   2: "conditions",
-  3: "conditions",
-  4: "closed",
-  5: "closed",
-  6: "closed",
-  7: "closed",
-  8: "closed",
-  9: "closed",
-  10: "closed",
+  3: "removed",
+  4: "removed",
+  5: "removed",
+  6: "removed",
+  7: "removed",
+  8: "removed",
+  9: "removed",
+  10: "removed",
 };
 
 const BUYER_STAGE_BADGE: Record<number, string> = {
   0: "Offer Prep",
   1: "Accepted",
   2: "Condition Removal",
-  3: "Condition Removal",
-  4: "Closed",
-  5: "Closed",
-  6: "Closed",
-  7: "Closed",
-  8: "Closed",
-  9: "Closed",
-  10: "Closed",
+  3: "Subjects Off",
+  4: "Subjects Off",
+  5: "Subjects Off",
+  6: "Subjects Off",
+  7: "Subjects Off",
+  8: "Subjects Off",
+  9: "Subjects Off",
+  10: "Subjects Off",
 };
 
 const LISTING_STAGE_NEXT: Record<number, string> = {
@@ -75,14 +75,14 @@ const BUYER_STAGE_NEXT: Record<number, string> = {
   0: "Offer package ready",
   1: "Accepted-offer checked",
   2: "Conditions tracked / removal pending",
-  3: "Conditions removed",
-  4: "File archived",
-  5: "File archived",
-  6: "File archived",
-  7: "File archived",
-  8: "File archived",
-  9: "File archived",
-  10: "File archived",
+  3: "File archive / nurture",
+  4: "File archive / nurture",
+  5: "File archive / nurture",
+  6: "File archive / nurture",
+  7: "File archive / nurture",
+  8: "File archive / nurture",
+  9: "File archive / nurture",
+  10: "File archive / nurture",
 };
 
 function shortAddr(addr: string | null, fallback: string): string {
@@ -131,6 +131,7 @@ export function adminDealToDeal(d: AdminDeal): Deal {
   const note = top25Note(d);
   return {
     id: d.id,
+    stage,
     phase,
     addr,
     line2,
@@ -144,6 +145,11 @@ export function adminDealToDeal(d: AdminDeal): Deal {
     blocked: d.scorecard?.blocked ?? undefined,
     canAdvance: d.scorecard?.canAdvance ?? undefined,
     missingCount: d.scorecard?.missingCount ?? undefined,
+    activeRunCount: d.scorecard?.activeRunCount ?? undefined,
+    runningRunCount: d.scorecard?.runningRunCount ?? undefined,
+    waitingHumanCount: d.scorecard?.waitingHumanCount ?? undefined,
+    activeRunLabel: d.scorecard?.activeRunLabel ?? undefined,
+    activeRunStatus: d.scorecard?.activeRunStatus ?? undefined,
   };
 }
 
@@ -156,6 +162,7 @@ export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
   const note = top25Note(d);
   return {
     id: d.id,
+    stage,
     side: "buyer",
     phase,
     addr: `${title} — buyer track`,
@@ -165,6 +172,11 @@ export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
     blocked: d.scorecard?.blocked ?? undefined,
     canAdvance: d.scorecard?.canAdvance ?? undefined,
     missingCount: d.scorecard?.missingCount ?? undefined,
+    activeRunCount: d.scorecard?.activeRunCount ?? undefined,
+    runningRunCount: d.scorecard?.runningRunCount ?? undefined,
+    waitingHumanCount: d.scorecard?.waitingHumanCount ?? undefined,
+    activeRunLabel: d.scorecard?.activeRunLabel ?? undefined,
+    activeRunStatus: d.scorecard?.activeRunStatus ?? undefined,
     next,
     primary: d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true,
     top25Note: note,
