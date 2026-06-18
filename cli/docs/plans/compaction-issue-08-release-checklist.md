@@ -3,19 +3,19 @@
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
 Status: checklist created; installed provider-call, desktop compacted follow-up,
-disposable Telegram hygiene, and light visual smoke pass; release still blocked
-until live Telegram/manual oversized-session soak passes
+disposable Telegram hygiene, live Telegram copied-lane soak, and light visual
+smoke pass; release is down to optional final human visual pass
 
 ## Current go/no-go
 
-Do not send the customer-visible update yet. Source tests, installed file
-parity, the disposable Telegram fixture, the real desktop provider-call
+Do not send the customer-visible update yet without a final human visual pass.
+Source tests, installed file parity, the disposable Telegram fixture, the real desktop provider-call
 close/resume smoke, the real installed desktop compact/resume/follow-up smoke,
 the installed synthetic Telegram hygiene soak, and installed Electron visual
 checks are passing. The compacted smoke session renders all setup turns plus
 `compacted followup ok`, with context pending (`--`) instead of stale usage.
-The remaining release gate is live Telegram/manual oversized-session soak
-against a disposable copied lane.
+Live Telegram/manual oversized-session soak also passed against a disposable
+copied lane, and the original Telegram lane was restored afterward.
 
 ## Source checks
 
@@ -171,6 +171,21 @@ customer transcript for this check.
 6. If recovery cannot fit, confirm the user sees the older-thread recovery
    message, not `AttributeError`, `_emit_warning`, or raw provider details.
 
+Current live evidence:
+
+- Cursor copied-lane fixture `live_tg_cursor_20260617_205934-29c5e8` resumed
+  through Telegram Desktop and answered `live telegram cursor ok` without
+  repeat hygiene compaction.
+- No-cursor copied-lane fixture `live_tg_legacy_fix_20260617_210746-045fb4`
+  compacted via live Telegram from cursor `0 -> 447`, answered
+  `live telegram legacy fixed ok`, and kept the live session mapping on the
+  same fixture.
+- The first live no-cursor attempt exposed a cached-agent bug in `/resume`;
+  fixed by evicting the cached agent on resume and covered by
+  `test_resume_evicts_cached_agent`.
+- The live Telegram EA lane was restored to `20260612_122522_da6d8a97`
+  (`Human Approval Queue Blocker`).
+
 ## Log checks
 
 Use these for support triage:
@@ -191,7 +206,6 @@ One report should answer:
 
 ## Release blocker list
 
-- Real Telegram/manual oversized-session soak still needed.
 - Optional human visual pass on the automated desktop compacted smoke session.
 - Watch the observed `/api/workspace/git/status` temp-file replace race from
   the installed smoke run; it did not fail the compaction smoke, but it is a

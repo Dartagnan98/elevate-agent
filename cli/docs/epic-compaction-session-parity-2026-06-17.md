@@ -2,9 +2,9 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: active local epic; foundation and Issues 1-7 are implemented in source
+Status: active local epic; foundation and Issues 1-8 are implemented in source
 and installed smoke coverage; live Telegram/manual oversized-session soak
-remains the main release gate
+passed after one cached-agent resume bug was found and fixed
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -122,6 +122,10 @@ Verified fixes already in source and patched into the installed desktop app:
 - Support can summarize structured compaction logs with
   `cli/scripts/compaction_log_summary.py`, and gateway legacy hygiene tests now
   assert failed-recovery and no-op-guard compaction log records.
+- `/resume` now evicts the cached `AIAgent` for that platform session key.
+  The live Telegram soak exposed that the legacy recovery response could be
+  written back to the previously cached physical session after switching from a
+  cursor fixture to a no-cursor fixture.
 - Installed app was patched under
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/`
   for touched CLI/web files, and `app.asar` was patched for the Electron shell.
@@ -143,6 +147,11 @@ installed desktop compacted follow-up smoke ok - manual compact advanced cursor,
   resume+follow-up completed, no repeat compaction logged
 installed Electron visual check ok - compacted smoke transcript visible,
   context usage pending instead of stale
+48 passed - gateway resume/cache, session-boundary, and agent-cache focused suite
+live Telegram copied-lane soak ok - cursor fixture skipped repeat hygiene,
+  no-cursor 450-message fixture compacted cursor 0->447, exact reply landed in
+  the same fixture, no Session split regression, and the lane was restored to
+  Human Approval Queue Blocker
 ```
 
 ## Epic acceptance
@@ -345,20 +354,20 @@ Execution tracker:
 
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
-| 1. Gateway hygiene parity | implemented; installed Telegram-shaped hygiene soak passes | yes | live Telegram copied-lane soak |
-| 2. Explainable compaction events | implemented; shared structured logs plus support summary script added | yes | live Telegram/manual event coverage |
+| 1. Gateway hygiene parity | implemented; installed Telegram-shaped hygiene soak and live copied-lane soak pass | yes | keep in release soak |
+| 2. Explainable compaction events | implemented; shared structured logs plus support summary script added and live Telegram events verified | yes | keep in release soak |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | keep in soak |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | keep in soak |
 | 5. Installed-runtime smoke | implemented; provider close/resume, Telegram fixture/hygiene, and compacted desktop follow-up pass | yes | reuse as release smoke |
-| 6. Legacy transcript recovery | implemented in source and installed synthetic soak; raw-history inventory complete | yes | live Telegram/manual oversized-session soak |
+| 6. Legacy transcript recovery | implemented in source and installed synthetic/live soak; raw-history inventory complete | yes | keep in release soak |
 | 7. Timeline/reasoning soak | implemented for desktop; replay ring, installed close/resume, visual, and compacted follow-up pass | yes | optional human visual pass |
-| 8. Release checklist | checklist created; only live Telegram/manual oversized-session soak is still a release gate | yes | live Telegram copied-lane soak pass |
+| 8. Release checklist | checklist updated; live Telegram/manual oversized-session soak passed | yes | optional human visual pass |
 
 Next action rule:
 
 1. Reuse Issue 5's installed-runtime smoke harness as the release smoke.
-2. Run one live Telegram/manual oversized-session soak against a copied lane,
-   not the original customer transcript.
+2. Keep one optional human visual pass on the installed desktop compacted smoke
+   session before a customer-visible update.
 
 Deep-dive branching model:
 
@@ -673,15 +682,16 @@ Telegram path, not only localhost.
 
 1. **Ship guardrails already fixed:** keep the current commits together because
    they close the active Telegram crash and cursor persistence failure.
-2. **Current P0 follow-through:** Issue 1/2 source and installed synthetic
-   coverage are in; only live Telegram/manual copied-lane coverage remains.
+2. **Current P0 follow-through:** Issue 1/2 source, installed synthetic
+   coverage, and live Telegram copied-lane coverage are in.
 3. **P1 product clarity is built:** Issue 3 and Issue 4 are source + installed
    app patched; keep them in soak.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
-5. **Then soak:** Issue 7 desktop coverage is automated and green; current
-   blocker is live Telegram/manual copied-lane coverage, not provider auth.
-6. **Release gate:** Issue 8 before any customer-visible update.
+5. **Then soak:** Issue 7 desktop coverage is automated and green; live
+   Telegram copied-lane coverage is now green too.
+6. **Release gate:** Issue 8 plus optional final human visual pass before any
+   customer-visible update.
 
 ## Open decisions
 
@@ -699,7 +709,6 @@ Telegram path, not only localhost.
 ## Current local state
 
 As of the latest docs pass, the recent source fixes are committed locally and
-the installed desktop runtime has been patched/smoked. The remaining release
-confidence gap is a live Telegram/manual oversized-session soak using a copied
-lane, because the installed synthetic hygiene soak already covers the gateway
-bug path without mutating real customer history.
+the installed desktop runtime has been patched/smoked. The live
+Telegram/manual oversized-session soak also passed using a copied lane, and the
+original Telegram EA lane was restored to `Human Approval Queue Blocker`.

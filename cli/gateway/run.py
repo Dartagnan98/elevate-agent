@@ -10060,6 +10060,7 @@ class GatewayRunner:
 
         # Clear any running agent for this session key
         self._release_running_agent_state(session_key)
+        self._evict_cached_agent(session_key)
 
         # Switch the session entry to point at the old session
         new_entry = self.session_store.switch_session(session_key, target_id)

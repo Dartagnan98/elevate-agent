@@ -3,8 +3,8 @@
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
 Status: implemented for source plus installed synthetic Telegram hygiene soak;
-live Telegram network soak with a copied oversized lane is still the remaining
-release-confidence check
+live Telegram network soak with a copied oversized lane passed after one
+resume cached-agent bug was found and fixed
 
 ## Implementation evidence
 
@@ -60,11 +60,32 @@ release-confidence check
   `1`, failed recovery calls `2`, same-count retry skipped, persisted guard
   reloaded after simulated restart, growth retried, and the clean older-thread
   recovery message returned without `_emit_warning`.
+- Live Telegram copied-lane soak:
+  - Cursor fixture `live_tg_cursor_20260617_205934-29c5e8` resumed through
+    Telegram Desktop and answered `live telegram cursor ok` without repeat
+    hygiene compaction from raw 450-message history.
+  - First no-cursor fixture `live_tg_legacy_20260617_205934-29c5e8`
+    successfully cursor-compacted `0 -> 447`, but exposed that `/resume` had
+    not evicted the cached agent for the Telegram session key; the exact reply
+    was written to the previous cursor fixture.
+  - Source fix: `cli/gateway/run.py` now evicts the cached agent during
+    `/resume`, matching `/branch` session-boundary behavior.
+  - Regression test:
+    `cli/tests/gateway/test_resume_command.py::TestHandleResumeCommand::test_resume_evicts_cached_agent`.
+  - Focused check:
+    `cli/.venv/bin/pytest tests/gateway/test_resume_command.py tests/gateway/test_session_boundary_security_state.py tests/gateway/test_agent_cache.py`
+    from `cli/` -> 48 passed.
+  - Retest fixture `live_tg_legacy_fix_20260617_210746-045fb4` resumed through
+    Telegram Desktop, compacted `0 -> 447`, answered
+    `live telegram legacy fixed ok`, persisted the assistant reply in the same
+    fixture, kept the live Telegram mapping on that fixture during the turn,
+    and then restored the lane to `20260612_122522_da6d8a97`
+    (`Human Approval Queue Blocker`).
 
 Remaining work:
 
-- live Telegram network/manual oversized-session soak against a disposable
-  copied lane, not the original customer transcript
+- optional final human visual pass on the installed desktop compacted smoke
+  session before a customer-visible update
 
 ## Goal
 
