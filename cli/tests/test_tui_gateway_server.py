@@ -7,7 +7,15 @@ import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tui_gateway import server
+
+
+@pytest.fixture(autouse=True)
+def _allow_prompt_submit_without_license(monkeypatch):
+    """Unit tests in this file exercise gateway RPC behavior behind the gate."""
+    monkeypatch.setattr(server, "_license_signed_in", lambda: True)
 
 
 class _ChunkyStdout:

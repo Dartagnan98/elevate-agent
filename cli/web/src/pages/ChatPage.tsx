@@ -1271,6 +1271,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
 export const __chatPageTestables = {
   activeSnapshotAlreadyCompleted,
   buildBreakdownSteps,
+  contextRingTitle,
   defaultActivityDigestOpen,
   describeToolGroup,
   isCompactSlashCommand,
@@ -1281,6 +1282,7 @@ export const __chatPageTestables = {
   normalizeStoredTranscript,
   resolveActivityDigestVisibility,
   shouldClearUsageForStatus,
+  shouldClearUsageForStatusUpdate,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   toolTarget,
@@ -2828,6 +2830,28 @@ function shouldClearUsageForStatus(text: string): boolean {
   return /compacting context|working through earlier context/i.test(text);
 }
 
+function shouldClearUsageForStatusUpdate(
+  kind: string | undefined,
+  text: string,
+): boolean {
+  return kind === "compacting_context" || shouldClearUsageForStatus(text);
+}
+
+function contextRingTitle(usage: UsageInfo | null): string {
+  if (usage?.context_percent === undefined) {
+    return "Context usage pending until the next model response.";
+  }
+
+  const used = Math.max(0, Math.min(100, usage.context_percent));
+  const left = Math.max(0, 100 - used);
+  const detail =
+    usage.context_used !== undefined && usage.context_max !== undefined
+      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
+      : "Token counts pending";
+
+  return `Context left: ${Math.round(left)}%. ${Math.round(used)}% used. ${detail}`;
+}
+
 function isOpenPreviewIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksToOpen =
@@ -3403,7 +3427,6 @@ export default function ChatPage() {
   const [compacting, setCompacting] = useState(false);
   const manualCompactAssistantRef = useRef<string | null>(null);
   const manualCompactRequestInFlightRef = useRef(false);
-  const manualCompactCompletedByStatusRef = useRef(false);
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__ELEVATE_SESSION_TOKEN__
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
@@ -3620,16 +3643,6 @@ export default function ChatPage() {
     (text: string) => {
       const messageId = manualCompactAssistantRef.current;
       const completedAt = Date.now();
-      if (!messageId && manualCompactCompletedByStatusRef.current) {
-        manualCompactCompletedByStatusRef.current = false;
-        manualCompactRequestInFlightRef.current = false;
-        setTools([]);
-        setActivityTrace([]);
-        setBusy(false);
-        setCompacting(false);
-        setStatusText("Ready");
-        return;
-      }
       if (messageId) {
         const traces = activityTraceRef.current
           .filter((trace) => !trace.messageId || trace.messageId === messageId)
@@ -3671,7 +3684,6 @@ export default function ChatPage() {
       if (currentAssistantRef.current === messageId) currentAssistantRef.current = null;
       manualCompactAssistantRef.current = null;
       manualCompactRequestInFlightRef.current = false;
-      manualCompactCompletedByStatusRef.current = false;
       setTools([]);
       setActivityTrace([]);
       setBusy(false);
@@ -5447,33 +5459,29 @@ export default function ChatPage() {
         if (text) {
           const at = eventMillis(ev);
           const payload = compactToolPayload(ev.payload);
+          const kind = typeof payload.kind === "string" ? payload.kind : undefined;
           const reason = typeof payload.reason === "string" ? payload.reason : "";
           const source = typeof payload.source === "string" ? payload.source : "";
           const manualCompactStatus =
             reason === "manual_compact" || source === "manual";
+          const manualCompactInFlight =
+            manualCompactStatus && manualCompactRequestInFlightRef.current;
           setStatusText(displayStatusText(text));
           addActivityTrace("status", text, at);
           // Compaction is the one status that maps to a long blocking stall.
-          // Latch the banner on; "Session compacted" (manual /compress end) or
-          // a resume signal clears it. \bcompacted\b only matches the done
-          // status, never the in-progress "Compacting context".
-          if (shouldClearUsageForStatus(text)) {
+          // Latch the banner on while compaction is blocking. Completion
+          // statuses clear the spinner only; manual /compact finishes through
+          // the slash callback so the transcript gets the real result text.
+          if (shouldClearUsageForStatusUpdate(kind, text)) {
             setCompacting(true);
             setUsage(null);
-            if (manualCompactStatus && manualCompactRequestInFlightRef.current) {
+            if (manualCompactInFlight) {
               const messageId = ensureAssistant(at);
               manualCompactAssistantRef.current = messageId;
               setBusy(true);
             }
           } else if (/\bcompacted\b|compaction (complete|done|finished)/i.test(text)) {
-            if (manualCompactStatus && manualCompactAssistantRef.current) {
-              manualCompactCompletedByStatusRef.current = true;
-              completeManualCompactAssistant("Finished compacting");
-            } else if (manualCompactAssistantRef.current) {
-              setStatusText("Finished compacting");
-            } else {
-              setCompacting(false);
-            }
+            setCompacting(false);
           }
         }
       }),
@@ -6283,7 +6291,6 @@ export default function ChatPage() {
     appendMessage,
     autoResumeDecided,
     clearPendingAssistantDelta,
-    completeManualCompactAssistant,
     enqueueAssistantDelta,
     ensureAssistant,
     flushAssistantDelta,
@@ -7474,7 +7481,6 @@ export default function ChatPage() {
         const manualCompact = isCompactSlashCommand(trimmed);
         const slashUserMessageId = appendMessage("user", trimmed);
         if (manualCompact) {
-          manualCompactCompletedByStatusRef.current = false;
           manualCompactRequestInFlightRef.current = true;
         }
         let slashResult: Awaited<ReturnType<typeof executeSlash>>;
@@ -9645,15 +9651,11 @@ function ContextRing({ usage }: { usage: UsageInfo | null }) {
   const circumference = 2 * Math.PI * 9;
   const stroke = left === null ? 0 : (left / 100) * circumference;
   const label = left === null ? "--" : `${Math.round(left)}%`;
-  const detail =
-    usage?.context_used && usage?.context_max
-      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
-      : "Context usage pending";
 
   return (
     <span
       className="inline-flex h-7 items-center gap-1.5 rounded-[7px] bg-[color-mix(in_srgb,var(--chat-text)_4%,transparent)] px-2.5 text-[var(--chat-muted-strong)]"
-      title={`Context left: ${label}. ${detail}`}
+      title={contextRingTitle(usage)}
     >
       <svg
         aria-hidden="true"

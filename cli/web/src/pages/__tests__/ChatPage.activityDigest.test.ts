@@ -172,6 +172,31 @@ describe("manual /compact activity", () => {
     expect(__chatPageTestables.shouldClearUsageForStatus("Working through earlier context")).toBe(true);
     expect(__chatPageTestables.shouldClearUsageForStatus("Session compacted")).toBe(false);
   });
+
+  it("uses structured compact status before text fallback", () => {
+    expect(
+      __chatPageTestables.shouldClearUsageForStatusUpdate("compacting_context", "Preparing"),
+    ).toBe(true);
+    expect(
+      __chatPageTestables.shouldClearUsageForStatusUpdate(undefined, "Compacting context"),
+    ).toBe(true);
+    expect(
+      __chatPageTestables.shouldClearUsageForStatusUpdate("session_compacted", "Session compacted"),
+    ).toBe(false);
+  });
+
+  it("describes context ring pending and left-versus-used values", () => {
+    expect(__chatPageTestables.contextRingTitle(null)).toBe(
+      "Context usage pending until the next model response.",
+    );
+    expect(
+      __chatPageTestables.contextRingTitle({
+        context_max: 272000,
+        context_percent: 11,
+        context_used: 29310,
+      }),
+    ).toBe("Context left: 89%. 11% used. 29,310 / 272,000 tokens used");
+  });
 });
 
 describe("chat transcript ordering repair", () => {
