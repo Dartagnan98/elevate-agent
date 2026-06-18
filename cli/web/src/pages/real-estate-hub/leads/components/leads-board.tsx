@@ -146,14 +146,14 @@ function SourcesHealthPill({
 }
 
 function SourcesDrawerSection({
-  title, items, kind: _kind,
+  title, items, kind,
 }: {
   title: string;
   items: Array<LeadsChannel | LeadsSchedule>;
   kind: "channel" | "schedule";
 }) {
   return (
-    <div className="lb-health-section">
+    <div className="lb-health-section" data-kind={kind}>
       <div className="lb-health-section-label mono">{title}</div>
       {items.map(it => {
         const isBroken = it.status === "error" || it.status === "blocked";
@@ -771,7 +771,7 @@ function ProfileRow({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      onOpen && onOpen(profile);
+      onOpen?.(profile);
     }
   };
   const isFavorite = Boolean(profile.favorite);
@@ -780,7 +780,7 @@ function ProfileRow({
       role="button"
       tabIndex={0}
       className={"lb-profile-row" + (isFavorite ? " favorite" : "")}
-      onClick={() => onOpen && onOpen(profile)}
+      onClick={() => onOpen?.(profile)}
       onKeyDown={handleKeyDown}
     >
       <div className="lb-profile-favorite-cell" onClick={(e) => e.stopPropagation()}>
@@ -793,7 +793,7 @@ function ProfileRow({
           disabled={favoriteBusy || !onFavoriteChange}
           onClick={(e) => {
             e.stopPropagation();
-            onFavoriteChange && void onFavoriteChange(profile, !isFavorite);
+            void onFavoriteChange?.(profile, !isFavorite);
           }}
         >
           {isFavorite ? "★" : "☆"}
@@ -1342,7 +1342,7 @@ function ProfileDrawer({
   onStatusChange?: (id: string, value: string) => void;
 }) {
   const handleStatusChange = (v: string) => {
-    onStatusChange && onStatusChange(profile.id, v);
+    onStatusChange?.(profile.id, v);
   };
   useEffect(() => {
     const prev = document.body.style.overflow;

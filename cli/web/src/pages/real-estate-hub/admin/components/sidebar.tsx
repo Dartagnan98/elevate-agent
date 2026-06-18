@@ -252,6 +252,7 @@ function AutomationRow({
 // ---------------------------------------------------------------------------
 
 function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
+  void _onClose;
   const u = MOCK_USER;
 
   const [theme, setTheme] = useState(u.theme);

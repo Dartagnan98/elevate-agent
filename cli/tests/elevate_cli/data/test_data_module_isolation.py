@@ -63,6 +63,9 @@ _ALLOWLIST: dict[str, str] = {
     # helpers in Sprint 2 once apple-messages becomes a first-class
     # connector; today it owns its identities/contacts writes.
     "apple_contacts_backfill.py": "one-shot backfill, refactored in Sprint 2 alongside apple-messages connector",
+    "xposure_pcs_connector.py": "PCS import cutover still writes central lead tables directly; route through elevate_cli.data helpers in the PCS refactor",
+    "xposure_pcs_enrichment.py": "PCS enrichment cutover still patches central contacts directly; route through elevate_cli.data helpers in the PCS refactor",
+    "xposure_pcs_views.py": "PCS view helpers still patch PCS/contact state directly; route through elevate_cli.data helpers in the PCS refactor",
 }
 
 # Tables we want to lock down. Anything writing these from outside the

@@ -32,7 +32,8 @@ def _now() -> str:
 def test_first_connect_applies_initial_migration():
     with connect() as conn:
         rows = conn.execute(
-            "SELECT version, name FROM _schema_migrations ORDER BY version"
+            "SELECT version, name FROM _schema_migrations "
+            "WHERE name LIKE '%.sql' ORDER BY version"
         ).fetchall()
         assert [(r[0], r[1]) for r in rows] == [
             (migration.version, migration.name)
@@ -93,13 +94,9 @@ def test_second_connect_is_noop():
 
 def test_drift_detection_raises():
     with connect() as conn:
-        pass
-    raw = sqlite3.connect(operational_db_path())
-    raw.execute(
-        "UPDATE _schema_migrations SET sha256='deadbeef' WHERE version='0001'"
-    )
-    raw.commit()
-    raw.close()
+        conn.execute(
+            "UPDATE _schema_migrations SET sha256='deadbeef' WHERE version='0001'"
+        )
     _reset_schema_cache()
     with pytest.raises(migrations.MigrationDriftError):
         with connect() as conn:

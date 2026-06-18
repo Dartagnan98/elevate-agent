@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sqlite3
 import threading
 from contextlib import contextmanager
 from functools import lru_cache
@@ -283,6 +284,15 @@ _INSERT_OR_IGNORE_RE = re.compile(
     r"\bINSERT\s+OR\s+IGNORE\s+INTO\b",
     re.IGNORECASE,
 )
+_INSERT_OR_REPLACE_RE = re.compile(
+    r"^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"\(([^)]+)\)\s*VALUES\s*\((.+)\)\s*;?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQLITE_MASTER_TABLES_RE = re.compile(
+    r"^\s*SELECT\s+name\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s*;?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _translate_sqlite_isms(sql: str) -> str:
@@ -294,16 +304,63 @@ def _translate_sqlite_isms(sql: str) -> str:
     ``ON CONFLICT DO NOTHING`` if the rewritten statement doesn't already
     have an ON CONFLICT clause.
     """
-    if not _INSERT_OR_IGNORE_RE.search(sql):
+    if _SQLITE_MASTER_TABLES_RE.match(sql):
+        return (
+            "SELECT table_name AS name FROM information_schema.tables "
+            "WHERE table_schema = 'public' "
+            "AND table_type IN ('BASE TABLE', 'VIEW')"
+        )
+
+    replace_match = _INSERT_OR_REPLACE_RE.match(sql)
+    if replace_match:
+        table, raw_cols, values = replace_match.groups()
+        cols = [c.strip().strip('"`') for c in raw_cols.split(",")]
+        if len(cols) >= 2:
+            assignments = ", ".join(
+                f"{col}=EXCLUDED.{col}" for col in cols[1:]
+            )
+            return (
+                f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({values}) "
+                f"ON CONFLICT ({cols[0]}) DO UPDATE SET {assignments}"
+            )
+
+    if _INSERT_OR_IGNORE_RE.search(sql):
+        rewritten = _INSERT_OR_IGNORE_RE.sub("INSERT INTO", sql)
+        if re.search(r"\bON\s+CONFLICT\b", rewritten, re.IGNORECASE):
+            return rewritten
+        # Append before trailing `;` if present, else at end.
+        stripped = rewritten.rstrip()
+        if stripped.endswith(";"):
+            return stripped[:-1] + " ON CONFLICT DO NOTHING;"
+        return stripped + " ON CONFLICT DO NOTHING"
+
+    return sql
+
+
+def _escape_literal_percent(sql: str) -> str:
+    """Psycopg treats every ``%`` as a possible placeholder marker.
+
+    Keep real placeholders (``%s``, ``%b``, ``%t``) and already-escaped
+    literals (``%%``), but double stray percent signs from SQL LIKE strings.
+    """
+    if "%" not in sql:
         return sql
-    rewritten = _INSERT_OR_IGNORE_RE.sub("INSERT INTO", sql)
-    if re.search(r"\bON\s+CONFLICT\b", rewritten, re.IGNORECASE):
-        return rewritten
-    # Append before trailing `;` if present, else at end.
-    stripped = rewritten.rstrip()
-    if stripped.endswith(";"):
-        return stripped[:-1] + " ON CONFLICT DO NOTHING;"
-    return stripped + " ON CONFLICT DO NOTHING"
+    out: list[str] = []
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch != "%":
+            out.append(ch)
+            i += 1
+            continue
+        nxt = sql[i + 1] if i + 1 < len(sql) else ""
+        if nxt in {"s", "b", "t", "%"}:
+            out.append(ch + nxt)
+            i += 2
+        else:
+            out.append("%%")
+            i += 1
+    return "".join(out)
 
 
 @lru_cache(maxsize=2048)
@@ -316,7 +373,7 @@ def _prepare_sql(sql: str) -> str:
     built SQL (e.g. ``IN (%s,%s,...)`` with a varying placeholder count) can't
     grow the cache without limit.
     """
-    return _translate_sqlite_isms(_translate_placeholders(sql))
+    return _escape_literal_percent(_translate_sqlite_isms(_translate_placeholders(sql)))
 
 
 # ─── PgConnection shim ─────────────────────────────────────────────────
@@ -347,11 +404,17 @@ class _PgCursorShim:
         return self._cur.description
 
     def execute(self, sql: str, params: Sequence[Any] | dict | None = None) -> "_PgCursorShim":
-        self._cur.execute(_prepare_sql(sql), params or ())
+        try:
+            self._cur.execute(_prepare_sql(sql), params or ())
+        except psycopg.IntegrityError as exc:
+            raise sqlite3.IntegrityError(str(exc)) from exc
         return self
 
     def executemany(self, sql: str, seq: Sequence[Sequence[Any]]) -> "_PgCursorShim":
-        self._cur.executemany(_prepare_sql(sql), list(seq))
+        try:
+            self._cur.executemany(_prepare_sql(sql), list(seq))
+        except psycopg.IntegrityError as exc:
+            raise sqlite3.IntegrityError(str(exc)) from exc
         return self
 
     def fetchone(self):
@@ -433,12 +496,18 @@ class PgConnection:
 
     def execute(self, sql: str, params: Sequence[Any] | dict | None = None) -> _PgCursorShim:
         cur = self._raw.cursor()
-        cur.execute(_prepare_sql(sql), params or ())
+        try:
+            cur.execute(_prepare_sql(sql), params or ())
+        except psycopg.IntegrityError as exc:
+            raise sqlite3.IntegrityError(str(exc)) from exc
         return _PgCursorShim(cur)
 
     def executemany(self, sql: str, seq: Sequence[Sequence[Any]]) -> _PgCursorShim:
         cur = self._raw.cursor()
-        cur.executemany(_prepare_sql(sql), list(seq))
+        try:
+            cur.executemany(_prepare_sql(sql), list(seq))
+        except psycopg.IntegrityError as exc:
+            raise sqlite3.IntegrityError(str(exc)) from exc
         return _PgCursorShim(cur)
 
     def executescript(self, script: str) -> None:

@@ -572,6 +572,7 @@ export function unionHydrate(
   msgs: HydratedWireMessage[],
   _source: HydrateSource,
 ): UnionReport {
+  void _source;
   const report: UnionReport = {
     added: 0,
     updated: 0,
