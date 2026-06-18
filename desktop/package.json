@@ -11,11 +11,12 @@
   "scripts": {
     "start": "electron .",
     "pack:mac": "electron-builder --mac dir",
-    "build:mac": "electron-builder --mac dmg zip --x64 --arm64",
+    "build:mac": "export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; electron-builder --mac dmg zip --x64 --publish never && electron-builder --mac dmg zip --arm64 --publish never && npm run merge:mac-feed",
     "preflight:apple": "node scripts/preflight-apple-release.js",
+    "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
     "ship:mac": "node scripts/ship-to-hetzner.js",
-    "release:mac": "electron-builder --mac dmg zip --x64 --arm64 --publish never && npm run finalize:mac && npm run ship:mac",
+    "release:mac": "npm run build:mac && npm run finalize:mac && npm run ship:mac",
     "release:apple": "npm run preflight:apple && npm run release:mac"
   },
   "build": {
