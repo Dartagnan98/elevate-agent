@@ -413,57 +413,64 @@ async def run_sidecar_smoke(
                 if isinstance(payload, dict):
                     final_payload = payload
 
-    if final_payload is None:
-        raise TimeoutError("message.complete did not arrive")
-    final_text = final_payload.get("text") or final_payload.get("rendered")
-    result.final_text = final_text if isinstance(final_text, str) else None
-    if result.final_text != expected:
-        raise RuntimeError(
-            f"unexpected final text: {result.final_text!r} != {expected!r}"
-        )
-    if "usage" not in final_payload:
-        raise RuntimeError("message.complete missing usage payload")
-    result.pass_check("message.complete matched expected text and included usage")
+        if final_payload is None:
+            raise TimeoutError("message.complete did not arrive")
+        final_text = final_payload.get("text") or final_payload.get("rendered")
+        result.final_text = final_text if isinstance(final_text, str) else None
+        if result.final_text != expected:
+            raise RuntimeError(
+                f"unexpected final text: {result.final_text!r} != {expected!r}"
+            )
+        if "usage" not in final_payload:
+            raise RuntimeError("message.complete missing usage payload")
+        result.pass_check("message.complete matched expected text and included usage")
 
-    required = {"message.start", "message.delta", "message.complete"}
-    missing = sorted(required - set(result.events))
-    if missing:
-        raise RuntimeError(f"missing event types: {', '.join(missing)}")
-    result.pass_check("required streaming events observed")
+        required = {"message.start", "message.delta", "message.complete"}
+        missing = sorted(required - set(result.events))
+        if missing:
+            raise RuntimeError(f"missing event types: {', '.join(missing)}")
+        result.pass_check("required streaming events observed")
 
-    if result.persisted_session_id and result.sidecar_session_id:
-        await request(
-            "session.close",
-            {"session_id": result.sidecar_session_id},
-            min(timeout, 30),
-        )
-        result.pass_check("closed live sidecar session before resume")
+        if result.persisted_session_id and result.sidecar_session_id:
+            await request(
+                "session.close",
+                {"session_id": result.sidecar_session_id},
+                min(timeout, 30),
+            )
+            result.pass_check("closed live sidecar session before resume")
 
-        resumed = await request(
-            "session.resume",
-            {
-                "session_id": result.persisted_session_id,
-                "include_messages": True,
-                "cols": 100,
-            },
-            min(timeout, 30),
-        )
-        resumed_result = resumed.get("result") or {}
-        if not isinstance(resumed_result, dict):
-            raise RuntimeError(f"unexpected session.resume result: {resumed!r}")
-        result.resumed_session_id = resumed_result.get("session_id")
-        messages = resumed_result.get("messages")
-        if not isinstance(messages, list):
-            raise RuntimeError(f"session.resume missing messages: {resumed!r}")
-        result.resumed_message_count = len(messages)
-        if not any(
-            isinstance(message, dict)
-            and message.get("role") == "assistant"
-            and expected in str(message.get("content") or message.get("text") or "")
-            for message in messages
-        ):
-            raise RuntimeError("resumed transcript missing final assistant text")
-        result.pass_check("session.resume reloaded final assistant text")
+            resumed = await request(
+                "session.resume",
+                {
+                    "session_id": result.persisted_session_id,
+                    "include_messages": True,
+                    "cols": 100,
+                },
+                min(timeout, 30),
+            )
+            resumed_result = resumed.get("result") or {}
+            if not isinstance(resumed_result, dict):
+                raise RuntimeError(f"unexpected session.resume result: {resumed!r}")
+            result.resumed_session_id = resumed_result.get("session_id")
+            messages = resumed_result.get("messages")
+            if not isinstance(messages, list):
+                raise RuntimeError(f"session.resume missing messages: {resumed!r}")
+            result.resumed_message_count = len(messages)
+            if not any(
+                isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and expected in str(message.get("content") or message.get("text") or "")
+                for message in messages
+            ):
+                raise RuntimeError("resumed transcript missing final assistant text")
+            result.pass_check("session.resume reloaded final assistant text")
+            if isinstance(result.resumed_session_id, str):
+                await request(
+                    "session.close",
+                    {"session_id": result.resumed_session_id},
+                    min(timeout, 30),
+                )
+                result.pass_check("closed resumed sidecar session")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

@@ -3,8 +3,8 @@
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
 Status: partially implemented; protocol replay/follow-up ring coverage is in,
-installed smoke has a close-and-resume transcript check, and provider-call
-verification is blocked until the installed app license is refreshed
+installed provider-call close/resume smoke passes, and light visual smoke
+passes; compacted-session manual soak is still pending
 
 ## Current evidence
 
@@ -14,9 +14,14 @@ verification is blocked until the installed app license is refreshed
 - `cli/scripts/installed_runtime_smoke.py` now closes the live sidecar session
   after completion, resumes the persisted session id, and asserts the final
   assistant text reloads from transcript.
-- Current installed run is auth-gated before provider streaming because
-  `~/.elevate/license.json` is expired:
-  `/tmp/elevate-installed-smoke-1781749410.json`.
+- Latest installed provider-call close/resume smoke passed:
+  `/tmp/elevate-installed-smoke-1781753062.json`.
+  It streamed `message.start`, `thinking.delta`, `status.update`,
+  `message.delta`, `reasoning.available`, and `message.complete`, included
+  usage, and reloaded the final assistant text after `session.resume`.
+- Light installed Electron visual smoke passed: the latest smoke session rendered
+  in the real Elevate window and showed `installed compaction smoke ok` without
+  requiring session re-entry.
 - The smoke output now reports `license_authenticated`, `license_expired`, and
   a non-secret license status string so auth gating is not mistaken for a
   timeline or compaction regression.
@@ -80,12 +85,13 @@ to see thinking, reasoning, streaming response text, or the final transcript.
    - resume persisted session id
    - assert final assistant text is present after resume
 
-   Current blocker: refresh the installed license, then rerun:
+   Latest passing command:
 
    ```bash
    cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py \
      --check-file gateway/run.py \
-     --check-file agent/conversation_compression.py
+     --check-file agent/conversation_compression.py \
+     --check-file tui_gateway/server.py
    ```
 
 3. UI visual sanity.

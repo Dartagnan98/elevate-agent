@@ -2,9 +2,8 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: active local epic; foundation and Issues 2-4 are implemented in
-source; Issues 1-2 still need installed Telegram-style/provider soak after
-license refresh
+Status: active local epic; foundation and Issues 2-5 are implemented in
+source; Issues 1-2 still need real Telegram/manual oversized-session soak
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -95,6 +94,9 @@ Verified fixes already in source and patched into the installed desktop app:
 - The installed smoke now has a disposable Telegram-style fixture that imports
   installed gateway code and verifies cursor effective payload plus persisted
   retry-guard behavior without touching real Telegram history.
+- The installed provider-call close/resume smoke now passes with a valid local
+  license: session `20260617_202412_b52050`, output
+  `/tmp/elevate-installed-smoke-1781753062.json`.
 - Legacy recovery failure now returns a clean older-thread recovery message
   when the same oversized Telegram-style transcript cannot be recovered and the
   normal agent turn hits context overflow.
@@ -324,13 +326,13 @@ Execution tracker:
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
 | 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
-| 2. Explainable compaction events | source support coverage implemented; shared structured logs plus support summary script added | yes | close after installed Telegram-style/provider event coverage |
+| 2. Explainable compaction events | source support coverage implemented; shared structured logs plus support summary script added | yes | close after real Telegram/manual event coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
-| 5. Installed-runtime smoke | implemented and extended with close/resume check plus disposable Telegram fixture; provider-call rerun currently auth-gated by expired local license | yes | rerun provider-call/close-resume after license refresh |
-| 6. Legacy transcript recovery | implemented in source and installed parity smoke; raw-history inventory complete | yes | provider-call installed soak after license refresh |
-| 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed and resume smoke added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
-| 8. Release checklist | checklist created; blocked until installed provider-call smoke passes with refreshed license | yes | license refreshed and real desktop/Telegram soak pass |
+| 5. Installed-runtime smoke | implemented; provider close/resume and disposable Telegram fixture pass | yes | reuse as release smoke |
+| 6. Legacy transcript recovery | implemented in source and installed parity smoke; raw-history inventory complete | yes | real Telegram/manual oversized-session soak |
+| 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed, installed close/resume smoke passes, light visual smoke passes | yes | real desktop compacted-session manual soak |
+| 8. Release checklist | checklist created; provider and light visual smoke pass, desktop/Telegram manual soak still open | yes | real desktop/Telegram soak pass |
 
 Next action rule:
 
@@ -657,7 +659,7 @@ Telegram path, not only localhost.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
 5. **Then soak:** Issue 7 across real desktop and Telegram sessions; current
-   blocker is an expired local installed-app license, not the event stream.
+   blocker is manual/Telegram coverage, not provider auth.
 6. **Release gate:** Issue 8 before any customer-visible update.
 
 ## Open decisions

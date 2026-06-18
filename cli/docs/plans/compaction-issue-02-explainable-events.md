@@ -2,8 +2,8 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: source support coverage implemented; installed Telegram/provider soak
-still pending license refresh
+Status: source support coverage and installed provider smoke implemented;
+installed Telegram/manual soak still pending
 
 ## Implementation evidence
 
@@ -55,8 +55,8 @@ Support currently has to reconstruct behavior from separate logs and code paths:
 - UI status pill and context ring updates
 
 Support now has a small log summary command for the structured backend records.
-The remaining verification gap is real installed Telegram/provider traffic after
-the local installed license is refreshed.
+The remaining verification gap is real installed Telegram/manual traffic through
+an oversized or recovered lane.
 
 The immediate production bug is fixed, but the next customer report should not
 require another source-level forensic pass to answer "why did it compact here?"
@@ -364,8 +364,7 @@ After source tests pass and the installed bundle is patched:
 3. Resume a compacted desktop session and send one message.
 4. Confirm no immediate repeat compaction unless effective payload is over
    threshold.
-5. Run a Telegram oversized-session smoke after the installed license is
-   refreshed.
+5. Run a Telegram oversized-session smoke.
 6. Confirm gateway logs say whether it was `legacy_hygiene`,
    `critical_compact`, or skipped due to cursor-effective payload.
 7. Confirm the context ring goes pending after compact-start and only repopulates

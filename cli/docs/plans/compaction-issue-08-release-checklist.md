@@ -2,15 +2,17 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: checklist created; release blocked until installed provider-call soak
-passes with a refreshed local license
+Status: checklist created; installed provider-call and light visual smoke pass;
+release still blocked until desktop compacted-session and Telegram/manual soak
+pass
 
 ## Current go/no-go
 
-Do not send the customer-visible update while the installed provider-call smoke
-is auth-gated. Source tests, installed file parity, and the disposable Telegram
-fixture are passing, but the real desktop chat provider-call close/resume check
-still needs a valid installed app license.
+Do not send the customer-visible update yet. Source tests, installed file
+parity, the disposable Telegram fixture, the real desktop provider-call
+close/resume smoke, and a light installed Electron visual check are passing.
+The remaining release gate is desktop compacted-session and Telegram/manual
+oversized-session soak.
 
 ## Source checks
 
@@ -86,26 +88,32 @@ cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py \
 
 Expected current evidence:
 
-- `/tmp/elevate-installed-smoke-1781751188.json`
+- `/tmp/elevate-installed-smoke-1781752896.json`
 - `ok: true`
 - `telegram_fixture.raw_messages: 450`
 - `telegram_fixture.effective_messages: 11`
 - `telegram_fixture.same_count_skips: true`
 - `telegram_fixture.grown_retries: true`
 
-Provider-call close/resume smoke after license refresh:
+Provider-call close/resume smoke:
 
 ```bash
 cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py \
   --check-file gateway/run.py \
   --check-file agent/conversation_compression.py \
-  --check-file tui_gateway/server.py \
-  --telegram-fixture
+  --check-file tui_gateway/server.py
 ```
 
-Release gate: this must pass without `sign_in_required` and must report a
-completed `message.complete`, persisted session id, close, resume, and final
-assistant text reload.
+Current evidence:
+
+- `/tmp/elevate-installed-smoke-1781753062.json`
+- `ok: true`
+- `license_authenticated: true`
+- `license_expired: false`
+- `final_text: installed compaction smoke ok`
+- `persisted_session_id: 20260617_202412_b52050`
+- `session.resume reloaded final assistant text`
+- `closed resumed sidecar session`
 
 ## Manual desktop smoke
 
@@ -153,9 +161,11 @@ One report should answer:
 
 ## Release blocker list
 
-- Installed provider-call smoke auth-gated by expired local license.
-- Real Telegram/manual soak still needed after license refresh.
-- Issue 7 timeline/reasoning soak needs the same provider-call smoke to pass.
+- Real desktop compacted-session manual soak still needed.
+- Real Telegram/manual oversized-session soak still needed.
+- Watch the observed `/api/workspace/git/status` temp-file replace race from
+  the installed smoke run; it did not fail the compaction smoke, but it is a
+  production-hardening bug.
 
 ## Acceptance criteria
 

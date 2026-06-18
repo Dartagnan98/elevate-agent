@@ -35,10 +35,13 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
   guard reloads after a simulated restart.
 - Latest Telegram fixture smoke:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture`
-  -> `PASS`, output `/tmp/elevate-installed-smoke-1781751188.json`.
-- Current provider-call smoke is auth-gated until the installed app license is
-  refreshed; latest auth-gated result:
-  `/tmp/elevate-installed-smoke-1781749410.json`.
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781752896.json`.
+- Latest provider-call close/resume smoke:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781753062.json`,
+  session `20260617_202412_b52050`, final text
+  `installed compaction smoke ok`, license status
+  `Subscribed, token has 59m left.`, and resumed sidecar session closed.
 
 ## Goal
 
@@ -170,9 +173,8 @@ Assertions:
 - same raw message count skips the same failed legacy recovery retry
 - growth past the retry margin allows a fresh recovery attempt
 
-Full provider-backed recovery remains source-test coverage until the installed
-app license is refreshed. Do not fake a provider inside the user's real app
-data.
+Full provider-backed legacy recovery remains source-test/manual-soak coverage.
+Do not fake a provider inside the user's real app data.
 
 ## Minimal implementation plan
 
