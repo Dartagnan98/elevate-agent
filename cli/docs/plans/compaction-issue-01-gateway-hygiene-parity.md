@@ -2,7 +2,7 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: detailed build plan, not implemented
+Status: partially implemented in source; needs installed Telegram-style soak
 
 ## Problem
 

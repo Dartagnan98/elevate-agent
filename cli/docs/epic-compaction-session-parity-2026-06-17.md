@@ -2,7 +2,8 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: local epic draft
+Status: active local epic; foundation and Issues 1-2 are partially implemented;
+Issues 3-4 now have detailed build plans
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -43,6 +44,10 @@ compaction around 49 percent or 29 percent context remaining.
 Recent commits in the current stack:
 
 ```text
+9f5abb026 fix(desktop): retry failed dashboard loads
+38b549190 fix(web): fail fast on stale gateway sockets
+df0848c57 fix(diagnostics): record content-free session timeline events
+c4cd145f6 fix(compaction): harden cursor compaction and manual compact UX
 4ee6f8b5d fix(gateway): persist hygiene compaction cursor
 912ff3eb8 fix(agent): cap oversized compaction summaries
 7d2cc6a5d fix(gateway): harden compression warning hygiene
@@ -61,9 +66,17 @@ Verified fixes already in source and patched into the installed desktop app:
   calling the provider.
 - Gateway hygiene passes `session_db` into its temporary agent so cursor
   compaction persists instead of advancing only in memory.
+- Gateway hygiene now treats the `0.85` line as diagnostic and only performs
+  pre-agent recovery for critical overflow or raw legacy message floods.
+- Content-free timeline events such as `thinking.delta`, `reasoning.available`,
+  and `message.complete` are recorded in the local session event recorder.
+- The web gateway client now rejects stale non-open sockets before sending,
+  instead of letting submit hang on a dead WebSocket.
+- The desktop Electron shell retries failed dashboard navigation after backend
+  readiness, which covers the black-shell startup race that manual reload fixed.
 - Installed app was patched under
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/`
-  for the touched compaction/gateway source files.
+  for touched CLI/web files, and `app.asar` was patched for the Electron shell.
 
 Verified checks from this stabilization pass:
 
@@ -74,6 +87,8 @@ Verified checks from this stabilization pass:
 38 passed - gateway hygiene, hygiene no-op, compression cursor after session_db fix
 py_compile passed - changed source and installed bundle files
 installed gateway smoke ok - 140-message Telegram-style transcript compacted to cursor 22, transcript append-only
+installed desktop smoke ok - dashboard rendered in the packaged app and a real
+  chat response streamed/completed
 ```
 
 ## Epic acceptance
@@ -244,7 +259,8 @@ Use this planning model instead:
 2. Create detailed implementation plans only for the next P0s:
    - Issue 1: gateway hygiene parity
    - Issue 2: explainable compaction events
-3. Keep Issues 3-8 as lightweight stubs until the foundation is proven.
+3. Promote Issues 3-4 now that the foundation has source commits and installed
+   desktop smoke coverage.
 4. Promote each stub to a real plan only when it is about to be built.
 
 Plan file convention:
@@ -264,15 +280,17 @@ Detailed plans currently created:
 
 - `cli/docs/plans/compaction-issue-01-gateway-hygiene-parity.md`
 - `cli/docs/plans/compaction-issue-02-explainable-events.md`
+- `cli/docs/plans/compaction-issue-03-threshold-policy.md`
+- `cli/docs/plans/compaction-issue-04-context-ui-clarity.md`
 
 Execution tracker:
 
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
-| 1. Gateway hygiene parity | detailed plan ready, deep-read hardened | yes | build first |
-| 2. Explainable compaction events | detailed plan ready, deep-read hardened | yes | build with/after Issue 1 |
-| 3. Threshold policy | stub only | no | Issue 1 proves gateway ownership |
-| 4. Claude-style context UI clarity | stub only | no | Issue 2 event fields exist |
+| 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
+| 2. Explainable compaction events | partially implemented; recorder/logs improved, support summary still open | yes | close after one-event explanation coverage |
+| 3. Threshold policy | detailed plan ready | yes | build next |
+| 4. Claude-style context UI clarity | detailed plan ready | yes | build after Issue 3 or alongside if diff stays small |
 | 5. Installed-runtime smoke | stub only | no | Issue 1 behavior is stable |
 | 6. Legacy transcript recovery | stub only | no | Issue 1 separates legacy vs normal |
 | 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
@@ -280,10 +298,12 @@ Execution tracker:
 
 Next action rule:
 
-1. Build Issue 1.
-2. Add Issue 2 instrumentation while touching the same seams, or immediately
-   after Issue 1 if the diff starts getting noisy.
-3. Promote only the next blocked stub to a detailed plan.
+1. Build Issue 3 so the product has one threshold ladder instead of stale
+   `0.85`/`0.90`/`0.95` explanations scattered across code and copy.
+2. Build Issue 4 so the context ring/status UI matches the policy and stays
+   quiet during automatic maintenance.
+3. Then turn Issue 5 and Issue 6 into detailed plans for installed-runtime
+   smoke and legacy transcript recovery.
 
 Deep-dive branching model:
 
@@ -595,9 +615,9 @@ Telegram path, not only localhost.
 
 1. **Ship guardrails already fixed:** keep the current commits together because
    they close the active Telegram crash and cursor persistence failure.
-2. **Next P0:** Issue 1 and Issue 2. Make gateway hygiene explainable and
-   subordinate to the shared compaction contract.
-3. **Then P1 product clarity:** Issue 3 and Issue 4. Normalize thresholds and
+2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps
+   while building the next policy/UI slices.
+3. **Next P1 product clarity:** Issue 3 and Issue 4. Normalize thresholds and
    make the context UI honest.
 4. **Then test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
@@ -617,14 +637,9 @@ Telegram path, not only localhost.
 - Do we want a support command that prints the last compaction event for a
   session without requiring log spelunking?
 
-## Current local caveat
+## Current local state
 
-This epic is doc-only. At the time it was created, the worktree already had
-unrelated modified session-recorder files:
-
-```text
-cli/elevate_cli/diagnostics/session_recorder.py
-cli/tests/elevate_cli/test_session_recorder.py
-```
-
-Those files are not part of this epic and should be reviewed separately.
+As of the latest docs pass, the worktree was clean before editing these plan
+files. The recent source fixes are committed locally and the installed desktop
+runtime has been patched/smoked, but Telegram legacy-session behavior still
+needs an installed-runtime soak before release confidence.
