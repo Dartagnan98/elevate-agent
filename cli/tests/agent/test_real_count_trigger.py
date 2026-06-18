@@ -113,8 +113,9 @@ class TestEffectiveTrigger:
         assert trigger == int(WINDOW * REAL_COUNT_MODE_THRESHOLD)
 
     def test_pinned_threshold_wins_in_real_mode(self, compressor):
-        # User pinned compression.threshold (even at the default value):
-        # real-count mode must NOT bump it to 0.90.
+        # If the caller marks a threshold as user-pinned, real-count mode must
+        # not bump it to 0.90. run_agent decides whether the default 0.85 is
+        # actually user-pinned.
         trigger = effective_compression_trigger_tokens(
             compressor,
             real_mode=True,

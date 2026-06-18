@@ -88,10 +88,20 @@ class TestLoadConfigDefaults:
         assert memory_plugin["embedding_provider"] == "openai"
         assert memory_plugin["embedding_model"] == "text-embedding-3-small"
         assert memory_plugin["embedding_enabled"] is False
-
         assert DEFAULT_CONFIG["platforms"]["telegram"]["enabled"] is False
         assert DEFAULT_CONFIG["platforms"]["telegram"]["reply_to_mode"] == "first"
         assert DEFAULT_CONFIG["platforms"]["api_server"]["enabled"] is False
+
+    def test_default_compression_threshold_matches_current_policy(self):
+        assert DEFAULT_CONFIG["compression"]["threshold"] == 0.85
+
+    def test_tips_do_not_advertise_stale_half_window_threshold(self):
+        from elevate_cli.tips import TIPS
+
+        joined = "\n".join(TIPS)
+        assert "compression.threshold: 0.50" not in joined
+        assert "default: 50% of context" not in joined
+        assert "85-90% context used" in joined
 
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):

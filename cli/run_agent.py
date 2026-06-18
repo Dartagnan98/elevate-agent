@@ -64,6 +64,18 @@ if _loaded_env_paths:
 else:
     logger.info("No .env file found. Using system environment variables.")
 
+DEFAULT_COMPRESSION_THRESHOLD = 0.85
+
+
+def _is_compression_threshold_pinned(compression_cfg: dict) -> bool:
+    if not isinstance(compression_cfg, dict) or "threshold" not in compression_cfg:
+        return False
+    try:
+        threshold = float(compression_cfg.get("threshold"))
+    except (TypeError, ValueError):
+        return True
+    return abs(threshold - DEFAULT_COMPRESSION_THRESHOLD) > 1e-9
+
 
 # Import our tool system
 from model_tools import (
@@ -1967,7 +1979,9 @@ class AIAgent:
         # first. 0.85 is the safe ceiling, NOT higher: threshold + worst-case
         # one-turn growth (~10% window of tool results + model output) must
         # stay under 100% or late turns hit context-overflow 400s.
-        compression_threshold = float(_compression_cfg.get("threshold", 0.85))
+        compression_threshold = float(
+            _compression_cfg.get("threshold", DEFAULT_COMPRESSION_THRESHOLD)
+        )
         # Real-count trigger (2026-06): when the provider has reported
         # prompt_tokens for the CURRENT message-list shape, the trigger runs
         # off that real count (+ delta estimates for appended messages only)
@@ -1976,7 +1990,7 @@ class AIAgent:
         # session max output tokens / summarizer overhead + pad) so the next
         # call's output and the compaction request always fit. A user-pinned
         # compression.threshold wins over both mode defaults.
-        self._compression_threshold_pinned = _compression_cfg.get("threshold") is not None
+        self._compression_threshold_pinned = _is_compression_threshold_pinned(_compression_cfg)
 
         # Session wall clock. max_iterations bounds the number of API calls
         # but not time — a loop of short calls (or slow tools) can run for
