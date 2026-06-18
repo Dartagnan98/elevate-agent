@@ -13,11 +13,13 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
 - Installed app smoke:
   `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py` -> `PASS`
 - Smoke result:
-  `/tmp/elevate-installed-smoke-1781747581.json`
+  `/tmp/elevate-installed-smoke-1781747844.json`
 - Verified installed assets:
   `index-BqtJl1UU.js`, `ChatPage-B0tDyOWz.js`
+- Verified installed runtime file:
+  `gateway/run.py`
 - Created installed-runtime session:
-  `20260617_185248_7f5e20`
+  `20260617_185712_addd79`
 - Event stream included:
   `gateway.ready`, `session.info`, `message.start`, `thinking.delta`,
   `status.update`, `message.delta`, `reasoning.available`,

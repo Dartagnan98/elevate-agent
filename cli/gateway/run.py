@@ -6796,6 +6796,31 @@ class GatewayRunner:
                         logger.warning(
                             "Session hygiene auto-compress failed: %s", e
                         )
+                        if (
+                            _hyg_reason == "message_count"
+                            and _approx_tokens < _warn_token_threshold
+                        ):
+                            _hygiene_record(
+                                _noop_guard,
+                                session_entry.session_id,
+                                msg_count=_msg_count,
+                                ineffective=True,
+                            )
+                            logger.info(
+                                "compaction.failed reason=legacy_hygiene "
+                                "source=%s trigger=%s session=%s "
+                                "raw_messages=%d effective_messages=%d "
+                                "tokens_before=%s cursor_before=%s "
+                                "retry_guard=recorded error=%s",
+                                _token_source,
+                                _hyg_reason,
+                                session_entry.session_id,
+                                _msg_count,
+                                len(_hyg_pressure_history),
+                                _approx_tokens,
+                                _hyg_compaction_cursor,
+                                e,
+                            )
 
         # First-message onboarding -- only on the very first interaction ever
         if not history and not self.session_store.has_any_sessions():

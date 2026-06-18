@@ -104,6 +104,17 @@ def compare_trees(left: Path, right: Path, *, limit: int = 20) -> list[str]:
     return diffs
 
 
+def cli_relative_path(repo_root: Path, value: str) -> tuple[Path, Path]:
+    rel = Path(value)
+    if rel.parts and rel.parts[0] == "cli":
+        repo_path = repo_root / rel
+        installed_rel = Path(*rel.parts[1:])
+    else:
+        repo_path = repo_root / "cli" / rel
+        installed_rel = rel
+    return repo_path, installed_rel
+
+
 def fetch_text(url: str, timeout: float) -> str:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
@@ -282,6 +293,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected", default="installed compaction smoke ok")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--skip-parity", action="store_true")
+    parser.add_argument(
+        "--check-file",
+        action="append",
+        default=[],
+        help="Extra CLI-relative file to compare, e.g. gateway/run.py.",
+    )
     parser.add_argument("--skip-sidecar", action="store_true")
     parser.add_argument(
         "--main-log",
@@ -308,6 +325,18 @@ def main(argv: list[str]) -> int:
             result.failures.extend(diffs)
         else:
             result.pass_check("installed web_dist matches repo")
+
+        for value in args.check_file:
+            repo_path, installed_rel = cli_relative_path(args.repo_root, value)
+            installed_path = installed_cli / installed_rel
+            if not repo_path.exists():
+                result.fail(f"missing repo check-file: {repo_path}")
+            elif not installed_path.exists():
+                result.fail(f"missing installed check-file: {installed_path}")
+            elif not filecmp.cmp(repo_path, installed_path, shallow=False):
+                result.fail(f"installed check-file differs: {installed_rel}")
+            else:
+                result.pass_check(f"installed {installed_rel} matches repo")
 
     if not args.skip_sidecar:
         try:

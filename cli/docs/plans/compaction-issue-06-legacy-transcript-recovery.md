@@ -2,7 +2,31 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: detailed build plan, not implemented
+Status: partially implemented; failed message-count recovery retry guard is in
+source and patched into installed app
+
+## Implementation evidence
+
+- Source change:
+  `cli/gateway/run.py` records the hygiene no-op guard when message-count
+  legacy recovery fails below the critical token line.
+- Regression test:
+  `cli/tests/gateway/test_session_hygiene.py::test_session_hygiene_records_failed_message_count_recovery_guard`
+- Focused checks:
+  `cli/.venv/bin/python -m pytest cli/tests/gateway/test_session_hygiene.py cli/tests/gateway/test_hygiene_noop_guard.py -q` -> 39 passed
+- Broader Issue 6 source checks:
+  `cli/.venv/bin/python -m pytest cli/tests/gateway/test_session_hygiene.py cli/tests/gateway/test_hygiene_noop_guard.py cli/tests/agent/test_compress_context_cursor.py cli/tests/run_agent/test_compaction_resume_hydration.py -q` -> 46 passed
+- Installed app patch:
+  `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/gateway/run.py`
+- Installed smoke after patch:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py` -> `PASS`
+
+Remaining work:
+
+- inventory every legacy raw-history source
+- decide whether retry state must persist across gateway restarts
+- add Telegram fixture coverage with disposable `ELEVATE_HOME`
+- define the final support-facing recovery failure message
 
 ## Goal
 
@@ -170,4 +194,3 @@ Installed/manual soak:
   message.
 - No recovery path uses `_emit_warning` or status callbacks in a way that can
   crash the user turn.
-

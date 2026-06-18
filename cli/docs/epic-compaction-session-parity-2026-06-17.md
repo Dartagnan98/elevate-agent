@@ -83,6 +83,9 @@ Verified fixes already in source and patched into the installed desktop app:
 - The context ring now stays pending after compaction until fresh usage arrives,
   labels left-vs-used clearly, and no longer lets generic status text fabricate
   a manual "Finished compacting" transcript result.
+- Failed legacy message-count recovery now records the hygiene no-op guard when
+  it is below the critical token line, so the same failed summary input does not
+  retry on every incoming Telegram-style message.
 - The desktop Electron shell retries failed dashboard navigation after backend
   readiness, which covers the black-shell startup race that manual reload fixed.
 - Installed app was patched under
@@ -305,7 +308,7 @@ Execution tracker:
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented as `cli/scripts/installed_runtime_smoke.py`; installed app pass recorded | yes | extend with Telegram fixture after Issue 6 |
-| 6. Legacy transcript recovery | detailed plan ready | yes | build retry guard/source tests after smoke harness |
+| 6. Legacy transcript recovery | partially implemented; failed message-count recovery retry guard patched and smoke-tested | yes | inventory sources and decide persisted retry state |
 | 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
 | 8. Release checklist | stub only | no | release candidate exists |
 
