@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { __chatPageTestables } from "../ChatPage";
 
 type TestTool = Parameters<typeof __chatPageTestables.describeToolGroup>[0][number];
+type TestToolEntry = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[0][number];
 type TestTrace = Parameters<typeof __chatPageTestables.buildBreakdownSteps>[1][number];
 type TestMessage = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[0][number];
 type TestActiveSnapshot = Parameters<typeof __chatPageTestables.mergeActiveTurnSnapshot>[1];
@@ -17,6 +18,18 @@ function tool(overrides: Partial<TestTool>): TestTool {
     context: "",
     status: "done",
     count: 1,
+    ...overrides,
+  };
+}
+
+function toolEntry(overrides: Partial<TestToolEntry>): TestToolEntry {
+  return {
+    kind: "tool",
+    id: "tool-entry-1",
+    tool_id: "tool-entry-1",
+    name: "terminal",
+    status: "done",
+    startedAt: 1,
     ...overrides,
   };
 }
@@ -157,6 +170,26 @@ describe("ChatActivityDigest reasoning persistence", () => {
       type: "trace",
       text: fullReasoning,
     });
+  });
+
+  it("hides reasoning prose when show reasoning is off but keeps tool activity", () => {
+    const steps = __chatPageTestables.buildBreakdownSteps(
+      [toolEntry({ id: "read", name: "read_file", tool_id: "read" })],
+      [
+        trace({
+          id: "private-reasoning",
+          text: "I am thinking through private intermediate details.",
+        }),
+      ],
+      { showReasoning: false },
+    );
+
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      type: "group",
+      label: "Read a file",
+    });
+    expect(JSON.stringify(steps)).not.toContain("private intermediate details");
   });
 });
 

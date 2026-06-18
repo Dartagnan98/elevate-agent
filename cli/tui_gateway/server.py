@@ -1202,6 +1202,10 @@ def _tool_progress_enabled(sid: str) -> bool:
     return _session_tool_progress_mode(sid) != "off"
 
 
+def _show_reasoning_enabled(sid: str) -> bool:
+    return bool(_sessions.get(sid, {}).get("show_reasoning", False))
+
+
 def _restart_slash_worker(session: dict):
     worker = session.get("slash_worker")
     if worker:
@@ -1638,7 +1642,7 @@ def _on_tool_progress(
     if event_type == "tool.started" and name:
         _emit("tool.progress", sid, {"name": name, "preview": preview or ""})
         return
-    if event_type == "reasoning.available" and preview:
+    if event_type == "reasoning.available" and preview and _show_reasoning_enabled(sid):
         _emit("reasoning.available", sid, {"text": str(preview)})
         return
     if event_type == "steer.applied":
@@ -1736,8 +1740,10 @@ def _agent_cbs(sid: str) -> dict:
         ),
         tool_gen_callback=lambda name: _tool_progress_enabled(sid)
         and _emit("tool.generating", sid, {"name": name}),
-        thinking_callback=lambda text: _emit("thinking.delta", sid, {"text": text}),
-        reasoning_callback=lambda text: _emit("reasoning.delta", sid, {"text": text}),
+        thinking_callback=lambda text: _show_reasoning_enabled(sid)
+        and _emit("thinking.delta", sid, {"text": text}),
+        reasoning_callback=lambda text: _show_reasoning_enabled(sid)
+        and _emit("reasoning.delta", sid, {"text": text}),
         status_callback=lambda kind, text=None: _status_update(
             sid, str(kind), None if text is None else str(text)
         ),
@@ -2714,6 +2720,7 @@ def _(rid, params: dict) -> dict:
             "session_id": sid,
             "persisted_session_id": key,
             **identity_payload,
+            "show_reasoning": _load_show_reasoning(),
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -2901,6 +2908,7 @@ def _(rid, params: dict) -> dict:
             "replay_events": replay_events,
             "replay_seq": replay_seq,
             "running_tools": running_tools,
+            "show_reasoning": bool(existing_session.get("show_reasoning", False)),
         }
         if live_subagent is not None:
             result["live_subagent"] = live_subagent
@@ -3058,6 +3066,7 @@ def _(rid, params: dict) -> dict:
         "replay_events": child_replay_events,
         "replay_seq": child_replay_seq,
         "running_tools": [],
+        "show_reasoning": bool(session.get("show_reasoning", False)),
     }
     if live_subagent is not None:
         result["live_subagent"] = live_subagent

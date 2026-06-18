@@ -182,6 +182,29 @@ def _session(agent=None, **extra):
     }
 
 
+def test_reasoning_callbacks_honor_show_reasoning_toggle():
+    server._sessions["sid"] = _session(show_reasoning=False)
+    try:
+        with patch("tui_gateway.server._emit") as emit:
+            callbacks = server._agent_cbs("sid")
+            callbacks["reasoning_callback"]("private thought")
+            callbacks["thinking_callback"]("private thinking")
+        emit.assert_not_called()
+
+        server._sessions["sid"]["show_reasoning"] = True
+        with patch("tui_gateway.server._emit") as emit:
+            callbacks = server._agent_cbs("sid")
+            callbacks["reasoning_callback"]("visible thought")
+            callbacks["thinking_callback"]("visible thinking")
+
+        assert [item.args for item in emit.call_args_list] == [
+            ("reasoning.delta", "sid", {"text": "visible thought"}),
+            ("thinking.delta", "sid", {"text": "visible thinking"}),
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_config_set_yolo_toggles_session_scope():
     from tools.approval import clear_session, is_session_yolo_enabled
 

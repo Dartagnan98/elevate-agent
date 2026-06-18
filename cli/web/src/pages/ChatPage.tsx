@@ -152,6 +152,7 @@ interface SessionCreateResponse {
   persisted_session_id?: string;
   resumed?: string;
   session_id: string;
+  show_reasoning?: boolean;
 }
 
 interface ResumeRunningTool {
@@ -3130,6 +3131,7 @@ export default function ChatPage() {
   const turnOutputBaselineRef = useRef<number | null>(null);
 
   const [info, setInfo] = useState<SessionInfo>({});
+  const [showReasoning, setShowReasoning] = useState(false);
   const [usage, setUsage] = useState<UsageInfo | null>(null);
   const [startAnalytics, setStartAnalytics] = useState<AnalyticsResponse | null>(null);
   const [startAnalyticsLoading, setStartAnalyticsLoading] = useState(false);
@@ -3182,19 +3184,26 @@ export default function ChatPage() {
     if (TRANSCRIPT_STORE_ENABLED) activateTranscriptStore();
   }, []);
 
-  // Resolve display.busy_input_mode once so busy sends can honor it. The
-  // config endpoint returns the nested config; tolerate a flat dotted key too.
+  // Resolve display flags once so chat behavior honors config before the
+  // gateway handshake arrives. The endpoint returns nested config; tolerate
+  // flat dotted keys too.
   useEffect(() => {
     void api
       .getConfig()
       .then((cfg) => {
-        const nested = (cfg as { display?: { busy_input_mode?: unknown } })
-          ?.display?.busy_input_mode;
+        const display = (cfg as { display?: Record<string, unknown> })?.display;
+        const nested = display?.busy_input_mode;
         const flat = (cfg as Record<string, unknown>)?.[
           "display.busy_input_mode"
         ];
         const mode = String(nested ?? flat ?? "").trim().toLowerCase();
         if (mode) busyInputModeRef.current = mode;
+        const reasoning =
+          display?.show_reasoning ??
+          (cfg as Record<string, unknown>)?.["display.show_reasoning"];
+        if (typeof reasoning === "boolean") {
+          setShowReasoning(reasoning);
+        }
       })
       .catch(() => {
         /* default "queue" stands */
@@ -6021,6 +6030,7 @@ export default function ChatPage() {
         }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
+        setShowReasoning(Boolean(created.show_reasoning));
         setLiveSubagent(
           "live_subagent" in created
             ? (created as SessionResumeResponse).live_subagent ?? null
@@ -6592,6 +6602,7 @@ export default function ChatPage() {
         }
         setSessionId(created.session_id);
         setInfo(created.info ?? {});
+        setShowReasoning(Boolean(created.show_reasoning));
         if (created.info?.credential_warning || created.info?.config_warning) {
           setBanner(
             created.info.credential_warning ?? created.info.config_warning ?? null,
@@ -8807,6 +8818,7 @@ export default function ChatPage() {
                       onOpenArtifact={openArtifactPreview}
                       onOpenPath={handleOpenPath}
                       onOpenSubagent={handleOpenSubagent}
+                      showReasoning={showReasoning}
                       subagents={turnSubagents}
                       tools={turnTools}
                       turnArtifacts={turnArtifacts}
@@ -9996,6 +10008,7 @@ interface MessageRowProps {
   onEditMessage?(message: ChatMessage): void;
   onOpenArtifact(artifact: ArtifactEntry): void;
   onOpenSubagent?(childSessionId: string): void;
+  showReasoning?: boolean;
   subagents?: SubagentEntry[];
   tools?: ToolEntry[];
   turnArtifacts?: ArtifactEntry[];
@@ -10013,6 +10026,7 @@ function MessageRow({
   onOpenArtifact,
   onOpenPath,
   onOpenSubagent,
+  showReasoning,
   subagents,
   tools,
   turnArtifacts,
@@ -10127,6 +10141,7 @@ function MessageRow({
             liveInput={liveInput}
             liveTokens={liveTokens}
             onOpenSubagent={onOpenSubagent}
+            showReasoning={!!showReasoning}
             startedAt={message.createdAt}
             subagents={subagents ?? EMPTY_SUBAGENTS}
             tokenCount={message.tokenCount}
@@ -10362,6 +10377,7 @@ function messageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): boo
     prev.onOpenArtifact === next.onOpenArtifact &&
     prev.onOpenPath === next.onOpenPath &&
     prev.onOpenSubagent === next.onOpenSubagent &&
+    prev.showReasoning === next.showReasoning &&
     sameOptionalArray(prev.activityTrace, next.activityTrace) &&
     sameOptionalArray(prev.artifacts, next.artifacts) &&
     sameOptionalArray(prev.subagents, next.subagents) &&
@@ -10572,8 +10588,10 @@ function truncatePreview(value: string | undefined, max = 48): string {
 function buildBreakdownSteps(
   tools: ToolEntry[],
   activityTrace: ActivityTrace[],
+  options: { showReasoning?: boolean } = {},
 ): BreakdownStep[] {
   const raw: BreakdownStep[] = [];
+  const showReasoning = options.showReasoning ?? true;
 
   for (const tool of tools) {
     if (tool.name.toLowerCase() === "memory") continue;
@@ -10621,6 +10639,7 @@ function buildBreakdownSteps(
       continue;
     }
     if (trace.kind !== "reasoning" && trace.kind !== "thinking") continue;
+    if (!showReasoning) continue;
     const text = trace.text.trim();
     if (!text) continue;
     // Drop transient single-word pills ("brainstorming", "Working...", etc.) —
@@ -11078,6 +11097,7 @@ function ChatActivityDigest({
   liveInput,
   liveTokens,
   onOpenSubagent,
+  showReasoning,
   startedAt,
   subagents,
   tokenCount,
@@ -11091,6 +11111,7 @@ function ChatActivityDigest({
   liveInput?: number;
   liveTokens?: number;
   onOpenSubagent?(childSessionId: string): void;
+  showReasoning: boolean;
   startedAt?: number;
   subagents?: SubagentEntry[];
   tokenCount?: number;
@@ -11110,8 +11131,8 @@ function ChatActivityDigest({
   }, [busy]);
 
   const steps = useMemo(
-    () => buildBreakdownSteps(tools, activityTrace),
-    [tools, activityTrace],
+    () => buildBreakdownSteps(tools, activityTrace, { showReasoning }),
+    [tools, activityTrace, showReasoning],
   );
   const memoryTools = useMemo(
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
