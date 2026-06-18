@@ -2,7 +2,28 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: detailed build plan, not implemented
+Status: implemented in `cli/scripts/installed_runtime_smoke.py`
+
+## Implementation evidence
+
+- Script:
+  `cli/scripts/installed_runtime_smoke.py`
+- Compile check:
+  `cli/.venv/bin/python -m py_compile cli/scripts/installed_runtime_smoke.py`
+- Installed app smoke:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py` -> `PASS`
+- Smoke result:
+  `/tmp/elevate-installed-smoke-1781747581.json`
+- Verified installed assets:
+  `index-BqtJl1UU.js`, `ChatPage-B0tDyOWz.js`
+- Created installed-runtime session:
+  `20260617_185248_7f5e20`
+- Event stream included:
+  `gateway.ready`, `session.info`, `message.start`, `thinking.delta`,
+  `status.update`, `message.delta`, `reasoning.available`,
+  `message.complete`
+- Fresh Electron log scan found no `gateway not connected`, `Uncaught`,
+  `BLANK-TRACE`, or `did-fail-load` hits.
 
 ## Goal
 
@@ -176,4 +197,3 @@ Installed smoke after patch/restart:
 - The smoke result includes enough session/log evidence for a handoff.
 - The smoke does not mutate real Telegram production history unless explicitly
   run in a manual soak.
-

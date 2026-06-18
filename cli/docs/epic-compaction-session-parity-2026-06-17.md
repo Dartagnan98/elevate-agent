@@ -304,17 +304,16 @@ Execution tracker:
 | 2. Explainable compaction events | partially implemented; recorder/logs improved, support summary still open | yes | close after one-event explanation coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
-| 5. Installed-runtime smoke | detailed plan ready | yes | build repeatable installed smoke script |
+| 5. Installed-runtime smoke | implemented as `cli/scripts/installed_runtime_smoke.py`; installed app pass recorded | yes | extend with Telegram fixture after Issue 6 |
 | 6. Legacy transcript recovery | detailed plan ready | yes | build retry guard/source tests after smoke harness |
 | 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
 | 8. Release checklist | stub only | no | release candidate exists |
 
 Next action rule:
 
-1. Build Issue 5's repeatable installed-runtime smoke script.
-2. Use that harness while implementing Issue 6's legacy recovery retry guard
+1. Use Issue 5's installed-runtime smoke harness while implementing Issue 6's legacy recovery retry guard
    and source tests.
-3. Then close Issue 1/2 verification gaps with Telegram-style installed soak
+2. Then close Issue 1/2 verification gaps with Telegram-style installed soak
    and support-facing explanation coverage.
 
 Deep-dive branching model:
