@@ -6670,6 +6670,7 @@ export default function ChatPage() {
       setStatusText(status);
 
       try {
+        await gw.connect();
         for (const att of readyAttachments) {
           if (!att.path) continue;
           try {

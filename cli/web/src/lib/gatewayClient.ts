@@ -122,7 +122,8 @@ export class GatewayClient {
   }
 
   async connect(token?: string): Promise<void> {
-    if (this._state === "open") return;
+    if (this._state === "open" && this.ws?.readyState === WebSocket.OPEN) return;
+    if (this._state === "open") this.setState("closed");
     if (this._state === "connecting" && this.connectPromise) {
       return this.connectPromise;
     }

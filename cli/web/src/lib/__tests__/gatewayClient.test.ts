@@ -101,4 +101,32 @@ describe("GatewayClient", () => {
     expect(socket.sent).toEqual([]);
     expect(client.state).toBe("closed");
   });
+
+  it("reconnects when the cached open socket is stale", async () => {
+    const client = new GatewayClient();
+    const connected = client.connect();
+    const firstSocket = FakeWebSocket.instances[0];
+    firstSocket.readyState = FakeWebSocket.OPEN;
+    firstSocket.emit("open");
+    await connected;
+
+    firstSocket.readyState = FakeWebSocket.CLOSED;
+
+    const reconnected = client.connect();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const secondSocket = FakeWebSocket.instances[1];
+    secondSocket.readyState = FakeWebSocket.OPEN;
+    secondSocket.emit("open");
+    await reconnected;
+
+    const request = client.request("prompt.submit", { session_id: "s", text: "hi" }, 1_000);
+    expect(firstSocket.sent).toEqual([]);
+    const sent = JSON.parse(secondSocket.sent[0]);
+    expect(sent.method).toBe("prompt.submit");
+    secondSocket.emit("message", {
+      data: JSON.stringify({ id: sent.id, result: { ok: true } }),
+    });
+    await expect(request).resolves.toEqual({ ok: true });
+    expect(client.state).toBe("open");
+  });
 });
