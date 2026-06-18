@@ -2,8 +2,9 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: partially implemented; failed message-count recovery retry guard is in
-source, persisted across gateway restarts, and patched into installed app
+Status: implemented for source plus installed synthetic Telegram hygiene soak;
+live Telegram network soak with a copied oversized lane is still the remaining
+release-confidence check
 
 ## Implementation evidence
 
@@ -51,10 +52,19 @@ source, persisted across gateway restarts, and patched into installed app
   now proves the same-count retry is skipped, growth past the retry margin
   retries once, and context overflow after failed legacy recovery returns the
   older Telegram thread message.
+- Installed `_handle_message` hygiene soak:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture --telegram-hygiene-soak`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781754329.json`.
+- The installed synthetic soak verifies:
+  cursor raw history `450`, cursor hygiene calls `0`, normal agent delegation
+  `1`, failed recovery calls `2`, same-count retry skipped, persisted guard
+  reloaded after simulated restart, growth retried, and the clean older-thread
+  recovery message returned without `_emit_warning`.
 
 Remaining work:
 
-- real provider-call installed soak after local license refresh
+- live Telegram network/manual oversized-session soak against a disposable
+  copied lane, not the original customer transcript
 
 ## Goal
 

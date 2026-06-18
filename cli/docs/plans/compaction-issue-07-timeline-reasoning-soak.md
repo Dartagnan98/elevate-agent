@@ -2,9 +2,8 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: partially implemented; protocol replay/follow-up ring coverage is in,
-installed provider-call close/resume smoke passes, and light visual smoke
-passes; compacted-session manual soak is still pending
+Status: implemented for installed desktop compact/resume/follow-up smoke;
+protocol replay/follow-up ring coverage and light visual smoke pass
 
 ## Current evidence
 
@@ -19,9 +18,20 @@ passes; compacted-session manual soak is still pending
   It streamed `message.start`, `thinking.delta`, `status.update`,
   `message.delta`, `reasoning.available`, and `message.complete`, included
   usage, and reloaded the final assistant text after `session.resume`.
+- Latest installed desktop compacted follow-up smoke passed:
+  `/tmp/elevate-installed-smoke-1781753993.json`.
+  It created a real installed desktop session, sent four provider-backed turns,
+  ran `session.compress`, advanced cursor `0 -> 5`, resumed the persisted
+  session `20260617_203915_5c739f`, completed the follow-up with final text
+  `compacted followup ok`, and found no post-follow-up `compaction.*` log lines
+  for that session.
 - Light installed Electron visual smoke passed: the latest smoke session rendered
   in the real Elevate window and showed `installed compaction smoke ok` without
   requiring session re-entry.
+- Installed Electron visual check for the compacted smoke session passed: search
+  opened `20260617_203915_5c739f`, the UI showed all four setup turns plus
+  `compacted followup ok`, and the context indicator rendered pending (`--`)
+  instead of a stale pre-compaction percentage.
 - The smoke output now reports `license_authenticated`, `license_expired`, and
   a non-secret license status string so auth gating is not mistaken for a
   timeline or compaction regression.
@@ -105,14 +115,14 @@ to see thinking, reasoning, streaming response text, or the final transcript.
 
 4. Compaction-boundary soak.
 
-   Only after the normal streaming/resume smoke is green, run a long-turn or
-   compacted-session fixture:
+   The installed compacted-session smoke is now green:
 
    - preloaded cursor metadata
    - compact-start status
    - pending usage ring
    - final text streams after the compaction boundary
    - resume reloads the final transcript
+   - follow-up does not immediately trigger compaction again
 
 ## Do not do
 
@@ -126,6 +136,8 @@ to see thinking, reasoning, streaming response text, or the final transcript.
 - Installed sidecar smoke passes with close-and-resume transcript verification.
 - A real installed Electron view shows the same final answer without requiring a
   manual session re-entry.
+- Installed compact/resume/follow-up smoke passes without fresh post-follow-up
+  compaction logs for the persisted session.
 - Fresh logs contain no `gateway not connected`, `Uncaught`, `BLANK-TRACE`, or
   `did-fail-load` entries after the smoke start time.
 - Any auth-gated run reports the license blocker clearly and does not get filed

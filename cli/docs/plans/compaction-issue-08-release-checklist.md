@@ -2,17 +2,20 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: checklist created; installed provider-call and light visual smoke pass;
-release still blocked until desktop compacted-session and Telegram/manual soak
-pass
+Status: checklist created; installed provider-call, desktop compacted follow-up,
+disposable Telegram hygiene, and light visual smoke pass; release still blocked
+until live Telegram/manual oversized-session soak passes
 
 ## Current go/no-go
 
 Do not send the customer-visible update yet. Source tests, installed file
 parity, the disposable Telegram fixture, the real desktop provider-call
-close/resume smoke, and a light installed Electron visual check are passing.
-The remaining release gate is desktop compacted-session and Telegram/manual
-oversized-session soak.
+close/resume smoke, the real installed desktop compact/resume/follow-up smoke,
+the installed synthetic Telegram hygiene soak, and installed Electron visual
+checks are passing. The compacted smoke session renders all setup turns plus
+`compacted followup ok`, with context pending (`--`) instead of stale usage.
+The remaining release gate is live Telegram/manual oversized-session soak
+against a disposable copied lane.
 
 ## Source checks
 
@@ -83,17 +86,21 @@ cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py \
   --check-file agent/conversation_compression.py \
   --check-file tui_gateway/server.py \
   --skip-sidecar \
-  --telegram-fixture
+  --telegram-fixture \
+  --telegram-hygiene-soak
 ```
 
 Expected current evidence:
 
-- `/tmp/elevate-installed-smoke-1781752896.json`
+- `/tmp/elevate-installed-smoke-1781754329.json`
 - `ok: true`
 - `telegram_fixture.raw_messages: 450`
 - `telegram_fixture.effective_messages: 11`
 - `telegram_fixture.same_count_skips: true`
 - `telegram_fixture.grown_retries: true`
+- `telegram_hygiene.cursor_hygiene_calls: 0`
+- `telegram_hygiene.persisted_guard_reloaded: true`
+- `telegram_hygiene.clean_recovery_message: true`
 
 Provider-call close/resume smoke:
 
@@ -115,16 +122,39 @@ Current evidence:
 - `session.resume reloaded final assistant text`
 - `closed resumed sidecar session`
 
-## Manual desktop smoke
+Compacted desktop follow-up smoke:
+
+```bash
+cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py \
+  --check-file gateway/run.py \
+  --check-file agent/conversation_compression.py \
+  --check-file tui_gateway/server.py \
+  --skip-sidecar \
+  --desktop-compacted-followup
+```
+
+Current evidence:
+
+- `/tmp/elevate-installed-smoke-1781753993.json`
+- `ok: true`
+- `desktop_compaction.persisted_session_id: 20260617_203915_5c739f`
+- `desktop_compaction.removed: 5`
+- `desktop_compaction.followup_final_text: compacted followup ok`
+- `desktop_compaction.post_followup_compaction_events: []`
+- Installed Electron visual check: session `20260617_203915_5c739f` opens from
+  search and shows `compacted followup ok` with context pending (`--`).
+
+## Desktop smoke
+
+Automated installed coverage above is the release gate. A human visual pass is
+still useful before shipping:
 
 1. Open the installed Elevate app, not localhost.
-2. Resume a cursor-compacted desktop session.
-3. Send one normal follow-up.
-4. Confirm no immediate repeat compaction unless the context is genuinely near
-   the critical line.
-5. Confirm reasoning/timeline updates continue in real time.
-6. Confirm the context ring stays pending after compaction until fresh usage
-   arrives.
+2. Confirm the latest compacted smoke session and final follow-up are visible.
+3. Confirm reasoning/timeline updates do not require leaving and re-entering
+   the session.
+4. Confirm the context ring is pending or fresh, not a stale pre-compaction
+   value.
 
 ## Manual Telegram smoke
 
@@ -161,8 +191,8 @@ One report should answer:
 
 ## Release blocker list
 
-- Real desktop compacted-session manual soak still needed.
 - Real Telegram/manual oversized-session soak still needed.
+- Optional human visual pass on the automated desktop compacted smoke session.
 - Watch the observed `/api/workspace/git/status` temp-file replace race from
   the installed smoke run; it did not fail the compaction smoke, but it is a
   production-hardening bug.
@@ -172,8 +202,8 @@ One report should answer:
 - Source checks pass.
 - Installed parity plus Telegram fixture passes.
 - Installed provider-call close/resume smoke passes with a valid license.
-- Manual desktop follow-up on a compacted session does not immediately compact
-  again from raw transcript measurement.
+- Installed compacted desktop follow-up smoke proves a resumed compacted session
+  does not immediately compact again from raw transcript measurement.
 - Manual Telegram oversized-session check either recovers once into cursor state
   or fails with the clean older-thread recovery message.
 - No fresh `AttributeError`, `_emit_warning`, blank timeline, or stale context

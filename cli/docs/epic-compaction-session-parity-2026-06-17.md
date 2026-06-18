@@ -2,8 +2,9 @@
 
 Date: 2026-06-17
 Repo: `/Users/dartagnanpatricio/elevate`
-Status: active local epic; foundation and Issues 2-5 are implemented in
-source; Issues 1-2 still need real Telegram/manual oversized-session soak
+Status: active local epic; foundation and Issues 1-7 are implemented in source
+and installed smoke coverage; live Telegram/manual oversized-session soak
+remains the main release gate
 
 > **Outcome:** Telegram, desktop chat, and resumed sessions behave like one
 > product: no surprise repeat compactions, no blank or stalled timelines, no
@@ -97,6 +98,19 @@ Verified fixes already in source and patched into the installed desktop app:
 - The installed provider-call close/resume smoke now passes with a valid local
   license: session `20260617_202412_b52050`, output
   `/tmp/elevate-installed-smoke-1781753062.json`.
+- The installed Telegram hygiene soak now imports installed gateway code under
+  disposable state and proves a 450-message cursor-compacted raw history does
+  not trigger hygiene compaction, failed legacy recovery is guarded across a
+  simulated restart, growth retries once, and recovery failure returns the clean
+  older-thread message. Output:
+  `/tmp/elevate-installed-smoke-1781754329.json`.
+- The installed desktop compacted follow-up smoke now runs a real provider
+  compact/resume/follow-up path: session `20260617_203915_5c739f`, cursor
+  `0 -> 5`, final text `compacted followup ok`, and no post-follow-up
+  compaction events. Output: `/tmp/elevate-installed-smoke-1781753993.json`.
+- The installed Electron visual check opens the same compacted smoke session
+  from search, shows all four setup turns plus `compacted followup ok`, and
+  shows context pending (`--`) instead of stale pre-compaction usage.
 - Legacy recovery failure now returns a clean older-thread recovery message
   when the same oversized Telegram-style transcript cannot be recovered and the
   normal agent turn hits context overflow.
@@ -123,6 +137,12 @@ py_compile passed - changed source and installed bundle files
 installed gateway smoke ok - 140-message Telegram-style transcript compacted to cursor 22, transcript append-only
 installed desktop smoke ok - dashboard rendered in the packaged app and a real
   chat response streamed/completed
+installed Telegram hygiene soak ok - cursor raw history skipped hygiene,
+  retry guard persisted/reloaded, clean recovery failure returned
+installed desktop compacted follow-up smoke ok - manual compact advanced cursor,
+  resume+follow-up completed, no repeat compaction logged
+installed Electron visual check ok - compacted smoke transcript visible,
+  context usage pending instead of stale
 ```
 
 ## Epic acceptance
@@ -325,20 +345,20 @@ Execution tracker:
 
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
-| 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
-| 2. Explainable compaction events | source support coverage implemented; shared structured logs plus support summary script added | yes | close after real Telegram/manual event coverage |
-| 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
-| 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
-| 5. Installed-runtime smoke | implemented; provider close/resume and disposable Telegram fixture pass | yes | reuse as release smoke |
-| 6. Legacy transcript recovery | implemented in source and installed parity smoke; raw-history inventory complete | yes | real Telegram/manual oversized-session soak |
-| 7. Timeline/reasoning soak | partially implemented; replay ring follow-up bug fixed, installed close/resume smoke passes, light visual smoke passes | yes | real desktop compacted-session manual soak |
-| 8. Release checklist | checklist created; provider and light visual smoke pass, desktop/Telegram manual soak still open | yes | real desktop/Telegram soak pass |
+| 1. Gateway hygiene parity | implemented; installed Telegram-shaped hygiene soak passes | yes | live Telegram copied-lane soak |
+| 2. Explainable compaction events | implemented; shared structured logs plus support summary script added | yes | live Telegram/manual event coverage |
+| 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | keep in soak |
+| 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | keep in soak |
+| 5. Installed-runtime smoke | implemented; provider close/resume, Telegram fixture/hygiene, and compacted desktop follow-up pass | yes | reuse as release smoke |
+| 6. Legacy transcript recovery | implemented in source and installed synthetic soak; raw-history inventory complete | yes | live Telegram/manual oversized-session soak |
+| 7. Timeline/reasoning soak | implemented for desktop; replay ring, installed close/resume, visual, and compacted follow-up pass | yes | optional human visual pass |
+| 8. Release checklist | checklist created; only live Telegram/manual oversized-session soak is still a release gate | yes | live Telegram copied-lane soak pass |
 
 Next action rule:
 
-1. Use Issue 5's installed-runtime smoke harness while implementing Issue 6's legacy recovery retry guard
-   and source tests.
-2. Then close Issue 1/2 verification gaps with Telegram-style installed soak.
+1. Reuse Issue 5's installed-runtime smoke harness as the release smoke.
+2. Run one live Telegram/manual oversized-session soak against a copied lane,
+   not the original customer transcript.
 
 Deep-dive branching model:
 
@@ -550,6 +570,8 @@ converted
 - **5.4** Assert cursor persists before the normal agent turn.
 - **5.5** Assert no repeat compaction on the next resumed turn when effective
   payload is below threshold.
+- **5.6** Real installed desktop compact/resume/follow-up smoke with provider
+  calls and structured compaction log assertions.
 
 **Acceptance:** The smoke reproduces the old failure mode and passes against the
 installed bundle after patching.
@@ -651,15 +673,14 @@ Telegram path, not only localhost.
 
 1. **Ship guardrails already fixed:** keep the current commits together because
    they close the active Telegram crash and cursor persistence failure.
-2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps;
-   shared compression event logs and support summary are in, Telegram-style
-   installed event coverage remains.
+2. **Current P0 follow-through:** Issue 1/2 source and installed synthetic
+   coverage are in; only live Telegram/manual copied-lane coverage remains.
 3. **P1 product clarity is built:** Issue 3 and Issue 4 are source + installed
    app patched; keep them in soak.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
-5. **Then soak:** Issue 7 across real desktop and Telegram sessions; current
-   blocker is manual/Telegram coverage, not provider auth.
+5. **Then soak:** Issue 7 desktop coverage is automated and green; current
+   blocker is live Telegram/manual copied-lane coverage, not provider auth.
 6. **Release gate:** Issue 8 before any customer-visible update.
 
 ## Open decisions
@@ -677,7 +698,8 @@ Telegram path, not only localhost.
 
 ## Current local state
 
-As of the latest docs pass, the worktree was clean before editing these plan
-files. The recent source fixes are committed locally and the installed desktop
-runtime has been patched/smoked, but Telegram legacy-session behavior still
-needs an installed-runtime soak before release confidence.
+As of the latest docs pass, the recent source fixes are committed locally and
+the installed desktop runtime has been patched/smoked. The remaining release
+confidence gap is a live Telegram/manual oversized-session soak using a copied
+lane, because the installed synthetic hygiene soak already covers the gateway
+bug path without mutating real customer history.

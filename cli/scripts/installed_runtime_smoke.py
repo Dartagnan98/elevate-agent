@@ -9,6 +9,9 @@ This intentionally exercises the packaged app path instead of localhost dev:
 4. Create a chat session, submit an exact-reply prompt, and wait for completion.
 5. Scan fresh Electron logs for the stale-socket/blank-shell errors we have hit.
 
+Optional flags add installed-code Telegram hygiene fixtures and a real installed
+desktop compact/resume/follow-up smoke.
+
 It does not start/patch/restart the app. Run it after the installed app is
 already running on the dashboard port.
 """
@@ -66,6 +69,8 @@ class SmokeResult:
     license_expired: bool | None = None
     license_status_text: str | None = None
     telegram_fixture: dict[str, Any] | None = None
+    telegram_hygiene: dict[str, Any] | None = None
+    desktop_compaction: dict[str, Any] | None = None
     log_hits: list[str] = field(default_factory=list)
     output_path: str | None = None
 
@@ -171,6 +176,32 @@ def read_license_state() -> tuple[bool | None, bool | None, str | None]:
     if expired:
         return True, True, "Subscribed, but local access token is expired."
     return True, False, f"Subscribed, token has {remaining // 60}m left."
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _read_from_offset(path: Path, offset: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, offset))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _session_compaction_lines(path: Path, offset: int, session_id: str) -> list[str]:
+    text = _read_from_offset(path, offset)
+    needle = f"session={session_id}"
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if "compaction." in line and needle in line
+    ][-20:]
 
 
 def run_installed_telegram_fixture(
@@ -288,6 +319,252 @@ print(json.dumps({
     result.telegram_fixture = payload
     result.pass_check(
         "telegram fixture: cursor raw history trims to summary+tail and retry guard reloads"
+    )
+
+
+def run_installed_telegram_hygiene_soak(
+    *,
+    installed_cli: Path,
+    timeout: float,
+    result: SmokeResult,
+) -> None:
+    """Run installed GatewayRunner hygiene with synthetic Telegram events."""
+
+    code = r"""
+import asyncio
+import importlib
+import json
+import logging
+import os
+import sys
+import types
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+sys.path.insert(0, sys.argv[1])
+
+fake_dotenv = types.ModuleType("dotenv")
+fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+sys.modules["dotenv"] = fake_dotenv
+
+from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
+from gateway.session import SessionEntry, SessionSource
+
+
+class CaptureAdapter(BasePlatformAdapter):
+    def __init__(self):
+        super().__init__(PlatformConfig(enabled=True, token="fake-token"), Platform.TELEGRAM)
+        self.sent = []
+
+    async def connect(self):
+        return True
+
+    async def disconnect(self):
+        return None
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append({"chat_id": chat_id, "content": content})
+        return SendResult(success=True, message_id="synthetic-1")
+
+    async def get_chat_info(self, chat_id):
+        return {"id": chat_id}
+
+
+def make_history(n_messages, content_size=20):
+    content = "x" * content_size
+    return [
+        {
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": content,
+            "timestamp": f"t{i}",
+        }
+        for i in range(n_messages)
+    ]
+
+
+def make_runner(gateway_run, *, session_id, history, row, last_prompt_tokens=0):
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token")}
+    )
+    runner.adapters = {Platform.TELEGRAM: CaptureAdapter()}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="agent:main:telegram:dm:8404672468:agent:executive-assistant",
+        session_id=session_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        last_prompt_tokens=last_prompt_tokens,
+    )
+    runner.session_store.load_transcript.return_value = history
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.append_to_transcript = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_model_overrides = {}
+    runner._session_db = MagicMock()
+    runner._session_db.get_session.return_value = row
+    runner._session_db.get_meta.return_value = None
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "ok",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 35_500,
+        }
+    )
+    return runner
+
+
+async def main():
+    gateway_run = importlib.import_module("gateway.run")
+    gateway_run._elevate_home = Path(os.environ["ELEVATE_HOME"])
+    gateway_run._resolve_runtime_agent_kwargs = lambda: {"api_key": "fake"}
+
+    import agent.model_metadata
+    agent.model_metadata.get_model_context_length = lambda *_args, **_kwargs: 100_000
+    gateway_run.get_model_context_length = lambda *_args, **_kwargs: 100_000
+
+    event = MessageEvent(
+        text="hello",
+        source=SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="8404672468",
+            chat_type="dm",
+            user_id="8404672468",
+            agent_id="executive-assistant",
+        ),
+        message_id="1",
+    )
+
+    class CursorAgent:
+        calls = 0
+        def __init__(self, **_kwargs):
+            type(self).calls += 1
+            raise AssertionError("cursor-compacted history should not auto-compress")
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = CursorAgent
+    sys.modules["run_agent"] = fake_run_agent
+
+    cursor_runner = make_runner(
+        gateway_run,
+        session_id="installed-telegram-cursor",
+        history=make_history(450, 20),
+        row={
+            "compaction_cursor": 430,
+            "compaction_summary": "earlier Telegram turns summarized",
+        },
+        last_prompt_tokens=99_000,
+    )
+    cursor_result = await cursor_runner._handle_message(event)
+    assert cursor_result == "ok"
+    assert CursorAgent.calls == 0
+    cursor_runner.session_store.rewrite_transcript.assert_not_called()
+
+    class FailingCompressAgent:
+        calls = 0
+        def __init__(self, **_kwargs):
+            type(self).calls += 1
+            self.session_id = "installed-telegram-fail"
+            self.compaction_cursor = 0
+            self.compaction_summary = None
+            self.context_compressor = SimpleNamespace(_last_compress_aborted=False)
+            self.shutdown_memory_provider = MagicMock()
+            self.close = MagicMock()
+
+        def _compress_context(self, *_args, **_kwargs):
+            raise RuntimeError("input exceeds the context window")
+
+    fake_run_agent.AIAgent = FailingCompressAgent
+
+    fail_runner = make_runner(
+        gateway_run,
+        session_id="installed-telegram-fail",
+        history=make_history(450, 20),
+        row={},
+    )
+    assert await fail_runner._handle_message(event) == "ok"
+    assert FailingCompressAgent.calls == 1
+    assert fail_runner._hygiene_noop_guard == {"installed-telegram-fail": 450}
+
+    assert await fail_runner._handle_message(event) == "ok"
+    assert FailingCompressAgent.calls == 1
+    assert fail_runner._run_agent.await_count == 2
+    fail_runner.session_store.rewrite_transcript.assert_not_called()
+
+    del fail_runner._hygiene_noop_guard
+    fail_runner._session_db.get_meta.return_value = json.dumps({"installed-telegram-fail": 450})
+    assert await fail_runner._handle_message(event) == "ok"
+    assert FailingCompressAgent.calls == 1
+    assert fail_runner._run_agent.await_count == 3
+
+    fail_runner.session_store.load_transcript.return_value = make_history(476, 20)
+    fail_runner._run_agent.return_value = {
+        "final_response": "",
+        "messages": [],
+        "tools": [],
+        "history_offset": 0,
+        "last_prompt_tokens": 0,
+        "failed": True,
+        "error": "Your input exceeds the context window of this model",
+    }
+    response = await fail_runner._handle_message(event)
+    assert FailingCompressAgent.calls == 2
+    assert "older Telegram thread is too large to recover automatically" in response
+    assert "_emit_warning" not in response
+
+    print(json.dumps({
+        "cursor_raw_messages": 450,
+        "cursor_hygiene_calls": CursorAgent.calls,
+        "cursor_delegated_to_agent": cursor_runner._run_agent.await_count,
+        "failed_recovery_calls": FailingCompressAgent.calls,
+        "same_count_skipped": True,
+        "persisted_guard_reloaded": True,
+        "growth_retried": True,
+        "clean_recovery_message": True,
+    }, sort_keys=True))
+
+asyncio.run(main())
+"""
+    with TemporaryDirectory(prefix="elevate-telegram-hygiene-soak-") as tmp:
+        env = os.environ.copy()
+        env["ELEVATE_HOME"] = tmp
+        env["PYTHONPATH"] = (
+            str(installed_cli)
+            + os.pathsep
+            + env.get("PYTHONPATH", "")
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(installed_cli)],
+            cwd=tmp,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"telegram hygiene soak failed: {stderr}")
+
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    result.telegram_hygiene = payload
+    result.pass_check(
+        "telegram hygiene soak: installed _handle_message skips cursor raw history and persists retry guard"
     )
 
 
@@ -473,6 +750,206 @@ async def run_sidecar_smoke(
                 result.pass_check("closed resumed sidecar session")
 
 
+async def run_desktop_compacted_followup_smoke(
+    *,
+    port: int,
+    timeout: float,
+    result: SmokeResult,
+) -> None:
+    if websockets is None:
+        raise RuntimeError("websockets package is required for sidecar smoke")
+
+    html = fetch_text(f"http://127.0.0.1:{port}/chat?new=installed-compact-smoke", timeout)
+    token = extract_required(
+        r'__ELEVATE_SESSION_TOKEN__="([^"]+)"',
+        html,
+        "dashboard session token",
+    )
+    url = f"ws://127.0.0.1:{port}/api/ws?token={token}"
+    agent_log = Path.home() / ".elevate/logs/agent.log"
+    next_id = 1
+    current_complete: dict[str, Any] | None = None
+
+    async with websockets.connect(url, max_size=None, ping_interval=None) as ws:
+        async def request(method: str, params: dict[str, Any], wait: float) -> dict[str, Any]:
+            nonlocal next_id, current_complete
+            request_id = f"compact-smoke-{next_id}"
+            next_id += 1
+            await ws.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": method,
+                        "params": params,
+                    }
+                )
+            )
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=max(0.1, deadline - time.monotonic()),
+                )
+                msg = json.loads(raw)
+                if msg.get("method") == "event":
+                    ev = msg.get("params") or {}
+                    typ = ev.get("type")
+                    if isinstance(typ, str):
+                        result.events.append(typ)
+                    if typ == "message.complete":
+                        payload = ev.get("payload") or {}
+                        if isinstance(payload, dict):
+                            current_complete = payload
+                if msg.get("id") == request_id:
+                    return msg
+            raise TimeoutError(f"request timed out: {method}")
+
+        async def submit_exact(session_id: str, text: str, expected: str) -> dict[str, Any]:
+            nonlocal current_complete
+            current_complete = None
+            submit = await request(
+                "prompt.submit",
+                {"session_id": session_id, "text": text},
+                min(timeout, 30),
+            )
+            submit_result = submit.get("result") or {}
+            if (
+                isinstance(submit_result, dict)
+                and submit_result.get("status") == "sign_in_required"
+            ):
+                raise RuntimeError(
+                    "prompt.submit auth gated (sign_in_required); refresh the installed app license"
+                )
+            if not isinstance(submit_result, dict) or submit_result.get("status") != "streaming":
+                raise RuntimeError(f"prompt.submit did not stream: {submit!r}")
+
+            deadline = time.monotonic() + timeout
+            while current_complete is None and time.monotonic() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=max(0.1, deadline - time.monotonic()),
+                )
+                msg = json.loads(raw)
+                if msg.get("method") != "event":
+                    continue
+                ev = msg.get("params") or {}
+                typ = ev.get("type")
+                if isinstance(typ, str):
+                    result.events.append(typ)
+                if typ == "message.complete":
+                    payload = ev.get("payload") or {}
+                    if isinstance(payload, dict):
+                        current_complete = payload
+            if current_complete is None:
+                raise TimeoutError("message.complete did not arrive")
+            final_text = current_complete.get("text") or current_complete.get("rendered")
+            if final_text != expected:
+                raise RuntimeError(f"unexpected final text: {final_text!r} != {expected!r}")
+            if "usage" not in current_complete:
+                raise RuntimeError("message.complete missing usage payload")
+            return current_complete
+
+        create = await request("session.create", {"cols": 100}, timeout)
+        create_result = create.get("result") or {}
+        if not isinstance(create_result, dict):
+            raise RuntimeError(f"unexpected session.create result: {create!r}")
+        sidecar_session_id = create_result.get("session_id")
+        persisted_session_id = create_result.get("persisted_session_id")
+        if not isinstance(sidecar_session_id, str):
+            raise RuntimeError(f"missing sidecar session id: {create!r}")
+        if not isinstance(persisted_session_id, str):
+            persisted_session_id = sidecar_session_id
+
+        setup_turns = [
+            ("Reply exactly: compact setup one", "compact setup one"),
+            ("Reply exactly: compact setup two", "compact setup two"),
+            ("Reply exactly: compact setup three", "compact setup three"),
+            ("Reply exactly: compact setup four", "compact setup four"),
+        ]
+        for prompt, expected in setup_turns:
+            await submit_exact(sidecar_session_id, prompt, expected)
+
+        compact_log_offset = _file_size(agent_log)
+        compact = await request(
+            "session.compress",
+            {
+                "session_id": sidecar_session_id,
+                "focus_topic": "installed compacted followup smoke",
+            },
+            min(timeout, 120),
+        )
+        compact_result = compact.get("result") or {}
+        if not isinstance(compact_result, dict):
+            raise RuntimeError(f"unexpected session.compress result: {compact!r}")
+        removed = int(compact_result.get("removed") or 0)
+        if removed <= 0:
+            raise RuntimeError(f"session.compress did not advance cursor: {compact!r}")
+
+        await asyncio.sleep(0.2)
+        compact_lines = _session_compaction_lines(
+            agent_log, compact_log_offset, persisted_session_id
+        )
+        if not any("compaction.completed" in line for line in compact_lines):
+            raise RuntimeError("manual compaction completed but no structured log was found")
+        after_compact_offset = _file_size(agent_log)
+
+        await request(
+            "session.close",
+            {"session_id": sidecar_session_id},
+            min(timeout, 30),
+        )
+
+        resumed = await request(
+            "session.resume",
+            {
+                "session_id": persisted_session_id,
+                "include_messages": True,
+                "cols": 100,
+            },
+            min(timeout, 30),
+        )
+        resumed_result = resumed.get("result") or {}
+        if not isinstance(resumed_result, dict):
+            raise RuntimeError(f"unexpected session.resume result: {resumed!r}")
+        resumed_session_id = resumed_result.get("session_id")
+        if not isinstance(resumed_session_id, str):
+            raise RuntimeError(f"session.resume missing live session id: {resumed!r}")
+
+        followup = await submit_exact(
+            resumed_session_id,
+            "Reply exactly: compacted followup ok",
+            "compacted followup ok",
+        )
+        post_followup_compactions = _session_compaction_lines(
+            agent_log, after_compact_offset, persisted_session_id
+        )
+        if post_followup_compactions:
+            raise RuntimeError(
+                "follow-up retriggered compaction after resume: "
+                + " | ".join(post_followup_compactions[-3:])
+            )
+
+        await request(
+            "session.close",
+            {"session_id": resumed_session_id},
+            min(timeout, 30),
+        )
+
+    result.desktop_compaction = {
+        "persisted_session_id": persisted_session_id,
+        "setup_turns": len(setup_turns),
+        "removed": removed,
+        "resumed_session_id": resumed_session_id,
+        "followup_final_text": followup.get("text") or followup.get("rendered"),
+        "manual_compaction_events": compact_lines,
+        "post_followup_compaction_events": post_followup_compactions,
+    }
+    result.pass_check(
+        "desktop compacted followup: manual compact persisted, resume+followup completed without repeat compaction"
+    )
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installed-app", type=Path, default=DEFAULT_APP)
@@ -498,6 +975,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "Run a disposable installed-code Telegram-style compaction fixture "
             "without touching real Telegram/session data."
+        ),
+    )
+    parser.add_argument(
+        "--telegram-hygiene-soak",
+        action="store_true",
+        help=(
+            "Run installed GatewayRunner hygiene with synthetic Telegram events "
+            "and disposable state."
+        ),
+    )
+    parser.add_argument(
+        "--desktop-compacted-followup",
+        action="store_true",
+        help=(
+            "Create a real installed desktop chat, compact it, resume it, and "
+            "send a follow-up."
         ),
     )
     parser.add_argument(
@@ -548,6 +1041,16 @@ def main(argv: list[str]) -> int:
         except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
             result.fail(str(exc))
 
+    if args.telegram_hygiene_soak:
+        try:
+            run_installed_telegram_hygiene_soak(
+                installed_cli=installed_cli,
+                timeout=args.timeout,
+                result=result,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            result.fail(str(exc))
+
     if not args.skip_sidecar:
         (
             result.license_authenticated,
@@ -572,6 +1075,30 @@ def main(argv: list[str]) -> int:
             asyncio.TimeoutError,
         ) as exc:
             result.fail(f"sidecar smoke failed: {exc}")
+
+    if args.desktop_compacted_followup:
+        if result.license_authenticated is None:
+            (
+                result.license_authenticated,
+                result.license_expired,
+                result.license_status_text,
+            ) = read_license_state()
+        try:
+            asyncio.run(
+                run_desktop_compacted_followup_smoke(
+                    port=args.port,
+                    timeout=args.timeout,
+                    result=result,
+                )
+            )
+        except (
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            urllib.error.URLError,
+            asyncio.TimeoutError,
+        ) as exc:
+            result.fail(f"desktop compacted followup smoke failed: {exc}")
 
     result.log_hits = read_recent_log_hits(args.main_log, started_at)
     if result.log_hits:

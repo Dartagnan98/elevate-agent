@@ -42,6 +42,19 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
   session `20260617_202412_b52050`, final text
   `installed compaction smoke ok`, license status
   `Subscribed, token has 59m left.`, and resumed sidecar session closed.
+- Latest Telegram fixture plus installed `_handle_message` hygiene soak:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --telegram-fixture --telegram-hygiene-soak`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781754329.json`.
+  It verifies a 450-message cursor-compacted Telegram-shaped raw history
+  delegates to the normal agent path without hygiene compression, and a failed
+  legacy recovery records/reloads/skips the same-count retry guard before
+  retrying only after raw-history growth.
+- Latest real installed desktop compacted follow-up smoke:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py --check-file tui_gateway/server.py --skip-sidecar --desktop-compacted-followup`
+  -> `PASS`, output `/tmp/elevate-installed-smoke-1781753993.json`,
+  session `20260617_203915_5c739f`, manual compact cursor advanced `0 -> 5`,
+  final follow-up text `compacted followup ok`, and
+  `post_followup_compaction_events: []`.
 
 ## Goal
 
@@ -169,20 +182,48 @@ Assertions:
 
 - cursor session estimates `summary + tail` and does not run pre-agent hygiene
   just because raw history is large
+- installed `GatewayRunner._handle_message` delegates a cursor-compacted
+  Telegram-shaped lane to the normal agent path instead of instantiating a
+  hygiene compressor
 - persisted no-op retry guard reloads after a simulated restart
 - same raw message count skips the same failed legacy recovery retry
 - growth past the retry margin allows a fresh recovery attempt
+- failed legacy recovery returns the clean older-thread recovery message
+  instead of `_emit_warning` or a raw provider error
 
 Full provider-backed legacy recovery remains source-test/manual-soak coverage.
 Do not fake a provider inside the user's real app data.
+
+### Tier 5: installed compacted desktop follow-up
+
+Use the real installed desktop dashboard sidecar and provider path:
+
+1. Create a session through `session.create`.
+2. Send several exact-reply turns to produce persisted transcript history.
+3. Run `session.compress`.
+4. Assert cursor compaction advanced.
+5. Close the live sidecar session.
+6. Resume the persisted session id.
+7. Send one exact-reply follow-up.
+
+Assertions:
+
+- structured `compaction.completed` log exists for the persisted session id
+- cursor advancement is nonzero
+- follow-up completes with a real `message.complete` usage payload
+- no fresh `compaction.*` line for that session appears after the follow-up
+- resumed sidecar session is closed so the smoke does not leak live workers
 
 ## Minimal implementation plan
 
 1. Create the smoke script with Tier 1 and Tier 2 only.
 2. Add optional `--visual` for Tier 3.
-3. Add optional `--telegram-fixture` only after Issue 6 defines recovery state.
-4. Save each smoke run's short JSON result under `/tmp/elevate-smoke-*.json`.
-5. Reference this script from the release checklist.
+3. Add optional `--telegram-fixture` and `--telegram-hygiene-soak` for Issue 6
+   recovery state.
+4. Add optional `--desktop-compacted-followup` for a real installed compact /
+   resume / follow-up provider path.
+5. Save each smoke run's short JSON result under `/tmp/elevate-installed-smoke-*.json`.
+6. Reference this script from the release checklist.
 
 ## Test plan
 
@@ -210,6 +251,10 @@ Installed smoke after patch/restart:
 
 - A single command can prove the installed app is serving the patched web asset.
 - A real installed sidecar chat turn streams and completes.
+- A real installed compacted desktop session can resume and answer one more
+  message without repeat compaction from raw transcript measurement.
+- The installed Telegram-shaped hygiene path proves cursor state wins over raw
+  message count and failed legacy recovery is guarded across restart.
 - Fresh logs are checked for the exact stale-socket/blank-shell errors that
   previously hurt production.
 - The smoke result includes enough session/log evidence for a handoff.
