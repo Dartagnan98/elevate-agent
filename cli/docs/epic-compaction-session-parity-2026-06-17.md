@@ -304,7 +304,7 @@ Execution tracker:
 | Issue | Status | Plan doc | Promote when |
 | --- | --- | --- | --- |
 | 1. Gateway hygiene parity | partially implemented; needs Telegram-style installed soak | yes | close after legacy/critical recovery smoke |
-| 2. Explainable compaction events | partially implemented; recorder/logs improved, support summary still open | yes | close after one-event explanation coverage |
+| 2. Explainable compaction events | partially implemented; shared compression structured logs added, support summary still open | yes | close after support summary and Telegram-style event coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
 | 5. Installed-runtime smoke | implemented as `cli/scripts/installed_runtime_smoke.py`; installed app pass recorded | yes | extend with Telegram fixture after Issue 6 |
@@ -629,8 +629,8 @@ Telegram path, not only localhost.
 
 1. **Ship guardrails already fixed:** keep the current commits together because
    they close the active Telegram crash and cursor persistence failure.
-2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps
-   while building the next policy/UI slices.
+2. **Current P0 follow-through:** close remaining Issue 1/2 verification gaps;
+   shared compression event logs are in, Telegram-style event coverage remains.
 3. **P1 product clarity is built:** Issue 3 and Issue 4 are source + installed
    app patched; keep them in soak.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and

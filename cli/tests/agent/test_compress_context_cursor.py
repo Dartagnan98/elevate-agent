@@ -15,6 +15,7 @@ redesign invariants:
   - the abort contract (summary fails) freezes: no cursor, no metadata write
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -140,6 +141,24 @@ def test_transcript_untouched_metadata_persisted_no_rotation(tmp_path):
     assert agent.commit_calls == [30]
 
 
+def test_structured_completion_log_includes_cursor_result(tmp_path, caplog):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    compressor = _make_compressor()
+    agent = _make_agent(db, compressor)
+    messages = _transcript(30)
+
+    caplog.set_level(logging.INFO, logger="agent.conversation_compression")
+    with patch(
+        "agent.context_compressor.call_llm", return_value=_summary_response()
+    ):
+        compress_context(agent, messages, "SYSTEM", approx_tokens=12345)
+
+    assert "compaction.completed reason=full_compact source=compress_context" in caplog.text
+    assert "session=sess-1" in caplog.text
+    assert f"cursor_after={agent.compaction_cursor}" in caplog.text
+    assert "tokens_before=12345" in caplog.text
+
+
 def test_recompaction_advances_cursor_and_folds_summary(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     compressor = _make_compressor()
@@ -189,6 +208,25 @@ def test_abort_freezes_no_cursor_no_metadata(tmp_path):
     assert row.get("compaction_summary") in (None, "")
     # Projector NOT invalidated on abort (payload didn't change).
     assert agent._usage_projector.invalidated == 0
+
+
+def test_abort_logs_structured_failure(tmp_path, caplog):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    compressor = _make_compressor()
+    agent = _make_agent(db, compressor)
+    messages = _transcript(30)
+
+    caplog.set_level(logging.INFO, logger="agent.conversation_compression")
+    with patch(
+        "agent.context_compressor.call_llm",
+        side_effect=RuntimeError("no provider"),
+    ):
+        compress_context(agent, messages, "SYSTEM", approx_tokens=54321)
+
+    assert "compaction.failed reason=full_compact source=compress_context" in caplog.text
+    assert "session=sess-1" in caplog.text
+    assert "tokens_before=54321" in caplog.text
+    assert "error=no auxiliary LLM provider configured" in caplog.text
 
 
 def test_cursor_summary_window_capped_before_llm_call():

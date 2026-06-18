@@ -2,7 +2,25 @@
 
 Date: 2026-06-17
 Parent epic: `cli/docs/epic-compaction-session-parity-2026-06-17.md`
-Status: partially implemented in source; support-facing summary still open
+Status: partially implemented in source; shared compression structured logs are
+in; support-facing summary still open
+
+## Implementation evidence
+
+- Shared full/critical compression now logs structured
+  `compaction.failed`, `compaction.skipped`, and `compaction.completed` records
+  from `cli/agent/conversation_compression.py`.
+- Regression coverage:
+  `cli/tests/agent/test_compress_context_cursor.py::test_structured_completion_log_includes_cursor_result`
+  and
+  `cli/tests/agent/test_compress_context_cursor.py::test_abort_logs_structured_failure`.
+- Focused source checks:
+  `cli/.venv/bin/python -m pytest cli/tests/agent/test_compress_context_cursor.py cli/tests/gateway/test_session_hygiene.py cli/tests/gateway/test_hygiene_noop_guard.py cli/tests/run_agent/test_compaction_resume_hydration.py cli/tests/agent/test_real_count_trigger.py -q`
+  -> 79 passed.
+- Installed app smoke after patch:
+  `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --check-file gateway/run.py --check-file agent/conversation_compression.py`
+  -> `PASS`, session `20260617_191844_20d46b`, output
+  `/tmp/elevate-installed-smoke-1781749137.json`.
 
 ## Problem
 

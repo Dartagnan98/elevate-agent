@@ -587,6 +587,16 @@ def compress_context(
     # the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        logger.warning(
+            "compaction.failed reason=%s source=compress_context session=%s "
+            "raw_messages=%d tokens_before=%s cursor_before=%d aborted=true error=%s",
+            "critical_compact" if force else "full_compact",
+            agent.session_id or "none",
+            _pre_msg_count,
+            approx_tokens if approx_tokens is not None else "unknown",
+            _cursor_before,
+            _err,
+        )
         if getattr(agent, "_last_compression_summary_warning", None) != _err:
             agent._last_compression_summary_warning = _err
             agent._emit_warning(
@@ -631,6 +641,15 @@ def compress_context(
     # backs off. Leave cursor/summary AND the usage projector untouched — the
     # payload did not shrink — and return the transcript unchanged.
     if summary_text is None:
+        logger.info(
+            "compaction.skipped reason=%s source=compress_context session=%s "
+            "raw_messages=%d tokens_before=%s cursor_before=%d note=no_cursor_advance",
+            "critical_compact" if force else "full_compact",
+            agent.session_id or "none",
+            _pre_msg_count,
+            approx_tokens if approx_tokens is not None else "unknown",
+            _cursor_before,
+        )
         _existing_sp = getattr(agent, "_cached_system_prompt", None) or agent._build_system_prompt(system_message)
         return messages, _existing_sp
 
@@ -736,6 +755,18 @@ def compress_context(
     except Exception:
         pass
 
+    logger.info(
+        "compaction.completed reason=%s source=compress_context session=%s "
+        "raw_messages=%d tokens_before=%s cursor_before=%d cursor_after=%d "
+        "summary_chars=%d aborted=false sentinel=-1",
+        "critical_compact" if force else "full_compact",
+        agent.session_id or "none",
+        _pre_msg_count,
+        approx_tokens if approx_tokens is not None else "unknown",
+        _prev_cursor,
+        compacted_idx,
+        len(summary_text or ""),
+    )
     logger.info(
         "context compaction done: session=%s cursor=%d->%d summary=%d chars "
         "(transcript untouched, no rotation)",
