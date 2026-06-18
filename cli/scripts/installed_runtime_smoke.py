@@ -56,7 +56,12 @@ class SmokeResult:
     installed_chat_asset: str | None = None
     persisted_session_id: str | None = None
     sidecar_session_id: str | None = None
+    resumed_session_id: str | None = None
+    resumed_message_count: int | None = None
     final_text: str | None = None
+    license_authenticated: bool | None = None
+    license_expired: bool | None = None
+    license_status_text: str | None = None
     log_hits: list[str] = field(default_factory=list)
     output_path: str | None = None
 
@@ -145,6 +150,23 @@ def read_recent_log_hits(path: Path, since: datetime) -> list[str]:
         if any(pattern in line for pattern in BAD_LOG_PATTERNS):
             hits.append(line.strip())
     return hits[-20:]
+
+
+def read_license_state() -> tuple[bool | None, bool | None, str | None]:
+    path = Path.home() / ".elevate/license.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, True, "Not activated. Run `elevate activate`."
+    token = data.get("access_token")
+    expires_at = data.get("expires_at")
+    if not token or not isinstance(expires_at, (int, float)):
+        return False, True, "License file is missing a valid access token."
+    remaining = int(float(expires_at) - time.time())
+    expired = remaining <= 30
+    if expired:
+        return True, True, "Subscribed, but local access token is expired."
+    return True, False, f"Subscribed, token has {remaining // 60}m left."
 
 
 async def run_sidecar_smoke(
@@ -240,6 +262,13 @@ async def run_sidecar_smoke(
             min(timeout, 30),
         )
         submit_result = submit.get("result") or {}
+        if (
+            isinstance(submit_result, dict)
+            and submit_result.get("status") == "sign_in_required"
+        ):
+            raise RuntimeError(
+                "prompt.submit auth gated (sign_in_required); refresh the installed app license"
+            )
         if not isinstance(submit_result, dict) or submit_result.get("status") != "streaming":
             raise RuntimeError(f"prompt.submit did not stream: {submit!r}")
         result.pass_check("prompt.submit returned streaming")
@@ -279,6 +308,40 @@ async def run_sidecar_smoke(
     if missing:
         raise RuntimeError(f"missing event types: {', '.join(missing)}")
     result.pass_check("required streaming events observed")
+
+    if result.persisted_session_id and result.sidecar_session_id:
+        await request(
+            "session.close",
+            {"session_id": result.sidecar_session_id},
+            min(timeout, 30),
+        )
+        result.pass_check("closed live sidecar session before resume")
+
+        resumed = await request(
+            "session.resume",
+            {
+                "session_id": result.persisted_session_id,
+                "include_messages": True,
+                "cols": 100,
+            },
+            min(timeout, 30),
+        )
+        resumed_result = resumed.get("result") or {}
+        if not isinstance(resumed_result, dict):
+            raise RuntimeError(f"unexpected session.resume result: {resumed!r}")
+        result.resumed_session_id = resumed_result.get("session_id")
+        messages = resumed_result.get("messages")
+        if not isinstance(messages, list):
+            raise RuntimeError(f"session.resume missing messages: {resumed!r}")
+        result.resumed_message_count = len(messages)
+        if not any(
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and expected in str(message.get("content") or message.get("text") or "")
+            for message in messages
+        ):
+            raise RuntimeError("resumed transcript missing final assistant text")
+        result.pass_check("session.resume reloaded final assistant text")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -339,6 +402,11 @@ def main(argv: list[str]) -> int:
                 result.pass_check(f"installed {installed_rel} matches repo")
 
     if not args.skip_sidecar:
+        (
+            result.license_authenticated,
+            result.license_expired,
+            result.license_status_text,
+        ) = read_license_state()
         try:
             asyncio.run(
                 run_sidecar_smoke(

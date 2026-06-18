@@ -26,6 +26,12 @@ Status: implemented in `cli/scripts/installed_runtime_smoke.py`
   `message.complete`
 - Fresh Electron log scan found no `gateway not connected`, `Uncaught`,
   `BLANK-TRACE`, or `did-fail-load` hits.
+- The smoke harness now also closes the live sidecar session after a completed
+  turn, resumes the persisted session id, and asserts the final assistant text
+  reloads from transcript.
+- Current provider-call smoke is auth-gated until the installed app license is
+  refreshed; latest auth-gated result:
+  `/tmp/elevate-installed-smoke-1781749410.json`.
 
 ## Goal
 
@@ -113,8 +119,11 @@ Assertions:
 - event stream ends with `message.complete`
 - final text is exactly `installed compaction smoke ok`
 - final `message.complete` has a `usage` payload
+- closing and resuming the persisted session reloads the final assistant text
 - no fresh `gateway not connected`, `Uncaught`, `BLANK-TRACE`, or
   `did-fail-load` appears in the Electron main log after the smoke start time
+- if `prompt.submit` returns `sign_in_required`, the smoke reports an explicit
+  auth-gated failure and includes non-secret local license state
 
 This is the replacement for "it works in localhost". It uses the installed
 dashboard and installed gateway.

@@ -88,6 +88,8 @@ Verified fixes already in source and patched into the installed desktop app:
   retry on every incoming Telegram-style message.
 - The desktop Electron shell retries failed dashboard navigation after backend
   readiness, which covers the black-shell startup race that manual reload fixed.
+- The installed smoke now attempts close-and-resume transcript verification and
+  reports expired license auth gating explicitly.
 - Installed app was patched under
   `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli/`
   for touched CLI/web files, and `app.asar` was patched for the Electron shell.
@@ -307,9 +309,9 @@ Execution tracker:
 | 2. Explainable compaction events | partially implemented; shared compression structured logs added, support summary still open | yes | close after support summary and Telegram-style event coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
-| 5. Installed-runtime smoke | implemented as `cli/scripts/installed_runtime_smoke.py`; installed app pass recorded | yes | extend with Telegram fixture after Issue 6 |
+| 5. Installed-runtime smoke | implemented and extended with close/resume check; provider-call rerun currently auth-gated by expired local license | yes | rerun after license refresh, then add Telegram fixture |
 | 6. Legacy transcript recovery | partially implemented; failed message-count recovery retry guard patched and smoke-tested | yes | inventory sources and decide persisted retry state |
-| 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
+| 7. Timeline/reasoning soak | plan created; smoke resume check added, pending valid installed license | yes | installed close/resume smoke passes after license refresh |
 | 8. Release checklist | stub only | no | release candidate exists |
 
 Next action rule:
@@ -635,7 +637,8 @@ Telegram path, not only localhost.
    app patched; keep them in soak.
 4. **Next test hardening:** Issue 5 and Issue 6. Turn the installed smoke and
    legacy recovery flow into repeatable coverage.
-5. **Then soak:** Issue 7 across real desktop and Telegram sessions.
+5. **Then soak:** Issue 7 across real desktop and Telegram sessions; current
+   blocker is an expired local installed-app license, not the event stream.
 6. **Release gate:** Issue 8 before any customer-visible update.
 
 ## Open decisions
