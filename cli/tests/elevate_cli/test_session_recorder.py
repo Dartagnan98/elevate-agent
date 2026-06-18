@@ -110,6 +110,72 @@ def test_sanitizer_rejects_type_abuse_content_channels(recorder_home):
     assert event["redaction"]["unknown_keys_dropped"] == 4
 
 
+def test_friction_metric_allowlist_keeps_safe_types():
+    payload, report = recorder.sanitize_payload(
+        "browser.friction_detected",
+        {
+            "attempt_count": 2,
+            "correction_count": 1,
+            "friction_count": 3,
+            "critical_ratio_bps": 999,
+            "critical_item_count": 2,
+            "context_tokens": 120,
+            "context_limit": 1200,
+            "compaction_saved_tokens": 42,
+            "compaction_removed_messages": 8,
+            "low_yield_count": 0,
+            "tool_name": "browser_navigate",
+            "stage": "navigate",
+            "friction_kind": "blocked",
+            "outcome": "failed",
+            "recovered": False,
+            "abandoned": True,
+        },
+    )
+
+    assert payload == {
+        "attempt_count": 2,
+        "correction_count": 1,
+        "friction_count": 3,
+        "critical_ratio_bps": 999,
+        "critical_item_count": 2,
+        "context_tokens": 120,
+        "context_limit": 1200,
+        "compaction_saved_tokens": 42,
+        "compaction_removed_messages": 8,
+        "low_yield_count": 0,
+        "tool_name": "browser_navigate",
+        "stage": "navigate",
+        "friction_kind": "blocked",
+        "outcome": "failed",
+        "recovered": False,
+        "abandoned": True,
+    }
+    assert report["unknown_keys_dropped"] == 0
+
+
+def test_friction_metric_allowlist_drops_wrong_types_and_raw_browser_text():
+    payload, report = recorder.sanitize_payload(
+        "browser.friction_detected",
+        {
+            "attempt_count": "2",
+            "critical_ratio_bps": "1250",
+            "recovered": "false",
+            "abandoned": 1,
+            "tool_name": {"content": "browser_navigate"},
+            "url": "https://example.com/private?token=secret",
+            "browser_snapshot": "secret page snapshot",
+            "raw": "raw browser result",
+            "text": "page text",
+            "stack": "stack trace",
+        },
+    )
+
+    assert payload == {}
+    assert report["unknown_keys_dropped"] == 7
+    assert report["forbidden_keys_dropped"] == 3
+
+
 def test_event_name_is_not_a_content_channel(recorder_home):
     assert recorder.record_session_event(
         "Please sell 123 Main Street to joe@example.com",
@@ -183,6 +249,45 @@ def test_kill_switch_prevents_file_creation(recorder_home, monkeypatch):
 
     assert recorder.record_session_event("message.start", session_id="s1") is False
     assert not (recorder_home / "logs" / "session-events").exists()
+
+
+def test_successful_write_enqueues_cloud_upload(recorder_home, monkeypatch):
+    from elevate_cli.diagnostics import session_uploader
+
+    queued = []
+    monkeypatch.setattr(
+        session_uploader,
+        "queue_session_event",
+        lambda event: queued.append(event),
+    )
+
+    assert recorder.record_session_event("message.start", session_id="s1")
+
+    assert len(queued) == 1
+    assert queued[0]["event"] == "message.start"
+    assert queued[0]["session_id"] == "s1"
+
+
+def test_uploader_skips_when_no_license(monkeypatch):
+    from elevate_cli import license as elevate_license
+    from elevate_cli.diagnostics import session_uploader
+
+    started = []
+    monkeypatch.setenv("ELEVATE_SESSION_RECORDER_UPLOAD", "1")
+    monkeypatch.setattr(elevate_license, "load", lambda: None)
+    monkeypatch.setattr(session_uploader, "_ensure_worker", lambda: started.append(True))
+
+    session_uploader.queue_session_event({"event_id": "e1", "event": "message.start"})
+
+    assert started == []
+
+
+def test_uploader_is_opt_in_by_default(monkeypatch):
+    from elevate_cli.diagnostics import session_uploader
+
+    monkeypatch.delenv("ELEVATE_SESSION_RECORDER_UPLOAD", raising=False)
+
+    assert session_uploader.uploader_enabled() is False
 
 
 def test_write_failure_returns_false(tmp_path, monkeypatch):
@@ -269,6 +374,38 @@ def test_concurrent_thread_writers_produce_parseable_jsonl(recorder_home):
     events = _jsonl_events(recorder_home)
     assert events
     assert all(event["session_id"] == "threaded" for event in events)
+
+
+def test_memory_critical_sample_below_threshold_only_writes_sample(recorder_home):
+    ratio = recorder.record_memory_critical_sample(
+        "s1",
+        critical_chars=100,
+        critical_item_count=1,
+        context_budget_chars=2000,
+    )
+
+    events = _jsonl_events(recorder_home)
+    assert ratio == 500
+    assert [event["event"] for event in events] == ["memory.critical_budget_sample"]
+    assert events[0]["payload"]["critical_ratio_bps"] == 500
+    assert "critical_chars" not in json.dumps(events)
+
+
+def test_memory_critical_sample_above_threshold_writes_exceeded(recorder_home):
+    ratio = recorder.record_memory_critical_sample(
+        "s1",
+        critical_chars=250,
+        critical_item_count=2,
+        context_budget_chars=2000,
+    )
+
+    events = _jsonl_events(recorder_home)
+    assert ratio == 1250
+    assert [event["event"] for event in events] == [
+        "memory.critical_budget_sample",
+        "memory.critical_budget_exceeded",
+    ]
+    assert events[1]["severity"] == "warning"
 
 
 def test_concurrent_process_writers_produce_parseable_jsonl(recorder_home):

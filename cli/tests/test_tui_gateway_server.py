@@ -164,6 +164,96 @@ def test_emit_throttles_delta_recorder(monkeypatch):
     assert calls[1][1]["payload"]["message_id"] == "m2"
 
 
+def _capture_session_recorder(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    return calls
+
+
+def test_browser_tool_failure_records_friction_and_tool_error(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_navigate",
+            {},
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "Timed out opening https://secret.example/path?token=abc",
+                    "browser_engine": "local",
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    friction = [call for call in calls if call[0] == "browser.friction_detected"]
+    tool_errors = [call for call in calls if call[0] == "tool.error"]
+    assert len(friction) == 1
+    assert len(tool_errors) == 1
+    payload = friction[0][1]["payload"]
+    assert payload["tool_name"] == "browser_navigate"
+    assert payload["stage"] == "navigate"
+    assert payload["friction_kind"] == "timeout"
+    assert payload["provider"] == "local"
+    assert payload["outcome"] == "failed"
+    assert "error" not in payload
+    assert "url" not in payload
+    assert "secret.example" not in json.dumps(payload)
+
+
+def test_browser_bot_warning_records_blocked_friction(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_snapshot",
+            {},
+            json.dumps(
+                {
+                    "success": True,
+                    "bot_detection_warning": "captcha detected on page",
+                    "provider": "browser-use",
+                }
+            ),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    friction = [call for call in calls if call[0] == "browser.friction_detected"]
+    assert len(friction) == 1
+    assert friction[0][1]["payload"]["friction_kind"] == "blocked"
+    assert [call[0] for call in calls].count("tool.error") == 0
+
+
+def test_successful_browser_tool_records_no_friction(monkeypatch):
+    calls = _capture_session_recorder(monkeypatch)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_complete(
+            "sid",
+            "tool-1",
+            "browser_navigate",
+            {},
+            json.dumps({"success": True, "result": "ok"}),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert [call[0] for call in calls] == []
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
@@ -1077,6 +1167,78 @@ def test_session_steer_calls_agent_steer_when_agent_supports_it():
     assert resp["result"]["text"] == "also check auth.log"
     assert calls["steer_text"] == "also check auth.log"
     assert "interrupt_called" not in calls  # must NOT interrupt
+
+
+def test_session_steer_records_correction_without_text(monkeypatch):
+    recorder_calls = _capture_session_recorder(monkeypatch)
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+
+    class _Agent:
+        def steer(self, text):
+            return True
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    try:
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "session.steer",
+                "params": {
+                    "session_id": "sid",
+                    "text": "raw correction text with https://secret.example",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert "result" in resp, resp
+    corrections = [
+        call for call in recorder_calls
+        if call[0] == "experience.correction_requested"
+    ]
+    assert len(corrections) == 1
+    payload = corrections[0][1]["payload"]
+    assert payload == {
+        "stage": "steer",
+        "friction_kind": "correction",
+        "correction_count": 1,
+        "attempt_count": 1,
+        "friction_count": 1,
+        "outcome": "queued",
+    }
+    assert "raw correction" not in json.dumps(corrections)
+    assert "secret.example" not in json.dumps(corrections)
+
+
+def test_steer_applied_records_recovery_when_tool_progress_disabled(monkeypatch):
+    recorder_calls = _capture_session_recorder(monkeypatch)
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    server._sessions["sid"] = _session(tool_progress_mode="off")
+    try:
+        server._on_tool_progress(
+            "sid",
+            "steer.applied",
+            count=2,
+            via="tool_result",
+            sources=["not recorded"],
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    recovery = [
+        call for call in recorder_calls
+        if call[0] == "experience.recovery_attempted"
+    ]
+    assert len(recovery) == 1
+    assert recovery[0][1]["payload"] == {
+        "stage": "steer",
+        "friction_kind": "correction",
+        "correction_count": 2,
+        "attempt_count": 1,
+        "outcome": "applied",
+    }
+    assert "not recorded" not in json.dumps(recovery)
 
 
 def test_session_steer_rejects_empty_text():

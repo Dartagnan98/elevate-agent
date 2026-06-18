@@ -540,6 +540,156 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
         logger.debug("session recorder write failed", exc_info=True)
 
 
+def _record_backend_event(
+    event: str,
+    sid: str,
+    payload: dict | None,
+    *,
+    severity: str = "info",
+    source: str = "tui_gateway",
+) -> None:
+    if not sid:
+        return
+    clean = payload if isinstance(payload, dict) else {}
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            event,
+            session_id=sid,
+            payload=clean,
+            severity=severity,
+            source=source,
+            component="tui_gateway.server",
+        )
+    except Exception:
+        logger.debug("session recorder write failed", exc_info=True)
+
+
+def _tool_duration_ms(duration_s: float | None) -> int | None:
+    if duration_s is None:
+        return None
+    try:
+        return max(0, int(float(duration_s) * 1000))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tool_result(result: str) -> dict | None:
+    try:
+        data = json.loads(result)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _tool_stage(name: str) -> str:
+    text = str(name or "")
+    if text.startswith("browser_"):
+        return text.removeprefix("browser_") or "browser"
+    return "tool_complete"
+
+
+def _tool_provider(data: dict | None) -> str | None:
+    if not isinstance(data, dict):
+        return None
+    for key in ("provider", "browser_engine", "engine"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:80]
+    return None
+
+
+def _friction_kind_from_text(text: str) -> str | None:
+    lower = text[:4096].lower()
+    if "no browser session" in lower:
+        return "missing_session"
+    if "captcha" in lower or "bot detection" in lower or "bot-detection" in lower:
+        return "blocked"
+    if "cloudflare" in lower or "checking your browser" in lower or "access denied" in lower:
+        return "blocked"
+    if "timed out" in lower or "timeout" in lower:
+        return "timeout"
+    if "auth required" in lower or "login required" in lower or "sign in" in lower:
+        return "auth_required"
+    if "unauthorized" in lower or "forbidden" in lower:
+        return "auth_required"
+    return None
+
+
+def _browser_friction_kind(result: str, data: dict | None) -> str | None:
+    if isinstance(data, dict):
+        if data.get("bot_detection_warning"):
+            return "blocked"
+        if data.get("fallback_warning") or data.get("browser_engine_fallback"):
+            return "fallback"
+        structured = _friction_kind_from_text(str(data.get("error") or ""))
+        if structured:
+            return structured
+        if data.get("error") or data.get("success") is False:
+            return "error"
+    return _friction_kind_from_text(result or "")
+
+
+def _tool_error_kind(result: str, data: dict | None) -> str | None:
+    if isinstance(data, dict):
+        structured = _friction_kind_from_text(str(data.get("error") or ""))
+        if structured:
+            return structured
+        if data.get("error") or data.get("success") is False:
+            return "error"
+    return None
+
+
+def _record_tool_completion_friction(
+    sid: str,
+    name: str,
+    result: str,
+    duration_s: float | None,
+) -> None:
+    data = _parse_tool_result(result)
+    duration_ms = _tool_duration_ms(duration_s)
+
+    if str(name or "").startswith("browser_"):
+        kind = _browser_friction_kind(result or "", data)
+        if kind:
+            outcome = "recovered" if kind == "fallback" else "failed"
+            payload = {
+                "tool_name": name,
+                "stage": _tool_stage(name),
+                "friction_kind": kind,
+                "attempt_count": 1,
+                "outcome": outcome,
+            }
+            provider = _tool_provider(data)
+            if provider:
+                payload["provider"] = provider
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
+            _record_backend_event(
+                "browser.friction_detected",
+                sid,
+                payload,
+                severity="warning" if outcome == "failed" else "info",
+            )
+
+    error_kind = _tool_error_kind(result or "", data)
+    if error_kind:
+        payload = {
+            "tool_name": name,
+            "stage": _tool_stage(name),
+            "friction_kind": error_kind,
+            "attempt_count": 1,
+            "outcome": "failed",
+        }
+        provider = _tool_provider(data)
+        if provider:
+            payload["provider"] = provider
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        _record_backend_event("tool.error", sid, payload, severity="warning")
+
+
 def _subagent_replay_from_live_parent(
     child_session_id: str,
     transport,
@@ -1608,6 +1758,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     duration_s = completed_at - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
+    _record_tool_completion_friction(sid, name, result, duration_s)
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
@@ -1637,6 +1788,21 @@ def _on_tool_progress(
     _args: dict | None = None,
     **_kwargs,
 ):
+    if event_type == "steer.applied":
+        try:
+            correction_count = max(1, int(_kwargs.get("count") or 1))
+        except (TypeError, ValueError):
+            correction_count = 1
+        payload = {
+            "stage": "steer",
+            "friction_kind": "correction",
+            "correction_count": correction_count,
+            "attempt_count": 1,
+            "outcome": "applied",
+        }
+        if _kwargs.get("child_session_id"):
+            payload["child_session_id"] = str(_kwargs["child_session_id"])
+        _record_backend_event("experience.recovery_attempted", sid, payload)
     if not _tool_progress_enabled(sid):
         return
     if event_type == "tool.started" and name:
@@ -3295,6 +3461,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    was_running = bool(session.get("running"))
     if hasattr(session["agent"], "interrupt"):
         session["agent"].interrupt()
     # Scope the pending-prompt release to THIS session.  A global
@@ -3308,6 +3475,27 @@ def _(rid, params: dict) -> dict:
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
     except Exception:
         pass
+    if was_running:
+        payload = {
+            "stage": "interrupt",
+            "friction_kind": "user_abandoned",
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": "interrupted",
+            "abandoned": True,
+        }
+        _record_backend_event(
+            "experience.friction_detected",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
+        _record_backend_event(
+            "experience.abandoned",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
     return _ok(rid, {"status": "interrupted"})
 
 
@@ -3316,6 +3504,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    was_running = bool(session.get("running"))
     interrupted = False
     killed = 0
     if hasattr(session["agent"], "interrupt"):
@@ -3337,6 +3526,27 @@ def _(rid, params: dict) -> dict:
         resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
     except Exception:
         pass
+    if was_running:
+        payload = {
+            "stage": "stop",
+            "friction_kind": "user_abandoned",
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": "stopped",
+            "abandoned": True,
+        }
+        _record_backend_event(
+            "experience.friction_detected",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
+        _record_backend_event(
+            "experience.abandoned",
+            str(params.get("session_id") or ""),
+            payload,
+            severity="warning",
+        )
     _mark_session_idle(session)
     return _ok(
         rid,
@@ -3845,6 +4055,24 @@ def _(rid, params: dict) -> dict:
         status = "steering_delegation" if forwarded else "queued_delegation"
     else:
         status = "queued"
+    if status != "rejected":
+        steer_sid = next(
+            (k for k, v in _sessions.items() if v is target_session), None
+        ) or str(params.get("session_id") or "")
+        payload = {
+            "stage": "steer",
+            "friction_kind": "correction",
+            "correction_count": 1,
+            "attempt_count": 1,
+            "friction_count": 1,
+            "outcome": status,
+        }
+        _record_backend_event("experience.friction_detected", steer_sid, payload)
+        _record_backend_event(
+            "experience.correction_requested",
+            steer_sid,
+            payload,
+        )
     if status == "queued":
         # The steered message renders INLINE in the run's timeline. Emitting
         # it as an event (instead of the sender drawing it locally) makes it
@@ -4615,6 +4843,19 @@ def _(rid, params: dict) -> dict:
                 if not has_followup:
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
+                if followup_rounds > 0 and not has_followup:
+                    _record_backend_event(
+                        "experience.recovered",
+                        sid,
+                        {
+                            "stage": "followup",
+                            "friction_kind": "correction",
+                            "correction_count": followup_rounds,
+                            "attempt_count": followup_rounds,
+                            "outcome": status,
+                            "recovered": status == "complete",
+                        },
+                    )
 
                 # Auto-generate a session title after the first exchange.
                 # CLI parity: cli.py fires maybe_auto_title here, but the

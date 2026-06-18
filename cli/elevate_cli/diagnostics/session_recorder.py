@@ -54,10 +54,20 @@ _FORBIDDEN_KEYS = {
 
 _SAFE_NUMERIC_KEYS = {
     "api_calls",
+    "attempt_count",
+    "compaction_removed_messages",
+    "compaction_saved_tokens",
+    "context_limit",
+    "context_tokens",
+    "correction_count",
+    "critical_item_count",
+    "critical_ratio_bps",
     "duration_ms",
     "duration_seconds",
     "event_seq",
+    "friction_count",
     "input_tokens",
+    "low_yield_count",
     "message_count",
     "message_chars",
     "output_tokens",
@@ -79,6 +89,7 @@ _SAFE_STATE_KEYS = {
     "end_reason",
     "error_class",
     "error_message",
+    "friction_kind",
     "frontend_asset",
     "assistant_message_id",
     "kind",
@@ -89,14 +100,18 @@ _SAFE_STATE_KEYS = {
     "reason",
     "request_id",
     "source",
+    "stage",
     "status",
     "task_id",
+    "tool_name",
     "turn_id",
     "user_message_id",
     "where",
+    "outcome",
 }
 
 _SAFE_BOOL_KEYS = {
+    "abandoned",
     "attached",
     "child_replay_attached",
     "child_replay_running",
@@ -104,6 +119,7 @@ _SAFE_BOOL_KEYS = {
     "followup",
     "noop",
     "payload_truncated",
+    "recovered",
     "running",
     "success",
 }
@@ -517,7 +533,64 @@ def record_session_event(
         retention_days=DEFAULT_RETENTION_DAYS,
         max_dir_size=DEFAULT_MAX_DIR_SIZE_BYTES,
     )
+    if ok:
+        try:
+            from elevate_cli.diagnostics.session_uploader import queue_session_event
+
+            queue_session_event(event)
+        except Exception:
+            pass
     return bool(ok)
+
+
+def record_memory_critical_sample(
+    session_id: str | None,
+    *,
+    critical_chars: int,
+    critical_item_count: int,
+    context_budget_chars: int,
+    provider: str = "holographic",
+) -> int:
+    """Record the critical-memory share of the memory injection budget."""
+    try:
+        critical = max(0, int(critical_chars))
+    except (TypeError, ValueError):
+        critical = 0
+    try:
+        budget = max(1, int(context_budget_chars))
+    except (TypeError, ValueError):
+        budget = 1
+    try:
+        items = max(0, int(critical_item_count))
+    except (TypeError, ValueError):
+        items = 0
+
+    ratio_bps = int((critical * 10000) / budget)
+    payload = {
+        "provider": provider,
+        "status": "active",
+        "critical_item_count": items,
+        "critical_ratio_bps": ratio_bps,
+        "context_tokens": (critical + 3) // 4,
+        "context_limit": (budget + 3) // 4,
+    }
+    record_session_event(
+        "memory.critical_budget_sample",
+        session_id=session_id,
+        payload=payload,
+        source="memory",
+        component="memory.holographic",
+    )
+    if ratio_bps > 1000:
+        record_session_event(
+            "memory.critical_budget_exceeded",
+            session_id=session_id,
+            payload=payload,
+            severity="warning",
+            source="memory",
+            component="memory.holographic",
+        )
+    return ratio_bps
 
 
 def _matches_event(
