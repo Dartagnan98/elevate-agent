@@ -270,7 +270,7 @@ Use this planning model instead:
 2. Create detailed implementation plans only for the next P0s:
    - Issue 1: gateway hygiene parity
    - Issue 2: explainable compaction events
-3. Promote Issues 3-4 now that the foundation has source commits and installed
+3. Promote Issues 3-6 now that the foundation has source commits and installed
    desktop smoke coverage.
 4. Promote each stub to a real plan only when it is about to be built.
 
@@ -293,6 +293,8 @@ Detailed plans currently created:
 - `cli/docs/plans/compaction-issue-02-explainable-events.md`
 - `cli/docs/plans/compaction-issue-03-threshold-policy.md`
 - `cli/docs/plans/compaction-issue-04-context-ui-clarity.md`
+- `cli/docs/plans/compaction-issue-05-installed-runtime-smoke.md`
+- `cli/docs/plans/compaction-issue-06-legacy-transcript-recovery.md`
 
 Execution tracker:
 
@@ -302,17 +304,16 @@ Execution tracker:
 | 2. Explainable compaction events | partially implemented; recorder/logs improved, support summary still open | yes | close after one-event explanation coverage |
 | 3. Threshold policy | implemented in source, rebuilt web assets, patched installed app | yes | soak with resumed compacted sessions |
 | 4. Claude-style context UI clarity | implemented in source, rebuilt web assets, patched installed app | yes | soak with real auto/manual compaction flows |
-| 5. Installed-runtime smoke | stub only | no | Issue 1 behavior is stable |
-| 6. Legacy transcript recovery | stub only | no | Issue 1 separates legacy vs normal |
+| 5. Installed-runtime smoke | detailed plan ready | yes | build repeatable installed smoke script |
+| 6. Legacy transcript recovery | detailed plan ready | yes | build retry guard/source tests after smoke harness |
 | 7. Timeline/reasoning soak | stub only | no | Issues 4-6 have checks |
 | 8. Release checklist | stub only | no | release candidate exists |
 
 Next action rule:
 
-1. Soak Issues 3-4 against resumed compacted sessions and real auto/manual
-   compaction flows.
-2. Turn Issue 5 and Issue 6 into detailed plans for installed-runtime
-   smoke and legacy transcript recovery.
+1. Build Issue 5's repeatable installed-runtime smoke script.
+2. Use that harness while implementing Issue 6's legacy recovery retry guard
+   and source tests.
 3. Then close Issue 1/2 verification gaps with Telegram-style installed soak
    and support-facing explanation coverage.
 
