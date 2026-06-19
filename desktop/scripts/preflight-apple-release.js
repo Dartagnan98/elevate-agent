@@ -178,6 +178,7 @@ record(
 
 record("hardened runtime enabled", packageJson.build?.mac?.hardenedRuntime === true);
 record("electron-builder notarization enabled", packageJson.build?.mac?.notarize === true);
+record("macOS minimum version pinned", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion === "12.0", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion || "missing");
 record("Developer ID targets configured", JSON.stringify(packageJson.build?.mac?.target || []).includes("dmg"));
 record("app icon present", exists("desktop/assets/icon.icns"));
 record("web dashboard bundle present", exists("cli/elevate_cli/web_dist/index.html"));
