@@ -29,6 +29,28 @@ function relative(file: string): string {
   return path.relative(srcRoot, file);
 }
 
+function hexVar(source: string, name: string): string {
+  const match = source.match(new RegExp(`${name}:\\s*(#[0-9A-Fa-f]{6})`));
+  expect(match).not.toBeNull();
+  return match![1];
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const luminance = (hex: string) => {
+    const value = Number.parseInt(hex.slice(1), 16);
+    const channels = [(value >> 16) & 255, (value >> 8) & 255, value & 255].map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.03928
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const a = luminance(foreground);
+  const b = luminance(background);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 function windowAround(source: string, marker: string): string {
   const index = source.indexOf(marker);
   expect(index).toBeGreaterThanOrEqual(0);
@@ -215,5 +237,22 @@ describe("icon-only control accessibility", () => {
     expect(comms).toContain('aria-label="Handoff task details"');
     expect(comms).toContain('aria-label="Run handoff now"');
     expect(comms).toContain('aria-label="Show archived channels"');
+  });
+
+  it("keeps dark neutral text tokens above AA contrast on app surfaces", () => {
+    const tokenFiles = [
+      "index.css",
+      "pages/agent-hub.css",
+      "pages/real-estate-hub/admin/admin.css",
+      "pages/real-estate-hub/leads/leads.css",
+      "pages/real-estate-hub/social/social.css",
+    ];
+
+    for (const file of tokenFiles) {
+      const source = read(file);
+      for (const token of ["--fg-muted", "--fg-faint", "--fg-dim"]) {
+        expect(contrastRatio(hexVar(source, token), "#202020"), `${file} ${token}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
   });
 });

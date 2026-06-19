@@ -101,9 +101,9 @@
   --border-soft: #1F1F1F;
   --border-strong: #353535;
   --fg: #ECECEC;
-  --fg-muted: #A0A0A0;
-  --fg-faint: #707070;
-  --fg-dim: #525252;
+  --fg-muted: #B5B5B5;
+  --fg-faint: #A0A0A0;
+  --fg-dim: #8A8A8A;
   --accent: #8A8A8A;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-ring: color-mix(in srgb, var(--accent) 28%, transparent);

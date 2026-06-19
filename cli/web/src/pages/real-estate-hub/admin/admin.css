@@ -21,7 +21,7 @@
   --fg:            #ECECEC;
   --fg-muted:      #B5B5B5;
   --fg-faint:      #8A8A8A;
-  --fg-dim:        #6E6E6E;
+  --fg-dim:        #8A8A8A;
 
   --accent:        #B0B0B0;
   --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
