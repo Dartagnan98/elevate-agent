@@ -2846,7 +2846,7 @@ code { font-size: 0.875rem; }
       color-mix(in srgb, var(--color-primary) 6%, transparent) 70%,
       transparent 100%);
   background-size: 220% 220%;
-  animation: onboarding-aurora 9s ease-in-out infinite;
+  animation: onboarding-aurora 9s ease-in-out 1 both;
 }
 
 .onboarding-rise {
@@ -2918,6 +2918,7 @@ code { font-size: 0.875rem; }
   .pack-unlock-card,
   .pack-unlock-check.is-saved,
   .pack-step-enter,
+  .onboarding-aurora-bg,
   .elevate-route-transition {
     animation: none !important;
   }

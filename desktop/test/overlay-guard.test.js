@@ -31,8 +31,20 @@ test("computer-use overlay is shown inactive and only while flag is fresh", () =
   assert.match(main, /const COMPUTER_USE_FRESH_MS = 6000/);
   assert.match(main, /fresh = Date\.now\(\) - stat\.mtimeMs < COMPUTER_USE_FRESH_MS/);
   assert.match(main, /setOverlayVisible\(fresh\)/);
+  assert.match(main, /if \(visible\) \{\s*createOverlay\(\);\s*}/s);
   assert.match(main, /overlayWindow\.showInactive\(\)/);
+  assert.match(main, /overlayWindow\.destroy\(\);\s*overlayWindow = null;/s);
   assert.doesNotMatch(main, /overlayWindow\.show\(\)/);
+});
+
+test("computer-use overlay renderer is not created while idle", () => {
+  const main = read(mainPath);
+  const start = main.indexOf("async function startDesktop()");
+  const end = main.indexOf('loadLocalPage("loading.html")', start);
+  const startupBlock = main.slice(start, end);
+
+  assert.match(startupBlock, /startOverlayWatcher\(\)/);
+  assert.doesNotMatch(startupBlock, /createOverlay\(\)/);
 });
 
 test("overlay html is pointer-events none with visible computer-use label", () => {

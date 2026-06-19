@@ -31,4 +31,11 @@ describe("production idle motion budget", () => {
       expect(readSource(file), file).not.toMatch(/animation:\s*ab-pulse[^;]*infinite/);
     }
   });
+
+  it("lets first-run onboarding settle when idle", () => {
+    const css = readSource("../index.css");
+
+    expect(css).toContain(".onboarding-aurora-bg");
+    expect(css).not.toMatch(/\.onboarding-aurora-bg\s*\{[^}]*animation:[^;]*infinite/);
+  });
 });

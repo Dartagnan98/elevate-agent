@@ -1336,13 +1336,17 @@ function createOverlay() {
 }
 
 function setOverlayVisible(visible) {
+  if (visible) {
+    createOverlay();
+  }
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   if (visible && !overlayWindow.isVisible()) {
     const { x, y, width, height } = screen.getPrimaryDisplay().bounds;
     overlayWindow.setBounds({ x, y, width, height });
     overlayWindow.showInactive();
-  } else if (!visible && overlayWindow.isVisible()) {
-    overlayWindow.hide();
+  } else if (!visible) {
+    overlayWindow.destroy();
+    overlayWindow = null;
   }
 }
 
@@ -1509,17 +1513,13 @@ async function startDesktop() {
   setupPermissions();
   createWindow();
   createMenu();
-  createOverlay();
   startOverlayWatcher();
   // The always-on-top, non-activating overlay panel (focusable:false +
-  // setVisibleOnAllWorkspaces + "screen-saver" level) silently demotes the
-  // whole app to a macOS "accessory" (lsappinfo type=UIElement) — which drops
-  // the Dock running indicator, so a pinned icon reads as "not running" even
-  // while the app is open (most visibly once the main window is minimized and
-  // the panel is the only active window). Re-assert the regular activation
-  // policy AFTER the panel exists so the app keeps a proper Dock tile +
-  // running indicator. Activation policy is app-level and persists, so this
-  // one assertion holds across minimize/restore.
+  // setVisibleOnAllWorkspaces + "screen-saver" level) can silently demote the
+  // whole app to a macOS "accessory" (lsappinfo type=UIElement) when it is
+  // created for computer-use. Re-assert the regular activation policy during
+  // startup so the app keeps a proper Dock tile + running indicator.
+  // Activation policy is app-level and persists across minimize/restore.
   if (process.platform === "darwin" && app.dock) {
     app.dock.show();
   }
@@ -1962,9 +1962,9 @@ app.whenReady().then(async () => {
 });
 
 app.on("activate", () => {
-  // The hidden overlay window keeps the app alive after the main window is
-  // closed, so BrowserWindow.getAllWindows() is never empty — track the
-  // main window explicitly instead.
+  // Track the main window explicitly. The computer-use overlay is lazy and may
+  // be absent during idle, so BrowserWindow.getAllWindows() is not the app
+  // lifecycle source of truth.
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
