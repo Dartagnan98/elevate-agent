@@ -434,8 +434,12 @@ function Sidebar({ activeNav, onNavSelect, activeSessionId, onSessionSelect }: S
             <div className="light max"></div>
           </div>
           <div className="tools">
-            <button className="icon-btn" title="Collapse sidebar"><PanelLeft /></button>
-            <button className="icon-btn" title="Search (&#x2318;K)"><Search /></button>
+            <button className="icon-btn" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
+              <PanelLeft aria-hidden="true" />
+            </button>
+            <button className="icon-btn" type="button" aria-label="Search" title="Search (&#x2318;K)">
+              <Search aria-hidden="true" />
+            </button>
           </div>
         </div>
 

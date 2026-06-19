@@ -10398,52 +10398,57 @@ function MessageRow({
         {isUser ? (
           <div className="user-actions">
             <button
+              aria-label={copied ? "Copied message" : "Copy message"}
               className="icon-btn sm"
               onClick={() => copy(copyText)}
               title={copied ? "Copied" : "Copy"}
               type="button"
             >
-              {copied ? <CheckCircle2 /> : <Clipboard />}
+              {copied ? <CheckCircle2 aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
             </button>
             <button
+              aria-label="Edit message"
               className="icon-btn sm"
               disabled={!message.content.trim()}
               onClick={() => onEditMessage?.(message)}
               title="Edit"
               type="button"
             >
-              <FilePen />
+              <FilePen aria-hidden="true" />
             </button>
           </div>
         ) : isAssistant && message.content ? (
           <div className={cn("asst-actions", pinned && "pinned")}>
             <button
+              aria-label={copied ? "Copied message" : "Copy message"}
               className="icon-btn sm"
               onClick={() => copy(copyText)}
               title={copied ? "Copied" : "Copy"}
               type="button"
             >
-              {copied ? <CheckCircle2 /> : <Clipboard />}
+              {copied ? <CheckCircle2 aria-hidden="true" /> : <Clipboard aria-hidden="true" />}
             </button>
             <button
+              aria-label={pinned ? "Unpin message" : "Pin message"}
               aria-pressed={pinned}
               className={cn("icon-btn sm", pinned && "message-action-active")}
               onClick={togglePinned}
               title={pinned ? "Unpin" : "Pin"}
               type="button"
             >
-              <Pin />
+              <Pin aria-hidden="true" />
             </button>
             <div className="message-action-wrap" ref={menuRef}>
               <button
                 aria-expanded={menuOpen}
                 aria-haspopup="menu"
+                aria-label="Open message actions"
                 className={cn("icon-btn sm", menuOpen && "message-action-active")}
                 onClick={() => setMenuOpen((open) => !open)}
                 title="More"
                 type="button"
               >
-                <MoreHorizontal />
+                <MoreHorizontal aria-hidden="true" />
               </button>
               {menuOpen && (
                 <div className="message-actions-menu" role="menu">
@@ -12084,8 +12089,12 @@ function ActivityPanel({
           </span>
         </div>
         <div className="ap-meta">
-          <button className="icon-btn sm" title="Pin panel" type="button"><Pin /></button>
-          <button className="icon-btn sm" title="More" type="button"><ChevronDown /></button>
+          <button className="icon-btn sm" aria-label="Pin activity panel" title="Pin panel" type="button">
+            <Pin aria-hidden="true" />
+          </button>
+          <button className="icon-btn sm" aria-label="Open activity panel menu" title="More" type="button">
+            <ChevronDown aria-hidden="true" />
+          </button>
         </div>
       </div>
 

@@ -161,8 +161,8 @@ function IdeaQueue({
         <span className="ab-card-title">AI idea approval queue</span>
         <div className="ab-card-actions">
           <span className={"sm-count" + (items.length ? " hot" : "")}>{items.length}</span>
-          <button className="sm-icon-btn" title="Refresh queue" onClick={onRefresh}>
-            <IcoRefresh width="13" height="13" />
+          <button className="sm-icon-btn" type="button" aria-label="Refresh queue" title="Refresh queue" onClick={onRefresh}>
+            <IcoRefresh width="13" height="13" aria-hidden="true" />
           </button>
         </div>
       </div>

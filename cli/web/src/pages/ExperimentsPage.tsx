@@ -352,10 +352,11 @@ export function CycleRow({
               type="button"
               onClick={() => setConfirmDel(true)}
               disabled={busy}
+              aria-label="Remove cycle"
               title="Remove cycle"
               className="text-muted-foreground/60 hover:text-destructive"
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
           </>
         )}

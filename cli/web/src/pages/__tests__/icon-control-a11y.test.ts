@@ -31,6 +31,30 @@ describe("icon-only control accessibility", () => {
     expect(block).toContain('aria-hidden="true"');
   });
 
+  it.each([
+    ["pages/real-estate-hub/admin/components/sidebar.tsx", 'aria-label="Collapse sidebar"'],
+    ["pages/real-estate-hub/admin/components/sidebar.tsx", 'aria-label="Search"'],
+    ["pages/ExperimentsPage.tsx", 'aria-label="Remove cycle"'],
+    ["pages/real-estate-hub/social/board.tsx", 'aria-label="Refresh queue"'],
+    ["pages/ChatPage.tsx", 'aria-label="Edit message"'],
+    ["pages/ChatPage.tsx", 'aria-label={pinned ? "Unpin message" : "Pin message"}'],
+    ["pages/ChatPage.tsx", 'aria-label="Open message actions"'],
+    ["pages/ChatPage.tsx", 'aria-label="Pin activity panel"'],
+    ["pages/ChatPage.tsx", 'aria-label="Open activity panel menu"'],
+  ])("%s names additional icon-only controls", (file, marker) => {
+    const source = read(file);
+    const block = windowAround(source, marker);
+
+    expect(block).toContain(marker);
+    expect(block).toContain('aria-hidden="true"');
+  });
+
+  it("names both message copy icon buttons", () => {
+    const source = read("pages/ChatPage.tsx");
+
+    expect(source.match(/aria-label=\{copied \? "Copied message" : "Copy message"\}/g)).toHaveLength(2);
+  });
+
   it("does not nest the OAuth provider docs link inside a button", () => {
     const source = read("components/OAuthProvidersCard.tsx");
     const docsLink = windowAround(source, "p.docs_url");
