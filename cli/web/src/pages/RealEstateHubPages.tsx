@@ -1094,6 +1094,8 @@ function DraftMessagesBoard({
                 {helpOpen && (
                   <div
                     role="dialog"
+                    aria-modal="false"
+                    aria-label="Keyboard shortcuts"
                     className="absolute right-0 top-[calc(100%+6px)] z-30 w-64 rounded-md border border-border bg-card p-3 shadow-lg"
                   >
                     <div className="font-mono-ui mb-2 text-[0.66rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">

@@ -87,6 +87,7 @@ function AdminTaskDialog({
     <div
       role="dialog"
       aria-modal="true"
+      aria-label={target.kind === "deal-task" ? "Deal task detail" : "Action run detail"}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6 animate-[fade-in_120ms_ease-out]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();

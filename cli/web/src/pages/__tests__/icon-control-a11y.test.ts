@@ -96,6 +96,25 @@ describe("icon-only control accessibility", () => {
     expect(source).toContain("document.body.style.overflow = \"hidden\"");
   });
 
+  it("keeps dialog surfaces named with explicit modal state", () => {
+    const failures: string[] = [];
+    const dialogTag = /<[A-Za-z][^>]*role="dialog"[^>]*>/g;
+
+    for (const file of scanRoots.flatMap(walkTsx)) {
+      const source = readFileSync(file, "utf8");
+      for (const match of source.matchAll(dialogTag)) {
+        const tag = match[0];
+        const hasName = /aria-label\s*=|aria-labelledby\s*=/.test(tag);
+        const hasModalState = /aria-modal\s*=/.test(tag);
+        if (!hasName || !hasModalState) {
+          failures.push(`${relative(file)}:${lineNumber(source, match.index ?? 0)}`);
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+  });
+
   it("keeps shared Switch controls explicitly named", () => {
     const failures: string[] = [];
 

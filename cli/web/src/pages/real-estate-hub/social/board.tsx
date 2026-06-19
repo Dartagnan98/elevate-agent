@@ -791,7 +791,7 @@ function PostDetailModal({ post, onClose }: { post: DesignPost; onClose: () => v
   // the scoped design tokens + styles outside the page subtree.
   return createPortal(
     <div className="sm-root">
-      <div className="sm-modal-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+      <div className="sm-modal-overlay" role="dialog" aria-modal="true" aria-label={`${label} post details`} onClick={onClose}>
       <div className="sm-modal" onClick={(e) => e.stopPropagation()}>
         <button className="sm-modal-close" type="button" onClick={onClose} aria-label="Close">
           ×

@@ -1458,7 +1458,7 @@ function ProfileDrawer({
 
   return (
     <div className="lb-drawer-backdrop" onClick={onClose}>
-      <aside className="lb-drawer" role="dialog" aria-label={"Profile: " + profile.name} onClick={(e) => e.stopPropagation()}>
+      <aside className="lb-drawer" role="dialog" aria-modal="true" aria-label={"Profile: " + profile.name} onClick={(e) => e.stopPropagation()}>
         <header className="lb-drawer-head">
           <div className="lb-drawer-head-title">
             <h2 className="lb-drawer-name">{profile.name}</h2>
