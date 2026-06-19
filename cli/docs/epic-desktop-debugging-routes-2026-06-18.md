@@ -917,7 +917,10 @@ Deliverables:
   - `/api/integrations` has a local route contract for GET settings, PUT save,
     POST test, and unsupported action rejection,
   - `/api/ayrshare/*` has local route contracts for status, key set/clear,
-    profiles, scheduled posts, history query params, and invalid-key rejection.
+    profiles, scheduled posts, history query params, and invalid-key rejection,
+  - `/api/composio/*` has local route-family coverage for key/status,
+    connections, capabilities, toolkits, connect, custom auth, delete,
+    Facebook page selection, and inbound pull.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
@@ -1078,8 +1081,6 @@ npm run build
 
 Current missing local route-family contract ledger:
 
-- `composio`: backend routes and dashboard callers exist; no local
-  `cli/tests` contract yet.
 - `social`: backend routes and dashboard callers exist; no local `cli/tests`
   contract yet.
 

@@ -17,11 +17,6 @@ CLI_TESTS_ROOT = REPO_ROOT / "cli/tests"
 
 MISSING_CONTRACT_FAMILIES = [
     {
-        "family": "composio",
-        "route_marker": "/api/composio/",
-        "caller_marker": "getComposioStatus",
-    },
-    {
         "family": "social",
         "route_marker": "/api/social/",
         "caller_marker": "getSocialSnapshot",

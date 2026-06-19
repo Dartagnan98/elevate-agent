@@ -1468,6 +1468,128 @@ class TestNewEndpoints:
             ("history", 7, 30),
         ]
 
+    def test_composio_route_contract(self, monkeypatch):
+        import elevate_cli.composio_client as composio_client
+        import elevate_cli.composio_inbound as composio_inbound
+        import elevate_cli.web_server as web_server
+
+        calls = []
+        status = {"configured": True, "hasKey": True, "valid": False, "baseUrl": "https://composio.test"}
+
+        with web_server._COMPOSIO_SWR_LOCK:
+            web_server._COMPOSIO_SWR.clear()
+        web_server._COMPOSIO_TOOLKITS_CACHE.clear()
+
+        monkeypatch.setattr(web_server, "_prewarm_composio_toolkits_in_background", lambda: calls.append(("prewarm",)))
+        monkeypatch.setattr(composio_client, "get_status", lambda: calls.append(("status",)) or status)
+        monkeypatch.setattr(
+            composio_client,
+            "set_api_key",
+            lambda api_key: calls.append(("set", api_key)) or {"ok": api_key == "good", "error": "bad key"},
+        )
+        monkeypatch.setattr(composio_client, "clear_api_key", lambda: calls.append(("clear",)) or {"ok": True})
+        monkeypatch.setattr(
+            composio_client,
+            "list_connected_accounts",
+            lambda: calls.append(("connections",)) or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "list_all_connected_accounts",
+            lambda *, toolkit=None, page_size=100, max_pages=50: calls.append(("connections-all", toolkit, page_size, max_pages))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(composio_client, "load_capability_matrix", lambda: calls.append(("capabilities",)) or {"gmail": {"send": {"supported": True}}})
+        monkeypatch.setattr(composio_client, "capability", lambda toolkit: calls.append(("capability", toolkit)) or {"toolkit": toolkit})
+        monkeypatch.setattr(
+            composio_client,
+            "list_toolkits",
+            lambda *, category=None, limit=100, cursor=None, search=None: calls.append(("toolkits-page", category, limit, cursor, search))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "list_all_toolkits",
+            lambda *, category=None, page_size=100: calls.append(("toolkits-all", category, page_size))
+            or {"ok": True, "data": []},
+        )
+        monkeypatch.setattr(
+            composio_client,
+            "initiate_connection",
+            lambda toolkit, redirect_url=None, user_id=None, auth_config_id=None: calls.append(
+                ("connect", toolkit, redirect_url, user_id, auth_config_id)
+            )
+            or {"ok": True, "data": {"redirect_url": "https://connect.test"}},
+        )
+        monkeypatch.setattr(composio_client, "get_toolkit_details", lambda slug: calls.append(("details", slug)) or {"ok": True, "slug": slug})
+        monkeypatch.setattr(
+            composio_client,
+            "create_custom_auth_config",
+            lambda toolkit, credentials, auth_scheme=None: calls.append(("custom-auth", toolkit, credentials, auth_scheme))
+            or {"ok": True, "data": {"auth_config": {"id": "auth-1"}}},
+        )
+        monkeypatch.setattr(composio_client, "delete_connected_account", lambda account_id: calls.append(("delete", account_id)) or {"ok": True})
+        monkeypatch.setattr(composio_inbound, "list_facebook_pages_for_picker", lambda: calls.append(("fb-pages",)) or {"pages": []})
+        monkeypatch.setattr(composio_inbound, "set_facebook_page_selection", lambda page_ids: calls.append(("fb-set", page_ids)) or {"ok": True})
+        monkeypatch.setattr(composio_inbound, "pull_all_supported", lambda: calls.append(("pull",)) or {"ok": True, "total_new": 0})
+
+        assert self.client.get("/api/composio/status").json() == status
+        assert self.client.post("/api/composio/key", json={"apiKey": "bad"}).status_code == 400
+        assert self.client.post("/api/composio/key", json={"apiKey": "good"}).json() == status
+        assert self.client.delete("/api/composio/key").json() == status
+        assert self.client.get("/api/composio/connections?fresh=1").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/connections/all?toolkit=gmail&page_size=2&max_pages=3").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/capabilities").json() == {"gmail": {"send": {"supported": True}}}
+        assert self.client.get("/api/composio/capabilities?toolkit=gmail").json() == {"toolkit": "gmail"}
+        assert self.client.get("/api/composio/toolkits?all=false&limit=2&cursor=c1").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/toolkits?search=gmail&category=crm").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/composio/toolkits?category=crm&limit=5").json() == {"ok": True, "data": []}
+        assert self.client.post(
+            "/api/composio/connect",
+            json={"toolkitSlug": "gmail", "redirectUrl": "app://return", "userId": "user-1"},
+        ).json() == {"ok": True, "data": {"redirect_url": "https://connect.test"}}
+        assert self.client.get("/api/composio/toolkits/gmail").json() == {"ok": True, "slug": "gmail"}
+        custom = self.client.post(
+            "/api/composio/auth-configs/custom",
+            json={
+                "toolkitSlug": "gmail",
+                "credentials": {"client_id": "id"},
+                "authScheme": "oauth2",
+                "redirectUrl": "app://return",
+                "userId": "user-1",
+            },
+        ).json()
+        assert custom["data"]["auth_config_id"] == "auth-1"
+        assert custom["data"]["auth_config_created"] is True
+        assert self.client.delete("/api/composio/connections/account-1").json() == {"ok": True}
+        assert self.client.get("/api/composio/facebook/pages").json() == {"pages": []}
+        assert self.client.put("/api/composio/facebook/pages", json={"pageIds": ["page-1"]}).json() == {"ok": True}
+        assert self.client.post("/api/composio/inbound/pull").json() == {"ok": True, "total_new": 0}
+
+        assert calls == [
+            ("status",),
+            ("set", "bad"),
+            ("set", "good"),
+            ("status",),
+            ("clear",),
+            ("status",),
+            ("connections",),
+            ("connections-all", "gmail", 2, 3),
+            ("capabilities",),
+            ("capability", "gmail"),
+            ("toolkits-page", None, 2, "c1", None),
+            ("toolkits-page", "crm", 100, None, "gmail"),
+            ("toolkits-all", "crm", 5),
+            ("connect", "gmail", "app://return", "user-1", None),
+            ("details", "gmail"),
+            ("custom-auth", "gmail", {"client_id": "id"}, "oauth2"),
+            ("connect", "gmail", "app://return", "user-1", "auth-1"),
+            ("delete", "account-1"),
+            ("fb-pages",),
+            ("fb-set", ["page-1"]),
+            ("pull",),
+        ]
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
