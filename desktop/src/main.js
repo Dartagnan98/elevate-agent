@@ -16,6 +16,10 @@ const path = require("path");
 const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
+const {
+  isAllowedAudioPermission,
+  requestPermissionOrigin,
+} = require("./permission-guard");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -1398,14 +1402,26 @@ function loadAppPath(pathname = START_PATH, options = {}) {
 function setupPermissions() {
   const ses = session.defaultSession;
   if (!ses) return;
-  ses.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === "media" || permission === "audioCapture");
+  ses.setPermissionRequestHandler((_webContents, permission, callback, details = {}) => {
+    callback(
+      isAllowedAudioPermission(
+        permission,
+        requestPermissionOrigin(details),
+        details,
+        backendUrl,
+      ),
+    );
   });
   // Only auto-pass the getUserMedia pre-flight; deny every other permission
   // check (geolocation, clipboard-read, MIDI, notifications, …) instead of the
   // previous blanket allow.
-  ses.setPermissionCheckHandler((_webContents, permission) => {
-    return permission === "media" || permission === "audioCapture";
+  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details = {}) => {
+    return isAllowedAudioPermission(
+      permission,
+      requestingOrigin || details.securityOrigin || details.requestingUrl,
+      details,
+      backendUrl,
+    );
   });
   // Defense-in-depth CSP for the local dashboard origin: a renderer XSS has no
   // 'self' backstop without this. The dashboard already serves only its own
