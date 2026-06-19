@@ -2449,6 +2449,25 @@ class TestBuildJobPromptMissingSkill:
         assert "Skill(s) not found" not in result
         mock_bump.assert_called_once_with("real-estate/theta-wave")
 
+    def test_real_estate_admin_skill_alias_loads_canonical_skill_when_short_name_is_ambiguous(self):
+        calls: list[str] = []
+
+        def _skill_view(name: str) -> str:
+            calls.append(name)
+            if name == "real-estate-admin/webforms":
+                return json.dumps({"success": True, "content": "Canonical webforms instructions."})
+            return json.dumps({"success": False, "error": f"Ambiguous skill name '{name}'"})
+
+        with patch("tools.skills_tool.skill_view", side_effect=_skill_view), \
+             patch("tools.skill_usage.bump_use") as mock_bump:
+            result = _build_job_prompt({"skills": ["webforms"], "prompt": "Run admin forms."})
+
+        assert calls == ["webforms", "real-estate-admin/webforms"]
+        assert "Canonical webforms instructions." in result
+        assert "Run admin forms." in result
+        assert "Skill(s) not found" not in result
+        mock_bump.assert_called_once_with("real-estate-admin/webforms")
+
 
 class TestBuildJobPromptBumpUse:
     """Verify that cron jobs bump skill usage counters so the curator sees them as active."""

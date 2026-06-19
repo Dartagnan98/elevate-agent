@@ -234,8 +234,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS: replaced installed app with 1.2.54 and reran `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --installed-app /Users/dartagnanpatricio/Applications/Elevate.app --skip-sidecar`
 - PASS: launched installed 1.2.54; `curl http://127.0.0.1:9120/api/status` shows gateway `running`, fresh pid/timestamps, Telegram/API connected, and WhatsApp `whatsapp_not_paired` instead of `whatsapp_bridge_missing`
 - PASS: `launchctl print gui/$(id -u)/ai.elevate.gateway` shows gateway running from `/Users/dartagnanpatricio/Applications/Elevate.app/Contents/Resources/cli`
-- FAIL: fresh `gateway.error.log` shows cron jobs skipped because several skill names are ambiguous (`gmail-doc-router`, `subject-removal`, `digisign`, `webforms`)
-- PASS: `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_agent_hub_effective_skills.py cli/tests/cron/test_scheduler.py -q`
+- FAIL then PASS: fresh `gateway.error.log` showed cron jobs skipped because several stale Admin skill names were ambiguous (`gmail-doc-router`, `subject-removal`, `digisign`, `webforms`); cron prompt assembly now retries those known aliases as `real-estate-admin/*`.
+- PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/cron/test_scheduler.py -k "skill_alias or missing_skill or effective_skills" cli/tests/hermes_cli/test_agent_hub_effective_skills.py`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run preflight:apple` for 1.2.57; public feed still 1.2.51, so package version is safely greater than published latest
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run build:mac` for 1.2.57 after clearing stale duplicate build/finalizer processes
 - PASS: `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --installed-app desktop/dist/mac-arm64/Elevate.app --skip-sidecar` for 1.2.57

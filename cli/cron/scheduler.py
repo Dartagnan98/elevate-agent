@@ -203,8 +203,12 @@ from cron.jobs import advance_next_run, ensure_system_jobs, get_due_jobs, mark_j
 SILENT_MARKER = "[SILENT]"
 
 _CORTEXT_CRON_SKILL_ALIASES: dict[str, tuple[str, ...]] = {
+    "digisign": ("real-estate-admin/digisign",),
+    "gmail-doc-router": ("real-estate-admin/gmail-doc-router",),
+    "subject-removal": ("real-estate-admin/subject-removal",),
     "surface-heartbeat": ("real-estate/surface-heartbeat",),
     "theta-wave": ("real-estate/theta-wave",),
+    "webforms": ("real-estate-admin/webforms",),
 }
 
 _CORTEXT_NATIVE_CRON_SKILLS: dict[str, str] = {
