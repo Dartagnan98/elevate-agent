@@ -274,18 +274,19 @@ function LbSourceAlert({ blocked }: { blocked: LeadsChannel[] }) {
 // Outbound = send approved texts through Messages (no FDA needed). They are
 // independent: you can send outreach without importing your message history.
 function LbToggle({
-  on, label, hint, onClick,
-}: { on: boolean; label: string; hint: string; onClick: () => void }) {
+  on, label, hint, onClick, disabled = false,
+}: { on: boolean; label: string; hint: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       title={hint}
       style={{
         display: "inline-flex", alignItems: "center", gap: 8,
         border: "1px solid var(--border, #2a2a2e)", borderRadius: 8,
         background: "transparent", color: "inherit", padding: "6px 10px",
-        cursor: "pointer", font: "inherit",
+        cursor: disabled ? "not-allowed" : "pointer", font: "inherit", opacity: disabled ? 0.65 : 1,
       }}
     >
       <span
@@ -315,7 +316,21 @@ function AppleMessagesToggleBar({
   appleMessages?: { inbound: boolean; outbound: boolean; blocked?: boolean; note?: string };
   onToggle?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
 }) {
+  const [busy, setBusy] = useState<"inbound" | "outbound" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
   if (!appleMessages || !onToggle) return null;
+  const runToggle = async (dir: "inbound" | "outbound", value: boolean) => {
+    setBusy(dir);
+    setError(null);
+    try {
+      await onToggle(dir, value);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update Apple Messages.");
+    } finally {
+      setBusy(null);
+    }
+  };
   return (
     <div style={{
       display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
@@ -326,14 +341,17 @@ function AppleMessagesToggleBar({
         on={appleMessages.inbound}
         label="Inbound (read replies)"
         hint="Read your Mac Messages as a lead source. Needs Full Disk Access for Elevate."
-        onClick={() => void onToggle("inbound", !appleMessages.inbound)}
+        onClick={() => void runToggle("inbound", !appleMessages.inbound)}
+        disabled={busy !== null}
       />
       <LbToggle
         on={appleMessages.outbound}
         label="Outbound (send texts)"
         hint="Send approved texts through Messages. No Full Disk Access required."
-        onClick={() => void onToggle("outbound", !appleMessages.outbound)}
+        onClick={() => void runToggle("outbound", !appleMessages.outbound)}
+        disabled={busy !== null}
       />
+      {error && <span style={{ color: "var(--accent-warn, #e0a44c)", fontSize: 12 }}>{error}</span>}
     </div>
   );
 }
@@ -447,13 +465,17 @@ function ActionQueue({
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
+  const [actionError, setActionError] = useState<string | null>(null);
   const PAGE = 5;
 
   const handleDraftAction = async (action: LeadsDraftAction, draft: LeadsDraft) => {
     if (!onDraftAction) return;
+    setActionError(null);
     setBusy((b) => { const n = new Set(b); n.add(draft.id); return n; });
     try {
       await onDraftAction(action, draft);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : `Could not ${action} draft.`);
     } finally {
       setBusy((b) => { const n = new Set(b); n.delete(draft.id); return n; });
     }
@@ -557,6 +579,10 @@ function ActionQueue({
           </div>
         )}
       </header>
+
+      {actionError && (
+        <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{actionError}</div>
+      )}
 
       <div className="lb-queue-list">
         {tab === "approve" && (

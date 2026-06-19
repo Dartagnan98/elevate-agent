@@ -1257,6 +1257,53 @@ class TestNewEndpoints:
         assert resp.json() == {"ok": True}
         assert calls == [("email:test@example.com", "follow_up", False)]
 
+    def test_source_inbox_draft_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_update_source_task_state(source_id, task_id, action, *, draft_text="", return_inbox=True):
+            calls.append((source_id, task_id, action, draft_text, return_inbox))
+            return {"ok": True}
+
+        monkeypatch.setattr(source_connectors, "update_source_task_state", fake_update_source_task_state)
+
+        resp = self.client.post(
+            "/api/source-inbox/draft",
+            json={
+                "sourceId": "email",
+                "taskId": "task-1",
+                "action": "approve",
+                "draftText": "send this",
+                "returnInbox": False,
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert calls == [("email", "task-1", "approve", "send this", False)]
+
+    def test_apple_messages_directions_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_set_apple_messages_directions(*, inbound=None, outbound=None):
+            calls.append(("set", inbound, outbound))
+            return {"inbound": bool(inbound), "outbound": True if outbound is None else bool(outbound)}
+
+        monkeypatch.setattr(source_connectors, "set_apple_messages_directions", fake_set_apple_messages_directions)
+        monkeypatch.setattr(source_connectors, "initialize_apple_messages_source", lambda: calls.append(("init",)))
+
+        resp = self.client.post(
+            "/api/source-inbox/apple-messages/directions",
+            json={"inbound": False},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"inbound": False, "outbound": True}
+        assert calls == [("set", False, None), ("init",)]
+
     def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
         from cron import jobs as cron_jobs
 

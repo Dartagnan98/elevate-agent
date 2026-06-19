@@ -762,6 +762,10 @@ Deliverables:
   `POST /api/source-inbox/profile` instead of only mutating local component
   state; the route contract test proves the dashboard POST reaches
   `update_profile_state`.
+- Done: `/leads` draft actions and Apple Messages direction toggles now surface
+  request failures in the page instead of console-only logging; route contracts
+  cover `POST /api/source-inbox/draft` and
+  `POST /api/source-inbox/apple-messages/directions`.
 - Remaining: at least one critical empty/error state per major dashboard
   surface.
 

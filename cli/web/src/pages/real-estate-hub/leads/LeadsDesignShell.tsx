@@ -161,6 +161,7 @@ export function LeadsDesignShell() {
         await data.refresh({ force: true });
       } catch (err) {
         console.error("apple messages direction toggle failed", err);
+        throw err;
       }
     },
     [data],
@@ -168,7 +169,7 @@ export function LeadsDesignShell() {
 
   const handleDraftAction = useCallback(
     async (action: LeadsDraftAction, draft: LeadsDraft) => {
-      if (!draft.sourceId || !draft.taskId) return;
+      if (!draft.sourceId || !draft.taskId) throw new Error("Draft is missing source/task identifiers.");
       try {
         // draft.body carries the edited text from the card (approve/edit must
         // send what's in the textarea, not the original template).
@@ -178,6 +179,7 @@ export function LeadsDesignShell() {
         setSourceInbox(res);
       } catch (err) {
         console.error("draft action failed", err);
+        throw err;
       }
     },
     [setSourceInbox],
