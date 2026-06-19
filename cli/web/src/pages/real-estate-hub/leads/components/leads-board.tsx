@@ -271,7 +271,7 @@ function LbSourceAlert({ blocked }: { blocked: LeadsChannel[] }) {
         <button
           type="button"
           className="lb-alert-action"
-          onClick={() => window.open(FDA_SETTINGS_URL)}
+          onClick={() => window.open(FDA_SETTINGS_URL, "_blank", "noopener,noreferrer")}
         >
           Open Full Disk Access
         </button>

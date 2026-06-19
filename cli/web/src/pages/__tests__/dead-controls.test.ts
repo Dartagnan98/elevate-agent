@@ -36,6 +36,10 @@ function jsxAttributes(node: ts.JsxOpeningElement): Map<string, string | true> {
   return attrs;
 }
 
+function isStringLiteralText(value: string | true, text: string): boolean {
+  return value === `"${text}"` || value === `'${text}'`;
+}
+
 describe("dead control sweep", () => {
   const files = scanRoots.flatMap(walkTsx);
 
@@ -109,6 +113,42 @@ describe("dead control sweep", () => {
             failures.push(`${relative(file)}:${lineNumber(source, node.getStart(ast))}`);
           }
         }
+        ts.forEachChild(node, visit);
+      };
+
+      visit(ast);
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  it("keeps new tabs isolated from the opener", () => {
+    const failures: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+      const visit = (node: ts.Node) => {
+        if (ts.isCallExpression(node) && node.expression.getText(ast) === "window.open") {
+          const featureArg = node.arguments[2]?.getText(ast) ?? "";
+          if (node.arguments.length < 3 || !featureArg.includes("noopener")) {
+            failures.push(`${relative(file)}:${lineNumber(source, node.getStart(ast))} window.open`);
+          }
+        }
+
+        if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "a") {
+          const attrs = jsxAttributes(node.openingElement);
+          const target = attrs.get("target");
+          const rel = attrs.get("rel");
+          if (target && isStringLiteralText(target, "_blank")) {
+            const relText = typeof rel === "string" ? rel : "";
+            if (!relText.includes("noopener") && !relText.includes("noreferrer")) {
+              failures.push(`${relative(file)}:${lineNumber(source, node.getStart(ast))} target=_blank`);
+            }
+          }
+        }
+
         ts.forEachChild(node, visit);
       };
 

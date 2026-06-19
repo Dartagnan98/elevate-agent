@@ -1,1 +1,0 @@
-import{r}from"./vendor-react-hYjLGG_g.js";import{E as t}from"./index-IyAjt8F0.js";function s(){const e=r.useContext(t);if(!e)throw new Error("usePageHeader must be used within a PageHeaderProvider");return e}export{s as u};
