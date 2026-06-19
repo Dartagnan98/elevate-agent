@@ -90,6 +90,16 @@ export function StatusDot({ status }: { status: string }) {
   return <div className={cls} aria-label={status} role="img" />;
 }
 
+function activateOnEnterSpace(
+  event: React.KeyboardEvent<HTMLElement>,
+  onActivate: () => void,
+) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    onActivate();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SectionLabel
 // ---------------------------------------------------------------------------
@@ -109,6 +119,9 @@ function SectionLabel({
     <div
       className={"section-label" + (collapsed ? " collapsed" : "")}
       onClick={onToggle}
+      onKeyDown={(event) => activateOnEnterSpace(event, onToggle)}
+      role="button"
+      tabIndex={0}
     >
       <Chevron />
       <span>{label}</span>
@@ -135,6 +148,7 @@ function NavRow({
     <div
       className={"nav-row" + (active ? " active" : "")}
       onClick={onClick}
+      onKeyDown={(event) => activateOnEnterSpace(event, onClick)}
       role="button"
       tabIndex={0}
     >
@@ -163,6 +177,7 @@ function SessionRow({
       className={"session-row" + (active ? " active" : "")}
       data-status={session.status}
       onClick={onClick}
+      onKeyDown={(event) => activateOnEnterSpace(event, onClick)}
       role="button"
       tabIndex={0}
       title={session.title}
@@ -235,6 +250,7 @@ function AutomationRow({
       className={"auto-row" + (active ? " active" : "")}
       data-status={auto.status}
       onClick={onClick}
+      onKeyDown={(event) => activateOnEnterSpace(event, onClick)}
       role="button"
       tabIndex={0}
       title={auto.name}
@@ -357,6 +373,7 @@ function UserPill() {
         role="button"
         tabIndex={0}
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => activateOnEnterSpace(event, () => setOpen((o) => !o))}
       >
         <div className="avatar">{u.initial}</div>
         <div className="who">

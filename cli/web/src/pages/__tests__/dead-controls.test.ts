@@ -1,0 +1,79 @@
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const srcRoot = path.resolve(testDir, "../..");
+const scanRoots = ["pages", "components"].map((dir) => path.join(srcRoot, dir));
+
+function walkTsx(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = path.join(dir, entry);
+    if (full.includes(`${path.sep}__tests__${path.sep}`)) return [];
+    const st = statSync(full);
+    if (st.isDirectory()) return walkTsx(full);
+    return full.endsWith(".tsx") ? [full] : [];
+  });
+}
+
+function lineNumber(source: string, index: number): number {
+  return source.slice(0, index).split("\n").length;
+}
+
+function relative(file: string): string {
+  return path.relative(srcRoot, file);
+}
+
+describe("dead control sweep", () => {
+  const files = scanRoots.flatMap(walkTsx);
+
+  it("does not ship obvious placeholder links or no-op click handlers", () => {
+    const forbidden = [
+      { name: "hash href", pattern: /href\s*=\s*["']#["']/g },
+      { name: "javascript href", pattern: /href\s*=\s*["']javascript:/gi },
+      { name: "empty click handler", pattern: /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*\{\s*\}\s*\}/g },
+      { name: "forced enabled disabled prop", pattern: /disabled\s*=\s*\{\s*false\s*\}/g },
+    ];
+    const failures: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      for (const check of forbidden) {
+        for (const match of source.matchAll(check.pattern)) {
+          failures.push(
+            `${relative(file)}:${lineNumber(source, match.index ?? 0)} ${check.name}`,
+          );
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  it("keeps custom role=button controls keyboard reachable", () => {
+    const failures: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const lines = source.split("\n");
+      lines.forEach((line, idx) => {
+        if (!line.includes('role="button"')) return;
+        const start = Math.max(0, idx - 25);
+        const end = Math.min(lines.length, idx + 26);
+        const window = lines.slice(start, end).join("\n");
+        if (!/onClick\s*=/.test(window)) {
+          failures.push(`${relative(file)}:${idx + 1} missing onClick`);
+        }
+        if (!/onKeyDown\s*=/.test(window)) {
+          failures.push(`${relative(file)}:${idx + 1} missing onKeyDown`);
+        }
+        if (!/tabIndex\s*=\s*\{?0\}?/.test(window)) {
+          failures.push(`${relative(file)}:${idx + 1} missing tabIndex=0`);
+        }
+      });
+    }
+
+    expect(failures).toEqual([]);
+  });
+});
