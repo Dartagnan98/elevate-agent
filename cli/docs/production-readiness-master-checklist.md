@@ -135,7 +135,7 @@ Critical path:
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
 | HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts and admin missing-record 404s pass; deeper admin mutation success/permission matrix still needs coverage |
-| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating and `skills/run` requested-skill/invocation audit pass; automation mutations, Stripe, and external failure mocks still need coverage |
+| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating and `skills/run` requested-skill/invocation audit pass; signed Stripe webhook test now proves unknown subscription prices do not grant `pro`; checkout/portal, automation mutations, and broader external failure mocks still need coverage |
 
 ## 11. Release And Update Path
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { describe, it } from "node:test";
 import bcrypt from "bcryptjs";
+import Stripe from "stripe";
 import {
   assertNoRawDiagnosticsText,
   createFakeDb,
@@ -365,6 +366,77 @@ describe("hosted route handlers", () => {
       (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
       "license.sign_out_everywhere",
     );
+  });
+
+  it("stripe subscription webhooks do not grant pro for unknown prices", async () => {
+    const previousSecretKey = process.env.STRIPE_SECRET_KEY;
+    const previousWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const previousBuilderPrice = process.env.STRIPE_PRICE_BUILDER_MONTHLY;
+    const previousProPrice = process.env.STRIPE_PRICE_PRO_MONTHLY;
+    Reflect.set(process.env, "STRIPE_SECRET_KEY", "sk_test_route_harness");
+    Reflect.set(process.env, "STRIPE_WEBHOOK_SECRET", "whsec_route_harness");
+    Reflect.set(process.env, "STRIPE_PRICE_BUILDER_MONTHLY", "price_builder");
+    Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", "price_pro");
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({
+        id: "billing-user",
+        email: "billing@example.com",
+        status: "inactive",
+        tier: "builder",
+        stripe_customer: "cus_unknown_price",
+      });
+      db.users.push(user);
+      const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+        "stripe/webhook",
+      );
+      const payload = JSON.stringify({
+        id: "evt_unknown_price",
+        object: "event",
+        type: "customer.subscription.updated",
+        data: {
+          object: {
+            id: "sub_unknown_price",
+            object: "subscription",
+            customer: "cus_unknown_price",
+            status: "active",
+            current_period_end: 1_800_000_000,
+            items: {
+              object: "list",
+              data: [{ price: { id: "price_not_configured" } }],
+            },
+          },
+        },
+      });
+      const signature = Stripe.webhooks.generateTestHeaderString({
+        payload,
+        secret: "whsec_route_harness",
+      });
+
+      const response = await route.POST(
+        new Request("https://app.test/api/stripe/webhook", {
+          method: "POST",
+          headers: { "stripe-signature": signature },
+          body: payload,
+        }),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(body, { received: true });
+      assert.equal(db.users[0].tier, "builder");
+      assert.equal(db.users[0].status, "inactive");
+      assert.equal(db.users[0].current_period_end, null);
+    } finally {
+      if (previousSecretKey === undefined) Reflect.deleteProperty(process.env, "STRIPE_SECRET_KEY");
+      else Reflect.set(process.env, "STRIPE_SECRET_KEY", previousSecretKey);
+      if (previousWebhookSecret === undefined) Reflect.deleteProperty(process.env, "STRIPE_WEBHOOK_SECRET");
+      else Reflect.set(process.env, "STRIPE_WEBHOOK_SECRET", previousWebhookSecret);
+      if (previousBuilderPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_BUILDER_MONTHLY");
+      else Reflect.set(process.env, "STRIPE_PRICE_BUILDER_MONTHLY", previousBuilderPrice);
+      if (previousProPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_PRO_MONTHLY");
+      else Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", previousProPrice);
+    }
   });
 
   it("account read routes return effective org access and gated catalogs", async () => {
