@@ -16,7 +16,6 @@ import {
   Folder,
   FolderOpen,
   Megaphone,
-  MoreVertical,
   Package,
   Paintbrush,
   Route,
@@ -1164,13 +1163,6 @@ function SkillDetail({
             disabled={toggling}
             aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
           />
-          <button
-            type="button"
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
-            aria-label="More"
-          >
-            <MoreVertical className="h-4 w-4" />
-          </button>
         </div>
       </header>
 

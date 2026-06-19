@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -23,6 +24,16 @@ function lineNumber(source: string, index: number): number {
 
 function relative(file: string): string {
   return path.relative(srcRoot, file);
+}
+
+function jsxAttributes(node: ts.JsxOpeningElement): Map<string, string | true> {
+  const attrs = new Map<string, string | true>();
+  for (const prop of node.attributes.properties) {
+    if (ts.isJsxAttribute(prop)) {
+      attrs.set(prop.name.getText(), prop.initializer?.getText() ?? true);
+    }
+  }
+  return attrs;
 }
 
 describe("dead control sweep", () => {
@@ -72,6 +83,33 @@ describe("dead control sweep", () => {
           failures.push(`${relative(file)}:${idx + 1} missing tabIndex=0`);
         }
       });
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  it("keeps native buttons actionable, disabled, or explicit submit controls", () => {
+    const failures: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+      const visit = (node: ts.Node) => {
+        if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === "button") {
+          const attrs = jsxAttributes(node.openingElement);
+          const hasAction = [...attrs.keys()].some((name) =>
+            /^on(Click|MouseDown|PointerDown|KeyDown|Submit)$/.test(name),
+          );
+          const isSubmit = attrs.get("type") === '"submit"' || attrs.get("type") === "'submit'";
+          if (!hasAction && !attrs.has("disabled") && !isSubmit) {
+            failures.push(`${relative(file)}:${lineNumber(source, node.getStart(ast))}`);
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+
+      visit(ast);
     }
 
     expect(failures).toEqual([]);

@@ -675,7 +675,6 @@ function UnifiedInbox() {
                   {it.desc && <div className="ab-inbox-desc">{it.desc}</div>}
                 </div>
                 <span className="ab-inbox-meta mono">{it.meta}</span>
-                <button type="button" className="ab-inbox-open">Open</button>
               </div>
             );
           })
@@ -769,7 +768,6 @@ function ActionRow({ action }: { action: ActionItem }) {
           {action.next && <span>{action.next}</span>}
         </div>
       </div>
-      <button className="ab-action-open" type="button">Open</button>
     </div>
   );
 }

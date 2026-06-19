@@ -270,6 +270,7 @@ function AutomationRow({
 function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
   void _onClose;
   const u = MOCK_USER;
+  const unavailableTitle = "Unavailable in the embedded admin sidebar";
 
   const [theme, setTheme] = useState(u.theme);
   const [locale, setLocale] = useState(u.locale);
@@ -281,13 +282,13 @@ function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
       <div className="user-menu-email">{u.email}</div>
 
       <div className="user-menu-section">
-        <button className="user-menu-row" role="menuitem">
+        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
           <Settings /><span>Settings</span>
         </button>
-        <button className="user-menu-row" role="menuitem">
+        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
           <Sparkles /><span>Run onboarding</span>
         </button>
-        <button className="user-menu-row" role="menuitem">
+        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
           <User /><span>Account</span>
         </button>
       </div>
@@ -322,17 +323,17 @@ function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
           <span className="dim">Active sessions</span>
           <span>{u.activeSessions}</span>
         </div>
-        <button className="user-menu-row" role="menuitem">
+        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
           <Refresh /><span>Restart gateway</span>
         </button>
-        <button className="user-menu-row" role="menuitem">
+        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
           <Download /><span>Update Elevation</span>
           {u.hasUpdate && <span className="user-menu-tag">new</span>}
         </button>
       </div>
 
       <div className="user-menu-section">
-        <button className="user-menu-row danger" role="menuitem">
+        <button className="user-menu-row danger" role="menuitem" disabled title={unavailableTitle}>
           <LogOut /><span>Sign out</span>
         </button>
       </div>
@@ -434,16 +435,16 @@ function Sidebar({ activeNav, onNavSelect, activeSessionId, onSessionSelect }: S
             <div className="light max"></div>
           </div>
           <div className="tools">
-            <button className="icon-btn" type="button" aria-label="Collapse sidebar" title="Collapse sidebar">
+            <button className="icon-btn" type="button" aria-label="Collapse sidebar" title="Unavailable in the embedded admin sidebar" disabled>
               <PanelLeft aria-hidden="true" />
             </button>
-            <button className="icon-btn" type="button" aria-label="Search" title="Search (&#x2318;K)">
+            <button className="icon-btn" type="button" aria-label="Search" title="Unavailable in the embedded admin sidebar" disabled>
               <Search aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        <button className="new-chat" type="button">
+        <button className="new-chat" type="button" disabled title="Unavailable in the embedded admin sidebar">
           <Plus />
           <span>New chat</span>
           <span className="kbd">&#x2318;N</span>

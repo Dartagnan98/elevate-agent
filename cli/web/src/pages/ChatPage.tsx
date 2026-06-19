@@ -12088,14 +12088,6 @@ function ActivityPanel({
             {state === "open" ? "live" : STATE_LABEL[state]}
           </span>
         </div>
-        <div className="ap-meta">
-          <button className="icon-btn sm" aria-label="Pin activity panel" title="Pin panel" type="button">
-            <Pin aria-hidden="true" />
-          </button>
-          <button className="icon-btn sm" aria-label="Open activity panel menu" title="More" type="button">
-            <ChevronDown aria-hidden="true" />
-          </button>
-        </div>
       </div>
 
       {hasProgress && (
