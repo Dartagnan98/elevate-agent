@@ -302,6 +302,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_ayrshare_route_contract`
 - PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_composio_route_contract`
 - PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_social_route_contract`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run build:mac` rebuilt x64 and arm64 1.2.58 artifacts after API-05/leads-section changes; both notarizations succeeded and `latest-mac.yml` merged 4 artifacts
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run smoke:mac`; x64 output `/tmp/elevate-installed-smoke-1781862694.json`, arm64 output `/tmp/elevate-installed-smoke-1781862700.json`
 - FAIL then PASS: `/leads` ignored backend `leadSections`, so DB-only hot/follow-up contacts and threads disappeared from the Hot Leads/Follow-ups queue when they were not draft-backed; now `mapLeadsPipeline` consumes section profile/thread ids and buyer-search counts.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- source-inbox-debug.test.ts`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
