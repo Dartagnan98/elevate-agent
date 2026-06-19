@@ -825,6 +825,30 @@ class TestWebServerEndpoints:
         if resp.status_code == 200:
             assert "FastAPI" not in resp.text  # Should not serve the actual source
 
+    def test_docs_dashboard_route_is_not_fastapi_swagger(self):
+        """The dashboard /docs route must not be shadowed by FastAPI docs."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import WEB_DIST, app
+
+        if not (WEB_DIST / "index.html").exists():
+            pytest.skip("frontend bundle not built")
+
+        resp = TestClient(app).get("/docs")
+
+        assert resp.status_code == 200
+        assert 'window.__ELEVATE_SESSION_TOKEN__' in resp.text
+        assert "SwaggerUIBundle" not in resp.text
+
+    def test_fastapi_swagger_lives_under_api_docs(self):
+        """Keep developer API docs reachable without taking /docs from the app."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        resp = TestClient(app).get("/api/docs")
+
+        assert resp.status_code == 200
+        assert "SwaggerUIBundle" in resp.text
+
 
 # ---------------------------------------------------------------------------
 # _build_schema_from_config tests

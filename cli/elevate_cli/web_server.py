@@ -226,7 +226,13 @@ def _fs_cache_invalidate(name: str) -> None:
         _FS_SCAN_CACHE.pop(key, None)
 
 
-app = FastAPI(title="Elevate", version=__version__)
+app = FastAPI(
+    title="Elevate",
+    version=__version__,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
+)
 
 
 class ImmutableStaticFiles(StaticFiles):
@@ -340,6 +346,9 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 # only truly non-sensitive, read-only endpoints belong here.
 # ---------------------------------------------------------------------------
 _PUBLIC_API_PATHS: frozenset = frozenset({
+    "/api/docs",
+    "/api/docs/oauth2-redirect",
+    "/api/redoc",
     "/api/status",
     "/api/config/defaults",
     "/api/config/schema",

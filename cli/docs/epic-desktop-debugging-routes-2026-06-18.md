@@ -177,7 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
-- Local route identity fingerprint: `8165f342e19723cb`.
+- Local route identity fingerprint: `f31390ff45328047`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -236,6 +236,8 @@ Current verified snapshot, 2026-06-18:
   polling comment, backend hosted route-handler harness, hosted device
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
+  dashboard nav/route/preloader drift guard, FastAPI `/docs` shadow moved to
+  `/api/docs` so the dashboard `/docs` deep link serves the SPA,
   stricter `/api/status` readiness for desktop launch, release-path
   `smoke:mac` gate, preflight public-feed version comparison, post-ship public
   feed/artifact verification, installed app `codesign`/`spctl` smoke gate,

@@ -66,7 +66,7 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | WEB-01 | Build | PASS iff TypeScript and Vite build are clean | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` passes; default Node 20.9.0 fails engine |
-| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Browser/manual pass |
+| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Source guard now proves nav routes are mounted/preloaded; TestClient proves `/docs` deep-link collision fixed in source (`/docs` serves SPA, `/api/docs` serves Swagger). Installed-app rebuild plus browser/manual render pass still required |
 | WEB-03 | Dead buttons | PASS iff every visible button/link/toggle either works, is disabled with reason, or is hidden | UNKNOWN | Browser/manual pass |
 | WEB-04 | UI collisions | PASS iff desktop-width and narrow-width screenshots show no clipped/overlapping critical controls | UNKNOWN | Browser/manual screenshots |
 | WEB-05 | Auth header contract | PASS iff dashboard API client sends the local session header where required | UNKNOWN | Existing frontend/API test |
@@ -77,7 +77,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| API-01 | Route inventory | PASS iff local FastAPI route inventory matches source and drift fails a test | PASS | `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_installed_runtime_smoke.py` passes |
+| API-01 | Route inventory | PASS iff local FastAPI route inventory matches source and drift fails a test | PASS | `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py` passes; installed runtime smoke also passed for current installed 1.2.58 before this source-only route fix |
 | API-02 | Health/status | PASS iff `/api/status` exposes enough version/gateway readiness to classify startup | PASS | `/api/status` includes app version, config paths, gateway pid/state, platform states, update timestamps, and active session count |
 | API-03 | Auth gate | PASS iff protected routes reject missing/bad token and accept valid local token | UNKNOWN | Contract tests/runtime probe |
 | API-04 | Chat WebSocket | PASS iff `/api/ws` connects, streams, reports close reasons, and recovers visibly | UNKNOWN | WebSocket smoke |
@@ -194,7 +194,7 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | GO-01 | All critical gates pass | PASS iff all non-N/A checklist rows above are PASS | FAIL | Checklist still has UNKNOWN rows across UI E2E, auth/license, recovery, observability, security, performance, and environment matrix |
-| GO-02 | No P0/P1 open bugs | PASS iff no open critical bugs remain in the ledger | FAIL | Open runtime/config issues still need classification: WhatsApp enabled but not paired, config version `24` behind latest `25`, plus earlier Oura MCP, missing `OPENAI_API_KEY`, and Composio Gmail HTTP 422 warnings |
+| GO-02 | No P0/P1 open bugs | PASS iff no open critical bugs remain in the ledger | FAIL | Open runtime/config issues still need classification: WhatsApp enabled but not paired, config version `24` behind latest `25`, earlier Oura MCP, missing `OPENAI_API_KEY`, Composio Gmail HTTP 422 warnings, and one full-file parallel web-server run timed out in `/api/pub` broadcast before isolated rerun passed |
 | GO-03 | Tests green | PASS iff selected repo-wide test suite is green and listed | PASS | Listed evidence commands pass for web build, backend tests, targeted pytest, desktop preflight, mac smoke, and installed-app smoke |
 | GO-04 | UI E2E checked | PASS iff install -> login -> chat -> tools -> automations -> update -> quit/reopen is checked | UNKNOWN | Manual/browser report |
 | GO-05 | Local commit | PASS iff all production-readiness changes are committed locally only | UNKNOWN | `git log -1`, remote untouched |
@@ -249,6 +249,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS: launched installed 1.2.58; `.gateway_version` advanced from `1.2.57` to `1.2.58`, gateway pid `73142` running, API/Telegram connected, WhatsApp visibly `whatsapp_not_paired`
 - PASS: post-launch installed 1.2.58 seal smoke passed, proving first launch did not mutate the signed bundle
 - PASS: post-1.2.58 gateway log window from line 8120 has no ambiguous-skill scheduler skips; only WhatsApp not-paired warnings are present
+- PASS: source route guard and `/docs` collision fix: `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py -q`
+- UNKNOWN/FLAKE: full `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_web_server.py cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py -q` reached 152 passed then timed out once in `TestPtyWebSocket::test_pub_broadcasts_to_events_subscribers`; isolated rerun of that test passed
 - NOTE: old installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-214427-1.2.51`
 - NOTE: previous 1.2.53 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-220758-1.2.53`
 - NOTE: previous 1.2.57 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235359-1.2.57`; a locally mutated 1.2.58 verification copy was backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235625-1.2.58-pycache-mutated`
