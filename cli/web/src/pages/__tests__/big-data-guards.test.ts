@@ -28,4 +28,19 @@ describe("large data page guards", () => {
     expect(text).toContain("Showing first {TASK_COLUMN_RENDER_LIMIT} of {column.tasks.length}");
     expect(text).toContain("Showing first {TASK_LIST_RENDER_LIMIT} of {sorted.length}");
   });
+
+  it("keeps real estate boards bounded on large local datasets", () => {
+    const leads = readPage("real-estate-hub/leads/components/leads-board.tsx");
+    const admin = readPage("real-estate-hub/admin/components/admin-board.tsx");
+    const social = readPage("real-estate-hub/social/board.tsx");
+
+    expect(leads).toContain("const PAGE = 5;");
+    expect(leads).toContain("const visible = showAll ? activeList : activeList.slice(safePage * PAGE, safePage * PAGE + PAGE);");
+    expect(admin).toContain("const PAGE = 3;");
+    expect(admin).toContain("return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);");
+    expect(admin).toContain("const visible = showAll ? filtered : filtered.slice(safePage * PAGE, safePage * PAGE + PAGE);");
+    expect(social).toContain("const SOCIAL_POST_RENDER_LIMIT = 96;");
+    expect(social).toContain("const rendered = useMemo(() => visible.slice(0, SOCIAL_POST_RENDER_LIMIT), [visible]);");
+    expect(social).toContain("Showing first {SOCIAL_POST_RENDER_LIMIT} of {visible.length}");
+  });
 });

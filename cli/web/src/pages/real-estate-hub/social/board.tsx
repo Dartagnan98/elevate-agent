@@ -41,6 +41,7 @@ const RANKINGS_YT: RankDef[] = [
   { id: "eng", label: "Most engagement", metric: "eng", order: "desc", fmt: "pct" },
   { id: "lviews", label: "Least views", metric: "views", order: "asc", fmt: "num" },
 ];
+const SOCIAL_POST_RENDER_LIMIT = 96;
 
 // ── helpers ─────────────────────────────────────────────────────────
 type PostWithInts = DesignPost & { ints: number };
@@ -670,6 +671,7 @@ function YourPosts({
 
   const [tab, setTab] = useState<"all" | "instagram" | "youtube">("all");
   const visible = useMemo(() => (tab === "all" ? all : all.filter((p) => p.platform === tab)), [all, tab]);
+  const rendered = useMemo(() => visible.slice(0, SOCIAL_POST_RENDER_LIMIT), [visible]);
 
   const tabs: { id: "all" | "instagram" | "youtube"; label: string; n: number }[] = [
     { id: "all", label: "All", n: counts.all },
@@ -748,16 +750,21 @@ function YourPosts({
           </p>
         ) : isYT ? (
           <div className="sm-video-grid">
-            {visible.map((p) => (
+            {rendered.map((p) => (
               <VideoCard key={p.id} post={p} onSelect={onSelect} />
             ))}
           </div>
         ) : (
           <div className="sm-post-grid">
-            {visible.map((p) => (
+            {rendered.map((p) => (
               <PostCard key={p.id} post={p} onSelect={onSelect} />
             ))}
           </div>
+        )}
+        {visible.length > SOCIAL_POST_RENDER_LIMIT && (
+          <p className="sm-block-empty mono">
+            Showing first {SOCIAL_POST_RENDER_LIMIT} of {visible.length}. Narrow the platform or lookback to inspect older posts.
+          </p>
         )}
       </div>
     </section>
