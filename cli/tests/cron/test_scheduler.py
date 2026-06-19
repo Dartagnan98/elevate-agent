@@ -1038,6 +1038,50 @@ class TestDeliverResultErrorReturns:
         assert result is not None
         assert "no delivery target" in result
 
+    def test_returns_error_when_send_helper_returns_error(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        send_mock = AsyncMock(return_value={"error": "403 Forbidden"})
+
+        job = {
+            "id": "send-error-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=send_mock):
+            result = _deliver_result(job, "Output.")
+
+        assert result == "delivery error: 403 Forbidden"
+
+    def test_returns_error_when_send_helper_raises(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        send_mock = AsyncMock(side_effect=RuntimeError("network timeout"))
+
+        job = {
+            "id": "send-exception-job",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("tools.send_message_tool._send_to_platform", new=send_mock):
+            result = _deliver_result(job, "Output.")
+
+        assert result == "delivery to telegram:123 failed: network timeout"
+
 
 class TestRunJobSessionPersistence:
     def test_run_job_skips_disabled_agent_before_session_start(self, tmp_path):
@@ -2052,6 +2096,21 @@ class TestSilentDelivery:
             from cron.scheduler import tick
             tick(verbose=False)
         deliver_mock.assert_called_once()
+
+    def test_delivery_failure_is_recorded_separately_from_agent_success(self):
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", "send this", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value="delivery error: 403 Forbidden"), \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        mark_mock.assert_called_once()
+        args, kwargs = mark_mock.call_args
+        assert args == ("monitor-job", True, None)
+        assert kwargs["delivery_error"] == "delivery error: 403 Forbidden"
+        assert kwargs["summary"] == "send this"
 
     def test_output_saved_even_when_delivery_suppressed(self):
         with patch("cron.scheduler.get_due_jobs", return_value=[self._make_job()]), \
