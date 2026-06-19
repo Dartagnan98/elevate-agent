@@ -15,6 +15,7 @@ const os = require("os");
 const path = require("path");
 const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
+const { isTrustedNavigationUrl } = require("./navigation-guard");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -1236,7 +1237,7 @@ function createWindow() {
   // Lock the main window to the trusted local origin: block top-level
   // navigation elsewhere (setWindowOpenHandler only covers window.open).
   mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(backendUrl) && !url.startsWith("file://")) {
+    if (!isTrustedNavigationUrl(url, { backendUrl, appRoot: __dirname })) {
       event.preventDefault();
     }
   });

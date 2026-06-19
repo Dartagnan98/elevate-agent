@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { describe, it } from "node:test";
+import bcrypt from "bcryptjs";
 import {
   assertNoRawDiagnosticsText,
   createFakeDb,
@@ -67,6 +68,131 @@ describe("hosted route handlers", () => {
     assert.equal(response.status, 402);
     assert.deepEqual(body, { error: "no active subscription" });
     assert.equal(db.licenses.length, 0);
+  });
+
+  it("signup, forgot, and reset issue tokens then revoke sessions", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousMailjetKey = process.env.MAILJET_API_KEY;
+    const previousMailjetSecret = process.env.MAILJET_API_SECRET;
+    const previousMailFrom = process.env.MAIL_FROM;
+    Reflect.set(process.env, "NODE_ENV", "test");
+    Reflect.deleteProperty(process.env, "MAILJET_API_KEY");
+    Reflect.deleteProperty(process.env, "MAILJET_API_SECRET");
+    Reflect.deleteProperty(process.env, "MAIL_FROM");
+    try {
+      const db = useFakeDb();
+      const signup = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/signup");
+      const forgot = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/forgot");
+      const reset = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/reset");
+
+      const signupResponse = await signup.POST(
+        jsonRequest("/api/auth/signup", {
+          email: "New.Agent@Example.COM",
+          password: "old-secret",
+          device_label: "New Mac",
+        }),
+      );
+      const signupBody = await responseJson(signupResponse);
+
+      assert.equal(signupResponse.status, 200);
+      assert.equal(signupBody.created, true);
+      assert.equal(typeof signupBody.access_token, "string");
+      assert.equal(typeof signupBody.refresh_token, "string");
+      assert.equal(signupBody.license_id, "license-1");
+      assert.deepEqual(signupBody.entitlements, []);
+      assert.equal(db.users.length, 1);
+      assert.equal(db.users[0].email, "new.agent@example.com");
+      assert.deepEqual(db.users[0].entitlements, []);
+      assert.equal(db.licenses.length, 1);
+      assert.equal(db.licenses[0].revoked, false);
+
+      const originalHash = db.users[0].password_hash;
+      const forgotResponse = await forgot.POST(
+        jsonRequest(
+          "/api/auth/forgot",
+          { email: "new.agent@example.com", app: true },
+          { headers: { "x-forwarded-for": "127.0.0.2", "user-agent": "desktop-app" } },
+        ),
+      );
+      const forgotBody = await responseJson(forgotResponse);
+      const devOnly = forgotBody.dev_only as { token?: string; reset_url?: string } | undefined;
+
+      assert.equal(forgotResponse.status, 200);
+      assert.equal(forgotBody.ok, true);
+      assert.equal(db.password_reset_tokens.length, 1);
+      assert.equal(db.password_reset_tokens[0].user_id, db.users[0].id);
+      assert.equal(
+        db.password_reset_tokens[0].token_hash,
+        crypto.createHash("sha256").update(String(devOnly?.token)).digest("hex"),
+      );
+      assert.match(String(devOnly?.reset_url), /app=1$/);
+      assert.equal(
+        (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
+        "password.reset_requested",
+      );
+
+      const resetResponse = await reset.POST(
+        jsonRequest("/api/auth/reset", {
+          token: devOnly?.token,
+          new_password: "new-secret",
+        }),
+      );
+      const resetBody = await responseJson(resetResponse);
+
+      assert.equal(resetResponse.status, 200);
+      assert.deepEqual(resetBody, { ok: true, email: "new.agent@example.com" });
+      assert.equal(db.licenses[0].revoked, true);
+      assert.equal(typeof db.password_reset_tokens[0].consumed_at, "string");
+      assert.notEqual(db.users[0].password_hash, originalHash);
+      assert.equal(await bcrypt.compare("new-secret", db.users[0].password_hash), true);
+      assert.equal(
+        (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
+        "password.reset_completed",
+      );
+    } finally {
+      if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
+      else Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
+      if (previousMailjetKey === undefined) Reflect.deleteProperty(process.env, "MAILJET_API_KEY");
+      else Reflect.set(process.env, "MAILJET_API_KEY", previousMailjetKey);
+      if (previousMailjetSecret === undefined) Reflect.deleteProperty(process.env, "MAILJET_API_SECRET");
+      else Reflect.set(process.env, "MAILJET_API_SECRET", previousMailjetSecret);
+      if (previousMailFrom === undefined) Reflect.deleteProperty(process.env, "MAIL_FROM");
+      else Reflect.set(process.env, "MAIL_FROM", previousMailFrom);
+    }
+  });
+
+  it("forgot fails visibly in production when reset email cannot be delivered", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousMailjetKey = process.env.MAILJET_API_KEY;
+    const previousMailjetSecret = process.env.MAILJET_API_SECRET;
+    const previousMailFrom = process.env.MAIL_FROM;
+    Reflect.set(process.env, "NODE_ENV", "production");
+    Reflect.deleteProperty(process.env, "MAILJET_API_KEY");
+    Reflect.deleteProperty(process.env, "MAILJET_API_SECRET");
+    Reflect.deleteProperty(process.env, "MAIL_FROM");
+    try {
+      const db = useFakeDb();
+      db.users.push(await makeUser({ email: "agent@example.com" }));
+      const forgot = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/forgot");
+
+      const response = await forgot.POST(
+        jsonRequest("/api/auth/forgot", { email: "agent@example.com" }),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(body, { error: "password reset email unavailable" });
+      assert.equal(db.password_reset_tokens.length, 0);
+    } finally {
+      if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
+      else Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
+      if (previousMailjetKey === undefined) Reflect.deleteProperty(process.env, "MAILJET_API_KEY");
+      else Reflect.set(process.env, "MAILJET_API_KEY", previousMailjetKey);
+      if (previousMailjetSecret === undefined) Reflect.deleteProperty(process.env, "MAILJET_API_SECRET");
+      else Reflect.set(process.env, "MAILJET_API_SECRET", previousMailjetSecret);
+      if (previousMailFrom === undefined) Reflect.deleteProperty(process.env, "MAIL_FROM");
+      else Reflect.set(process.env, "MAIL_FROM", previousMailFrom);
+    }
   });
 
   it("license refresh rotates active tokens and revokes inactive licenses", async () => {

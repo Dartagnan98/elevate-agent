@@ -88,6 +88,100 @@ def test_installed_runtime_smoke_discovers_selected_dashboard_port(tmp_path):
     assert smoke.read_selected_dashboard_port(tmp_path / "missing.log") == 9119
 
 
+def test_main_records_selected_dashboard_port(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    log = tmp_path / "main.log"
+    out = tmp_path / "smoke.json"
+    app = tmp_path / "Elevate.app"
+    app.mkdir()
+    log.write_text(
+        "[2026-06-19 00:00:00.000] [info] [startup] 42ms backend:port-selected 9121\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(smoke, "read_recent_log_hits", lambda *_args, **_kwargs: [])
+
+    rc = smoke.main(
+        [
+            "--installed-app",
+            str(app),
+            "--main-log",
+            str(log),
+            "--skip-seal",
+            "--skip-parity",
+            "--skip-sidecar",
+            "--json-out",
+            str(out),
+        ]
+    )
+
+    assert rc == 0
+    assert '"dashboard_port": 9121' in out.read_text(encoding="utf-8")
+
+
+def test_installed_dashboard_assets_extract_index_and_chat(tmp_path):
+    smoke = _load_smoke_script()
+    web_dist = tmp_path / "web_dist"
+    assets = web_dist / "assets"
+    assets.mkdir(parents=True)
+    (web_dist / "index.html").write_text(
+        '<script type="module" src="/assets/index-live.js"></script>',
+        encoding="utf-8",
+    )
+    (assets / "index-live.js").write_text('import("./ChatPage-live.js");', encoding="utf-8")
+
+    assert smoke.installed_dashboard_assets(web_dist) == ("index-live.js", "ChatPage-live.js")
+
+
+def test_served_asset_mismatch_fails(tmp_path):
+    smoke = _load_smoke_script()
+    web_dist = tmp_path / "web_dist"
+    assets = web_dist / "assets"
+    assets.mkdir(parents=True)
+    (web_dist / "index.html").write_text(
+        '<script type="module" src="/assets/index-installed.js"></script>',
+        encoding="utf-8",
+    )
+    (assets / "index-installed.js").write_text(
+        'import("./ChatPage-installed.js");',
+        encoding="utf-8",
+    )
+
+    result = smoke.SmokeResult(
+        installed_index_asset="index-stale.js",
+        installed_chat_asset="ChatPage-stale.js",
+    )
+    smoke.check_served_assets_match_installed(web_dist, result)
+
+    assert result.ok is False
+    assert result.failures == [
+        "served dashboard index asset differs from installed web_dist: "
+        "'index-stale.js' != 'index-installed.js'",
+        "served dashboard ChatPage asset differs from installed web_dist: "
+        "'ChatPage-stale.js' != 'ChatPage-installed.js'",
+    ]
+
+
+def test_protected_http_auth_probe(monkeypatch):
+    smoke = _load_smoke_script()
+    calls: list[tuple[str, dict[str, str] | None]] = []
+
+    def fake_fetch_status(url, _timeout, headers=None):
+        calls.append((url, headers))
+        return 200 if headers else 401
+
+    monkeypatch.setattr(smoke, "fetch_status", fake_fetch_status)
+
+    result = smoke.SmokeResult()
+    smoke.check_protected_http_auth(port=9120, token="tok", timeout=5.0, result=result)
+
+    assert result.ok is True
+    assert calls == [
+        ("http://127.0.0.1:9120/api/sessions?limit=1", None),
+        ("http://127.0.0.1:9120/api/sessions?limit=1", {"X-Elevate-Session-Token": "tok"}),
+    ]
+
+
 def test_read_installed_app_version_uses_bundle_info_plist(monkeypatch, tmp_path):
     smoke = _load_smoke_script()
     app = tmp_path / "Elevate.app"

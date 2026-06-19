@@ -68,6 +68,17 @@ type LoginCodeRow = {
   user_agent: string | null;
 };
 
+type PasswordResetTokenRow = {
+  id: string;
+  user_id: string;
+  token_hash: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  ip_addr: string | null;
+  user_agent: string | null;
+};
+
 type OrgRow = {
   id: string;
   slug: string;
@@ -119,6 +130,7 @@ type FakeDb = {
   }>;
   device_grants: DeviceGrantRow[];
   login_codes: LoginCodeRow[];
+  password_reset_tokens: PasswordResetTokenRow[];
   skill_invocations: unknown[];
   audit_log: unknown[];
   session_diagnostic_events: Record<string, unknown>[];
@@ -127,9 +139,11 @@ type FakeDb = {
 
 const baseUrl = "https://example.supabase.test";
 let activeDb: FakeDb = createFakeDb();
+let nextUserId = 1;
 let nextLicenseId = 1;
 let nextGrantId = 1;
 let nextLoginCodeId = 1;
+let nextPasswordResetTokenId = 1;
 let nextPatchFailure: { table: string; status: number; message: string } | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
@@ -142,6 +156,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     automations: [],
     device_grants: [],
     login_codes: [],
+    password_reset_tokens: [],
     skill_invocations: [],
     audit_log: [],
     session_diagnostic_events: [],
@@ -152,9 +167,11 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
 
 export function useFakeDb(db = createFakeDb()): FakeDb {
   activeDb = db;
+  nextUserId = db.users.length + 1;
   nextLicenseId = db.licenses.length + 1;
   nextGrantId = db.device_grants.length + 1;
   nextLoginCodeId = db.login_codes.length + 1;
+  nextPasswordResetTokenId = db.password_reset_tokens.length + 1;
   nextPatchFailure = null;
   return activeDb;
 }
@@ -247,6 +264,31 @@ function asArrayBody(body: unknown): Record<string, unknown>[] {
 
 function insertRows(table: string, body: unknown): unknown {
   const rows = asArrayBody(body);
+  if (table === "users") {
+    const inserted = rows.map((row) => {
+      const now = new Date().toISOString();
+      const user: UserRow = {
+        id: `user-${nextUserId++}`,
+        email: String(row.email).toLowerCase(),
+        password_hash: String(row.password_hash),
+        stripe_customer: null,
+        tier: (row.tier as Tier | undefined) ?? "pro",
+        status: (row.status as UserStatus | undefined) ?? "active",
+        current_period_end: null,
+        entitlements: Array.isArray(row.entitlements) ? row.entitlements.map(String) : [],
+        blocked_entitlements: [],
+        role: (row.role as UserRow["role"] | undefined) ?? "user",
+        is_developer: false,
+        first_name: (row.first_name as string | null | undefined) ?? null,
+        last_name: (row.last_name as string | null | undefined) ?? null,
+        created_at: now,
+        updated_at: now,
+      };
+      activeDb.users.push(user);
+      return user;
+    });
+    return inserted[0];
+  }
   if (table === "licenses") {
     const inserted = rows.map((row) => {
       const license: LicenseRow = {
@@ -314,14 +356,41 @@ function insertRows(table: string, body: unknown): unknown {
     });
     return inserted[0];
   }
+  if (table === "password_reset_tokens") {
+    const inserted = rows.map((row) => {
+      const now = new Date().toISOString();
+      const resetToken: PasswordResetTokenRow = {
+        id: `password-reset-${nextPasswordResetTokenId++}`,
+        user_id: String(row.user_id),
+        token_hash: String(row.token_hash),
+        created_at: (row.created_at as string | undefined) || now,
+        expires_at: String(row.expires_at),
+        consumed_at: (row.consumed_at as string | null | undefined) ?? null,
+        ip_addr: (row.ip_addr as string | null | undefined) ?? null,
+        user_agent: (row.user_agent as string | null | undefined) ?? null,
+      };
+      activeDb.password_reset_tokens.push(resetToken);
+      return resetToken;
+    });
+    return inserted[0];
+  }
   throw new Error(`unexpected insert into ${table}`);
 }
 
 function updateRows(table: string, filters: URLSearchParams, body: Record<string, unknown>): void {
   const id = readEq(filters, "id");
+  const userId = readEq(filters, "user_id");
+  if (table === "users") {
+    for (const user of activeDb.users) {
+      if (!id || user.id === id) Object.assign(user, body);
+    }
+    return;
+  }
   if (table === "licenses") {
     for (const license of activeDb.licenses) {
-      if (!id || license.id === id) Object.assign(license, body);
+      if ((!id || license.id === id) && (!userId || license.user_id === userId)) {
+        Object.assign(license, body);
+      }
     }
     return;
   }
@@ -334,6 +403,12 @@ function updateRows(table: string, filters: URLSearchParams, body: Record<string
   if (table === "login_codes") {
     for (const loginCode of activeDb.login_codes) {
       if (!id || loginCode.id === id) Object.assign(loginCode, body);
+    }
+    return;
+  }
+  if (table === "password_reset_tokens") {
+    for (const resetToken of activeDb.password_reset_tokens) {
+      if (!id || resetToken.id === id) Object.assign(resetToken, body);
     }
     return;
   }
@@ -435,6 +510,14 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
     if ((params.get("order") || "").startsWith("created_at.desc")) {
       rows = [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at));
     }
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "password_reset_tokens") {
+    let rows = activeDb.password_reset_tokens;
+    const id = readEq(params, "id");
+    const tokenHash = readEq(params, "token_hash");
+    if (id) rows = rows.filter((row) => row.id === id);
+    if (tokenHash) rows = rows.filter((row) => row.token_hash === tokenHash);
     return maybeSingle(wantsSingle, rows);
   }
   throw new Error(`unexpected select from ${table}`);

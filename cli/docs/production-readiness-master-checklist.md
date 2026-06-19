@@ -47,7 +47,7 @@ Critical path:
 | DESK-02 | Backend selection | PASS iff desktop selects a live local dashboard port and rejects stale bundles | PASS | `curl http://127.0.0.1:9120/api/status` returns Elevate status payload after installed-app launch |
 | DESK-03 | Fallback pages | PASS iff loading/install failure screens are reachable and their buttons work | UNKNOWN | Manual UI pass plus IPC result |
 | DESK-04 | Desktop IPC | PASS iff every exposed preload action has a main-process handler and at least one caller | UNKNOWN | `desktop/src/preload.js`, `desktop/src/main.js`, dashboard callers |
-| DESK-05 | External navigation | PASS iff untrusted links cannot navigate the main window or launch unsafe schemes | UNKNOWN | Source read plus test/manual probe |
+| DESK-05 | External navigation | PASS iff untrusted links cannot navigate the main window or launch unsafe schemes | PASS | `node --test desktop/test/navigation-guard.test.js` proves top-level navigation allows only dashboard/app-owned local files and rejects arbitrary `file://`, external http(s), and mailto schemes; `setWindowOpenHandler` still only hands http(s)/mailto to the OS |
 | DESK-06 | Permissions | PASS iff microphone and file-preview permissions are scoped and visible on denial | UNKNOWN | Permission handler source plus manual probe |
 | DESK-07 | Quit/reopen | PASS iff close, quit, reopen, and activate restore the dashboard without orphan state | UNKNOWN | Manual installed-app pass |
 | DESK-08 | SMS outbox | PASS iff approved SMS requests produce result files and failures are visible | UNKNOWN | Outbox fixture or manual probe |
@@ -131,7 +131,7 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | HOST-01 | Hosted route inventory | PASS iff every `backend/src/app/api/**/route.ts` is tracked and drift-tested | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts` passes hosted route drift/contracts |
-| HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | UNKNOWN | Backend route tests |
+| HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | UNKNOWN | Login, signup, forgot/reset, refresh, expired subscription, login-code, and revoked bearer are covered; logout/self-revoke route coverage still needs a contract |
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
 | HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts and admin missing-record 404s pass; deeper admin mutation success/permission matrix still needs coverage |
@@ -144,7 +144,7 @@ Critical path:
 | REL-01 | Apple preflight | PASS iff release preflight passes on release machine | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run preflight:apple` passes for 1.2.58 and verifies public feed is 1.2.51 |
 | REL-02 | Packaged build | PASS iff arm64 packaged app builds and launches | PASS | 1.2.58 x64/arm64 app bundles built; `npm --prefix desktop run finalize:mac` signed/notarized/stapled x64 and arm64 DMGs |
 | REL-03 | Code signing/seal | PASS iff installed and built app pass `codesign --verify --deep --strict` and `spctl --assess` | PASS | `npm --prefix desktop run smoke:mac` passes for 1.2.58; installed 1.2.58 passes seal smoke before and after first launch |
-| REL-04 | Bundled runtime parity | PASS iff installed bundle `cli` and `web_dist` match expected source/build | UNKNOWN | Built x64, built arm64, and installed 1.2.58 apps passed `web_dist` parity before current source fixes; current source `web_dist` has been rebuilt and still needs a packaged/installed parity smoke |
+| REL-04 | Bundled runtime parity | PASS iff installed bundle `cli` and `web_dist` match expected source/build | UNKNOWN | Smoke script now records selected port and compares live-served dashboard assets against installed `web_dist` during sidecar smoke; current source `web_dist` still needs rebuilt packaged/installed parity smoke |
 | REL-05 | Updater feed | PASS iff feed version/artifacts/checksums match the build being shipped | PASS | `desktop/dist/latest-mac.yml` is version 1.2.58 with x64/arm64 zip+dmg urls, sha512, and sizes |
 | REL-06 | Update failure recovery | PASS iff failed download/install leaves visible state and retry path | UNKNOWN | Updater tests/manual packaged probe |
 | REL-07 | Rollback | PASS iff rollback procedure is documented and artifact-retention is verified | UNKNOWN | Release docs/artifact store |
@@ -255,7 +255,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec vitest run src/lib/__tests__/resolve-page-title.test.ts src/pages/__tests__/CronPage.errors.test.ts src/pages/real-estate-hub/_shared/__tests__/use-hub-data.flags.test.ts` from `cli/web`
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` rebuilt `cli/elevate_cli/web_dist` with corrected dashboard route titles
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts`
-- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding admin missing-record 404 and `skills/run` requested-skill/invocation coverage
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding signup/forgot/reset, production mailer outage, admin missing-record 404, and `skills/run` requested-skill/invocation coverage
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/navigation-guard.test.js`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
 - PASS/BUGS: live installed 1.2.58 route pass rendered Comms, Activity, Skills, and Memory graph; Comms/Activity still show generic `Web UI` page chrome in installed app, while source route-title fix covers them for the next rebuild

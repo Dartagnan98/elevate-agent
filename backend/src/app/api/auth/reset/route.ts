@@ -58,12 +58,12 @@ export async function POST(req: NextRequest) {
   }
 
   const hash = await bcrypt.hash(parsed.data.new_password, 12);
-  await updateUserPasswordHash(user.id, hash);
-
-  // Reset always nukes every active session — if the email was actually
-  // compromised, the attacker's tokens die here.
+  // Reset always nukes every active session before the password changes. If a
+  // cleanup write fails, the old password remains in place and the token can be
+  // retried instead of leaving a changed password with live old sessions.
   await revokeLicensesForUser(user.id);
   await consumePasswordReset(row.id);
+  await updateUserPasswordHash(user.id, hash);
 
   await logAdminAction({
     actor_user_id: user.id,

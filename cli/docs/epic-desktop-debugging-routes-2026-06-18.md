@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `b0a999d38de42254`.
+- Caller inventory fingerprint: `931f38822786ecdd`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
@@ -237,6 +237,8 @@ Current verified snapshot, 2026-06-18:
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
   hosted account/org/skills-list/automation-list read contracts,
+  hosted signup/forgot/reset contract with visible production mailer outage
+  and reset cleanup-before-password-change ordering,
   hosted admin missing-record mutations return 404 instead of false success,
   dashboard nav/route/preloader drift guard, FastAPI `/docs` shadow moved to
   `/api/docs` and `/api/openapi.json` so the dashboard `/docs` deep link
@@ -245,7 +247,11 @@ Current verified snapshot, 2026-06-18:
   `smoke:mac` gate, preflight public-feed version comparison, post-ship public
   feed/artifact verification, installed app `codesign`/`spctl` smoke gate,
   packaged WhatsApp bridge/package checks, installed smoke reads the selected
-  dashboard port from `main.log` before sidecar probes, gateway reinstall when a previously
+  dashboard port from `main.log`, records it in JSON, compares served dashboard
+  assets to the installed `web_dist`, and probes one protected HTTP route
+  without/with the extracted session token before sidecar prompts, desktop
+  top-level navigation blocks arbitrary `file://` and external schemes,
+  gateway reinstall when a previously
   missing packaged resource is recovered, gateway version-change installs
   kickstart launchd before advancing `.gateway_version`, Admin cron effective
   skills qualify ambiguous real-estate skill names, cron lane seeding repairs
@@ -767,7 +773,9 @@ Deliverables:
   `web_dist` changed after that app was built, so installed/candidate parity is
   currently stale until the app artifacts are rebuilt and smoked again. The
   latest live installed check used `--skip-sidecar`, so it does not prove
-  injected auth, WebSocket, or updater runtime state.
+  WebSocket or updater runtime state. The smoke script now records the selected
+  port, compares live-served assets against installed `web_dist`, and probes
+  protected local HTTP auth when sidecar smoke is enabled.
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`.
   Prior local `1.2.58` x64 and arm64 built apps passed app-version, seal, repo
   `web_dist` parity, and packaged WhatsApp bridge checks, but that proof is
@@ -823,8 +831,13 @@ Deliverables:
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
   - installed runtime smoke discovers the selected dashboard port from
-    `main.log` before sidecar probes,
+    `main.log`, records it, compares served assets to installed `web_dist`,
+    and probes protected local HTTP auth before sidecar prompts,
+  - desktop top-level navigation rejects arbitrary `file://` and external
+    schemes while allowing dashboard/app-owned local pages,
   - hosted account/org/skills-list/automation-list read contracts,
+  - hosted signup/forgot/reset route contract, production mailer outage
+    visibility, and reset cleanup-before-password-change ordering,
   - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing
@@ -843,12 +856,12 @@ Deliverables:
     (current public feed is still `1.2.51`),
   - installed/candidate app `web_dist` parity is stale after current bundle
     changes and needs rebuild + smoke,
-  - installed sidecar runtime smoke still needs non-mutating auth injection,
-    WebSocket, and updater-state proof,
+  - installed sidecar runtime smoke still needs a fresh packaged run for
+    WebSocket and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks signup, forgot/reset, Stripe, and
-    deeper admin/org mutation route contracts,
+  - hosted backend coverage still lacks Stripe, logout/self-revoke, and deeper
+    admin/org mutation route contracts,
   - route-family coverage ledger is seeded, but full row-level route inventory
     is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

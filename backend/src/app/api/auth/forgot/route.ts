@@ -42,6 +42,13 @@ export async function POST(req: NextRequest) {
   );
   if (limited) return tooManyRequests(limited.retryAfter);
 
+  if (process.env.NODE_ENV === "production" && !mailerEnabled()) {
+    return NextResponse.json(
+      { error: "password reset email unavailable" },
+      { status: 503 },
+    );
+  }
+
   const user = await findUserByEmail(normalized);
 
   // Always 200 so an attacker can't probe which emails are registered.
@@ -93,6 +100,12 @@ export async function POST(req: NextRequest) {
     // Log the failure but still respond 200 to avoid leaking state. Surface
     // the dev fallback in case the operator needs it.
     console.error("[auth/forgot] mailer failed:", result.error);
+    if (process.env.NODE_ENV === "production") {
+      return NextResponse.json(
+        { error: "password reset email unavailable" },
+        { status: 503 },
+      );
+    }
   }
 
   // Only surface the reset link/token to the caller in non-production. In

@@ -59,6 +59,7 @@ class SmokeResult:
     checks: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
+    dashboard_port: int | None = None
     installed_index_asset: str | None = None
     installed_chat_asset: str | None = None
     persisted_session_id: str | None = None
@@ -138,11 +139,71 @@ def fetch_text(url: str, timeout: float) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
+def fetch_status(url: str, timeout: float, headers: dict[str, str] | None = None) -> int:
+    request = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
 def extract_required(pattern: str, text: str, label: str) -> str:
     match = re.search(pattern, text)
     if not match:
         raise RuntimeError(f"could not find {label}")
     return match.group(1)
+
+
+def installed_dashboard_assets(installed_web_dist: Path) -> tuple[str, str]:
+    html_path = installed_web_dist / "index.html"
+    if not html_path.exists():
+        raise RuntimeError(f"installed dashboard index missing: {html_path}")
+    index_asset = extract_required(
+        r'src="/assets/(index-[^"]+\.js)"',
+        html_path.read_text(encoding="utf-8", errors="replace"),
+        "installed index asset",
+    )
+    index_js_path = installed_web_dist / "assets" / index_asset
+    if not index_js_path.exists():
+        raise RuntimeError(f"installed dashboard asset missing: {index_js_path}")
+    chat_asset = extract_required(
+        r"(ChatPage-[A-Za-z0-9_-]+\.js)",
+        index_js_path.read_text(encoding="utf-8", errors="replace"),
+        "installed ChatPage asset",
+    )
+    return index_asset, chat_asset
+
+
+def check_served_assets_match_installed(installed_web_dist: Path, result: SmokeResult) -> None:
+    expected_index, expected_chat = installed_dashboard_assets(installed_web_dist)
+    if result.installed_index_asset != expected_index:
+        result.fail(
+            "served dashboard index asset differs from installed web_dist: "
+            f"{result.installed_index_asset!r} != {expected_index!r}"
+        )
+    if result.installed_chat_asset != expected_chat:
+        result.fail(
+            "served dashboard ChatPage asset differs from installed web_dist: "
+            f"{result.installed_chat_asset!r} != {expected_chat!r}"
+        )
+    if result.installed_index_asset == expected_index and result.installed_chat_asset == expected_chat:
+        result.pass_check("served dashboard assets match installed web_dist")
+
+
+def check_protected_http_auth(*, port: int, token: str, timeout: float, result: SmokeResult) -> None:
+    url = f"http://127.0.0.1:{port}/api/sessions?limit=1"
+    unauth_status = fetch_status(url, timeout)
+    if unauth_status != 401:
+        result.fail(f"protected HTTP route without token returned {unauth_status}, expected 401")
+    else:
+        result.pass_check("protected HTTP route rejects missing token")
+
+    authed_status = fetch_status(url, timeout, {"X-Elevate-Session-Token": token})
+    if authed_status != 200:
+        result.fail(f"protected HTTP route with session token returned {authed_status}, expected 200")
+    else:
+        result.pass_check("protected HTTP route accepts extracted session token")
 
 
 def read_recent_log_hits(path: Path, since: datetime) -> list[str]:
@@ -734,6 +795,7 @@ asyncio.run(main())
 
 async def run_sidecar_smoke(
     *,
+    installed_web_dist: Path,
     port: int,
     prompt: str,
     expected: str,
@@ -765,6 +827,8 @@ async def run_sidecar_smoke(
     )
     result.installed_chat_asset = chat_asset
     result.pass_check(f"index references {chat_asset}")
+    check_served_assets_match_installed(installed_web_dist, result)
+    check_protected_http_auth(port=port, token=token, timeout=timeout, result=result)
 
     next_id = 1
     final_payload: dict[str, Any] | None = None
@@ -1181,6 +1245,7 @@ def main(argv: list[str]) -> int:
     installed_cli = args.installed_app / "Contents/Resources/cli"
     installed_web_dist = installed_cli / "elevate_cli/web_dist"
     dashboard_port = args.port or read_selected_dashboard_port(args.main_log, DEFAULT_PORT)
+    result.dashboard_port = dashboard_port
 
     if args.expected_app_version:
         actual_version = read_installed_app_version(args.installed_app)
@@ -1253,6 +1318,7 @@ def main(argv: list[str]) -> int:
         try:
             asyncio.run(
                 run_sidecar_smoke(
+                    installed_web_dist=installed_web_dist,
                     port=dashboard_port,
                     prompt=args.prompt,
                     expected=args.expected,
