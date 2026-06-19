@@ -89,6 +89,15 @@ def test_installed_runtime_smoke_discovers_selected_dashboard_port(tmp_path):
     assert smoke.read_selected_dashboard_port(tmp_path / "missing.log") == 9119
 
 
+def test_installed_runtime_smoke_reads_license_from_elevate_home(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    elevate_home = tmp_path / "state"
+    elevate_home.mkdir()
+    monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+
+    assert smoke.license_state_path() == elevate_home / "license.json"
+
+
 def test_recent_log_scan_ignores_old_untimestamped_continuations(tmp_path):
     smoke = _load_smoke_script()
     log = tmp_path / "main.log"

@@ -243,8 +243,15 @@ def read_selected_dashboard_port(path: Path, fallback: int = DEFAULT_PORT) -> in
     return fallback
 
 
+def license_state_path() -> Path:
+    elevate_home = os.environ.get("ELEVATE_HOME")
+    if elevate_home:
+        return Path(elevate_home) / "license.json"
+    return Path.home() / ".elevate/license.json"
+
+
 def read_license_state() -> tuple[bool | None, bool | None, str | None]:
-    path = Path.home() / ".elevate/license.json"
+    path = license_state_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
