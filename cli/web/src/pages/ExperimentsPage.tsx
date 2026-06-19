@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
@@ -1305,10 +1306,10 @@ export default function ExperimentsPage() {
       </header>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load experiments: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load experiments" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : (
         <>
           {/* Stat tiles — identical 5-col frame loading vs loaded */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">

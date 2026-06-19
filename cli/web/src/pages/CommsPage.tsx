@@ -8,6 +8,7 @@ import type { AgentCommsChannel, AgentCommsChannelResponse, AgentCommsMessage, A
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -1022,10 +1023,10 @@ export default function CommsPage() {
       </header>
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn't load comms: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load comms" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !commsData ? null : (
         <Tabs defaultValue="meeting-room">
           {(active, setActive) => (
             <>

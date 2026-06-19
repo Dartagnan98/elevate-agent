@@ -21,11 +21,18 @@ describe("route load error states", () => {
   });
 
   it.each([
+    ["pages/ActivityPage.tsx", "cacheError", "Could not load activity"],
+    ["pages/AnalyticsPage.tsx", "cacheError", "Could not load analytics"],
+    ["pages/ApprovalsPage.tsx", "cacheError", "Could not load approvals"],
+    ["pages/CommsPage.tsx", "cacheError", "Could not load comms"],
     ["pages/EnvPage.tsx", "varsError", "Could not load environment variables"],
+    ["pages/ExperimentsPage.tsx", "cacheError", "Could not load experiments"],
+    ["pages/OverviewPage.tsx", "cacheError", "Could not load overview"],
     ["pages/SkillsPage.tsx", "skillsError", "Could not load skills"],
     ["pages/ProjectPage.tsx", "cacheError", "Could not load project"],
     ["pages/SessionsPage.tsx", "pageError", "Could not load sessions"],
     ["pages/HeartbeatPage.tsx", "heartbeatError", "Could not load heartbeats"],
+    ["pages/TasksPage.tsx", "cacheError", "Could not load tasks"],
   ])("%s keeps useCachedResource failures visible", (file, errorName, title) => {
     const source = read(file);
 

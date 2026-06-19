@@ -30,6 +30,7 @@ import type {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, isoTimeAgo, timeAgo as epochTimeAgo } from "@/lib/utils";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
@@ -734,10 +735,10 @@ export default function OverviewPage() {
       </header>
 
       {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-          Couldn&apos;t load overview: {error}
-        </div>
-      ) : (
+        <RouteLoadError title="Could not load overview" error={error} onRetry={() => load(true)} />
+      ) : null}
+
+      {error && !data ? null : (
         <>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <MetricTile

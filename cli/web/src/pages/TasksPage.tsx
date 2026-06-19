@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Modal } from "@/components/ui/modal";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -1297,13 +1298,11 @@ export default function TasksPage() {
         onClearAll={clearFilters}
       />
 
-      {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-          Could not load tasks: {error}
-        </div>
-      )}
+      {error ? (
+        <RouteLoadError title="Could not load tasks" error={error} onRetry={() => fetchTasks(true)} />
+      ) : null}
 
-      {loading ? (
+      {error && !data ? null : loading ? (
         view === "kanban" ? <KanbanBoardSkeleton /> : <TaskListTableSkeleton />
       ) : tasks.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-border py-16 text-center">
