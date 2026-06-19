@@ -2109,15 +2109,16 @@ class TestConversationParameter:
 
 class TestSessionIdHeader:
     @pytest.mark.asyncio
-    async def test_new_session_response_includes_session_id_header(self, adapter):
+    async def test_new_session_response_includes_session_id_header(self, auth_adapter):
         """Without X-Elevate-Session-Id, a new session is created and returned in the header."""
         mock_result = {"final_response": "Hello!", "messages": [], "api_calls": 1}
-        app = _create_app(adapter)
+        app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+            with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
+                    headers={"Authorization": "Bearer sk-secret"},
                     json={"model": "elevate", "messages": [{"role": "user", "content": "Hi"}]},
                 )
             assert resp.status == 200

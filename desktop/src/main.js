@@ -9,6 +9,7 @@ const {
   screen,
 } = require("electron");
 const { execFileSync, spawn, spawnSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -224,24 +225,39 @@ function decodeJwtExp(token) {
   }
 }
 
+function hqJsonRequestHeaders(scope) {
+  const requestId = `desktop-${scope}-${crypto.randomUUID()}`;
+  log.info(`[desktop:request] request_id=${requestId} scope=${scope}`);
+  return {
+    requestId,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Request-Id": requestId,
+    },
+  };
+}
+
 async function refreshLicense(license) {
   if (!license || !license.refresh_token) return null;
+  const { requestId, headers } = hqJsonRequestHeaders("license-refresh");
   try {
     // Same endpoint the CLI's elevate_cli/license.py refresh() uses, so a
      // session refreshed here is interchangeable with one refreshed by the CLI.
     const res = await fetch(`${HQ_BASE_URL}/api/license/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ refresh_token: license.refresh_token }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      console.warn(`[license] refresh failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+      log.warn(
+        `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
+      );
       return null;
     }
     const data = await res.json();
     if (!data || !data.access_token || !data.refresh_token) {
-      console.warn("[license] refresh response missing tokens");
+      log.warn(`[license] refresh response missing tokens request_id=${requestId}`);
       return null;
     }
     const next = {
@@ -254,9 +270,10 @@ async function refreshLicense(license) {
       expires_at: decodeJwtExp(data.access_token),
     };
     writeLicense(next);
+    log.info(`[license] refresh succeeded request_id=${requestId}`);
     return next;
   } catch (err) {
-    console.warn(`[license] refresh threw: ${err && err.message ? err.message : err}`);
+    log.warn(`[license] refresh threw request_id=${requestId}: ${err && err.message ? err.message : err}`);
     return null;
   }
 }
@@ -318,10 +335,11 @@ async function performLogin({ email, password }) {
   if (!email || !password) {
     return { ok: false, error: "Email and password are required." };
   }
+  const { requestId, headers } = hqJsonRequestHeaders("auth-login");
   try {
     const res = await fetch(`${HQ_BASE_URL}/api/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         email: String(email).trim().toLowerCase(),
         password,
@@ -330,9 +348,11 @@ async function performLogin({ email, password }) {
     });
 
     if (res.status === 401) {
+      log.warn(`[auth] login rejected request_id=${requestId}: HTTP 401`);
       return { ok: false, error: "Email or password is wrong." };
     }
     if (res.status === 402) {
+      log.warn(`[auth] login rejected request_id=${requestId}: HTTP 402`);
       return {
         ok: false,
         error: "Your account has no active subscription. Upgrade in your browser, then sign in.",
@@ -340,6 +360,7 @@ async function performLogin({ email, password }) {
     }
     if (!res.ok) {
       const text = await res.text();
+      log.warn(`[auth] login failed request_id=${requestId}: HTTP ${res.status} ${text.slice(0, 160)}`);
       return { ok: false, error: `Sign-in failed (${res.status}): ${text.slice(0, 160)}` };
     }
 
@@ -354,8 +375,10 @@ async function performLogin({ email, password }) {
       entitlements: data.entitlements || [],
     };
     writeLicense(license);
+    log.info(`[auth] login succeeded request_id=${requestId}`);
     return { ok: true, license };
   } catch (err) {
+    log.warn(`[auth] login threw request_id=${requestId}: ${err && err.message ? err.message : err}`);
     return {
       ok: false,
       error: `Could not reach ${HQ_BASE_URL}. Check your connection and try again.`,

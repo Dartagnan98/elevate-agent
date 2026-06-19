@@ -2,6 +2,7 @@
 
 import os
 import json
+import logging
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -149,6 +150,52 @@ class TestWebServerEndpoints:
         assert "project_root" in data
         assert "elevate_home" in data
         assert "active_sessions" in data
+
+    def test_request_id_header_is_echoed_and_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = self.client.get("/api/status", headers={"X-Request-Id": "rid 123"})
+
+        assert resp.status_code == 200
+        assert resp.headers["x-request-id"] == "rid_123"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid_123 session_id=- method=GET path=/api/status status=200"
+            in message
+            for message in messages
+        )
+
+    def test_session_path_is_in_request_log(self, caplog):
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = self.client.get(
+                "/api/sessions/session%20one/messages",
+                headers={"X-Request-Id": "rid-two"},
+            )
+
+        assert resp.headers["x-request-id"] == "rid-two"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid-two session_id=session_one method=GET "
+            "path=/api/sessions/session one/messages"
+            in message
+            for message in messages
+        )
+
+    def test_unauthorized_request_id_header_is_echoed_and_logged(self, caplog):
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        client = TestClient(app)
+        with caplog.at_level(logging.INFO, logger="elevate_cli.web_server"):
+            resp = client.get("/api/env", headers={"X-Request-Id": "rid-unauth"})
+
+        assert resp.status_code == 401
+        assert resp.headers["x-request-id"] == "rid-unauth"
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "request complete request_id=rid-unauth session_id=- method=GET path=/api/env status=401"
+            in message
+            for message in messages
+        )
 
     def test_get_agent_hub(self, monkeypatch):
         import elevate_cli.agent_hub as agent_hub

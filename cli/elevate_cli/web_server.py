@@ -280,6 +280,10 @@ _SESSION_TOKEN = _load_session_token()
 _SESSION_HEADER_NAME = "X-Elevate-Session-Token"
 _RUN_TOKEN_HEADER_NAME = "X-Elevate-Run-Token"
 _RUN_RESULT_PATH_RE = re.compile(r"^/api/deals/([^/]+)/runs/([^/]+)/result$")
+_REQUEST_ID_HEADER_NAME = "X-Request-Id"
+_SESSION_ID_HEADER_NAMES = ("X-Elevate-Session-Id", "X-Session-Id")
+_REQUEST_SESSION_PATH_RE = re.compile(r"^/api/(?:sessions|uploads)/([^/]+)")
+_LOG_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``elevate dashboard --tui``
 # or ELEVATE_DASHBOARD_TUI=1.  Set from :func:`start_server`.
@@ -477,6 +481,29 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     return host_only == bound_lc
 
 
+def _safe_log_token(value: object, *, max_len: int = 96) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    return _LOG_TOKEN_RE.sub("_", text)[:max_len] or "-"
+
+
+def _request_id_for_log(request: Request) -> str:
+    incoming = _safe_log_token(request.headers.get(_REQUEST_ID_HEADER_NAME), max_len=96)
+    return incoming if incoming != "-" else secrets.token_hex(8)
+
+
+def _session_id_for_log(request: Request) -> str:
+    for header in _SESSION_ID_HEADER_NAMES:
+        candidate = _safe_log_token(request.headers.get(header), max_len=140)
+        if candidate != "-":
+            return candidate
+    match = _REQUEST_SESSION_PATH_RE.match(request.url.path)
+    if match:
+        return _safe_log_token(urllib.parse.unquote(match.group(1)), max_len=140)
+    return "-"
+
+
 @app.middleware("http")
 async def host_header_middleware(request: Request, call_next):
     """Reject requests whose Host header doesn't match the bound interface.
@@ -518,6 +545,38 @@ async def auth_middleware(request: Request, call_next):
                 content={"detail": "Unauthorized"},
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = _request_id_for_log(request)
+    session_id = _session_id_for_log(request)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _log.exception(
+            "request failed request_id=%s session_id=%s method=%s path=%s elapsed_ms=%.1f",
+            request_id,
+            session_id,
+            request.method,
+            request.url.path,
+            elapsed_ms,
+        )
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers[_REQUEST_ID_HEADER_NAME] = request_id
+    _log.info(
+        "request complete request_id=%s session_id=%s method=%s path=%s status=%s elapsed_ms=%.1f",
+        request_id,
+        session_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------
