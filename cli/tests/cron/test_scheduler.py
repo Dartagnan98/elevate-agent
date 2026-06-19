@@ -1978,13 +1978,13 @@ class TestRunJobSkillBacked:
             )
 
         assert "AGENT HUB CONTEXT" in result
-        assert "You are running as agent: Admin (admin)." in result
+        assert "You are running as agent: Admin · Transaction Coordinator (admin)." in result
         assert "outside this agent's specialization" in result
         assert "Instructions for tasks." in result
         assert "Instructions for nano-pdf." in result
-        assert "Instructions for admin-agent." in result
+        assert "Instructions for real-estate-admin/admin-agent." in result
         assert "Instructions for heartbeat-specific." in result
-        assert calls.index("tasks") < calls.index("admin-agent") < calls.index("heartbeat-specific")
+        assert calls.index("tasks") < calls.index("real-estate-admin/admin-agent") < calls.index("heartbeat-specific")
 
 
 class TestSilentDelivery:

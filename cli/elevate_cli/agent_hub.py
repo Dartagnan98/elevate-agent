@@ -890,6 +890,34 @@ def _merge_unique(*values: Any) -> list[str]:
     return merged
 
 
+_AGENT_EFFECTIVE_SKILL_ALIASES: dict[str, dict[str, str]] = {
+    "admin": {
+        "admin-agent": "real-estate-admin/admin-agent",
+        "admin-result-writer": "real-estate-admin/admin-result-writer",
+        "closing-admin": "real-estate-admin/closing-admin",
+        "cma-generator": "real-estate-admin/cma-generator",
+        "deal-matcher": "real-estate-admin/deal-matcher",
+        "digisign": "real-estate-admin/digisign",
+        "gmail-doc-router": "real-estate-admin/gmail-doc-router",
+        "offer-review": "real-estate-admin/offer-review",
+        "signing-package": "real-estate-admin/signing-package",
+        "skyslope-sync": "real-estate-admin/skyslope-sync",
+        "subject-removal": "real-estate-admin/subject-removal",
+        "webforms": "real-estate-admin/webforms",
+    },
+}
+
+
+def _qualify_agent_effective_skill(agent_id: str, skill_name: str) -> str:
+    if "/" in skill_name:
+        return skill_name
+    return _AGENT_EFFECTIVE_SKILL_ALIASES.get(agent_id, {}).get(skill_name, skill_name)
+
+
+def _qualify_agent_effective_skills(agent_id: str, skills: list[str]) -> list[str]:
+    return _merge_unique([_qualify_agent_effective_skill(agent_id, skill) for skill in skills])
+
+
 def _model_summary(config: dict[str, Any]) -> dict[str, Any]:
     model_cfg = config.get("model")
     if isinstance(model_cfg, dict):
@@ -2057,7 +2085,10 @@ def agent_effective_skills(
     agent = get_agent_def(agent_id, config=config)
     if not isinstance(agent, dict):
         return _merge_unique(extra_skills)
-    return _merge_unique(agent.get("skills"), extra_skills)
+    return _qualify_agent_effective_skills(
+        str(agent.get("id") or agent_id or ""),
+        _merge_unique(agent.get("skills"), extra_skills),
+    )
 
 
 def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> str:

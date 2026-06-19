@@ -93,16 +93,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "search.parallel": ("parallel-web==0.4.2",),
 
     # ─── TTS providers ─────────────────────────────────────────────────────
-    # Pinned to exact versions to match pyproject.toml's no-ranges policy
-    # (see comment at top of [project.dependencies]). When bumping, update
-    # both this map AND the corresponding extra in pyproject.toml.
+    # Keep bundled core deps aligned with pyproject.toml. If this is narrower
+    # than the packaged runtime, first launch can mutate the signed app bundle.
     #
     # NOTE: tts.mistral / stt.mistral entries are intentionally absent —
     # the `mistralai` PyPI project is quarantined as of 2026-05-12 (Mini
     # Shai-Hulud worm). Re-add when PyPI restores a clean release; see
     # comment in pyproject.toml above the (removed) `mistral` extra for
     # the full restoration checklist.
-    "tts.edge": ("edge-tts==7.2.7",),
+    "tts.edge": ("edge-tts>=7.2.7,<8",),
     "tts.elevenlabs": ("elevenlabs==1.59.0",),
 
     # ─── Speech-to-text providers ──────────────────────────────────────────

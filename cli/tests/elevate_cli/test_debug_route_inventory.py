@@ -7,6 +7,7 @@ coverage. If the route surface changes, the ledger must move with it.
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 
 
@@ -34,6 +35,24 @@ def _local_route_count() -> int:
         for path in paths:
             count += len(LOCAL_ROUTE_RE.findall(_read(path)))
     return count
+
+
+def _local_route_fingerprint() -> str:
+    entries: list[str] = []
+    roots = [
+        REPO_ROOT / "cli/elevate_cli/web_server.py",
+        REPO_ROOT / "cli/elevate_cli/web_routes",
+        REPO_ROOT / "cli/plugins",
+    ]
+    for root in roots:
+        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in paths:
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            for line_no, line in enumerate(_read(path).splitlines(), start=1):
+                if LOCAL_ROUTE_RE.search(line):
+                    entries.append(f"{rel}:{line_no}:{line.strip()}")
+    digest = hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 def _hosted_route_count() -> int:
@@ -64,6 +83,7 @@ def test_desktop_debugging_epic_route_inventory_is_current():
     hosted_count = _hosted_route_count()
 
     assert f"Local inventory: {local_count} decorated local routes/WebSockets" in epic
+    assert f"Local route identity fingerprint: `{_local_route_fingerprint()}`" in epic
     assert f"Hosted inventory: {hosted_count} tracked `backend/src/app/api/**/route.ts` files" in epic
 
 

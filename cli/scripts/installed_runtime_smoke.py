@@ -74,6 +74,7 @@ class SmokeResult:
     installed_app_seal: list[dict[str, Any]] = field(default_factory=list)
     log_hits: list[str] = field(default_factory=list)
     installed_whatsapp_bridge: dict[str, bool] | None = None
+    installed_app_version: str | None = None
     output_path: str | None = None
 
     def pass_check(self, message: str) -> None:
@@ -275,6 +276,30 @@ def run_installed_app_seal(
 
     if result.installed_app_seal and all(item["ok"] for item in result.installed_app_seal):
         result.pass_check("installed app seal valid (codesign + spctl)")
+
+
+def read_installed_app_version(installed_app: Path) -> str | None:
+    plist = installed_app / "Contents/Info.plist"
+    try:
+        completed = subprocess.run(
+            [
+                "plutil",
+                "-extract",
+                "CFBundleShortVersionString",
+                "raw",
+                str(plist),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
 
 
 def run_installed_whatsapp_bridge(
@@ -1087,6 +1112,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default="Reply exactly: installed compaction smoke ok",
     )
     parser.add_argument("--expected", default="installed compaction smoke ok")
+    parser.add_argument("--expected-app-version")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--skip-parity", action="store_true")
     parser.add_argument(
@@ -1142,6 +1168,16 @@ def main(argv: list[str]) -> int:
     repo_web_dist = args.repo_root / "cli/elevate_cli/web_dist"
     installed_cli = args.installed_app / "Contents/Resources/cli"
     installed_web_dist = installed_cli / "elevate_cli/web_dist"
+
+    if args.expected_app_version:
+        actual_version = read_installed_app_version(args.installed_app)
+        result.installed_app_version = actual_version
+        if actual_version != args.expected_app_version:
+            result.fail(
+                f"installed app version mismatch: {actual_version!r} != {args.expected_app_version!r}"
+            )
+        else:
+            result.pass_check(f"installed app version matches {args.expected_app_version}")
 
     if not args.skip_seal:
         run_installed_app_seal(

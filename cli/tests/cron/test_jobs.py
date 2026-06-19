@@ -115,6 +115,24 @@ class TestParseSchedule:
             parse_schedule("99 99 99 99 99")
 
 
+class TestAgentValidation:
+    def test_create_job_canonicalizes_agent_id(self, tmp_cron_dir):
+        job = create_job(prompt="Admin lane", schedule="every 1h", agent="Admin")
+
+        assert job["agent"] == "admin"
+
+    def test_create_job_rejects_unknown_agent(self, tmp_cron_dir):
+        with pytest.raises(ValueError, match="unknown agent"):
+            create_job(prompt="Bad lane", schedule="every 1h", agent="admn")
+
+    def test_update_job_canonicalizes_agent_id(self, tmp_cron_dir):
+        job = create_job(prompt="Admin lane", schedule="every 1h")
+
+        updated = update_job(job["id"], {"agent": "Admin"})
+
+        assert updated["agent"] == "admin"
+
+
 # =========================================================================
 # compute_next_run
 # =========================================================================

@@ -77,14 +77,23 @@ const identity = resolveIdentity();
 const profile = process.env.APPLE_KEYCHAIN_PROFILE || "elevate-notarization";
 const version = packageJson.version;
 const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
-const dmgs = (feed.files || [])
-  .map((file) => file.url)
-  .filter((name) => name.endsWith(".dmg") && name.includes(`-${version}-`));
-
-if (dmgs.length === 0) {
-  throw new Error(`[finalize] no ${version} DMG artifacts listed in latest-mac.yml`);
+const feedUrls = new Set((feed.files || []).map((file) => file.url).filter(Boolean));
+const required = [
+  `Elevate-${version}-mac-x64.zip`,
+  `Elevate-${version}-mac-arm64.zip`,
+  `Elevate-${version}-mac-x64.dmg`,
+  `Elevate-${version}-mac-arm64.dmg`,
+];
+for (const name of required) {
+  if (!feedUrls.has(name)) {
+    throw new Error(`[finalize] latest-mac.yml missing ${name}`);
+  }
+  if (!fs.existsSync(artifactPath(name))) {
+    throw new Error(`[finalize] missing ${artifactPath(name)}`);
+  }
 }
 
+const dmgs = required.filter((name) => name.endsWith(".dmg"));
 console.log(`[finalize] signing/notarizing ${dmgs.length} DMG artifact(s) as ${identity}`);
 for (const dmg of dmgs) {
   const filePath = artifactPath(dmg);

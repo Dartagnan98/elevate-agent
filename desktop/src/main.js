@@ -622,7 +622,9 @@ function ensureGatewayInstalled(launcher, baseEnv) {
         const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
         appendBackendLog(`[gateway] version-change reinstall rc=${reinstall.status}\n${rout}\n`);
         if (reinstall.status === 0) {
-          writeGatewayVersionMarker(appVersion);
+          if (kickstartGateway(uid)) {
+            writeGatewayVersionMarker(appVersion);
+          }
         } else if (kickstartGateway(uid)) {
           writeGatewayVersionMarker(appVersion);
         }
@@ -636,7 +638,9 @@ function ensureGatewayInstalled(launcher, baseEnv) {
           const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
           appendBackendLog(`[gateway] recovered-resource reinstall rc=${reinstall.status}\n${rout}\n`);
           if (reinstall.status === 0) {
-            writeGatewayVersionMarker(appVersion);
+            if (kickstartGateway(uid)) {
+              writeGatewayVersionMarker(appVersion);
+            }
           } else if (kickstartGateway(uid)) {
             writeGatewayVersionMarker(appVersion);
           }
@@ -902,22 +906,25 @@ function appendBackendLog(data) {
   }
 }
 
+function scheduleGatewaySelfHeal(launcher, baseEnv) {
+  if (!launcher) return;
+  // Self-heal the gateway service (cron ticker that seeds + runs automations +
+  // heartbeats). Deferred so it never blocks UI startup. Idempotent.
+  setTimeout(() => {
+    try {
+      ensureGatewayInstalled(launcher, baseEnv);
+    } catch (e) {
+      appendBackendLog(`[gateway] self-heal threw: ${e}\n`);
+    }
+  }, 8000);
+}
+
 async function ensureBackend() {
   markStartup("backend:ensure-start");
   await chooseBackendPort();
   markStartup("backend:port-selected", String(backendPort));
 
-  if (await backendMatchesDesktopMode()) {
-    markStartup("backend:already-ready");
-    return true;
-  }
-
   const launcher = resolveElevateLauncher();
-  if (!launcher) {
-    markStartup("backend:launcher-missing");
-    return false;
-  }
-
   const baseEnv = {
     ELEVATE_DESKTOP_APP: "1",
     // SMS sends go via the sms-outbox spool drained by THIS foreground app
@@ -926,6 +933,18 @@ async function ensureBackend() {
     ELEVATE_SMS_VIA_APP: "1",
     ...(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
   };
+
+  if (await backendMatchesDesktopMode()) {
+    markStartup("backend:already-ready");
+    scheduleGatewaySelfHeal(launcher, baseEnv);
+    return true;
+  }
+
+  if (!launcher) {
+    markStartup("backend:launcher-missing");
+    return false;
+  }
+
   markStartup("backend:spawn", path.basename(launcher.command));
   backendProcess = spawn(launcher.command, launcher.args, {
     cwd: launcher.cwd,
@@ -945,15 +964,7 @@ async function ensureBackend() {
   const ready = await waitForBackend();
   markStartup(ready ? "backend:ready" : "backend:timeout");
 
-  // Self-heal the gateway service (cron ticker that seeds + runs automations +
-  // heartbeats). Deferred so it never blocks UI startup. Idempotent.
-  setTimeout(() => {
-    try {
-      ensureGatewayInstalled(launcher, baseEnv);
-    } catch (e) {
-      appendBackendLog(`[gateway] self-heal threw: ${e}\n`);
-    }
-  }, 8000);
+  scheduleGatewaySelfHeal(launcher, baseEnv);
 
   return ready;
 }

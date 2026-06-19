@@ -221,6 +221,8 @@ def create_cron_router(*, log: logging.Logger | None = None) -> APIRouter:
                     updates["skills"] = desired_skills
                 if lane.workdir is not None and existing_job.get("workdir") != lane.workdir:
                     updates["workdir"] = lane.workdir
+                if lane.agent is not None and existing_job.get("agent") != lane.agent:
+                    updates["agent"] = lane.agent
                 if updates:
                     try:
                         changed = update_job(existing_job["id"], updates)

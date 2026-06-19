@@ -8406,6 +8406,8 @@ Examples:
         "--lines",
         type=int,
         default=200,
+        choices=range(1, 10001),
+        metavar="1..10000",
         help="Number of log lines to include per log file (default: 200)",
     )
     share_parser.add_argument(

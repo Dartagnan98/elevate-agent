@@ -615,9 +615,45 @@ def _agent_exists(agent_id: str) -> bool:
     try:
         from elevate_cli.agent_hub import get_agent_def
 
-        return get_agent_def(agent_id) is not None
+        return get_agent_def(agent_id) is not None or _builtin_agent_id(agent_id) is not None
     except Exception:
         return False
+
+
+def _builtin_agent_id(agent_id: str) -> Optional[str]:
+    wanted = _slug_agent(agent_id)
+    try:
+        from elevate_cli.agent_hub import DEFAULT_AGENT_DEFS
+    except Exception:
+        return None
+    for agent in DEFAULT_AGENT_DEFS:
+        candidate = str(agent.get("id") or "").strip()
+        if _slug_agent(candidate) == wanted:
+            return candidate
+    return None
+
+
+def _normalize_agent_id(agent_id: object) -> Optional[str]:
+    clean = str(agent_id).strip() if isinstance(agent_id, str) else ""
+    if not clean:
+        return None
+    resolve_error: Exception | None = None
+    try:
+        from elevate_cli.agent_hub import get_agent_def
+
+        agent = get_agent_def(clean)
+    except Exception as exc:
+        agent = None
+        resolve_error = exc
+    if isinstance(agent, dict):
+        return str(agent.get("id") or clean).strip() or clean
+    builtin = _builtin_agent_id(clean)
+    if builtin:
+        return builtin
+    if resolve_error is not None:
+        raise ValueError(f"cannot resolve agent: {clean!r}") from resolve_error
+    if not isinstance(agent, dict):
+        raise ValueError(f"unknown agent: {clean!r}")
 
 
 def resolve_surface_agent(surface: str, spec: Optional[Dict[str, Any]] = None) -> Optional[str]:
@@ -2416,8 +2452,7 @@ def create_job(
 
     # Elevate /leads metadata normalization (agent picker, tier resolver
     # fallback, readiness gate, backfill iterator).
-    normalized_agent = str(agent).strip() if isinstance(agent, str) else None
-    normalized_agent = normalized_agent or None
+    normalized_agent = _normalize_agent_id(agent)
     if normalized_agent:
         try:
             from elevate_cli.agent_hub import agent_lifecycle_defaults, agent_runtime_defaults
@@ -2616,6 +2651,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = None
             else:
                 updates["profile"] = _normalize_profile(_profile)
+
+        if "agent" in updates:
+            updates["agent"] = _normalize_agent_id(updates["agent"])
 
         updated = _apply_skill_fields({**job, **updates})
         schedule_changed = "schedule" in updates

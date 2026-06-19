@@ -177,6 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
+- Local route identity fingerprint: `8165f342e19723cb`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -235,20 +236,28 @@ Current verified snapshot, 2026-06-18:
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
   stricter `/api/status` readiness for desktop launch, release-path
-  `smoke:mac` gate, post-ship public feed/artifact verification, installed app
-  `codesign`/`spctl` smoke gate, packaged WhatsApp bridge/package checks, and
-  gateway reinstall when a previously missing packaged resource is recovered,
-  and production support bundle redaction for session-recorder events.
+  `smoke:mac` gate, preflight public-feed version comparison, post-ship public
+  feed/artifact verification, installed app `codesign`/`spctl` smoke gate,
+  packaged WhatsApp bridge/package checks, gateway reinstall when a previously
+  missing packaged resource is recovered, gateway version-change installs
+  kickstart launchd before advancing `.gateway_version`, Admin cron effective
+  skills qualify ambiguous real-estate skill names, cron lane seeding repairs
+  existing job agents, cron rejects unknown agent ids instead of silently
+  skipping, debug share rejects nonpositive `--lines`, local route identity
+  fingerprint drift guard, release feed merge rejects app-bundle/package version
+  mismatch, finalization requires all current x64/arm64 zip/dmg artifacts,
+  ship refuses a mismatched local feed before any remote mutation, lazy
+  `tts.edge` install spec matches packaged core dependency policy, and
+  production support bundle redaction for session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
-  now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
-  `codesign --verify --deep --strict` and `spctl --assess` report a sealed
-  resource is missing or invalid in the Python runtime (`edge_tts` version
-  mismatch). The installed app also has stale `web_dist` assets versus the repo.
-  Both block packaged production readiness until fixed by release/install flow.
-- Fresh candidate smoke: signed/notarized `desktop/dist/mac-arm64/Elevate.app`
-  for `1.2.53` passes `codesign`, `spctl`, repo `web_dist` parity, and packaged
-  WhatsApp bridge checks, including `bridge.js`, `package.json`,
-  `package-lock.json`, and `node_modules`.
+  still fails `cli/scripts/installed_runtime_smoke.py` for `1.2.57` because
+  `codesign` and `spctl` report a sealed resource missing or invalid in the
+  bundled Python `edge_tts` runtime. Installed `web_dist` parity and packaged
+  WhatsApp bridge checks pass.
+- Fresh candidate smoke: signed/notarized `desktop/dist/mac/Elevate.app` and
+  `desktop/dist/mac-arm64/Elevate.app` for `1.2.58` pass app-version, seal,
+  repo `web_dist` parity, and packaged WhatsApp bridge checks, including
+  `bridge.js`, `package.json`, `package-lock.json`, and `node_modules`.
 
 ## Route Center
 
@@ -723,13 +732,19 @@ Deliverables:
 - Packaged app smoke: launch installed app, read
   `~/Library/Logs/Elevate/main.log`, compare bundled-vs-served assets, verify
   selected port, auth injection, updater state/log lines, and app version.
-- Current packaged blocker: installed app seal validation is now part of
-  `cli/scripts/installed_runtime_smoke.py`, but the installed app still fails
-  `codesign --verify --deep --strict` and `spctl --assess` after first launch.
-  The installed `web_dist` is also stale versus the repo build.
+- Current packaged blocker: installed app seal validation is part of
+  `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.57` app still
+  fails seal validation on bundled Python `edge_tts` files, while `web_dist`
+  parity and packaged WhatsApp bridge checks pass.
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
-  local `1.2.53` x64 and arm64 built apps pass seal validation, repo
-  `web_dist` parity, and packaged WhatsApp bridge checks.
+  local `1.2.58` x64 and arm64 built apps pass app-version, seal, repo
+  `web_dist` parity, and packaged WhatsApp bridge checks; matching DMGs are
+  signed, notarized, stapled, Gatekeeper-accepted, and feed-synced.
+- Preflight proof: `desktop/scripts/preflight-apple-release.js` compares the
+  package version to the public update feed, not stale local `dist/` output.
+- Local ship proof: `desktop/scripts/ship-to-hetzner.js` verifies the local
+  feed version, required x64/arm64 zip/dmg set, sizes, and sha512 hashes before
+  running any `rsync`/`ssh` remote mutation.
 - Post-ship proof: `desktop/scripts/ship-to-hetzner.js` now refuses to print
   "live" until the public `latest-mac.yml` matches the package version plus
   local `url`/`sha512`/`size` entries, and all referenced zip/dmg artifacts
@@ -768,6 +783,9 @@ Deliverables:
   - route inventory drift guard with exact hosted file-list comparison,
   - desktop launch readiness requiring `200` plus Elevate status payload,
   - release-path `smoke:mac` gate before `ship:mac`,
+  - Apple preflight public-feed version gate,
+  - local pre-ship feed/artifact version/hash/size gate,
+  - finalize exact x64/arm64 zip/dmg artifact gate,
   - post-ship public feed/artifact verifier before declaring a release live,
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
@@ -779,9 +797,14 @@ Deliverables:
 - Remaining readiness-blocking gaps include:
   - live installed `/Users/dartagnanpatricio/Applications/Elevate.app` seal
     validation failure,
-  - live installed app stale `web_dist` versus repo build,
-  - public update feed/artifacts not yet shipped and verified for `1.2.53`
-    (current public feed is still `1.2.51`; `1.2.53` artifact URLs 404).
+  - public update feed/artifacts not yet shipped and verified for `1.2.58`
+    (current public feed is still `1.2.51`),
+  - UI E2E is not yet complete across install, login, chat, tools,
+    automations, update, and quit/reopen,
+  - live runtime warnings still need owner/recovery classification: WhatsApp
+    enabled but not paired, Oura MCP connection failure, missing
+    `OPENAI_API_KEY` for embeddings, Composio Gmail HTTP 422, and config
+    version `24` behind latest `25`.
 
 Acceptance:
 

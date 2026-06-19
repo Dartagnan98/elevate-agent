@@ -668,6 +668,8 @@ def run_debug_share(args):
     _best_effort_sweep_expired_pastes()
 
     log_lines = getattr(args, "lines", 200)
+    if log_lines <= 0:
+        raise ValueError("--lines must be greater than 0")
     expiry = getattr(args, "expire", 7)
     local_only = _bool_arg(args, "local")
     redact = not _bool_arg(args, "no_redact")

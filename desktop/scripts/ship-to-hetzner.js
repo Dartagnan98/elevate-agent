@@ -15,11 +15,13 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
 
 const DIST = path.resolve(__dirname, "..", "dist");
 const FEED = path.join(DIST, "latest-mac.yml");
+const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
 const HOST = "root@5.78.46.234";
 const REMOTE = "/var/www/elevate-updates/";
 const PUBLIC_URL = "https://api.elevationrealestatehq.com/updates";
@@ -84,6 +86,35 @@ function verifyPublicRelease(feed, expectedVersion) {
   console.log(`[ship] verified public ${expectedVersion} feed and artifacts`);
 }
 
+function hashFile(filePath) {
+  return crypto.createHash("sha512").update(fs.readFileSync(filePath)).digest("base64");
+}
+
+function verifyLocalRelease(feed, expectedVersion) {
+  if (feed.version !== expectedVersion) {
+    throw new Error(`[ship] local feed version ${feed.version || "missing"} != ${expectedVersion}`);
+  }
+  const files = new Map((feed.files || []).map((file) => [file.url, file]));
+  for (const name of [
+    `Elevate-${expectedVersion}-mac-x64.zip`,
+    `Elevate-${expectedVersion}-mac-arm64.zip`,
+    `Elevate-${expectedVersion}-mac-x64.dmg`,
+    `Elevate-${expectedVersion}-mac-arm64.dmg`,
+  ]) {
+    const file = files.get(name);
+    if (!file) throw new Error(`[ship] local feed missing ${name}`);
+    const filePath = path.join(DIST, name);
+    if (!fs.existsSync(filePath)) throw new Error(`[ship] missing ${filePath}`);
+    const size = fs.statSync(filePath).size;
+    if (Number(file.size || 0) !== size) {
+      throw new Error(`[ship] local feed size mismatch for ${name}`);
+    }
+    if (file.sha512 !== hashFile(filePath)) {
+      throw new Error(`[ship] local feed sha512 mismatch for ${name}`);
+    }
+  }
+}
+
 if (!fs.existsSync(DIST)) {
   console.error(`[ship] no dist/ folder at ${DIST} — did the build run?`);
   process.exit(1);
@@ -98,6 +129,13 @@ if (!fs.existsSync(FEED)) {
 // Ship exactly the files referenced by the feed, plus matching blockmaps when
 // present, so stale artifacts in dist/ never leak into the update directory.
 const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
+try {
+  verifyLocalRelease(feed, PKG_VERSION);
+} catch (err) {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+}
+
 const selected = new Set(["latest-mac.yml"]);
 for (const file of feed.files || []) {
   selected.add(file.url);
@@ -117,7 +155,6 @@ for (const file of feed.files || []) {
 // but they're the first-time MANUAL download. The feed only listed zips, so the
 // public .dmg used to go stale every release. Ship this version's DMGs too, and
 // refresh stable "latest" aliases (below) so the download link is permanent.
-const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
 for (const name of fs.readdirSync(DIST)) {
   if (name.endsWith(".dmg") && name.includes(`-${PKG_VERSION}-`)) selected.add(name);
 }

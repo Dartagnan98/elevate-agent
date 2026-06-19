@@ -75,6 +75,49 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
 
 
+def test_read_installed_app_version_uses_bundle_info_plist(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    app = tmp_path / "Elevate.app"
+    plist = app / "Contents/Info.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_text("<plist />\n", encoding="utf-8")
+
+    def fake_run(command, **_kwargs):
+        assert command[-1] == str(plist)
+        return subprocess.CompletedProcess(command, 0, stdout="1.2.58\n", stderr="")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    assert smoke.read_installed_app_version(app) == "1.2.58"
+
+
+def test_expected_app_version_mismatch_fails_main(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    app = tmp_path / "Elevate.app"
+    out = tmp_path / "smoke.json"
+    app.mkdir()
+
+    monkeypatch.setattr(smoke, "read_installed_app_version", lambda _app: "1.2.57")
+    monkeypatch.setattr(smoke, "read_recent_log_hits", lambda *_args, **_kwargs: [])
+
+    rc = smoke.main(
+        [
+            "--installed-app",
+            str(app),
+            "--expected-app-version",
+            "1.2.58",
+            "--skip-seal",
+            "--skip-parity",
+            "--skip-sidecar",
+            "--json-out",
+            str(out),
+        ]
+    )
+
+    assert rc == 1
+    assert "installed app version mismatch" in out.read_text(encoding="utf-8")
+
+
 def test_installed_whatsapp_bridge_passes_when_packaged(tmp_path):
     smoke = _load_smoke_script()
     installed_cli = tmp_path / "Elevate.app/Contents/Resources/cli"

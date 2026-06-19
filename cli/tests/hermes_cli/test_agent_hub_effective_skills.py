@@ -39,6 +39,30 @@ def test_builtin_agents_include_shared_artifact_capabilities():
     assert "tasks" in agent["skills"]
 
 
+def test_admin_effective_skills_qualify_ambiguous_real_estate_skills():
+    update_agent_config("admin", {"enabled": True})
+
+    skills = agent_effective_skills("admin", ["real-estate-admin/webforms"], config={})
+
+    assert "gmail-doc-router" not in skills
+    assert "subject-removal" not in skills
+    assert "digisign" not in skills
+    assert "webforms" not in skills
+    assert "real-estate-admin/gmail-doc-router" in skills
+    assert "real-estate-admin/subject-removal" in skills
+    assert "real-estate-admin/digisign" in skills
+    assert skills.count("real-estate-admin/webforms") == 1
+
+
+def test_admin_effective_skills_use_canonical_agent_id_for_aliases():
+    update_agent_config("admin", {"enabled": True})
+
+    skills = agent_effective_skills("Admin", [], config={})
+
+    assert "digisign" not in skills
+    assert "real-estate-admin/digisign" in skills
+
+
 def test_effective_skills_merge_shared_agent_and_run_specific_without_duplicates():
     # Agent definitions persist in the account DB now (hub_agents), not in a
     # caller-supplied config dict.
