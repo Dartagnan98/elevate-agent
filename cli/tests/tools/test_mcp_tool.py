@@ -3967,3 +3967,30 @@ class TestMcpParallelToolCalls:
             register_mcp_servers(config_off)
         with _lock:
             assert sanitize_mcp_name_component("toggle_srv") not in _parallel_safe_servers
+
+
+class TestMCPLoopShutdown:
+    def test_drain_mcp_loop_cancels_pending_tasks_before_close(self):
+        """Shutdown should not close the loop with live MCP cleanup tasks."""
+        from tools.mcp_tool import _drain_mcp_loop_before_close
+
+        loop = asyncio.new_event_loop()
+        cancelled = []
+
+        async def sleeper():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        try:
+            task = loop.create_task(sleeper())
+            loop.run_until_complete(asyncio.sleep(0))
+
+            _drain_mcp_loop_before_close(loop)
+
+            assert task.done()
+            assert cancelled == [True]
+        finally:
+            loop.close()
