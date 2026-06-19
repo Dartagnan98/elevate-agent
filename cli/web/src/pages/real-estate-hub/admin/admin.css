@@ -97,6 +97,9 @@
 }
 .icon-btn:hover  { background: color-mix(in srgb, var(--fg) 7%, transparent); color: var(--fg); }
 .icon-btn:active { transform: scale(0.94); }
+.icon-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.icon-btn:disabled:hover { background: transparent; color: var(--fg-muted); }
+.icon-btn:disabled:active { transform: none; }
 .icon-btn svg { width: 14px; height: 14px; }
 .icon-btn.sm { width: 22px; height: 22px; }
 .icon-btn.sm svg { width: 12px; height: 12px; }
@@ -132,6 +135,11 @@
   cursor: pointer;
 }
 .new-chat:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); border-color: var(--border); }
+.new-chat:disabled { cursor: not-allowed; opacity: 0.58; }
+.new-chat:disabled:hover {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border-color: var(--border-soft);
+}
 .new-chat .kbd {
   margin-left: auto;
   font: 500 10.5px/1 "Geist Mono", monospace;
@@ -141,6 +149,12 @@
   border: 1px solid var(--border-soft);
 }
 .new-chat svg { width: 14px; height: 14px; color: var(--fg-muted); }
+.sidebar-unavailable-note {
+  margin: 0 12px 8px;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
 
 .sidebar-scroll {
   flex: 1; min-height: 0; overflow-y: auto;
@@ -351,6 +365,34 @@
 .user-menu-row.danger { color: var(--fg-muted); }
 .user-menu-row.danger:hover { color: var(--status-error); background: color-mix(in srgb, var(--status-error) 8%, transparent); }
 .user-menu-row.danger:hover svg { color: var(--status-error); }
+.user-menu-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+.user-menu-row:disabled:hover,
+.user-menu-row.danger:disabled:hover {
+  background: transparent;
+  color: var(--fg);
+}
+.user-menu-row.danger:disabled,
+.user-menu-row.danger:disabled:hover {
+  color: var(--fg-muted);
+}
+.user-menu-row:disabled:hover svg {
+  color: var(--fg-muted);
+}
+.user-menu-unavailable {
+  margin-left: auto;
+  padding: 3px 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  color: var(--fg-faint);
+  font: 600 9px/1 "Geist Mono", monospace;
+}
+.user-menu-tag + .user-menu-unavailable {
+  margin-left: 4px;
+}
 .user-menu-tag {
   margin-left: auto;
   font: 600 9px/1 "Geist Mono", monospace;

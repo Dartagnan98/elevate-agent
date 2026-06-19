@@ -71,6 +71,21 @@ describe("icon-only control accessibility", () => {
     expect(block).toContain('aria-hidden="true"');
   });
 
+  it("keeps embedded admin sidebar disabled controls visibly explained", () => {
+    const source = read("pages/real-estate-hub/admin/components/sidebar.tsx");
+    const styles = read("pages/real-estate-hub/admin/admin.css");
+
+    expect(source).toContain("SIDEBAR_UNAVAILABLE_ID");
+    expect(source).toContain('className="sidebar-unavailable-note"');
+    expect(source).toContain("Embedded sidebar actions are unavailable here.");
+    expect(source.match(/aria-describedby=\{SIDEBAR_UNAVAILABLE_ID\}/g)).toHaveLength(3);
+    expect(source.match(/<UnavailableMenuRow/g)).toHaveLength(6);
+    expect(source).not.toContain("disabled title=\"Unavailable in the embedded admin sidebar\"");
+    expect(styles).toContain(".sidebar-unavailable-note");
+    expect(styles).toContain(".user-menu-unavailable");
+    expect(styles).toContain(".user-menu-row:disabled");
+  });
+
   it("names both message copy icon buttons", () => {
     const source = read("pages/ChatPage.tsx");
 

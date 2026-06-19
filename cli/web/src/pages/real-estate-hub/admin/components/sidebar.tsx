@@ -100,6 +100,9 @@ function activateOnEnterSpace(
   }
 }
 
+const SIDEBAR_UNAVAILABLE_ID = "admin-sidebar-unavailable-reason";
+const EMBEDDED_UNAVAILABLE_REASON = "Unavailable in the embedded admin sidebar";
+
 // ---------------------------------------------------------------------------
 // SectionLabel
 // ---------------------------------------------------------------------------
@@ -267,10 +270,36 @@ function AutomationRow({
 // UserMenu (popup above the user pill)
 // ---------------------------------------------------------------------------
 
+function UnavailableMenuRow({
+  icon: Icon,
+  label,
+  danger = false,
+  children,
+}: {
+  icon: IconComponent;
+  label: string;
+  danger?: boolean;
+  children?: React.ReactNode;
+}) {
+  return (
+    <button
+      className={"user-menu-row" + (danger ? " danger" : "")}
+      role="menuitem"
+      disabled
+      title={EMBEDDED_UNAVAILABLE_REASON}
+      aria-label={`${label}: ${EMBEDDED_UNAVAILABLE_REASON}`}
+    >
+      <Icon />
+      <span>{label}</span>
+      {children}
+      <span className="user-menu-unavailable">Unavailable</span>
+    </button>
+  );
+}
+
 function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
   void _onClose;
   const u = MOCK_USER;
-  const unavailableTitle = "Unavailable in the embedded admin sidebar";
 
   const [theme, setTheme] = useState(u.theme);
   const [locale, setLocale] = useState(u.locale);
@@ -282,15 +311,9 @@ function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
       <div className="user-menu-email">{u.email}</div>
 
       <div className="user-menu-section">
-        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
-          <Settings /><span>Settings</span>
-        </button>
-        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
-          <Sparkles /><span>Run onboarding</span>
-        </button>
-        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
-          <User /><span>Account</span>
-        </button>
+        <UnavailableMenuRow icon={Settings} label="Settings" />
+        <UnavailableMenuRow icon={Sparkles} label="Run onboarding" />
+        <UnavailableMenuRow icon={User} label="Account" />
       </div>
 
       <div className="user-menu-section">
@@ -323,19 +346,14 @@ function UserMenu({ onClose: _onClose }: { onClose: () => void }) {
           <span className="dim">Active sessions</span>
           <span>{u.activeSessions}</span>
         </div>
-        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
-          <Refresh /><span>Restart gateway</span>
-        </button>
-        <button className="user-menu-row" role="menuitem" disabled title={unavailableTitle}>
-          <Download /><span>Update Elevation</span>
+        <UnavailableMenuRow icon={Refresh} label="Restart gateway" />
+        <UnavailableMenuRow icon={Download} label="Update Elevation">
           {u.hasUpdate && <span className="user-menu-tag">new</span>}
-        </button>
+        </UnavailableMenuRow>
       </div>
 
       <div className="user-menu-section">
-        <button className="user-menu-row danger" role="menuitem" disabled title={unavailableTitle}>
-          <LogOut /><span>Sign out</span>
-        </button>
+        <UnavailableMenuRow icon={LogOut} label="Sign out" danger />
       </div>
     </div>
   );
@@ -435,20 +453,23 @@ function Sidebar({ activeNav, onNavSelect, activeSessionId, onSessionSelect }: S
             <div className="light max"></div>
           </div>
           <div className="tools">
-            <button className="icon-btn" type="button" aria-label="Collapse sidebar" title="Unavailable in the embedded admin sidebar" disabled>
+            <button className="icon-btn" type="button" aria-label="Collapse sidebar" aria-describedby={SIDEBAR_UNAVAILABLE_ID} title={EMBEDDED_UNAVAILABLE_REASON} disabled>
               <PanelLeft aria-hidden="true" />
             </button>
-            <button className="icon-btn" type="button" aria-label="Search" title="Unavailable in the embedded admin sidebar" disabled>
+            <button className="icon-btn" type="button" aria-label="Search" aria-describedby={SIDEBAR_UNAVAILABLE_ID} title={EMBEDDED_UNAVAILABLE_REASON} disabled>
               <Search aria-hidden="true" />
             </button>
           </div>
         </div>
 
-        <button className="new-chat" type="button" disabled title="Unavailable in the embedded admin sidebar">
+        <button className="new-chat" type="button" disabled title={EMBEDDED_UNAVAILABLE_REASON} aria-describedby={SIDEBAR_UNAVAILABLE_ID}>
           <Plus />
           <span>New chat</span>
           <span className="kbd">&#x2318;N</span>
         </button>
+        <p id={SIDEBAR_UNAVAILABLE_ID} className="sidebar-unavailable-note">
+          Embedded sidebar actions are unavailable here.
+        </p>
 
         <div className="sidebar-scroll">
           {/* Real estate */}
