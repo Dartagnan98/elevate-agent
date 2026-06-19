@@ -789,6 +789,21 @@ html .font-courier {
 }
 
 @media (max-width: 1023px) {
+  #root button:not([role="switch"]),
+  #root [role="button"]:not([role="switch"]),
+  #root [role="tab"],
+  #root a.ab-btn,
+  #root a.hub-btn,
+  #root a.hub-link,
+  #root a.td-card-link,
+  #root a[class*="inline-flex"][href],
+  #root input:not([type="hidden"]),
+  #root select,
+  #root textarea {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
   #app-sidebar .icon-btn {
     width: 40px !important;
     height: 40px !important;

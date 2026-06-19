@@ -172,9 +172,11 @@ describe("icon-only control accessibility", () => {
   it("keeps browser-probed Skills and Social controls named and tappable", () => {
     const appCss = read("index.css");
     const hubData = read("pages/real-estate-hub/_shared/use-hub-data.tsx");
+    const hubCss = read("pages/agent-hub.css");
     const skills = read("pages/SkillsPage.tsx");
     const socialBoard = read("pages/real-estate-hub/social/board.tsx");
     const socialCss = read("pages/real-estate-hub/social/social.css");
+    const switchControl = read("components/ui/switch.tsx");
 
     expect(hubData).toContain('className="min-h-[40px]"');
     expect(skills).toContain('aria-label="Search skills"');
@@ -186,6 +188,14 @@ describe("icon-only control accessibility", () => {
     expect(socialCss).toContain("min-height: 36px;");
     expect(socialCss).toContain("min-height: 36px; padding: 0 18px 0 0");
     expect(appCss).toContain("@media (max-width: 1023px)");
+    expect(appCss).toContain('#root button:not([role="switch"]),');
+    expect(appCss).toContain("#root a.hub-btn,");
+    expect(appCss).toContain("#root a.td-card-link,");
+    expect(appCss).toContain("#root input:not([type=\"hidden\"]),");
+    expect(appCss).toContain("min-width: 36px;\n    min-height: 36px;");
+    expect(hubCss).toContain("min-height: 36px;");
+    expect(switchControl).toContain("h-[36px] w-[56px]");
+    expect(switchControl).toContain("md:h-5 md:w-9");
     expect(appCss).toContain("#app-sidebar .nav-row,");
     expect(appCss).toContain("#app-sidebar .icon-btn {\n    width: 40px !important;\n    height: 40px !important;");
   });

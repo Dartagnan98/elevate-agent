@@ -289,7 +289,7 @@ function AgentFleet({ agents, loading }: { agents: AgentHubAgent[]; loading?: bo
           <Bot className="h-5 w-5 text-foreground" />
           <CardTitle>Agent Status</CardTitle>
         </div>
-        <Link to="/hub" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/hub" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           Open Hub
         </Link>
       </CardHeader>
@@ -354,7 +354,7 @@ function LiveActivity({ items, loading }: { items: ActivityItem[]; loading?: boo
           <Activity className="h-5 w-5 text-foreground" />
           <CardTitle>Live Activity</CardTitle>
         </div>
-        <Link to="/activity" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/activity" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           View Feed
         </Link>
       </CardHeader>
@@ -419,7 +419,7 @@ function FocusPanel({ surfaces, tasks, loading }: { surfaces: HeartbeatSurface[]
           <Zap className="h-5 w-5 text-foreground" />
           <CardTitle>Current Focus</CardTitle>
         </div>
-        <Link to="/heartbeat" className="text-xs font-medium text-muted-foreground hover:text-foreground">
+        <Link to="/heartbeat" className="inline-flex min-h-9 items-center text-xs font-medium text-muted-foreground hover:text-foreground">
           Heartbeats
         </Link>
       </CardHeader>
