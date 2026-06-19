@@ -1,0 +1,109 @@
+name: ENV-03 previous macOS smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      dmg_url:
+        description: "HTTPS URL for the arm64 DMG built from the commit under test"
+        required: true
+        type: string
+      expected_app_version:
+        description: "Expected app version; blank uses desktop/package.json"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Apple Silicon previous macOS
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      ELEVATE_DESKTOP_PORT: "9143"
+      ELEVATE_LICENSE_JSON_B64: ${{ secrets.ELEVATE_LICENSE_JSON_B64 }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify previous macOS Apple Silicon runner
+        run: |
+          sw_vers
+          test "$(uname -m)" = "arm64"
+          case "$(sw_vers -productVersion)" in
+            15.*) ;;
+            *) echo "ENV-03 requires macOS 15.x for the previous-macOS lane" >&2; exit 1 ;;
+          esac
+
+      - name: Install smoke dependency
+        run: python3 -m pip install --user websockets
+
+      - name: Download and copy app
+        run: |
+          set -euo pipefail
+          dmg="$RUNNER_TEMP/Elevate-env03-arm64.dmg"
+          mount_dir="$RUNNER_TEMP/elevate-dmg"
+          app_path="$RUNNER_TEMP/Elevate.app"
+          mkdir -p "$mount_dir"
+          curl --fail --location --show-error --output "$dmg" "${{ inputs.dmg_url }}"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
+          cp -R "$mount_dir/Elevate.app" "$app_path"
+          hdiutil detach "$mount_dir"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+
+      - name: Seed licensed disposable home
+        run: |
+          set -euo pipefail
+          test -n "$ELEVATE_LICENSE_JSON_B64"
+          home="$RUNNER_TEMP/elevate-home"
+          mkdir -p "$home/.elevate"
+          LICENSE_PATH="$home/.elevate/license.json" \
+            python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["LICENSE_PATH"]).write_bytes(base64.b64decode(os.environ["ELEVATE_LICENSE_JSON_B64"]))'
+          chmod 600 "$home/.elevate/license.json"
+
+      - name: Launch app and run installed smoke
+        run: |
+          set -euo pipefail
+          app_path="$RUNNER_TEMP/Elevate.app"
+          home="$RUNNER_TEMP/elevate-home"
+          expected="${{ inputs.expected_app_version }}"
+          if [ -z "$expected" ]; then
+            expected="$(python3 -c 'import json; print(json.load(open("desktop/package.json"))["version"])')"
+          fi
+
+          HOME="$home" \
+          ELEVATE_HOME="$home/.elevate" \
+          ELEVATE_DESKTOP_PORT="$ELEVATE_DESKTOP_PORT" \
+          "$app_path/Contents/MacOS/Elevate" > "$RUNNER_TEMP/elevate-stdout.log" 2>&1 &
+          app_pid="$!"
+          trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 90); do
+            if curl --fail --silent "http://127.0.0.1:$ELEVATE_DESKTOP_PORT/chat?new=env03" >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          python3 cli/scripts/installed_runtime_smoke.py \
+            --installed-app "$app_path" \
+            --repo-root "$PWD" \
+            --port "$ELEVATE_DESKTOP_PORT" \
+            --expected-app-version "$expected" \
+            --timeout 180 \
+            --json-out "$RUNNER_TEMP/elevate-env03-previous-macos-smoke.json"
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: env03-previous-macos-smoke
+          path: |
+            ${{ runner.temp }}/elevate-env03-previous-macos-smoke.json
+            ${{ runner.temp }}/elevate-stdout.log
+            ${{ runner.temp }}/elevate-home/Library/Logs/Elevate/main.log
+          if-no-files-found: ignore
