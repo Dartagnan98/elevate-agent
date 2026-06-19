@@ -1106,7 +1106,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installed-app", type=Path, default=DEFAULT_APP)
     parser.add_argument("--repo-root", type=Path, default=repo_root_from_script())
-    parser.add_argument("--port", type=int, default=9120)
+    parser.add_argument("--port", type=int, default=9119)
     parser.add_argument(
         "--prompt",
         default="Reply exactly: installed compaction smoke ok",

@@ -84,6 +84,7 @@ let activeDb: FakeDb = createFakeDb();
 let nextLicenseId = 1;
 let nextGrantId = 1;
 let nextLoginCodeId = 1;
+let nextPatchFailure: { table: string; status: number; message: string } | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -104,7 +105,16 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextLicenseId = db.licenses.length + 1;
   nextGrantId = db.device_grants.length + 1;
   nextLoginCodeId = db.login_codes.length + 1;
+  nextPatchFailure = null;
   return activeDb;
+}
+
+export function failNextSupabasePatch(
+  table: string,
+  status = 500,
+  message = "supabase patch failed",
+): void {
+  nextPatchFailure = { table, status, message };
 }
 
 export async function makeUser(
@@ -389,6 +399,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     return okJson(insertRows(table, body), 201);
   }
   if (method === "PATCH") {
+    if (nextPatchFailure?.table === table) {
+      const failure = nextPatchFailure;
+      nextPatchFailure = null;
+      return okJson({ message: failure.message }, failure.status);
+    }
     updateRows(table, url.searchParams, body as Record<string, unknown>);
     return noContent();
   }

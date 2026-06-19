@@ -855,6 +855,16 @@ async function waitForBackend(timeoutMs = 180000) {
   return false;
 }
 
+async function backendProbeSummary(port = backendPort) {
+  const [statusReady, bundleMatch, chatEnabled] = await Promise.allSettled([
+    backendIsReady(port),
+    backendBundleMatches(port),
+    dashboardChatEnabled(port),
+  ]);
+  const value = (result) => result.status === "fulfilled" ? String(result.value) : `error:${result.reason}`;
+  return `port=${port} status=${value(statusReady)} bundle=${value(bundleMatch)} chat=${value(chatEnabled)}`;
+}
+
 async function chooseBackendPort() {
   if (await backendMatchesDesktopMode(PREFERRED_PORT)) {
     backendPort = PREFERRED_PORT;
@@ -864,8 +874,8 @@ async function chooseBackendPort() {
 
   // A ready-but-WRONG-VERSION backend on the preferred port = a stale
   // dashboard the pre-update app left running. Adopting a higher port would
-  // leave it serving the old bundle on 9120 AND confuse anything that probes
-  // the default port. Evict it so the fresh spawn (new bundle) binds 9120.
+  // leave it serving the old bundle on the preferred port AND confuse anything
+  // that probes the default port. Evict it so the fresh spawn binds cleanly.
   if (
     (await backendIsReady(PREFERRED_PORT)) &&
     !(await backendBundleMatches(PREFERRED_PORT))
@@ -962,6 +972,9 @@ async function ensureBackend() {
   });
 
   const ready = await waitForBackend();
+  if (!ready) {
+    markStartup("backend:timeout-detail", await backendProbeSummary());
+  }
   markStartup(ready ? "backend:ready" : "backend:timeout");
 
   scheduleGatewaySelfHeal(launcher, baseEnv);

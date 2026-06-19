@@ -6,6 +6,15 @@ import { SocialBoard } from "./board";
 import { buildSocialViewModel } from "./view-model";
 import "./social.css";
 
+export function socialLoadErrorFromResults(results: PromiseSettledResult<unknown>[]): string | null {
+  const failed = results.filter((result) => result.status === "rejected");
+  if (failed.length === 0) return null;
+  const reason = failed[0].reason;
+  const message = reason instanceof Error ? reason.message : "Failed to load social data";
+  if (failed.length === results.length) return message;
+  return `${failed.length} social source${failed.length === 1 ? "" : "s"} failed: ${message}`;
+}
+
 export function RealEstateSocialMediaPage() {
   const data = useRealEstateHubData();
 
@@ -36,15 +45,7 @@ export function RealEstateSocialMediaPage() {
       if (snapRes.status === "fulfilled") setSnapshot(snapRes.value);
       if (ideaRes.status === "fulfilled") setIdeas(ideaRes.value.items || []);
       if (recentRes.status === "fulfilled") setRecentPosts(recentRes.value.items || []);
-      // allSettled never rejects, so surface a banner when every source failed.
-      if (
-        snapRes.status === "rejected" &&
-        ideaRes.status === "rejected" &&
-        recentRes.status === "rejected"
-      ) {
-        const reason = snapRes.reason;
-        setSocialError(reason instanceof Error ? reason.message : "Failed to load social data");
-      }
+      setSocialError(socialLoadErrorFromResults([snapRes, ideaRes, recentRes]));
     } catch (e) {
       if (signal.aborted) return;
       setSocialError(e instanceof Error ? e.message : "Failed to load social data");

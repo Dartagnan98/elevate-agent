@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 442 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `b59929723aef8fb5`.
+- Caller inventory fingerprint: `47b3ec051ea25d4b`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
@@ -347,6 +347,17 @@ First fix candidate:
   diagnostic only if repeated desktop failures remain ambiguous after those
   checks.
 
+No-secret local auth checklist:
+
+- Read the selected port from `~/Library/Logs/Elevate/main.log`
+  (`backend:port-selected`).
+- `curl -sS http://127.0.0.1:<port>/ | rg "__ELEVATE_SESSION_TOKEN__|elevate_session"`.
+- `curl -i http://127.0.0.1:<port>/api/status` should return `200` with
+  `version` and `gateway_running`.
+- A protected local route without the session header should return a local
+  dashboard `401`; hosted bearer `401/402/403` belongs to the backend routes
+  in Issue 5.
+
 ### 3. Active Chat Path
 
 Primary files:
@@ -363,10 +374,11 @@ Source anchors:
   `cli/web/src/pages/ChatPage.tsx:844` and
   `cli/web/src/pages/ChatPage.tsx:863`.
 - `/chat` is only active when embedded chat is enabled in `cli/web/src/App.tsx`.
-- `GatewayClient` opens `/api/ws` in `cli/web/src/lib/gatewayClient.ts:124`.
+- `GatewayClient` opens `/api/ws` in `cli/web/src/lib/gatewayClient.ts:149`.
 - FastAPI exposes `/api/ws` at `cli/elevate_cli/web_server.py:12033`.
-- The WebSocket transport emits `gateway.ready` and dispatches JSON-RPC through
-  `cli/tui_gateway/ws.py:112`.
+- The WebSocket transport accepts at `cli/tui_gateway/ws.py:112`, emits
+  `gateway.ready` around `cli/tui_gateway/ws.py:127`, and dispatches JSON-RPC
+  at `cli/tui_gateway/ws.py:177`.
 - `session.create`, `session.list`, and `session.resume` live at
   `cli/tui_gateway/server.py:2760`,
   `cli/tui_gateway/server.py:2900`, and
@@ -407,10 +419,11 @@ Primary files:
 
 Source anchors:
 
-- Source connector and inbox routes start at
-  `cli/elevate_cli/web_routes/source_connectors.py:66`.
+- Source connector routes start at
+  `cli/elevate_cli/web_routes/source_connectors.py:103`; source-inbox starts
+  at `cli/elevate_cli/web_routes/source_connectors.py:143`.
 - Cron routes start at `cli/elevate_cli/web_routes/cron.py:96`.
-- Cron attention exists at `cli/elevate_cli/web_routes/cron.py:382`.
+- Cron attention exists at `cli/elevate_cli/web_routes/cron.py:384`.
 - Today route is `cli/elevate_cli/web_routes/today.py:431`.
 - Agent hub and worker routes start at
   `cli/elevate_cli/web_routes/agent_hub.py:922`.
@@ -463,16 +476,17 @@ Source anchors:
 - License refresh uses refresh token hash in
   `backend/src/app/api/license/refresh/route.ts:25`.
 - Desktop code-sign-in opens hosted `/link` from `desktop/src/login.html:198`
-  through `desktop/src/main.js:1538`.
+  through `desktop/src/main.js:1607` and `desktop/src/main.js:1612`.
 - Device start and poll are public device-code routes in
   `backend/src/app/api/device/start/route.ts:24` and
   `backend/src/app/api/device/poll/route.ts:20`; lookup/approve are the hosted
   `/link` browser approval leg, not direct desktop curls.
 - Login-code request/verify are alternate CLI/admin-web auth paths, not the
   first desktop debugging path.
-- Diagnostics ingestion sanitizes and duplicate-upserts events in
-  `backend/src/app/api/diagnostics/session-events/route.ts:188` and
-  `backend/src/app/api/diagnostics/session-events/route.ts:223`.
+- Diagnostics ingestion sanitizes/redacts and duplicate-upserts events in
+  `backend/src/app/api/diagnostics/session-events/route.ts:155`,
+  `backend/src/app/api/diagnostics/session-events/route.ts:184`, and
+  `backend/src/app/api/diagnostics/session-events/route.ts:239`.
 
 Debug questions:
 
@@ -642,6 +656,11 @@ Acceptance:
 - CI or a local check fails when the route inventory changes and the map is not
   refreshed.
 
+Current status: the guarded artifact is not yet the row-level inventory above.
+The current checks guard local route count/fingerprint, hosted route file list,
+and frontend/desktop caller count/fingerprint. A generated row-level map remains
+a readiness gap.
+
 ### Issue 7 - Full Local Route Contract Coverage
 
 Goal: local dashboard production readiness is tested by route family, not only
@@ -735,8 +754,10 @@ Deliverables:
   selected port, auth injection, updater state/log lines, and app version.
 - Current packaged proof: installed app seal validation is part of
   `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.58` app passes
-  seal validation, `web_dist` parity, and packaged WhatsApp bridge checks
-  before and after first launch.
+  app-version, seal validation, `web_dist` parity, and packaged WhatsApp
+  bridge checks. The latest live installed check used `--skip-sidecar`, so it
+  does not prove selected port, injected auth, WebSocket, or updater runtime
+  state.
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
   local `1.2.58` x64 and arm64 built apps pass app-version, seal, repo
   `web_dist` parity, and packaged WhatsApp bridge checks; matching DMGs are
@@ -790,18 +811,27 @@ Deliverables:
   - post-ship public feed/artifact verifier before declaring a release live,
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
+  - installed runtime smoke defaulting to the desktop app's `9119` port,
+  - hosted device poll refuses to return a one-shot refresh token if clearing
+    `refresh_token_plain` fails,
+  - social media page surfaces partial route-load failures instead of only
+    showing an error when every source fails,
   - desktop gateway reinstall when gateway status reports a recovered
     packaged-resource `_missing` error,
   - `elevate debug share --session/--last` recorder-event support bundle
     section with export-time re-sanitization and redaction report,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
-  - live installed `/Users/dartagnanpatricio/Applications/Elevate.app` seal
-    validation failure,
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
+  - installed sidecar runtime smoke still needs selected-port, auth injection,
+    WebSocket, and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
+  - hosted backend coverage still lacks signup, forgot/reset, `me`, orgs,
+    admin, skills, automations, and Stripe route contracts,
+  - local row-level route inventory and route-family coverage ledger are not
+    complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp
     enabled but not paired, Oura MCP connection failure, missing
     `OPENAI_API_KEY` for embeddings, Composio Gmail HTTP 422, and config

@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   assertNoRawDiagnosticsText,
   createFakeDb,
+  failNextSupabasePatch,
   issueAccessToken,
   jsonRequest,
   loadRoute,
@@ -98,6 +99,7 @@ describe("hosted route handlers", () => {
     assert.equal(typeof okBody.access_token, "string");
     assert.equal(typeof okBody.refresh_token, "string");
     assert.equal(okBody.tier, "pro");
+    assert.deepEqual(okBody.entitlements, ["real_estate_sales"]);
     assert.notEqual(activeLicense.refresh_token_hash, refreshHash("old-refresh"));
     assert.equal(activeLicense.revoked, false);
 
@@ -167,6 +169,44 @@ describe("hosted route handlers", () => {
 
     assert.equal(secondPoll.status, 410);
     assert.deepEqual(secondBody, { error: "already_claimed", status: "claimed" });
+  });
+
+  it("device poll does not return a one-shot refresh token when clearing it fails", async () => {
+    const db = useFakeDb();
+    const user = await makeUser();
+    db.users.push(user);
+    const browserLicense = seedLicense({ id: "browser-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/approve");
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startResponse = await start.POST(
+      jsonRequest("/api/device/start", { device_label: "CLI" }),
+    );
+    const startBody = await responseJson(startResponse);
+
+    const approveResponse = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+
+    assert.equal(approveResponse.status, 200);
+    assert.equal(typeof db.device_grants[0].refresh_token_plain, "string");
+
+    failNextSupabasePatch("device_grants");
+    const pollResponse = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const pollBody = await responseJson(pollResponse);
+
+    assert.equal(pollResponse.status, 500);
+    assert.deepEqual(pollBody, { error: "invalid_grant" });
+    assert.equal(db.device_grants[0].status, "approved");
+    assert.equal(typeof db.device_grants[0].refresh_token_plain, "string");
   });
 
   it("device lookup and deny report the browser approval leg", async () => {

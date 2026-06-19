@@ -75,6 +75,12 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
 
 
+def test_installed_runtime_smoke_defaults_to_desktop_port():
+    smoke = _load_smoke_script()
+
+    assert smoke.parse_args([]).port == 9119
+
+
 def test_read_installed_app_version_uses_bundle_info_plist(monkeypatch, tmp_path):
     smoke = _load_smoke_script()
     app = tmp_path / "Elevate.app"
