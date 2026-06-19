@@ -91,9 +91,32 @@ describe("icon-only control accessibility", () => {
     expect(source).toContain('role="dialog"');
     expect(source).toContain('aria-modal="true"');
     expect(source).toContain("aria-labelledby={titleId}");
-    expect(source).toContain("closeRef.current?.focus()");
-    expect(source).toContain("prevActive?.focus?.()");
-    expect(source).toContain("document.body.style.overflow = \"hidden\"");
+    expect(source).toContain("useDialogFocus");
+    expect(source).toContain('initialFocusSelector: "[data-autofocus]"');
+  });
+
+  it("keeps shared dialog focus trapping and recovery wired", () => {
+    const hook = read("components/ui/use-dialog-focus.ts");
+    const confirm = read("components/ui/confirm-dialog.tsx");
+
+    expect(hook).toContain('event.key !== "Tab"');
+    expect(hook).toContain('event.key === "Escape"');
+    expect(hook).toContain("document.body.style.overflow = \"hidden\"");
+    expect(hook).toContain("prevActive?.focus?.()");
+    expect(hook).toContain("last.focus()");
+    expect(hook).toContain("first.focus()");
+    expect(confirm).toContain("useDialogFocus");
+    expect(confirm).toContain('initialFocusSelector: "[data-confirm]"');
+  });
+
+  it.each([
+    ["components/ModelPickerDialog.tsx", 'initialFocusSelector: "input"'],
+    ["components/OAuthLoginModal.tsx", 'initialFocusSelector: "[data-autofocus], input, button"'],
+  ])("%s uses shared dialog focus management", (file, selector) => {
+    const source = read(file);
+
+    expect(source).toContain("useDialogFocus");
+    expect(source).toContain(selector);
   });
 
   it("keeps dialog surfaces named with explicit modal state", () => {

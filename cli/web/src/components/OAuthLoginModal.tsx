@@ -4,6 +4,7 @@ import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { api, type OAuthProvider, type OAuthStartResponse } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
 import { useI18n } from "@/i18n";
 
 interface Props {
@@ -36,6 +37,7 @@ export function OAuthLoginModal({
   const [codeCopied, setCodeCopied] = useState(false);
   const isMounted = useRef(true);
   const pollTimer = useRef<number | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const { t } = useI18n();
 
   // Initiate flow on mount
@@ -154,6 +156,12 @@ export function OAuthLoginModal({
     onClose();
   };
 
+  useDialogFocus({
+    dialogRef,
+    initialFocusSelector: "[data-autofocus], input, button",
+    onEscape: () => void handleClose(),
+  });
+
   const handleCopyUserCode = async (code: string) => {
     try {
       await navigator.clipboard.writeText(code);
@@ -177,14 +185,17 @@ export function OAuthLoginModal({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 p-4"
       onClick={handleBackdrop}
       role="dialog"
       aria-modal="true"
       aria-labelledby="oauth-modal-title"
+      tabIndex={-1}
     >
       <div className="relative w-full max-w-md overflow-hidden rounded-md border border-border bg-card">
         <button
+          data-autofocus
           type="button"
           onClick={handleClose}
           className="absolute right-3 top-3 text-muted-foreground hover:text-foreground transition-colors"

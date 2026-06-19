@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef } from "react";
+import { useId, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
 
 /** Lightweight portal modal — backdrop click + Escape close. */
 export function Modal({
@@ -14,28 +15,10 @@ export function Modal({
   children: React.ReactNode;
   wide?: boolean;
 }) {
-  const closeRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
-  useEffect(() => {
-    const prevActive = document.activeElement as HTMLElement | null;
-    const prevOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    closeRef.current?.focus();
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      onClose();
-    };
-
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prevOverflow;
-      prevActive?.focus?.();
-    };
-  }, [onClose]);
+  useDialogFocus({ dialogRef, initialFocusSelector: "[data-autofocus]", onEscape: onClose });
 
   return createPortal(
     <div
@@ -43,16 +26,18 @@ export function Modal({
       onMouseDown={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
         className={`w-full ${wide ? "max-w-lg" : "max-w-md"} rounded-lg border border-border bg-card shadow-xl`}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 id={titleId} className="text-sm font-semibold text-foreground">{title}</h2>
           <button
-            ref={closeRef}
+            data-autofocus
             type="button"
             onClick={onClose}
             aria-label="Close modal"

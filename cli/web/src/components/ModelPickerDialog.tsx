@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useDialogFocus } from "@/components/ui/use-dialog-focus";
 import type { GatewayClient } from "@/lib/gatewayClient";
 import { cn } from "@/lib/utils";
 import { Check, Search, X } from "lucide-react";
@@ -52,6 +53,9 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
   const [query, setQuery] = useState("");
   const [persistGlobal, setPersistGlobal] = useState(false);
   const closedRef = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useDialogFocus({ dialogRef, initialFocusSelector: "input", onEscape: onClose });
 
   // Load providers + models on open.
   useEffect(() => {
@@ -140,11 +144,13 @@ export function ModelPickerDialog({ gw, sessionId, onClose, onSubmit }: Props) {
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[100] flex items-center justify-center bg-[color-mix(in_srgb,var(--chat-bg)_82%,transparent)] p-4 backdrop-blur-sm"
       onClick={(e) => e.target === e.currentTarget && onClose()}
       role="dialog"
       aria-modal="true"
       aria-labelledby="model-picker-title"
+      tabIndex={-1}
     >
       <div className="relative flex max-h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--chat-border)] bg-[var(--chat-surface)] text-[var(--chat-text)] shadow-[0_24px_60px_-16px_rgba(0,0,0,0.72),0_1px_0_rgba(255,255,255,0.03)_inset]">
         <button
