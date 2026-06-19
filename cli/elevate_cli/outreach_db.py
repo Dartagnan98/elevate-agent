@@ -1073,6 +1073,7 @@ def _mirror_send_to_operational_db(send: dict[str, Any]) -> None:
                 body=str(body),
                 source_id=str(source_id),
                 thread_key=str(thread_id),
+                ts=send.get("createdAt") or None,
             )
     except Exception:
         # Best-effort mirror — never block a real send on this.
