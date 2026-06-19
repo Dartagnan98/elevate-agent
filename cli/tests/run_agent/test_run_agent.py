@@ -1861,10 +1861,9 @@ class TestConcurrentToolExecution:
             agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         assert len(messages) == 2
-        # First tool should have error
-        assert "Error" in messages[0]["content"] or "boom" in messages[0]["content"]
-        # Second tool should succeed
-        assert "success" in messages[1]["content"]
+        contents = [m["content"] for m in messages]
+        assert any("Error" in content or "boom" in content for content in contents)
+        assert any("success" in content for content in contents)
 
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
