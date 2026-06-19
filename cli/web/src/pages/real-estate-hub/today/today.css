@@ -16,6 +16,23 @@
   background: color-mix(in srgb, var(--fg) 10%, transparent);
   border-radius: 2px; border: 2px solid transparent; background-clip: content-box;
 }
+.td-board-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--status-error) 34%, var(--border-soft));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--status-error) 9%, var(--bg-1));
+  color: var(--fg);
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+.td-board-alert-title {
+  flex: 0 0 auto;
+  color: var(--status-error);
+  font-weight: 650;
+}
 
 /* Card primitive */
 .td-card {

@@ -500,6 +500,7 @@ export function TodayDesignShell() {
   const [today, setToday] = useState<TodayDashboardResponse | null>(null);
   const [todayLoading, setTodayLoading] = useState(false);
   const [todayError, setTodayError] = useState<string | null>(null);
+  const [todayActionError, setTodayActionError] = useState<string | null>(null);
   const [deals, setDeals] = useState<AdminDeal[]>([]);
   const [events, setEvents] = useState<AdminUpcomingEvent[]>([]);
   const [greetingName, setGreetingName] = useState<string>("there");
@@ -552,6 +553,7 @@ export function TodayDesignShell() {
   const sourceBreakdown = useMemo(() => mapSourceBreakdown(threads), [threads]);
 
   const handleRefresh = useCallback(async () => {
+    setTodayActionError(null);
     await Promise.all([
       data.refresh({ force: true }),
       loadToday(),
@@ -566,13 +568,22 @@ export function TodayDesignShell() {
 
   const handleDraftAction = useCallback<NonNullable<TodayBoardProps["onDraftAction"]>>(
     async (action, draftId) => {
+      setTodayActionError(null);
       const draft = drafts.find((d) => d.id === draftId);
-      if (!draft) return;
+      if (!draft) {
+        const message = "Draft is no longer available. Refresh Today and try again.";
+        setTodayActionError(message);
+        throw new Error(message);
+      }
       try {
         const res = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action);
         data.setSourceInbox(res);
       } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        const verb = action === "approve" ? "approve and send" : "skip";
+        setTodayActionError(`Could not ${verb} draft: ${detail}`);
         console.error("today draft action failed", err);
+        throw err instanceof Error ? err : new Error(detail);
       }
     },
     [drafts, data],
@@ -607,7 +618,7 @@ export function TodayDesignShell() {
         wins={wins}
         sourceBreakdown={sourceBreakdown}
         loading={todayLoading || data.loading}
-        error={todayError}
+        error={todayActionError || todayError}
         onRefresh={handleRefresh}
         onDraftAction={handleDraftAction}
       />

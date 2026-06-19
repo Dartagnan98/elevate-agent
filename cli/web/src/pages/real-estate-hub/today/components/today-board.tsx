@@ -590,6 +590,8 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
       if (onDraftAction) await onDraftAction(action, id);
       if (action === "skip") setSkipped((s) => new Set(s).add(id));
       else setApproved((s) => new Set(s).add(id));
+    } catch {
+      // Parent surfaces the action error; keep the draft visible for retry.
     } finally {
       setBusy((s) => {
         const next = new Set(s);
@@ -955,6 +957,12 @@ export function TodayBoard(props: TodayBoardProps) {
       {/* No in-page hero — the title "Today" lives in the app breadcrumb
           header (like Memory and the other pages), no icon/eyebrow/status. */}
       <div className="td-board-body">
+        {props.error ? (
+          <div className="td-board-alert" role="alert">
+            <span className="td-board-alert-title">Today needs attention</span>
+            <span>{props.error}</span>
+          </div>
+        ) : null}
         <TodayPulse stats={props.pulse} greeting={greeting} name={props.greetingName ?? "there"} sub={sub} />
         <PipelineVelocity stages={props.pipeline} />
         <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
