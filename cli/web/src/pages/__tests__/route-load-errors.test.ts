@@ -20,6 +20,14 @@ describe("route load error states", () => {
     expect(source).toContain("RefreshCw");
   });
 
+  it("keeps manual log fetch failures visible with retry support", () => {
+    const source = read("pages/LogsPage.tsx");
+
+    expect(source).toContain("RouteLoadError");
+    expect(source).toContain("Could not load logs");
+    expect(source).toContain("onRetry={fetchLogs}");
+  });
+
   it.each([
     ["pages/ActivityPage.tsx", "cacheError", "Could not load activity"],
     ["pages/AnalyticsPage.tsx", "cacheError", "Could not load analytics"],

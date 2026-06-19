@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { FilterGroup, Segmented } from "@/components/ui/segmented";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { RouteLoadError } from "@/components/route-skeletons";
 
 const FILES = ["agent", "errors", "gateway"] as const;
 const LEVELS = ["ALL", "DEBUG", "INFO", "WARNING", "ERROR"] as const;
@@ -188,8 +189,13 @@ export default function LogsPage() {
         </CardHeader>
         <CardContent className="p-0">
           {error && (
-            <div className="bg-card border-b border-border px-4 py-2">
-              <p className="text-xs text-destructive">{error}</p>
+            <div className="bg-card border-b border-border px-4 py-3">
+              <RouteLoadError
+                title="Could not load logs"
+                error={error}
+                onRetry={fetchLogs}
+                className="py-3"
+              />
             </div>
           )}
 
