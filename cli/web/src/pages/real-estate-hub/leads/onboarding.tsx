@@ -438,6 +438,7 @@ function LeadsOnboardingWizard({
 }) {
   const navigate = useNavigate();
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<Record<string, { kind: "success" | "error"; message: string }>>({});
 
   const promptForConnector = useCallback(async (connector: SourceConnectorStatus) => {
     const existing = (connector.prompt || "").trim();
@@ -469,9 +470,20 @@ function LeadsOnboardingWizard({
 
   const copyPrompt = useCallback(async (connector: SourceConnectorStatus) => {
     try {
-      await navigator.clipboard.writeText(await promptForConnector(connector));
-    } catch {
-      // clipboard unavailable — silent fail
+      const prompt = await promptForConnector(connector);
+      await navigator.clipboard.writeText(prompt);
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: { kind: "success", message: "Prompt copied." },
+      }));
+    } catch (err) {
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: {
+          kind: "error",
+          message: err instanceof Error ? err.message : "Could not copy prompt.",
+        },
+      }));
     }
   }, [promptForConnector]);
 
@@ -818,6 +830,18 @@ function LeadsOnboardingWizard({
                             <Copy className="h-3 w-3" />
                           </Button>
                         </div>
+                        {copyStatus[connector.id] && (
+                          <p
+                            className={cn(
+                              "mt-2 text-[11.5px]",
+                              copyStatus[connector.id].kind === "error"
+                                ? "text-destructive"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {copyStatus[connector.id].message}
+                          </p>
+                        )}
                       </li>
                     );
                   })}

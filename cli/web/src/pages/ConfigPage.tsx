@@ -788,6 +788,7 @@ function SourceConnectorSettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
   const [runResults, setRunResults] = useState<Record<string, { kind: string; message: string }>>({});
+  const [copyStatus, setCopyStatus] = useState<Record<string, { kind: "success" | "error"; message: string }>>({});
   const [composioAccounts, setComposioAccounts] = useState<ComposioConnectedAccount[]>([]);
   const [composioReady, setComposioReady] = useState<boolean>(false);
   const [fbPages, setFbPages] = useState<Array<{
@@ -931,9 +932,20 @@ function SourceConnectorSettingsPanel() {
 
   const copyPromptText = async (connector: SourceConnectorStatus) => {
     try {
-      await navigator.clipboard.writeText(await promptForConnector(connector));
-    } catch {
-      // clipboard not available — silently skip; primary path is run.
+      const prompt = await promptForConnector(connector);
+      await navigator.clipboard.writeText(prompt);
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: { kind: "success", message: "Prompt copied." },
+      }));
+    } catch (err) {
+      setCopyStatus((prev) => ({
+        ...prev,
+        [connector.id]: {
+          kind: "error",
+          message: err instanceof Error ? err.message : "Could not copy prompt.",
+        },
+      }));
     }
   };
 
@@ -1175,6 +1187,17 @@ function SourceConnectorSettingsPanel() {
                 <Copy className="h-3.5 w-3.5" aria-hidden="true" />
               </Button>
             </div>
+            {copyStatus[connector.id] && (
+              <p
+                className={`mt-2 text-xs ${
+                  copyStatus[connector.id].kind === "error"
+                    ? "text-destructive"
+                    : "text-muted-foreground"
+                }`}
+              >
+                {copyStatus[connector.id].message}
+              </p>
+            )}
           </li>
                 ))}
               </ul>

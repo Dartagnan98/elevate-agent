@@ -33,6 +33,10 @@ describe("onboarding UI recovery wiring", () => {
     expect(onboarding).toContain('errorMessage(err, "Could not load leads setup")');
     expect(onboarding).toContain('errorMessage(err, "Save failed")');
     expect(onboarding).toContain('errorMessage(err, "Could not complete setup")');
+    expect(onboarding).toContain("const [copyStatus");
+    expect(onboarding).toContain("await navigator.clipboard.writeText(prompt)");
+    expect(onboarding).toContain("Could not copy prompt.");
+    expect(onboarding).toContain("{copyStatus[connector.id].message}");
     expect(api).toContain("resetLeadsSetup");
   });
 });

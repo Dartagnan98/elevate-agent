@@ -15,4 +15,14 @@ describe("Config source connector recovery UI", () => {
     expect(page).toContain("connector.recoveryKind.replace");
     expect(page).toContain("Error: {connector.recoveryError}");
   });
+
+  it("keeps connector prompt copy failures visible", () => {
+    const page = source("../ConfigPage.tsx");
+
+    expect(page).toContain("const [copyStatus");
+    expect(page).toContain("await navigator.clipboard.writeText(prompt)");
+    expect(page).toContain("Prompt copied.");
+    expect(page).toContain("Could not copy prompt.");
+    expect(page).toContain("{copyStatus[connector.id].message}");
+  });
 });
