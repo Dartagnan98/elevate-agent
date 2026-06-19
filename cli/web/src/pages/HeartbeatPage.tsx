@@ -844,10 +844,11 @@ export default function HeartbeatPage() {
                       </span>
                       <button
                         type="button"
+                        aria-label="Close heartbeat editor"
                         onClick={() => setEditingId(null)}
                         className="text-muted-foreground hover:text-foreground"
                       >
-                        <X className="h-4 w-4" />
+                        <X aria-hidden="true" className="h-4 w-4" />
                       </button>
                     </div>
                     <HeartbeatForm

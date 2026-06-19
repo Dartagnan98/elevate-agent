@@ -959,10 +959,11 @@ export function SurfaceGoalsForm({
                 </span>
                 <button
                   type="button"
+                  aria-label={`Remove goal ${i + 1}`}
                   onClick={() => removeGoal(i)}
                   className="shrink-0 text-muted-foreground/60 hover:text-destructive"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
               </div>
               <input

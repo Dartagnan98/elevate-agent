@@ -541,10 +541,11 @@ export default function SkillsPage() {
           {search && (
             <button
               type="button"
+              aria-label="Clear skill search"
               className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               onClick={() => setSearch("")}
             >
-              <X className="h-3 w-3" />
+              <X aria-hidden="true" className="h-3 w-3" />
             </button>
           )}
         </div>

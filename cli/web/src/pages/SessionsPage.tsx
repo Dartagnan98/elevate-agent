@@ -656,10 +656,11 @@ export default function SessionsPage() {
         {search && (
           <button
             type="button"
+            aria-label="Clear session search"
             className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-muted-foreground hover:text-foreground"
             onClick={() => setSearch("")}
           >
-            <X className="h-3 w-3" />
+            <X aria-hidden="true" className="h-3 w-3" />
           </button>
         )}
       </div>,
