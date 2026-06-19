@@ -58,7 +58,7 @@ Critical path:
 | --- | --- | --- | --- | --- |
 | HTML-01 | Loading screen | PASS iff loading screen never traps the user silently | UNKNOWN | Manual startup and backend-failure pass |
 | HTML-02 | Install screen | PASS iff Install and Retry buttons call working IPC and show result state | UNKNOWN | Manual UI pass |
-| HTML-03 | Login screen legacy path | PASS iff legacy login screen is either unreachable by design or fully working | UNKNOWN | Source route audit |
+| HTML-03 | Login screen legacy path | PASS iff legacy login screen is either unreachable by design or fully working | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/login-flow.test.js desktop/test/ipc-contract.test.js` proves the legacy `login.html` form submits trimmed credentials, failed login restores controls with visible error text, forgot/signup/link actions use allowlisted auth targets, preload IPC has handlers/callers, and successful `auth:login` reloads the dashboard |
 | HTML-04 | Overlay | PASS iff computer-use overlay appears only while the activity flag is fresh and never steals focus | UNKNOWN | Manual flag-file probe |
 
 ## 4. React Dashboard App
@@ -332,3 +332,4 @@ If one command fails, fix the smallest failing gate first.
 - FAIL then PASS: desktop permissions allowed `media`/`audioCapture` without checking origin or media type; the new permission guard limits grants to dashboard-origin audio capture and denies cross-origin, camera, and unrelated permission requests.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/navigation-guard.test.js desktop/test/ipc-contract.test.js desktop/test/permission-guard.test.js`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web exec vitest run src/pages/__tests__/ChatPage.artifactPreviewSafety.test.ts`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/login-flow.test.js desktop/test/ipc-contract.test.js`
