@@ -65,20 +65,20 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Mint a license only for an ACTIVE subscription — same gate as /auth/login
+  // and /auth/login-code/verify. A newly created invitee is `active` by default;
+  // this blocks an EXISTING lapsed user from re-accepting a pending invite to
+  // consuming the invite, joining the org, or bypassing the paywall.
+  const active = await findActiveUser(user.id);
+  if (!active) {
+    return NextResponse.json({ error: "no active subscription" }, { status: 402 });
+  }
+
   if (!existing) {
     await addMembership({ org_id: inv.org_id, user_id: user.id, role: inv.role });
   }
 
   await acceptInvitation(inv.id, user.id);
-
-  // Mint a license only for an ACTIVE subscription — same gate as /auth/login
-  // and /auth/login-code/verify. A newly created invitee is `active` by default;
-  // this blocks an EXISTING lapsed user from re-accepting a pending invite to
-  // mint a fresh license and bypass the paywall.
-  const active = await findActiveUser(user.id);
-  if (!active) {
-    return NextResponse.json({ error: "no active subscription" }, { status: 402 });
-  }
 
   const access_info = await effectiveAccess(user.id);
   const refresh = generateRefreshToken();

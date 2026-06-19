@@ -657,6 +657,72 @@ describe("hosted route handlers", () => {
     assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
   });
 
+  it("inactive invite accepts do not consume the invite or add membership", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "inactive-invite-admin", email: "inactive-invite-admin@example.com", role: "admin" });
+    const owner = await makeUser({ id: "inactive-invite-owner", email: "inactive-invite-owner@example.com" });
+    const invitee = await makeUser({
+      id: "inactive-invitee",
+      email: "inactive-invitee@example.com",
+      status: "inactive",
+    });
+    db.users.push(admin, owner, invitee);
+    const now = new Date().toISOString();
+    const org = {
+      id: "inactive-invite-org",
+      slug: "inactive-invite-org",
+      name: "Inactive Invite Org",
+      stripe_customer: null,
+      tier: "pro" as const,
+      status: "active" as const,
+      current_period_end: null,
+      entitlements: [],
+      seat_limit: 3,
+      created_at: now,
+      updated_at: now,
+    };
+    db.organizations.push(org);
+    db.memberships.push({
+      id: "inactive-invite-owner-membership",
+      org_id: org.id,
+      user_id: owner.id,
+      role: "owner",
+      created_at: now,
+      organization: org,
+    });
+    const token = "inactive-invite-token";
+    const invitation = {
+      id: "inactive-invite",
+      org_id: org.id,
+      email: invitee.email,
+      role: "member" as const,
+      token_hash: crypto.createHash("sha256").update(token).digest("hex"),
+      invited_by: admin.id,
+      status: "pending" as const,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      accepted_at: null,
+      accepted_user_id: null,
+      created_at: now,
+    };
+    db.invitations.push(invitation);
+    const acceptRoute = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "invitations/accept",
+    );
+
+    const response = await acceptRoute.POST(
+      jsonRequest("/api/invitations/accept", { token }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 402);
+    assert.deepEqual(body, { error: "no active subscription" });
+    assert.equal(invitation.status, "pending");
+    assert.equal(invitation.accepted_at, null);
+    assert.equal(invitation.accepted_user_id, null);
+    assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
+    assert.equal(db.licenses.some((license) => license.user_id === invitee.id), false);
+  });
+
   it("admin license revoke mutates only the target user's license", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ id: "license-admin", email: "license-admin@example.com", role: "admin" });

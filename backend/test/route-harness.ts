@@ -321,6 +321,24 @@ function insertRows(table: string, body: unknown): unknown {
     });
     return inserted[0];
   }
+  if (table === "memberships") {
+    const inserted = rows.map((row) => {
+      const orgId = String(row.org_id);
+      const organization = activeDb.organizations.find((org) => org.id === orgId);
+      if (!organization) throw new Error(`missing organization ${orgId}`);
+      const membership: MembershipRow = {
+        id: String(row.id || `membership-${activeDb.memberships.length + 1}`),
+        org_id: orgId,
+        user_id: String(row.user_id),
+        role: (row.role as MembershipRow["role"] | undefined) ?? "member",
+        created_at: new Date().toISOString(),
+        organization,
+      };
+      activeDb.memberships.push(membership);
+      return membership;
+    });
+    return inserted[0];
+  }
   if (table === "device_grants") {
     const inserted = rows.map((row) => {
       const grant: DeviceGrantRow = {
@@ -444,6 +462,15 @@ function updateRows(
       if (matchesId(resetToken.id)) {
         Object.assign(resetToken, body);
         updated.push(resetToken);
+      }
+    }
+    return updated;
+  }
+  if (table === "invitations") {
+    for (const invitation of activeDb.invitations) {
+      if (matchesId(invitation.id)) {
+        Object.assign(invitation, body);
+        updated.push(invitation);
       }
     }
     return updated;

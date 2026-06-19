@@ -240,6 +240,8 @@ Current verified snapshot, 2026-06-18:
   hosted account/org/skills-list/automation-list read contracts,
   hosted signup/forgot/reset contract with visible production mailer outage
   and reset cleanup-before-password-change ordering,
+  hosted inactive invitation accepts return `402` without consuming the invite or
+  adding membership,
   hosted admin missing-record mutations return 404 instead of false success,
   dashboard nav/route/preloader drift guard, FastAPI `/docs` shadow moved to
   `/api/docs` and `/api/openapi.json` so the dashboard `/docs` deep link
@@ -855,6 +857,8 @@ Deliverables:
     buttons,
   - hosted org seat-limit enforcement for direct member adds and stale
     invitation accepts,
+  - hosted inactive invitation accepts do not consume the invite or add
+    membership before returning `402`,
   - hosted admin license listing and tenant-safe revoke contract,
   - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
