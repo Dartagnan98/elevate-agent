@@ -85,6 +85,17 @@ describe("icon-only control accessibility", () => {
     expect(docsLink).not.toMatch(/<a[\\s\\S]*<Button/);
   });
 
+  it("keeps shared modal dialog semantics and focus recovery wired", () => {
+    const source = read("components/ui/modal.tsx");
+
+    expect(source).toContain('role="dialog"');
+    expect(source).toContain('aria-modal="true"');
+    expect(source).toContain("aria-labelledby={titleId}");
+    expect(source).toContain("closeRef.current?.focus()");
+    expect(source).toContain("prevActive?.focus?.()");
+    expect(source).toContain("document.body.style.overflow = \"hidden\"");
+  });
+
   it("keeps shared Switch controls explicitly named", () => {
     const failures: string[] = [];
 
