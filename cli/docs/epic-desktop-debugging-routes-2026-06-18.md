@@ -223,9 +223,10 @@ Current verified snapshot, 2026-06-18:
   - `backend/src/app/api/stripe/checkout/route.ts`
   - `backend/src/app/api/stripe/portal/route.ts`
   - `backend/src/app/api/stripe/webhook/route.ts`
-- Caller inventory: the latest sweep found 441 frontend/desktop caller
+- Caller inventory: the latest sweep found 442 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
+- Caller inventory fingerprint: `b59929723aef8fb5`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
@@ -250,10 +251,10 @@ Current verified snapshot, 2026-06-18:
   `tts.edge` install spec matches packaged core dependency policy, and
   production support bundle redaction for session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
-  still fails `cli/scripts/installed_runtime_smoke.py` for `1.2.57` because
-  `codesign` and `spctl` report a sealed resource missing or invalid in the
-  bundled Python `edge_tts` runtime. Installed `web_dist` parity and packaged
-  WhatsApp bridge checks pass.
+  passes `cli/scripts/installed_runtime_smoke.py` for `1.2.58` before and
+  after first launch. The 1.2.57 installed-app seal failure is closed by the
+  lazy `tts.edge` dependency-range fix plus the packaged pycache isolation that
+  keeps Python bytecode out of `Contents/Resources`.
 - Fresh candidate smoke: signed/notarized `desktop/dist/mac/Elevate.app` and
   `desktop/dist/mac-arm64/Elevate.app` for `1.2.58` pass app-version, seal,
   repo `web_dist` parity, and packaged WhatsApp bridge checks, including
@@ -732,10 +733,10 @@ Deliverables:
 - Packaged app smoke: launch installed app, read
   `~/Library/Logs/Elevate/main.log`, compare bundled-vs-served assets, verify
   selected port, auth injection, updater state/log lines, and app version.
-- Current packaged blocker: installed app seal validation is part of
-  `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.57` app still
-  fails seal validation on bundled Python `edge_tts` files, while `web_dist`
-  parity and packaged WhatsApp bridge checks pass.
+- Current packaged proof: installed app seal validation is part of
+  `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.58` app passes
+  seal validation, `web_dist` parity, and packaged WhatsApp bridge checks
+  before and after first launch.
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
   local `1.2.58` x64 and arm64 built apps pass app-version, seal, repo
   `web_dist` parity, and packaged WhatsApp bridge checks; matching DMGs are

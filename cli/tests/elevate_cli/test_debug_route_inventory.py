@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import hashlib
+import subprocess
 from pathlib import Path
 
 
@@ -59,6 +60,32 @@ def _hosted_route_count() -> int:
     return len(list((REPO_ROOT / "backend/src/app/api").rglob("route.ts")))
 
 
+def _caller_inventory() -> list[str]:
+    result = subprocess.run(
+        [
+            "rg",
+            "-n",
+            r"fetchJSON|cachedFetchJSON|fetch\(|/api/|new WebSocket|elevateDesktop|openExternal\(",
+            "desktop/src",
+            "cli/web/src",
+            "backend/src/app",
+            "--glob",
+            "!**/web_dist/**",
+            "--glob",
+            "!**/node_modules/**",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    return sorted(result.stdout.splitlines())
+
+
+def _caller_inventory_fingerprint() -> str:
+    return hashlib.sha256("\n".join(_caller_inventory()).encode("utf-8")).hexdigest()[:16]
+
+
 def _hosted_route_files() -> list[str]:
     return [
         path.relative_to(REPO_ROOT).as_posix()
@@ -85,6 +112,9 @@ def test_desktop_debugging_epic_route_inventory_is_current():
     assert f"Local inventory: {local_count} decorated local routes/WebSockets" in epic
     assert f"Local route identity fingerprint: `{_local_route_fingerprint()}`" in epic
     assert f"Hosted inventory: {hosted_count} tracked `backend/src/app/api/**/route.ts` files" in epic
+    caller_count = len(_caller_inventory())
+    assert f"Caller inventory: the latest sweep found {caller_count} frontend/desktop caller" in epic
+    assert f"Caller inventory fingerprint: `{_caller_inventory_fingerprint()}`" in epic
 
 
 def test_desktop_debugging_epic_hosted_route_file_list_is_current():
