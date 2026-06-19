@@ -1101,10 +1101,12 @@ function TemplateEditorCard({
         <button
           type="button"
           onClick={onCancel}
+          aria-label="Cancel template edit"
+          title="Cancel"
           className="rounded-sm p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
           disabled={busy}
         >
-          <X className="h-3 w-3" />
+          <X className="h-3 w-3" aria-hidden="true" />
         </button>
       </div>
       <input

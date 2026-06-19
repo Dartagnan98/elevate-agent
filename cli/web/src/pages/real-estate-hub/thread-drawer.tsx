@@ -283,8 +283,15 @@ function ThreadDrawer({
                 selectButtonClassName="h-8 px-2 text-xs"
               />
             )}
-            <Button variant="ghost" size="sm" onClick={onClose} className="text-foreground/75 hover:text-foreground">
-              <CloseIcon className="h-4 w-4" />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              aria-label="Close thread drawer"
+              title="Close"
+              className="text-foreground/75 hover:text-foreground"
+            >
+              <CloseIcon className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>

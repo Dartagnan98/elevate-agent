@@ -201,12 +201,11 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                       href={p.docs_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex"
+                      aria-label={`Open ${p.name} docs`}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70"
                       title={`Open ${p.name} docs`}
                     >
-                      <Button variant="ghost" size="sm" className="h-7 w-7 p-0">
-                        <ExternalLink className="h-3.5 w-3.5" />
-                      </Button>
+                      <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                     </a>
                   )}
                   {showLoginButton && (
