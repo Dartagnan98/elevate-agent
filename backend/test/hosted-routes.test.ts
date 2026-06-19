@@ -578,6 +578,25 @@ describe("hosted route handlers", () => {
     });
   });
 
+  it("hosted bearer licenses must belong to the token user", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "token-user", email: "token-user@example.com" });
+    const other = await makeUser({ id: "license-owner", email: "license-owner@example.com" });
+    db.users.push(user, other);
+    const otherLicense = seedLicense({ id: "other-user-license", user_id: other.id });
+    const bearer = await issueAccessToken(user, otherLicense);
+    const me = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("me");
+
+    const response = await me.GET(
+      jsonRequest("/api/me", {}, { method: "GET", headers: { authorization: `Bearer ${bearer}` } }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(body, { error: "license revoked" });
+    assert.equal(otherLicense.last_used_at, null);
+  });
+
   it("org seat limits block direct member adds and stale invite accepts", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ id: "seat-admin", email: "seat-admin@example.com", role: "admin" });

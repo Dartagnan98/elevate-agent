@@ -236,7 +236,7 @@ Current verified snapshot, 2026-06-18:
   `GatewayClient` WebSocket close-code/reason propagation, stale updater
   polling comment, backend hosted route-handler harness, hosted device
   lookup/deny contracts, hosted login-code request/verify contract, hosted
-  revoked-bearer 403 contract, hosted route file-list drift guard,
+  revoked-bearer and license/user ownership 403 contracts, hosted route file-list drift guard,
   hosted account/org/skills-list/automation-list read contracts,
   hosted signup/forgot/reset contract with visible production mailer outage
   and reset cleanup-before-password-change ordering,
@@ -487,9 +487,9 @@ Source anchors:
 
 - `/api/health` only proves the Next handler is alive at
   `backend/src/app/api/health/route.ts:5`.
-- `requireAccess(...)` maps missing/invalid bearer to 401, revoked license to
-  403, and inactive subscription to 402 in `backend/src/lib/auth-guard.ts:11`
-  and `backend/src/lib/auth-guard.ts:22`.
+- `requireAccess(...)` maps missing/invalid bearer to 401, revoked or
+  cross-user license to 403, and inactive subscription to 402 in
+  `backend/src/lib/auth-guard.ts:11` and `backend/src/lib/auth-guard.ts:22`.
 - Admin routes add `requireAdmin(...)` in `backend/src/lib/admin-guard.ts:12`.
 - Login is public/rate-limited in
   `backend/src/app/api/auth/login/route.ts:21`.
@@ -853,6 +853,7 @@ Deliverables:
     visibility, and reset cleanup-before-password-change ordering,
   - hosted self-service license read/revoke tenant guard and
     sign-out-everywhere current-license preservation,
+  - hosted bearer license/user ownership binding,
   - signed hosted Stripe webhook contract preventing unknown subscription
     prices from granting `pro`,
   - account billing distinguishes Stripe customer records from active
