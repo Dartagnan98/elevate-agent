@@ -10,6 +10,7 @@ import {
   findOrgById,
   findUserByEmail,
   getMembership,
+  listMembershipsForOrg,
   logAdminAction,
 } from "@/lib/store";
 
@@ -36,10 +37,14 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const { email, role } = parsed.data;
 
   const existing = await findUserByEmail(email);
+  const memberCount = (await listMembershipsForOrg(orgId)).length;
   if (existing) {
     const already = await getMembership(orgId, existing.id);
     if (already) {
       return NextResponse.json({ error: "user already a member" }, { status: 409 });
+    }
+    if (memberCount >= org.seat_limit) {
+      return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
     }
     const membership = await addMembership({ org_id: orgId, user_id: existing.id, role });
     await logAdminAction({
@@ -50,6 +55,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       payload: { role, org_id: orgId },
     });
     return NextResponse.json({ added: true, membership });
+  }
+
+  if (memberCount >= org.seat_limit) {
+    return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
   }
 
   // create invitation

@@ -543,6 +543,85 @@ describe("hosted route handlers", () => {
     );
   });
 
+  it("org seat limits block direct member adds and stale invite accepts", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "seat-admin", email: "seat-admin@example.com", role: "admin" });
+    const owner = await makeUser({ id: "seat-owner", email: "seat-owner@example.com" });
+    const target = await makeUser({ id: "seat-target", email: "seat-target@example.com" });
+    const invitee = await makeUser({ id: "seat-invitee", email: "seat-invitee@example.com" });
+    db.users.push(admin, owner, target, invitee);
+    const adminLicense = seedLicense({ id: "seat-admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const now = new Date().toISOString();
+    const org = {
+      id: "full-org",
+      slug: "full-org",
+      name: "Full Org",
+      stripe_customer: null,
+      tier: "pro" as const,
+      status: "active" as const,
+      current_period_end: null,
+      entitlements: [],
+      seat_limit: 1,
+      created_at: now,
+      updated_at: now,
+    };
+    db.organizations.push(org);
+    db.memberships.push({
+      id: "full-org-owner",
+      org_id: org.id,
+      user_id: owner.id,
+      role: "owner",
+      created_at: now,
+      organization: org,
+    });
+
+    const memberRoute = await loadRoute<{
+      POST: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/orgs/[id]/members");
+    const addResponse = await memberRoute.POST(
+      jsonRequest(
+        "/api/admin/orgs/full-org/members",
+        { email: target.email, role: "member" },
+        { headers },
+      ),
+      { params: Promise.resolve({ id: org.id }) },
+    );
+    const addBody = await responseJson(addResponse);
+
+    assert.equal(addResponse.status, 409);
+    assert.deepEqual(addBody, { error: "seat limit reached" });
+    assert.equal(db.memberships.some((membership) => membership.user_id === target.id), false);
+
+    const token = "full-seat-invite";
+    db.invitations.push({
+      id: "full-seat-invite",
+      org_id: org.id,
+      email: invitee.email,
+      role: "member",
+      token_hash: crypto.createHash("sha256").update(token).digest("hex"),
+      invited_by: admin.id,
+      status: "pending",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      accepted_at: null,
+      accepted_user_id: null,
+      created_at: now,
+    });
+    const acceptRoute = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "invitations/accept",
+    );
+    const acceptResponse = await acceptRoute.POST(
+      jsonRequest("/api/invitations/accept", { token }),
+    );
+    const acceptBody = await responseJson(acceptResponse);
+
+    assert.equal(acceptResponse.status, 409);
+    assert.deepEqual(acceptBody, { error: "seat limit reached" });
+    assert.equal(db.invitations[0].status, "pending");
+    assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
+  });
+
   it("skills run returns the requested skill and records an invocation", async () => {
     const db = useFakeDb();
     const user = await makeUser({ id: "skill-user", tier: "pro" });

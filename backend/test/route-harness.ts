@@ -102,6 +102,20 @@ type MembershipRow = {
   organization: OrgRow;
 };
 
+type InvitationRow = {
+  id: string;
+  org_id: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  token_hash: string;
+  invited_by: string | null;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  expires_at: string;
+  accepted_at: string | null;
+  accepted_user_id: string | null;
+  created_at: string;
+};
+
 type CatalogRow = {
   name: string;
   version: number;
@@ -118,6 +132,7 @@ type FakeDb = {
   licenses: LicenseRow[];
   organizations: OrgRow[];
   memberships: MembershipRow[];
+  invitations: InvitationRow[];
   skills: CatalogRow[];
   automations: Array<CatalogRow & {
     surface: string;
@@ -152,6 +167,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     licenses: [],
     organizations: [],
     memberships: [],
+    invitations: [],
     skills: [],
     automations: [],
     device_grants: [],
@@ -491,6 +507,18 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
     const orgId = readEq(params, "org_id");
     if (userId) rows = rows.filter((row) => row.user_id === userId);
     if (orgId) rows = rows.filter((row) => row.org_id === orgId);
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "invitations") {
+    let rows = activeDb.invitations;
+    const id = readEq(params, "id");
+    const orgId = readEq(params, "org_id");
+    const status = readEq(params, "status");
+    const tokenHash = readEq(params, "token_hash");
+    if (id) rows = rows.filter((row) => row.id === id);
+    if (orgId) rows = rows.filter((row) => row.org_id === orgId);
+    if (status) rows = rows.filter((row) => row.status === status);
+    if (tokenHash) rows = rows.filter((row) => row.token_hash === tokenHash);
     return maybeSingle(wantsSingle, rows);
   }
   if (table === "organizations") {

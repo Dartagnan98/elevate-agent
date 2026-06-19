@@ -842,6 +842,8 @@ Deliverables:
     sign-out-everywhere current-license preservation,
   - signed hosted Stripe webhook contract preventing unknown subscription
     prices from granting `pro`,
+  - hosted org seat-limit enforcement for direct member adds and stale
+    invitation accepts,
   - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing
@@ -865,8 +867,8 @@ Deliverables:
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
   - hosted backend coverage still lacks Stripe checkout/portal contracts,
-    broader Stripe failure mocks, and deeper admin/org mutation route
-    contracts,
+    broader Stripe failure mocks, and deeper admin/org mutation success/
+    permission route contracts,
   - route-family coverage ledger is seeded, but full row-level route inventory
     is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

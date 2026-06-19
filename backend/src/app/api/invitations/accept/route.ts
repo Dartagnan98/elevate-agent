@@ -10,8 +10,10 @@ import {
   effectiveAccess,
   findActiveUser,
   findInvitationByTokenHash,
+  findOrgById,
   findUserByEmail,
   getMembership,
+  listMembershipsForOrg,
 } from "@/lib/store";
 import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
 
@@ -38,6 +40,16 @@ export async function POST(req: NextRequest) {
   }
 
   let user = await findUserByEmail(inv.email);
+  const existing = user ? await getMembership(inv.org_id, user.id) : null;
+  if (!existing) {
+    const org = await findOrgById(inv.org_id);
+    if (!org) return NextResponse.json({ error: "org not found" }, { status: 404 });
+    const memberCount = (await listMembershipsForOrg(inv.org_id)).length;
+    if (memberCount >= org.seat_limit) {
+      return NextResponse.json({ error: "seat limit reached" }, { status: 409 });
+    }
+  }
+
   if (!user) {
     if (!parsed.data.password) {
       return NextResponse.json(
@@ -53,7 +65,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const existing = await getMembership(inv.org_id, user.id);
   if (!existing) {
     await addMembership({ org_id: inv.org_id, user_id: user.id, role: inv.role });
   }
