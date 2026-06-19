@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin-guard";
-import { getMembership, logAdminAction, removeMembership, updateMembershipRole } from "@/lib/store";
+import {
+  getMembership,
+  listMembershipsForOrg,
+  logAdminAction,
+  removeMembership,
+  updateMembershipRole,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -20,8 +26,16 @@ export async function PATCH(
   const parsed = PatchBody.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
 
-  if (!(await getMembership(orgId, userId))) {
+  const membership = await getMembership(orgId, userId);
+  if (!membership) {
     return NextResponse.json({ error: "membership not found" }, { status: 404 });
+  }
+
+  if (membership.role === "owner" && parsed.data.role !== "owner") {
+    const ownerCount = (await listMembershipsForOrg(orgId)).filter((m) => m.role === "owner").length;
+    if (ownerCount <= 1) {
+      return NextResponse.json({ error: "org must keep an owner" }, { status: 409 });
+    }
   }
 
   await updateMembershipRole(orgId, userId, parsed.data.role);
@@ -43,8 +57,16 @@ export async function DELETE(
   if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
   const { id: orgId, userId } = await ctx.params;
 
-  if (!(await getMembership(orgId, userId))) {
+  const membership = await getMembership(orgId, userId);
+  if (!membership) {
     return NextResponse.json({ error: "membership not found" }, { status: 404 });
+  }
+
+  if (membership.role === "owner") {
+    const ownerCount = (await listMembershipsForOrg(orgId)).filter((m) => m.role === "owner").length;
+    if (ownerCount <= 1) {
+      return NextResponse.json({ error: "org must keep an owner" }, { status: 409 });
+    }
   }
 
   await removeMembership(orgId, userId);

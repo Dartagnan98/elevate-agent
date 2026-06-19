@@ -349,6 +349,27 @@ function insertRows(table: string, body: unknown): unknown {
     });
     return inserted[0];
   }
+  if (table === "organizations") {
+    const inserted = rows.map((row) => {
+      const now = new Date().toISOString();
+      const org: OrgRow = {
+        id: String(row.id || `org-${activeDb.organizations.length + 1}`),
+        slug: String(row.slug),
+        name: String(row.name),
+        stripe_customer: (row.stripe_customer as string | null | undefined) ?? null,
+        tier: (row.tier as Tier | undefined) ?? "pro",
+        status: (row.status as UserStatus | undefined) ?? "active",
+        current_period_end: (row.current_period_end as string | null | undefined) ?? null,
+        entitlements: Array.isArray(row.entitlements) ? row.entitlements.map(String) : [],
+        seat_limit: Number(row.seat_limit ?? 1),
+        created_at: (row.created_at as string | undefined) || now,
+        updated_at: (row.updated_at as string | undefined) || now,
+      };
+      activeDb.organizations.push(org);
+      return org;
+    });
+    return inserted[0];
+  }
   if (table === "device_grants") {
     const inserted = rows.map((row) => {
       const grant: DeviceGrantRow = {
@@ -449,6 +470,25 @@ function updateRows(
     }
     return updated;
   }
+  if (table === "organizations") {
+    for (const org of activeDb.organizations) {
+      if (matchesId(org.id)) {
+        Object.assign(org, body);
+        updated.push(org);
+      }
+    }
+    return updated;
+  }
+  if (table === "memberships") {
+    const orgId = readEq(filters, "org_id");
+    for (const membership of activeDb.memberships) {
+      if ((!orgId || membership.org_id === orgId) && (!userId || membership.user_id === userId)) {
+        Object.assign(membership, body);
+        updated.push(membership);
+      }
+    }
+    return updated;
+  }
   if (table === "device_grants") {
     for (const grant of activeDb.device_grants) {
       if (matchesId(grant.id)) {
@@ -486,6 +526,37 @@ function updateRows(
     return updated;
   }
   throw new Error(`unexpected update on ${table}`);
+}
+
+function deleteRows(table: string, filters: URLSearchParams): unknown[] {
+  const id = readEq(filters, "id");
+  const orgId = readEq(filters, "org_id");
+  const userId = readEq(filters, "user_id");
+  const removed: unknown[] = [];
+
+  if (table === "organizations") {
+    activeDb.organizations = activeDb.organizations.filter((org) => {
+      if (id && org.id === id) {
+        removed.push(org);
+        return false;
+      }
+      return true;
+    });
+    return removed;
+  }
+
+  if (table === "memberships") {
+    activeDb.memberships = activeDb.memberships.filter((membership) => {
+      if ((!orgId || membership.org_id === orgId) && (!userId || membership.user_id === userId)) {
+        removed.push(membership);
+        return false;
+      }
+      return true;
+    });
+    return removed;
+  }
+
+  throw new Error(`unexpected delete from ${table}`);
 }
 
 function readEq(params: URLSearchParams, key: string): string | null {
@@ -681,6 +752,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
       return okJson({ message: failure.message }, failure.status);
     }
     const rows = updateRows(table, url.searchParams, body as Record<string, unknown>);
+    if (url.searchParams.has("select")) return okJson(rows);
+    return noContent();
+  }
+  if (method === "DELETE") {
+    const rows = deleteRows(table, url.searchParams);
     if (url.searchParams.has("select")) return okJson(rows);
     return noContent();
   }

@@ -36,6 +36,7 @@ export async function POST(req: NextRequest) {
       actor_user_id: guard.claims.sub,
       target_user_id: null,
       action: "org_created",
+      org_id: org.id,
       payload: { org_id: org.id, slug: org.slug, name: org.name },
     });
     return NextResponse.json({ org });

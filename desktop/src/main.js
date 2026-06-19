@@ -1642,8 +1642,9 @@ function broadcastUpdaterEvent(payload) {
 async function runUpdaterCheck(reason) {
   if (app.isPackaged && !fs.existsSync(UPDATE_CONFIG_PATH)) {
     const message = "update metadata is not bundled";
-    log.info(`[updater] skip check (${reason}) — ${message}`);
-    return { ok: true, skipped: true, message };
+    log.warn(`[updater] skip check (${reason}) — ${message}`);
+    broadcastUpdaterEvent({ status: "error", info: null, progress: null, error: message });
+    return { ok: false, message };
   }
 
   if (updateCheckInFlight || updateBusyStatuses.has(updateState.status)) {

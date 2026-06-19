@@ -931,6 +931,187 @@ describe("hosted route handlers", () => {
     assert.equal(db.licenses.some((license) => license.user_id === invitee.id), false);
   });
 
+  it("admin org member mutations preserve an owner", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "owner-guard-admin", email: "owner-guard-admin@example.com", role: "admin" });
+    const owner = await makeUser({ id: "owner-guard-owner", email: "owner-guard-owner@example.com" });
+    db.users.push(admin, owner);
+    const adminLicense = seedLicense({ id: "owner-guard-admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const now = new Date().toISOString();
+    const org = {
+      id: "owner-guard-org",
+      slug: "owner-guard-org",
+      name: "Owner Guard Org",
+      stripe_customer: null,
+      tier: "pro" as const,
+      status: "active" as const,
+      current_period_end: null,
+      entitlements: [],
+      seat_limit: 2,
+      created_at: now,
+      updated_at: now,
+    };
+    db.organizations.push(org);
+    db.memberships.push({
+      id: "owner-guard-membership",
+      org_id: org.id,
+      user_id: owner.id,
+      role: "owner",
+      created_at: now,
+      organization: org,
+    });
+    const route = await loadRoute<{
+      PATCH: (
+        req: Request,
+        ctx: { params: Promise<{ id: string; userId: string }> },
+      ) => Promise<Response>;
+      DELETE: (
+        req: Request,
+        ctx: { params: Promise<{ id: string; userId: string }> },
+      ) => Promise<Response>;
+    }>("admin/orgs/[id]/members/[userId]");
+
+    const demoteResponse = await route.PATCH(
+      jsonRequest(
+        "/api/admin/orgs/owner-guard-org/members/owner-guard-owner",
+        { role: "member" },
+        { method: "PATCH", headers },
+      ),
+      { params: Promise.resolve({ id: org.id, userId: owner.id }) },
+    );
+    const deleteResponse = await route.DELETE(
+      jsonRequest(
+        "/api/admin/orgs/owner-guard-org/members/owner-guard-owner",
+        {},
+        { method: "DELETE", headers },
+      ),
+      { params: Promise.resolve({ id: org.id, userId: owner.id }) },
+    );
+
+    assert.equal(demoteResponse.status, 409);
+    assert.deepEqual(await responseJson(demoteResponse), { error: "org must keep an owner" });
+    assert.equal(deleteResponse.status, 409);
+    assert.deepEqual(await responseJson(deleteResponse), { error: "org must keep an owner" });
+    assert.equal(db.memberships[0].role, "owner");
+    assert.equal(db.memberships.length, 1);
+    assert.equal(db.audit_log.length, 0);
+  });
+
+  it("admin org seat limit cannot be lowered below occupied seats", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "seat-limit-admin", email: "seat-limit-admin@example.com", role: "admin" });
+    const owner = await makeUser({ id: "seat-limit-owner", email: "seat-limit-owner@example.com" });
+    const member = await makeUser({ id: "seat-limit-member", email: "seat-limit-member@example.com" });
+    db.users.push(admin, owner, member);
+    const adminLicense = seedLicense({ id: "seat-limit-admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const now = new Date().toISOString();
+    const org = {
+      id: "seat-limit-org",
+      slug: "seat-limit-org",
+      name: "Seat Limit Org",
+      stripe_customer: null,
+      tier: "pro" as const,
+      status: "active" as const,
+      current_period_end: null,
+      entitlements: [],
+      seat_limit: 2,
+      created_at: now,
+      updated_at: now,
+    };
+    db.organizations.push(org);
+    db.memberships.push(
+      {
+        id: "seat-limit-owner-membership",
+        org_id: org.id,
+        user_id: owner.id,
+        role: "owner" as const,
+        created_at: now,
+        organization: org,
+      },
+      {
+        id: "seat-limit-member-membership",
+        org_id: org.id,
+        user_id: member.id,
+        role: "member" as const,
+        created_at: now,
+        organization: org,
+      },
+    );
+    const route = await loadRoute<{
+      PATCH: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/orgs/[id]");
+
+    const response = await route.PATCH(
+      jsonRequest(
+        "/api/admin/orgs/seat-limit-org",
+        { seat_limit: 1 },
+        { method: "PATCH", headers: { authorization: `Bearer ${bearer}` } },
+      ),
+      { params: Promise.resolve({ id: org.id }) },
+    );
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await responseJson(response), { error: "seat limit below occupied seats" });
+    assert.equal(org.seat_limit, 2);
+    assert.equal(db.audit_log.length, 0);
+  });
+
+  it("admin org audit rows include org_id", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "org-audit-admin", email: "org-audit-admin@example.com", role: "admin" });
+    db.users.push(admin);
+    const adminLicense = seedLicense({ id: "org-audit-admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const collectionRoute = await loadRoute<{
+      POST: (req: Request) => Promise<Response>;
+    }>("admin/orgs");
+    const itemRoute = await loadRoute<{
+      PATCH: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+      DELETE: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/orgs/[id]");
+
+    const createResponse = await collectionRoute.POST(
+      jsonRequest(
+        "/api/admin/orgs",
+        { slug: "org-audit", name: "Org Audit", seat_limit: 1 },
+        { headers },
+      ),
+    );
+    const createBody = await responseJson(createResponse) as { org: { id: string } };
+    const orgId = createBody.org.id;
+    const updateResponse = await itemRoute.PATCH(
+      jsonRequest(
+        `/api/admin/orgs/${orgId}`,
+        { name: "Org Audit Updated" },
+        { method: "PATCH", headers },
+      ),
+      { params: Promise.resolve({ id: orgId }) },
+    );
+    const deleteResponse = await itemRoute.DELETE(
+      jsonRequest(`/api/admin/orgs/${orgId}`, {}, { method: "DELETE", headers }),
+      { params: Promise.resolve({ id: orgId }) },
+    );
+
+    assert.equal(createResponse.status, 200);
+    assert.equal(updateResponse.status, 200);
+    assert.equal(deleteResponse.status, 200);
+    assert.deepEqual(
+      (db.audit_log as Array<{ action: string; org_id: string | null }>).map((row) => [
+        row.action,
+        row.org_id,
+      ]),
+      [
+        ["org_created", orgId],
+        ["org_updated", orgId],
+        ["org_deleted", orgId],
+      ],
+    );
+  });
+
   it("admin license revoke mutates only the target user's license", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ id: "license-admin", email: "license-admin@example.com", role: "admin" });
