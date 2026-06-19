@@ -1417,6 +1417,7 @@ export interface SourceInboxResponse {
     readPath: "db" | "jsonl" | string;
     fallback: boolean;
     fallbackError?: string;
+    fallbackErrorCode?: string;
     counts: {
       sources: number;
       profiles: number;

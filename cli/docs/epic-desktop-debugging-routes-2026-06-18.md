@@ -177,7 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
-- Local route identity fingerprint: `77a17629cf632bea`.
+- Local route identity fingerprint: `52094886efcfdce6`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -226,12 +226,12 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `11284541a3287764`.
+- Caller inventory fingerprint: `3110b150ce9d70dd`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,
-  `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
-  `/api/cron/attention` contract test, example plugin API mount test, serialized
+  `/api/source-inbox?debug=1` read-path/counts/sanitized fallback metadata,
+  direct `/api/cron/attention` contract test, example plugin API mount test, serialized
   updater manual checks, dead updater `dismissToast` preload exposure,
   `GatewayClient` WebSocket close-code/reason propagation, stale updater
   polling comment, backend hosted route-handler harness, hosted device
@@ -617,7 +617,8 @@ traceable to their owner.
 
 Deliverables:
 
-- Done: source inbox backend `debug=1` metadata on the existing route.
+- Done: source inbox backend `debug=1` metadata on the existing route; fallback
+  errors return exception type plus stable code only, not raw DB exception text.
 - Done: direct `/api/cron/attention` route contract test.
 - Done: positive protected example plugin API mount contract test.
 - Remaining: plugin restart behavior is documented before any public
@@ -819,7 +820,7 @@ Deliverables:
 - Closed gaps from this pass:
   - `/api/ws` missing-token, bad-token, and embedded-chat-disabled close codes,
   - frontend `api.ts` session-header injection,
-  - `/api/source-inbox?debug=1`,
+  - `/api/source-inbox?debug=1` read-path/counts/sanitized fallback metadata,
   - `/api/cron/attention`,
   - positive protected example plugin API mount,
   - updater manual-check serialization,

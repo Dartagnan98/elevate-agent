@@ -78,7 +78,8 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
             "counts": _source_inbox_counts(payload),
         }
         if fallback_error is not None:
-            debug["fallbackError"] = f"{type(fallback_error).__name__}: {fallback_error}"[:240]
+            debug["fallbackError"] = type(fallback_error).__name__
+            debug["fallbackErrorCode"] = "source_inbox_db_read_failed"
         return {**payload, "debug": debug}
 
     def _source_inbox_response(limit: int = _SOURCE_INBOX_ACTION_LIMIT, *, debug: bool = False):

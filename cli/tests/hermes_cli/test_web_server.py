@@ -1182,7 +1182,10 @@ class TestNewEndpoints:
         import elevate_cli.source_connectors as source_connectors
 
         def fail_db_source_inbox_response(*, limit=16):
-            raise RuntimeError("db offline")
+            raise RuntimeError(
+                "db offline postgres://user:pass@host/db "
+                "sk-1234567890abcdef agent@example.com /Users/example/.elevate/state.db"
+            )
 
         def fake_jsonl_source_inbox_response(*, limit=16):
             return {
@@ -1214,8 +1217,14 @@ class TestNewEndpoints:
         debug = resp.json()["debug"]
         assert debug["readPath"] == "jsonl"
         assert debug["fallback"] is True
-        assert "RuntimeError: db offline" in debug["fallbackError"]
+        assert debug["fallbackError"] == "RuntimeError"
+        assert debug["fallbackErrorCode"] == "source_inbox_db_read_failed"
         assert debug["counts"]["threads"] == 1
+        body = resp.text
+        assert "postgres://user:pass@host/db" not in body
+        assert "sk-1234567890abcdef" not in body
+        assert "agent@example.com" not in body
+        assert "/Users/example/.elevate/state.db" not in body
 
     def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
         from cron import jobs as cron_jobs
