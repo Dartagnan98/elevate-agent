@@ -2952,7 +2952,8 @@ async def upload_attachment(session_id: str, file: UploadFile = File(...)):
     try:
         upload_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create upload dir: {exc}")
+        _log.warning("Could not create upload dir", exc_info=True)
+        raise HTTPException(status_code=500, detail="Could not create upload directory")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_name = _sanitize_upload_filename(file.filename or "file")
@@ -2984,7 +2985,8 @@ async def upload_attachment(session_id: str, file: UploadFile = File(...)):
             dest.unlink()
         except OSError:
             pass
-        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+        _log.warning("Upload failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Upload failed")
 
     media_type = file.content_type or mimetypes.guess_type(str(dest))[0] or "application/octet-stream"
     return JSONResponse(

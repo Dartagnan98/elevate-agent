@@ -929,6 +929,55 @@ class TestWebServerEndpoints:
         via_link = self.client.get("/api/files/preview", params={"path": str(link)})
         assert via_link.status_code == 403
 
+    def test_upload_attachment_sanitizes_session_and_filename(self):
+        from elevate_constants import get_elevate_home
+
+        resp = self.client.post(
+            "/api/uploads/session%20weird",
+            files={"file": ("../../.env", b"hello", "text/plain")},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["name"] == "_env"
+        assert body["size"] == 5
+        path = Path(body["path"]).resolve()
+        assert path.is_file()
+        assert path.read_bytes() == b"hello"
+        assert path.parent == (get_elevate_home() / "uploads" / "session_weird").resolve()
+
+    def test_upload_attachment_rejects_oversize_and_removes_partial(self, monkeypatch):
+        from elevate_cli import web_server
+        from elevate_constants import get_elevate_home
+
+        monkeypatch.setattr(web_server, "_UPLOAD_MAX_PER_FILE", 4)
+        resp = self.client.post(
+            "/api/uploads/oversize",
+            files={"file": ("big.txt", b"12345", "text/plain")},
+        )
+
+        assert resp.status_code == 413
+        upload_dir = get_elevate_home() / "uploads" / "oversize"
+        assert list(upload_dir.glob("*")) == []
+
+    def test_upload_attachment_failure_response_does_not_leak_local_path(self, monkeypatch):
+        from elevate_cli import web_server
+
+        class FailingPath(type(Path())):
+            def mkdir(self, *args, **kwargs):  # noqa: ARG002
+                raise OSError("/Users/example/.elevate/uploads/secret")
+
+        monkeypatch.setattr(web_server, "get_elevate_home", lambda: FailingPath("/tmp/elevate-test-home"))
+
+        resp = self.client.post(
+            "/api/uploads/session",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Could not create upload directory"
+        assert "/Users/example" not in resp.text
+
 
 # ---------------------------------------------------------------------------
 # _build_schema_from_config tests
