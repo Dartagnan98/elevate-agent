@@ -59,7 +59,7 @@ Critical path:
 | HTML-01 | Loading screen | PASS iff loading screen never traps the user silently | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/install-flow.test.js desktop/test/ipc-contract.test.js` proves startup loads `loading.html` first and then routes to either dashboard or setup; retry failure also leaves loading for setup with `{ ok: false }` |
 | HTML-02 | Install screen | PASS iff Install and Retry buttons call working IPC and show result state | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/install-flow.test.js desktop/test/ipc-contract.test.js` proves Retry and Install call the preload IPC, display checking/install/error/result text, and re-enable both buttons on rejected or negative results |
 | HTML-03 | Login screen legacy path | PASS iff legacy login screen is either unreachable by design or fully working | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/login-flow.test.js desktop/test/ipc-contract.test.js` proves the legacy `login.html` form submits trimmed credentials, failed login restores controls with visible error text, forgot/signup/link actions use allowlisted auth targets, preload IPC has handlers/callers, and successful `auth:login` reloads the dashboard |
-| HTML-04 | Overlay | PASS iff computer-use overlay appears only while the activity flag is fresh and never steals focus | UNKNOWN | Manual flag-file probe |
+| HTML-04 | Overlay | PASS iff computer-use overlay appears only while the activity flag is fresh and never steals focus | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/overlay-guard.test.js desktop/test/navigation-guard.test.js` proves the computer-use overlay watches `~/.elevate/computer-use-active` with a 6s freshness window, uses `showInactive()`, is non-focusable/click-through/skip-taskbar, stays visible on full-screen workspaces, and the overlay HTML has a visible Computer Use label without pointer capture |
 
 ## 4. React Dashboard App
 
@@ -334,3 +334,4 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web exec vitest run src/pages/__tests__/ChatPage.artifactPreviewSafety.test.ts`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/login-flow.test.js desktop/test/ipc-contract.test.js`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/install-flow.test.js desktop/test/ipc-contract.test.js`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/overlay-guard.test.js desktop/test/navigation-guard.test.js`
