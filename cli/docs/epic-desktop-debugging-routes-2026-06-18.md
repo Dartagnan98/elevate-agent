@@ -269,7 +269,7 @@ Current verified snapshot, 2026-06-18:
   `tts.edge` install spec matches packaged core dependency policy, production
   support bundle redaction for session-recorder events, and remote
   `elevate debug share --no-redact` rejection before upload, and dashboard
-  plugin rescan auth gating.
+  plugin rescan auth gating, and `debug.trace` blank-trace log redaction.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   passes `cli/scripts/installed_runtime_smoke.py` for `1.2.58` before and
   after first launch. The 1.2.57 installed-app seal failure is closed by the
@@ -781,19 +781,16 @@ Deliverables:
   `~/Library/Logs/Elevate/main.log`, compare bundled-vs-served assets, verify
   selected port, auth injection, updater state/log lines, and app version.
 - Current packaged proof: installed app seal validation is part of
-  `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.58` app passes
-  app-version, seal validation, and packaged WhatsApp bridge checks. Repo
-  `web_dist` changed after that app was built, so installed/candidate parity is
-  currently stale until the app artifacts are rebuilt and smoked again. The
-  latest live installed check used `--skip-sidecar`, so it does not prove
-  WebSocket or updater runtime state. The smoke script now records the selected
-  port, compares live-served assets against installed `web_dist`, and probes
-  protected local HTTP auth when sidecar smoke is enabled.
+  `cli/scripts/installed_runtime_smoke.py`; the final installed `1.2.58` app
+  passes app-version, notarized seal validation, repo/installed `web_dist`
+  parity, served-asset parity, packaged WhatsApp bridge checks, protected HTTP
+  auth without/with extracted session token, `/api/ws` streaming, final text,
+  and session resume. Final installed Comms channel probe returned
+  `invalid_count: 0` after the legacy self-recipient projection fix.
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`.
-  Prior local `1.2.58` x64 and arm64 built apps passed app-version, seal, repo
-  `web_dist` parity, and packaged WhatsApp bridge checks, but that proof is
-  stale after the current web bundle changes; rerun the release/smoke path
-  before claiming current candidate parity.
+  Current local `1.2.58` x64 and arm64 built apps pass app-version, seal, repo
+  `web_dist` parity, and packaged WhatsApp bridge checks after the final Comms
+  fix.
 - Preflight proof: `desktop/scripts/preflight-apple-release.js` compares the
   package version to the public update feed, not stale local `dist/` output.
 - Local ship proof: `desktop/scripts/ship-to-hetzner.js` verifies the local
@@ -889,6 +886,8 @@ Deliverables:
     mode is local-only,
   - `/api/dashboard/plugins/rescan` requires the dashboard session token while
     `/api/dashboard/plugins` remains public read-only,
+  - `debug.trace` redacts blank-trace email/token/password/path values before
+    writing `blank-trace.log`,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`

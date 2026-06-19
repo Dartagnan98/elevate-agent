@@ -67,6 +67,36 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_debug_trace_log_redacts_secrets(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_elevate_home", tmp_path)
+
+    resp = server._methods["debug.trace"](
+        7,
+        {
+            "session_id": "sid-1",
+            "payload": {
+                "msg": (
+                    "blank for joe@example.com token=sk-secret123 "
+                    "password=hunter2 /Users/dartagnanpatricio/private/report.pdf"
+                ),
+                "authorization": "Bearer raw-token",
+            },
+        },
+    )
+
+    text = (tmp_path / "logs" / "blank-trace.log").read_text(encoding="utf-8")
+
+    assert resp["result"] == {"ok": True}
+    assert "joe@example.com" not in text
+    assert "sk-secret123" not in text
+    assert "hunter2" not in text
+    assert "/Users/dartagnanpatricio" not in text
+    assert "raw-token" not in text
+    assert "[redacted-email]" in text
+    assert "[redacted-secret]" in text
+    assert "[path:report.pdf]" in text
+
+
 def test_status_callback_emits_kind_and_text():
     with patch("tui_gateway.server._emit") as emit:
         cb = server._agent_cbs("sid")["status_callback"]

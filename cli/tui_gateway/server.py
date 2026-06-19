@@ -4478,6 +4478,36 @@ def _mark_session_idle(session: dict) -> None:
         session["idle_since"] = time.monotonic()
 
 
+_DEBUG_TRACE_SECRET_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+}
+
+
+def _redact_debug_trace_value(value, key: str = ""):
+    if key.lower() in _DEBUG_TRACE_SECRET_KEYS:
+        return "[redacted-secret]"
+    if isinstance(value, dict):
+        return {str(k)[:96]: _redact_debug_trace_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_debug_trace_value(v) for v in value[:50]]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    try:
+        from elevate_cli.diagnostics.session_recorder import _base_report, _redact_string
+
+        return _redact_string(text, _base_report())
+    except Exception:
+        return text
+
+
 @method("debug.trace")
 def _(rid, params: dict) -> dict:
     """Debug-only: append a client UI trace to blank-trace.log so a render
@@ -4485,11 +4515,12 @@ def _(rid, params: dict) -> dict:
     try:
         _bt = os.path.join(_elevate_home, "logs", "blank-trace.log")
         os.makedirs(os.path.dirname(_bt), exist_ok=True)
+        payload = _redact_debug_trace_value(params.get("payload") or params)
         with open(_bt, "a", encoding="utf-8") as f:
             f.write(
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} "
                 f"sid={params.get('session_id','')} "
-                f"{json.dumps(params.get('payload') or params, ensure_ascii=False)[:4000]}\n"
+                f"{json.dumps(payload, ensure_ascii=False)[:4000]}\n"
             )
     except Exception:
         pass
