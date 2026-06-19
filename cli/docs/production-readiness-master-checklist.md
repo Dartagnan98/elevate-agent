@@ -77,7 +77,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| API-01 | Route inventory | PASS iff local FastAPI route inventory matches source and drift fails a test | PASS | `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py` passes; installed runtime smoke also passed for current installed 1.2.58 before this source-only route fix |
+| API-01 | Route inventory | PASS iff local FastAPI route inventory matches source and drift fails a test | PASS | `cli/docs/desktop-debug-route-inventory.tsv` is generated from local FastAPI/WebSocket, plugin API, and hosted Next route rows; `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py` guards drift |
 | API-02 | Health/status | PASS iff `/api/status` exposes enough version/gateway readiness to classify startup | PASS | `/api/status` includes app version, config paths, gateway pid/state, platform states, update timestamps, and active session count |
 | API-03 | Auth gate | PASS iff protected routes reject missing/bad token and accept valid local token | UNKNOWN | Contract tests/runtime probe |
 | API-04 | Chat WebSocket | PASS iff `/api/ws` connects, streams, reports close reasons, and recovers visibly | UNKNOWN | WebSocket smoke |

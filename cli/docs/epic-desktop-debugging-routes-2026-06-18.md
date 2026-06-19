@@ -177,7 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
-- Local route identity fingerprint: `2938aef7acec0223`.
+- Local route identity fingerprint: `77a17629cf632bea`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `931f38822786ecdd`.
+- Caller inventory fingerprint: `90a6da8ae011404a`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
@@ -671,10 +671,11 @@ Acceptance:
 - CI or a local check fails when the route inventory changes and the map is not
   refreshed.
 
-Current status: the guarded artifact is not yet the row-level inventory above.
-The current checks guard local route count/fingerprint, hosted route file list,
-and frontend/desktop caller count/fingerprint. A generated row-level map remains
-a readiness gap.
+Current status: `cli/docs/desktop-debug-route-inventory.tsv` is generated from
+local FastAPI routes/WebSockets, dashboard plugin APIs, and hosted Next route
+handlers, and `cli/tests/elevate_cli/test_debug_route_inventory.py` fails when
+the checked-in TSV drifts. Caller, runtime smoke, and desktop IPC maps remain
+separate readiness artifacts.
 
 ### Issue 7 - Full Local Route Contract Coverage
 

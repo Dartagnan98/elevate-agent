@@ -8,52 +8,44 @@ from __future__ import annotations
 
 import re
 import hashlib
+import importlib.util
 import subprocess
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EPIC_PATH = REPO_ROOT / "cli/docs/epic-desktop-debugging-routes-2026-06-18.md"
-LOCAL_ROUTE_RE = re.compile(
-    r"^\s*@(app|router)\.(get|post|put|patch|delete|websocket)\(",
-    re.MULTILINE,
-)
+INVENTORY_PATH = REPO_ROOT / "cli/docs/desktop-debug-route-inventory.tsv"
+GENERATOR_PATH = REPO_ROOT / "cli/scripts/generate_debug_route_inventory.py"
+GENERATOR_SPEC = importlib.util.spec_from_file_location("generate_debug_route_inventory", GENERATOR_PATH)
+assert GENERATOR_SPEC is not None
+GENERATOR = importlib.util.module_from_spec(GENERATOR_SPEC)
+assert GENERATOR_SPEC.loader is not None
+sys.modules[GENERATOR_SPEC.name] = GENERATOR
+GENERATOR_SPEC.loader.exec_module(GENERATOR)
 
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _local_route_count() -> int:
-    roots = [
-        REPO_ROOT / "cli/elevate_cli/web_server.py",
-        REPO_ROOT / "cli/elevate_cli/web_routes",
-        REPO_ROOT / "cli/plugins",
-    ]
-    count = 0
-    for root in roots:
-        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
-        for path in paths:
-            count += len(LOCAL_ROUTE_RE.findall(_read(path)))
-    return count
+def _inventory_rows():
+    return GENERATOR.generate_rows(REPO_ROOT)
 
 
 def _local_route_fingerprint() -> str:
-    entries: list[str] = []
-    roots = [
-        REPO_ROOT / "cli/elevate_cli/web_server.py",
-        REPO_ROOT / "cli/elevate_cli/web_routes",
-        REPO_ROOT / "cli/plugins",
+    entries = [
+        f"{row.surface}:{row.kind}:{row.method}:{row.path}:{row.file}:{row.line}"
+        for row in _inventory_rows()
+        if row.surface in {"local", "local_plugin"}
     ]
-    for root in roots:
-        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
-        for path in paths:
-            rel = path.relative_to(REPO_ROOT).as_posix()
-            for line_no, line in enumerate(_read(path).splitlines(), start=1):
-                if LOCAL_ROUTE_RE.search(line):
-                    entries.append(f"{rel}:{line_no}:{line.strip()}")
     digest = hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+def _local_route_count() -> int:
+    return sum(1 for row in _inventory_rows() if row.surface in {"local", "local_plugin"})
 
 
 def _hosted_route_count() -> int:
@@ -115,6 +107,16 @@ def test_desktop_debugging_epic_route_inventory_is_current():
     caller_count = len(_caller_inventory())
     assert f"Caller inventory: the latest sweep found {caller_count} frontend/desktop caller" in epic
     assert f"Caller inventory fingerprint: `{_caller_inventory_fingerprint()}`" in epic
+
+
+def test_desktop_debug_route_inventory_tsv_is_current():
+    rows = _inventory_rows()
+    expected = GENERATOR.to_tsv(rows)
+
+    assert _read(INVENTORY_PATH) == expected
+
+    keys = [(row.surface, row.kind, row.method, row.path, row.file, row.line) for row in rows]
+    assert len(keys) == len(set(keys))
 
 
 def test_desktop_debugging_epic_hosted_route_file_list_is_current():
