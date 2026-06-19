@@ -167,7 +167,7 @@ Critical path:
 | SEC-02 | Token storage | PASS iff local tokens are permissioned and never logged | UNKNOWN | Source review/log scan |
 | SEC-03 | CSP/navigation | PASS iff dashboard CSP/navigation prevents unsafe top-level nav and external schemes | UNKNOWN | Source review/manual probe |
 | SEC-04 | File preview safety | PASS iff previews cannot exfiltrate arbitrary local files or frame unsafe content | UNKNOWN | Tests/source review |
-| SEC-05 | Hosted guards | PASS iff hosted account/admin routes enforce auth/admin guards | UNKNOWN | Backend tests |
+| SEC-05 | Hosted guards | PASS iff hosted account/admin routes enforce auth/admin guards | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts` covers bearer license/user binding, revoked-license auth failure, self-service license tenant guard, sign-out-everywhere current-session preservation, and admin namespace missing-bearer/non-admin guard matrix |
 
 ## 14. Performance And Stability
 
