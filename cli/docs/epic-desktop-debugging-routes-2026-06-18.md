@@ -252,7 +252,8 @@ Current verified snapshot, 2026-06-18:
   packaged WhatsApp bridge/package checks, installed smoke reads the selected
   dashboard port from `main.log`, records it in JSON, compares served dashboard
   assets to the installed `web_dist`, and probes one protected HTTP route
-  without/with the extracted session token before sidecar prompts, desktop
+  without/with the extracted session token before sidecar prompts, ignores old
+  untimestamped bad-log continuations, desktop
   top-level navigation blocks arbitrary `file://` and external schemes,
   gateway reinstall when a previously
   missing packaged resource is recovered, gateway version-change installs
@@ -273,7 +274,9 @@ Current verified snapshot, 2026-06-18:
   passes `cli/scripts/installed_runtime_smoke.py` for `1.2.58` before and
   after first launch. The 1.2.57 installed-app seal failure is closed by the
   lazy `tts.edge` dependency-range fix plus the packaged pycache isolation that
-  keeps Python bytecode out of `Contents/Resources`.
+  keeps Python bytecode out of `Contents/Resources`. The fresh-log scanner now
+  skips stale untimestamped continuation lines from old timestamp blocks while
+  still catching fresh bad continuations.
 - Fresh candidate smoke: signed/notarized `desktop/dist/mac/Elevate.app` and
   `desktop/dist/mac-arm64/Elevate.app` for `1.2.58` pass app-version, seal,
   repo `web_dist` parity, and packaged WhatsApp bridge checks, including
@@ -842,7 +845,8 @@ Deliverables:
   - packaged WhatsApp bridge script/package/dependency checks,
   - installed runtime smoke discovers the selected dashboard port from
     `main.log`, records it, compares served assets to installed `web_dist`,
-    and probes protected local HTTP auth before sidecar prompts,
+    probes protected local HTTP auth before sidecar prompts, and ignores stale
+    untimestamped bad-log continuations,
   - desktop top-level navigation rejects arbitrary `file://` and external
     schemes while allowing dashboard/app-owned local pages,
   - desktop preload IPC contract checks every exposed invoke has a main handler

@@ -212,15 +212,21 @@ def read_recent_log_hits(path: Path, since: datetime) -> list[str]:
 
     hits: list[str] = []
     line_re = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+\]")
+    fresh_block = False
+    cutoff = since.replace(microsecond=0)
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         match = line_re.match(line)
         if match:
             try:
                 stamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
             except ValueError:
+                fresh_block = False
                 continue
-            if stamp < since.replace(microsecond=0):
+            fresh_block = stamp >= cutoff
+            if not fresh_block:
                 continue
+        elif not fresh_block:
+            continue
         if any(pattern in line for pattern in BAD_LOG_PATTERNS):
             hits.append(line.strip())
     return hits[-20:]

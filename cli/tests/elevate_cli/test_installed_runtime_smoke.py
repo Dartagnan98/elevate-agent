@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -86,6 +87,32 @@ def test_installed_runtime_smoke_discovers_selected_dashboard_port(tmp_path):
     assert smoke.parse_args([]).port is None
     assert smoke.read_selected_dashboard_port(log) == 9120
     assert smoke.read_selected_dashboard_port(tmp_path / "missing.log") == 9119
+
+
+def test_recent_log_scan_ignores_old_untimestamped_continuations(tmp_path):
+    smoke = _load_smoke_script()
+    log = tmp_path / "main.log"
+    since = datetime(2026, 6, 19, 12, 0, 0)
+    log.write_text(
+        "\n".join(
+            [
+                "[2026-06-19 11:59:00.000] [error] old failure",
+                "BLANK-TRACE from stale renderer boot",
+                "[2026-06-19 12:00:01.000] [info] fresh healthy line",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert smoke.read_recent_log_hits(log, since) == []
+
+    log.write_text(
+        "[2026-06-19 12:00:01.000] [error] fresh failure\n"
+        "Uncaught fresh renderer error\n",
+        encoding="utf-8",
+    )
+
+    assert smoke.read_recent_log_hits(log, since) == ["Uncaught fresh renderer error"]
 
 
 def test_main_records_selected_dashboard_port(monkeypatch, tmp_path):
