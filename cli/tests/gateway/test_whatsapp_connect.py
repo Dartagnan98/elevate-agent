@@ -215,14 +215,15 @@ class TestConnectCleanup:
     """Verify failure paths release the scoped session lock."""
 
     @pytest.mark.asyncio
-    async def test_marks_missing_creds_as_not_paired(self, tmp_path):
+    async def test_marks_missing_creds_as_not_paired(self, tmp_path, caplog):
         adapter = _make_adapter()
         bridge_script = tmp_path / "test-bridge.js"
         bridge_script.write_text("console.log('bridge');\n")
         adapter._bridge_script = str(bridge_script)
         adapter._session_path = tmp_path / "session"
 
-        with patch("gateway.platforms.whatsapp.check_whatsapp_requirements", return_value=True), \
+        with caplog.at_level("WARNING"), \
+             patch("gateway.platforms.whatsapp.check_whatsapp_requirements", return_value=True), \
              patch.object(type(adapter), "_acquire_platform_lock", return_value=True) as mock_lock:
             result = await adapter.connect()
 
@@ -230,6 +231,7 @@ class TestConnectCleanup:
         assert adapter.fatal_error_code == "whatsapp_not_paired"
         assert adapter.fatal_error_retryable is False
         assert "elevate whatsapp" in adapter.fatal_error_message
+        assert "platforms.whatsapp.enabled=false" in caplog.text
         mock_lock.assert_not_called()
 
     @pytest.mark.asyncio

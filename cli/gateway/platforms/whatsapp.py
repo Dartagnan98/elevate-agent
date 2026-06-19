@@ -521,8 +521,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if not creds_path.exists():
             logger.warning(
                 "[%s] WhatsApp is enabled but not paired (no creds.json at %s). "
-                "Run `elevate whatsapp` to pair, or remove WHATSAPP_ENABLED from "
-                "your .env to disable.",
+                "Run `elevate whatsapp` to pair, or set platforms.whatsapp.enabled=false "
+                "in config.yaml/remove WHATSAPP_ENABLED from .env to disable.",
                 self.name, creds_path,
             )
             self._set_fatal_error(
