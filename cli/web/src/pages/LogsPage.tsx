@@ -87,6 +87,7 @@ export default function LogsPage() {
             checked={autoRefresh}
             onCheckedChange={setAutoRefresh}
             id="logs-auto-refresh"
+            aria-label={t.logs.autoRefresh}
           />
           <Label htmlFor="logs-auto-refresh" className="text-xs cursor-pointer">
             {t.logs.autoRefresh}

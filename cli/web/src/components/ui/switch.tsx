@@ -1,4 +1,13 @@
+import type { ButtonHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
+
+type SwitchProps = {
+  checked: boolean;
+  onCheckedChange: (v: boolean) => void;
+  className?: string;
+  disabled?: boolean;
+  id?: string;
+} & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "aria-label" | "aria-labelledby" | "title">;
 
 export function Switch({
   checked,
@@ -6,19 +15,19 @@ export function Switch({
   className,
   disabled,
   id,
-}: {
-  checked: boolean;
-  onCheckedChange: (v: boolean) => void;
-  className?: string;
-  disabled?: boolean;
-  id?: string;
-}) {
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
+  title,
+}: SwitchProps) {
   return (
     <button
       type="button"
       id={id}
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      title={title}
       disabled={disabled}
       className={cn(
         "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors",

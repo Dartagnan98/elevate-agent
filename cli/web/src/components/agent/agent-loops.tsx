@@ -238,6 +238,7 @@ export function AgentLoops({
                       </div>
                       <Switch
                         checked={!!surface!.config?.enabled}
+                        aria-label="Enable work loop"
                         onCheckedChange={async (v) => {
                           await api.setHeartbeatSurfaceEnabled(surfaceKey, v);
                           load();
@@ -377,6 +378,7 @@ export function AgentLoops({
                         </div>
                         <Switch
                           checked={a.enabled}
+                          aria-label={`${a.enabled ? "Disable" : "Enable"} ${a.name}`}
                           onCheckedChange={async (v) => {
                             await api.setHeartbeatAutomationEnabled(a.id, v);
                             load();

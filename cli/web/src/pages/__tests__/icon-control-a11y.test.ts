@@ -1,13 +1,32 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const srcRoot = path.resolve(testDir, "../..");
+const scanRoots = ["pages", "components"].map((dir) => path.join(srcRoot, dir));
+
+function walkTsx(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = path.join(dir, entry);
+    if (full.includes(`${path.sep}__tests__${path.sep}`)) return [];
+    const st = statSync(full);
+    if (st.isDirectory()) return walkTsx(full);
+    return full.endsWith(".tsx") ? [full] : [];
+  });
+}
 
 function read(relativePath: string): string {
   return readFileSync(path.join(srcRoot, relativePath), "utf8");
+}
+
+function lineNumber(source: string, index: number): number {
+  return source.slice(0, index).split("\n").length;
+}
+
+function relative(file: string): string {
+  return path.relative(srcRoot, file);
 }
 
 function windowAround(source: string, marker: string): string {
@@ -66,5 +85,21 @@ describe("icon-only control accessibility", () => {
 
     expect(docsLink).toContain("aria-label={`Open ${p.name} docs`}");
     expect(docsLink).not.toMatch(/<a[\\s\\S]*<Button/);
+  });
+
+  it("keeps shared Switch controls explicitly named", () => {
+    const failures: string[] = [];
+
+    for (const file of scanRoots.flatMap(walkTsx)) {
+      const source = readFileSync(file, "utf8");
+      for (const match of source.matchAll(/<Switch\b[\s\S]*?\/>/g)) {
+        const block = match[0];
+        if (!/aria-label\s*=|aria-labelledby\s*=|title\s*=/.test(block)) {
+          failures.push(`${relative(file)}:${lineNumber(source, match.index ?? 0)}`);
+        }
+      }
+    }
+
+    expect(failures).toEqual([]);
   });
 });

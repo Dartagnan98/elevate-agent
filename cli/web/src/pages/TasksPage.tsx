@@ -707,7 +707,11 @@ function CreateTaskForm({
         </Field>
       )}
       <div className="flex items-center gap-3">
-        <Switch checked={needsApproval} onCheckedChange={setNeedsApproval} />
+        <Switch
+          checked={needsApproval}
+          onCheckedChange={setNeedsApproval}
+          aria-label="Needs approval before execution"
+        />
         <Label className="cursor-pointer text-sm text-foreground">Needs approval before execution</Label>
       </div>
       <div className="flex justify-end gap-2 pt-1">

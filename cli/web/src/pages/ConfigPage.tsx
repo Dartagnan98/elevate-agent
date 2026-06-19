@@ -1979,12 +1979,12 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Enable curated memory</span>
-          <Switch checked={memoryEnabled} onCheckedChange={(v) => set("memory.memory_enabled", v)} />
+          <Switch checked={memoryEnabled} onCheckedChange={(v) => set("memory.memory_enabled", v)} aria-label="Enable curated memory" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Include user profile</span>
-          <Switch checked={userProfileEnabled} onCheckedChange={(v) => set("memory.user_profile_enabled", v)} />
+          <Switch checked={userProfileEnabled} onCheckedChange={(v) => set("memory.user_profile_enabled", v)} aria-label="Include user profile" />
         </label>
 
         <div className="grid grid-cols-2 gap-3">
@@ -2034,32 +2034,32 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Auto-extract facts from each turn</span>
-          <Switch checked={autoExtract} onCheckedChange={(v) => set("plugins.elevate-memory-store.auto_extract", v)} />
+          <Switch checked={autoExtract} onCheckedChange={(v) => set("plugins.elevate-memory-store.auto_extract", v)} aria-label="Auto-extract facts from each turn" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Turn-by-turn journal</span>
-          <Switch checked={turnJournal} onCheckedChange={(v) => set("plugins.elevate-memory-store.turn_journal_enabled", v)} />
+          <Switch checked={turnJournal} onCheckedChange={(v) => set("plugins.elevate-memory-store.turn_journal_enabled", v)} aria-label="Turn-by-turn journal" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Daily organize (compress + cluster)</span>
-          <Switch checked={dailyOrganize} onCheckedChange={(v) => set("plugins.elevate-memory-store.daily_organize_enabled", v)} />
+          <Switch checked={dailyOrganize} onCheckedChange={(v) => set("plugins.elevate-memory-store.daily_organize_enabled", v)} aria-label="Daily organize memory" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Recent recall (last few turns)</span>
-          <Switch checked={recentRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.recent_recall_enabled", v)} />
+          <Switch checked={recentRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.recent_recall_enabled", v)} aria-label="Recent recall" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Graph recall (concept neighbors)</span>
-          <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} />
+          <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} aria-label="Graph recall" />
         </label>
 
         <label className="flex items-center justify-between gap-3">
           <span className="text-sm text-foreground/90">Embedding-based recall</span>
-          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} />
+          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} aria-label="Embedding-based recall" />
         </label>
       </div>
     </section>

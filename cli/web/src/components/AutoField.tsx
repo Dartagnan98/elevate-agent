@@ -50,7 +50,7 @@ export function AutoField({
       <div className="flex items-start justify-between gap-4">
         <FieldLabel label={label} schema={schema} />
         <div className="shrink-0 pt-0.5">
-          <Switch checked={!!value} onCheckedChange={onChange} />
+          <Switch checked={!!value} onCheckedChange={onChange} aria-label={label} />
         </div>
       </div>
     );

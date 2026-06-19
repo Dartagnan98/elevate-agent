@@ -920,6 +920,7 @@ function SkillRailRow({
         checked={skill.enabled}
         disabled={toggling}
         onCheckedChange={() => onToggleEnable()}
+        aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
         className="h-4 w-7 [&>span]:h-3 [&>span]:w-3"
       />
     </div>
@@ -1161,6 +1162,7 @@ function SkillDetail({
             checked={skill.enabled}
             onCheckedChange={onToggleEnable}
             disabled={toggling}
+            aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
           />
           <button
             type="button"
@@ -1295,6 +1297,7 @@ function WorkflowFlowCard({
               checked={skill.enabled}
               disabled={togglingSkills.has(skill.name)}
               onCheckedChange={() => onToggle(skill)}
+              aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
             />
           </div>
         ))}

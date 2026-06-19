@@ -1488,6 +1488,7 @@ function AgentHubAgentRow({
             checked={agent.enabled}
             disabled={saving}
             onCheckedChange={handleToggle}
+            aria-label={`${agent.enabled ? "Disable" : "Enable"} ${agent.name}`}
           />
         </div>
       </div>
@@ -2289,6 +2290,7 @@ function SkillsBrowser() {
                     checked={skill.enabled}
                     disabled={savingName === skill.name}
                     onCheckedChange={(v) => void handleToggle(skill.name, v)}
+                    aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
                   />
                 </li>
               ))}

@@ -552,7 +552,11 @@ export function AgentConfigEditor({
               <span className="text-xs text-muted-foreground">
                 {enabled ? "Enabled" : "Suspended"}
               </span>
-              <Switch checked={enabled} onCheckedChange={setEnabled} />
+              <Switch
+                checked={enabled}
+                onCheckedChange={setEnabled}
+                aria-label={enabled ? "Suspend agent identity" : "Enable agent identity"}
+              />
             </div>
           </div>
           <div className="grid gap-2 md:grid-cols-[10rem_minmax(0,1fr)]">
@@ -574,6 +578,7 @@ export function AgentConfigEditor({
             <Switch
               checked={dangerouslySkipPermissions}
               onCheckedChange={setDangerouslySkipPermissions}
+              aria-label="Preserve dangerously skip permissions"
             />
           </label>
         </section>
@@ -914,6 +919,7 @@ export function AgentConfigEditor({
                 <Switch
                   checked={Boolean(checked)}
                   onCheckedChange={(value) => (setChecked as (next: boolean) => void)(value)}
+                  aria-label={`${Boolean(checked) ? "Disable" : "Enable"} ${String(label)}`}
                 />
               </label>
             ))}
