@@ -267,7 +267,8 @@ Current verified snapshot, 2026-06-18:
   ship refuses a mismatched local feed before any remote mutation, lazy
   `tts.edge` install spec matches packaged core dependency policy, production
   support bundle redaction for session-recorder events, and remote
-  `elevate debug share --no-redact` rejection before upload.
+  `elevate debug share --no-redact` rejection before upload, and dashboard
+  plugin rescan auth gating.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   passes `cli/scripts/installed_runtime_smoke.py` for `1.2.58` before and
   after first launch. The 1.2.57 installed-app seal failure is closed by the
@@ -881,6 +882,8 @@ Deliverables:
     section with export-time re-sanitization and redaction report,
   - remote `elevate debug share --no-redact` is rejected before upload; no-redact
     mode is local-only,
+  - `/api/dashboard/plugins/rescan` requires the dashboard session token while
+    `/api/dashboard/plugins` remains public read-only,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
@@ -1051,8 +1054,6 @@ Current missing local route-family contract ledger:
   contract yet.
 - `integrations`: backend routes and dashboard callers exist; no local
   `cli/tests` contract yet.
-- `dashboard-plugins`: manifest/rescan routes and dashboard callers exist; no
-  local `cli/tests` contract yet.
 - `activity`: fleet feed route and dashboard caller exist; no local
   `cli/tests` contract yet.
 

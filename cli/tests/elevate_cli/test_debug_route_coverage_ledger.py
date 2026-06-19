@@ -37,11 +37,6 @@ MISSING_CONTRACT_FAMILIES = [
         "caller_marker": "getIntegrations",
     },
     {
-        "family": "dashboard-plugins",
-        "route_marker": "/api/dashboard/plugins",
-        "caller_marker": "getPlugins",
-    },
-    {
         "family": "activity",
         "route_marker": "/api/activity",
         "caller_marker": "getActivity",

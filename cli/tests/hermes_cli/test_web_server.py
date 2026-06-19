@@ -808,6 +808,17 @@ class TestWebServerEndpoints:
         resp = unauth_client.get("/api/status")
         assert resp.status_code == 200
 
+    def test_dashboard_plugin_rescan_requires_session_token(self):
+        """Plugin manifest reads are public; forced rescans mutate cache and require auth."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        unauth_client = TestClient(app)
+
+        assert unauth_client.get("/api/dashboard/plugins").status_code == 200
+        assert unauth_client.get("/api/dashboard/plugins/rescan").status_code == 401
+        assert self.client.get("/api/dashboard/plugins/rescan").status_code == 200
+
     def test_dashboard_session_cookie_authorizes_api_requests(self):
         """The served SPA cookie must cover first-load /api calls before JS runs."""
         from starlette.testclient import TestClient
