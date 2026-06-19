@@ -211,7 +211,7 @@ visible recovery.
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| GO-01 | All critical gates pass | PASS iff all non-N/A checklist rows above are PASS | FAIL | Checklist still has UNKNOWN rows across broader browser/manual UI coverage, performance soaks, install/upgrade/previous-macOS environment matrix, and UI E2E |
+| GO-01 | All critical gates pass | PASS iff all non-N/A checklist rows above are PASS | FAIL | Checklist still has a FAIL row for installed idle CPU plus UNKNOWN rows for performance soaks, update timing, install/upgrade/previous-macOS environment matrix, and final UI E2E |
 | GO-02 | No P0/P1 open bugs | PASS iff no open critical bugs remain in the ledger | PASS | Runtime warning ledger classifies current warnings as P2/P3 or resolved/historical: WhatsApp setup, stale config, Composio Gmail 422, missing embedding key, one asyncio cleanup warning, historical Oura MCP noise, resolved Admin cron aliases, and one isolated-passing `/api/pub` flake |
 | GO-03 | Tests green | PASS iff selected repo-wide test suite is green and listed | PASS | Listed evidence commands pass for web build, backend tests, targeted pytest, desktop preflight, mac smoke, installed-app smoke, and the frontend hard-lint gate (`npm --prefix cli/web run lint -- --quiet`) |
 | GO-04 | UI E2E checked | PASS iff install -> login -> chat -> tools -> automations -> update -> quit/reopen is checked | UNKNOWN | Manual/browser report |
