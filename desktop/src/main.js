@@ -1745,7 +1745,15 @@ ipcMain.handle("updater:install", () => {
     return { ok: false, message: "Update is not ready yet." };
   }
   // setImmediate so the IPC reply is sent before quit kicks in.
-  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  setImmediate(() => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      log.warn(`[updater] install failed: ${message}`);
+      broadcastUpdaterEvent({ status: "error", error: message });
+    }
+  });
   return { ok: true };
 });
 

@@ -6,7 +6,12 @@ const vm = require("node:vm");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
 
-function loadUpdater({ isPackaged = true, hasMetadata = true, checkForUpdates } = {}) {
+function loadUpdater({
+  isPackaged = true,
+  hasMetadata = true,
+  checkForUpdates,
+  quitAndInstall,
+} = {}) {
   const main = fs.readFileSync(mainPath, "utf8");
   const start = main.indexOf('let updateState = { status: "idle"');
   const end = main.indexOf("// Register the elevate:// scheme");
@@ -48,6 +53,7 @@ function loadUpdater({ isPackaged = true, hasMetadata = true, checkForUpdates } 
       },
       quitAndInstall(...args) {
         quitCalls.push(args);
+        if (quitAndInstall) quitAndInstall(...args);
       },
     },
     setImmediate(callback) {
@@ -119,4 +125,61 @@ test("updater install only runs once an update is ready", () => {
 
   assert.equal(updater.handlers.get("updater:install")().ok, true);
   assert.deepEqual(updater.quitCalls, [[false, true]]);
+});
+
+test("updater check failures are visible and can be retried", async () => {
+  let attempts = 0;
+  const updater = loadUpdater({
+    checkForUpdates() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("feed unavailable");
+      return { updateInfo: { version: "9.9.9" } };
+    },
+  });
+
+  const first = await updater.handlers.get("updater:check")();
+  assert.equal(first.ok, false);
+  assert.equal(first.message, "feed unavailable");
+  assert.equal(updater.handlers.get("updater:status")().status, "error");
+  assert.equal(updater.sent.at(-1).payload.error, "feed unavailable");
+
+  const retry = await updater.handlers.get("updater:check")();
+  assert.equal(retry.ok, true);
+  assert.equal(retry.version, "9.9.9");
+  assert.equal(updater.checkCalls, 2);
+});
+
+test("updater error events stay visible without blocking retry", async () => {
+  const updater = loadUpdater();
+
+  updater.updaterEvents.get("error")(new Error("download failed"));
+
+  assert.equal(updater.handlers.get("updater:status")().status, "error");
+  assert.equal(updater.sent.at(-1).payload.error, "download failed");
+
+  const retry = await updater.handlers.get("updater:check")();
+  assert.equal(retry.ok, true);
+  assert.equal(retry.version, "9.9.9");
+  assert.equal(updater.checkCalls, 1);
+});
+
+test("updater install failures are visible and can be retried", async () => {
+  const updater = loadUpdater({
+    quitAndInstall() {
+      throw new Error("ShipIt failed");
+    },
+  });
+  updater.updaterEvents.get("update-downloaded")({ version: "9.9.9" });
+
+  const install = updater.handlers.get("updater:install")();
+
+  assert.equal(install.ok, true);
+  assert.equal(updater.handlers.get("updater:status")().status, "error");
+  assert.equal(updater.sent.at(-1).payload.error, "ShipIt failed");
+  assert.deepEqual(updater.quitCalls, [[false, true]]);
+
+  const retry = await updater.handlers.get("updater:check")();
+  assert.equal(retry.ok, true);
+  assert.equal(retry.version, "9.9.9");
+  assert.equal(updater.checkCalls, 1);
 });
