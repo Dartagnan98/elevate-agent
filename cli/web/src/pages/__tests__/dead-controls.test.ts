@@ -45,6 +45,7 @@ describe("dead control sweep", () => {
       { name: "javascript href", pattern: /href\s*=\s*["']javascript:/gi },
       { name: "empty click handler", pattern: /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*\{\s*\}\s*\}/g },
       { name: "forced enabled disabled prop", pattern: /disabled\s*=\s*\{\s*false\s*\}/g },
+      { name: "blocking browser alert", pattern: /\b(?:window\.)?alert\s*\(/g },
     ];
     const failures: string[] = [];
 

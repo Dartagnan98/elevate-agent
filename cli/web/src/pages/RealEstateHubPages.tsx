@@ -814,6 +814,7 @@ function DraftMessagesBoard({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const drafts = allDrafts.filter((d) => !dismissedIds.has(d.id));
@@ -898,6 +899,7 @@ function DraftMessagesBoard({
         });
       }
       try {
+        setActionError(null);
         const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action, text);
         data.setSourceInbox(nextInbox);
         if (!isDismiss) {
@@ -917,7 +919,7 @@ function DraftMessagesBoard({
           });
         }
         console.error("Failed to update draft", error);
-        window.alert(`Failed to ${action} draft: ${error instanceof Error ? error.message : String(error)}`);
+        setActionError(`Failed to ${action} draft: ${error instanceof Error ? error.message : String(error)}`);
       }
     },
     [data],
@@ -1186,6 +1188,11 @@ function DraftMessagesBoard({
                 {showAll ? `Show first ${pageSize}` : `Show all ${drafts.length}`}
               </button>
             )}
+          </div>
+        )}
+        {actionError && (
+          <div className="mt-3 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+            {actionError}
           </div>
         )}
       </CardHeader>
@@ -1956,6 +1963,7 @@ function SkippedDraftsList({
   const { byThread } = useProfileLookups(data);
   const allSkipped = draftsOverride ?? data.sourceInbox?.skippedDrafts ?? [];
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // Build thread lookup by (sourceId, threadId) AND bare threadId so we can
   // borrow Hot Leads-style heat/name/status from the real thread record.
@@ -2019,12 +2027,13 @@ function SkippedDraftsList({
   const restoreDraft = async (draft: SourceInboxDraft) => {
     if (restoringId) return;
     setRestoringId(draft.id);
+    setRestoreError(null);
     try {
       const nextInbox = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, "restore", draft.draftText);
       data.setSourceInbox(nextInbox);
     } catch (error) {
       console.error("Failed to restore skipped draft", error);
-      window.alert(`Failed to restore draft: ${error instanceof Error ? error.message : String(error)}`);
+      setRestoreError(`Failed to restore draft: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setRestoringId(null);
     }
@@ -2032,6 +2041,11 @@ function SkippedDraftsList({
 
   return (
     <div className={LANE_LIST_SCROLL_CLASS}>
+      {restoreError && (
+        <div className="mb-2 rounded-md border border-destructive/45 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+          {restoreError}
+        </div>
+      )}
       {skipped.map((draft) => {
         const thread = (draft.sourceId && draft.threadId
           ? threadByKey.get(`${draft.sourceId}:${draft.threadId}`)

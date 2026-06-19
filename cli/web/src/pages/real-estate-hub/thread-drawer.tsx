@@ -154,6 +154,7 @@ function ThreadDrawer({
     async (action: "approve" | "skip") => {
       if (!context?.pendingDraft) return;
       setSubmitting(true);
+      setError(null);
       try {
         const nextInbox = await api.updateSourceInboxDraft(
           context.pendingDraft.sourceId,
@@ -164,7 +165,7 @@ function ThreadDrawer({
         data.setSourceInbox(nextInbox);
         onClose();
       } catch (err) {
-        window.alert(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
+        setError(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setSubmitting(false);
       }
@@ -175,6 +176,7 @@ function ThreadDrawer({
   const restoreSkippedDraft = useCallback(async () => {
     if (!skippedDraft || restoring) return;
     setRestoring(true);
+    setError(null);
     try {
       const nextInbox = await api.updateSourceInboxDraft(
         skippedDraft.sourceId,
@@ -185,7 +187,7 @@ function ThreadDrawer({
       data.setSourceInbox(nextInbox);
       onClose();
     } catch (err) {
-      window.alert(`Failed to restore skipped draft: ${err instanceof Error ? err.message : String(err)}`);
+      setError(`Failed to restore skipped draft: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setRestoring(false);
     }
