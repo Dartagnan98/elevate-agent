@@ -1969,7 +1969,7 @@ async def configure_whatsapp(request: Request):
     return {
         "ok": True,
         "mode": get_env_value("WHATSAPP_MODE") or "",
-        "enabled": (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true",
+        "enabled": _whatsapp_enabled(),
         "allowedUsers": get_env_value("WHATSAPP_ALLOWED_USERS") or "",
         "bridgePresent": bridge_present,
         "bridgeInstalled": has_node_modules,
@@ -1981,6 +1981,23 @@ def _elevate_repo_root() -> Path:
     """Locate the repo root that holds ``scripts/whatsapp-bridge``."""
     # web_server.py lives at <repo>/cli/elevate_cli/web_server.py
     return Path(__file__).resolve().parents[1]
+
+
+def _whatsapp_enabled() -> bool:
+    env_value = (get_env_value("WHATSAPP_ENABLED") or "").strip().lower()
+    if env_value in {"true", "1", "yes"}:
+        return True
+    try:
+        platforms = load_config().get("platforms", {})
+        whatsapp = platforms.get("whatsapp", {}) if isinstance(platforms, dict) else {}
+        if not isinstance(whatsapp, dict):
+            return False
+        enabled = whatsapp.get("enabled")
+        if isinstance(enabled, str):
+            return enabled.strip().lower() in {"true", "1", "yes"}
+        return bool(enabled)
+    except Exception:
+        return False
 
 
 @app.post("/api/channels/whatsapp/install")
@@ -2032,7 +2049,7 @@ async def whatsapp_status():
         "bridgePresent": (bridge_dir / "bridge.js").exists(),
         "bridgeInstalled": (bridge_dir / "node_modules").exists(),
         "mode": get_env_value("WHATSAPP_MODE") or "",
-        "enabled": (get_env_value("WHATSAPP_ENABLED") or "").lower() == "true",
+        "enabled": _whatsapp_enabled(),
         "paired": (session_dir / "creds.json").exists(),
         "allowedUsers": get_env_value("WHATSAPP_ALLOWED_USERS") or "",
     }

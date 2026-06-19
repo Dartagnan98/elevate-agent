@@ -609,6 +609,19 @@ class TestWebServerEndpoints:
         assert resp.json()["gateway_state"] == "startup_failed"
         assert resp.json()["gateway_platforms"] == {}
 
+    def test_whatsapp_status_reads_config_enabled_flag(self, monkeypatch):
+        from elevate_cli.config import save_config
+        import elevate_cli.web_server as web_server
+
+        monkeypatch.delenv("WHATSAPP_ENABLED", raising=False)
+        monkeypatch.setattr(web_server, "_elevate_repo_root", lambda: Path("/missing"))
+        save_config({"platforms": {"whatsapp": {"enabled": True}}})
+
+        resp = self.client.get("/api/channels/whatsapp/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is True
+
     def test_get_config_schema(self):
         resp = self.client.get("/api/config/schema")
         assert resp.status_code == 200
