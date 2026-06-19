@@ -491,6 +491,32 @@ function writeGatewayVersionMarker(version) {
   }
 }
 
+function existingGatewayMissingResource() {
+  try {
+    const statusPath = path.join(os.homedir(), ".elevate", "gateway_state.json");
+    const payload = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    const platforms = payload && typeof payload === "object" ? payload.platforms : null;
+    if (!platforms || typeof platforms !== "object") return "";
+
+    for (const [name, state] of Object.entries(platforms)) {
+      if (!state || typeof state !== "object") continue;
+      const code = String(state.error_code || "");
+      if (!code.endsWith("_missing")) continue;
+      const message = String(state.error_message || "");
+      const marker = " missing at ";
+      const idx = message.indexOf(marker);
+      if (idx < 0) continue;
+      const candidate = message.slice(idx + marker.length).trim().replace(/\.$/, "");
+      if (candidate && fileExists(candidate)) {
+        return `${name}:${code}:${candidate}`;
+      }
+    }
+  } catch {
+    // no status yet, malformed JSON, or unreadable file: not a recovery signal
+  }
+  return "";
+}
+
 // Restart the loaded gateway so it re-execs the freshly-bundled CLI code. A
 // desktop auto-update swaps the .app bundle, but the long-lived launchd gateway
 // keeps running the OLD code in memory — so the seed/migration path
@@ -601,9 +627,24 @@ function ensureGatewayInstalled(launcher, baseEnv) {
           writeGatewayVersionMarker(appVersion);
         }
       } else {
-        appendBackendLog(
-          "[gateway] self-heal: healthy (plist present + loaded, version current)\n",
-        );
+        const missingResource = existingGatewayMissingResource();
+        if (missingResource) {
+          appendBackendLog(
+            `[gateway] self-heal: packaged resource recovered (${missingResource}); reinstalling gateway\n`,
+          );
+          const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
+          const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
+          appendBackendLog(`[gateway] recovered-resource reinstall rc=${reinstall.status}\n${rout}\n`);
+          if (reinstall.status === 0) {
+            writeGatewayVersionMarker(appVersion);
+          } else if (kickstartGateway(uid)) {
+            writeGatewayVersionMarker(appVersion);
+          }
+        } else {
+          appendBackendLog(
+            "[gateway] self-heal: healthy (plist present + loaded, version current)\n",
+          );
+        }
       }
       return;
     }

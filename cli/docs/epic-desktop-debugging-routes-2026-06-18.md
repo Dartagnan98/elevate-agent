@@ -237,7 +237,8 @@ Current verified snapshot, 2026-06-18:
   stricter `/api/status` readiness for desktop launch, release-path
   `smoke:mac` gate, post-ship public feed/artifact verification, installed app
   `codesign`/`spctl` smoke gate, packaged WhatsApp bridge/package checks, and
-  production support bundle redaction for session-recorder events.
+  gateway reinstall when a previously missing packaged resource is recovered,
+  and production support bundle redaction for session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
   `codesign --verify --deep --strict` and `spctl --assess` report a sealed
@@ -770,6 +771,8 @@ Deliverables:
   - post-ship public feed/artifact verifier before declaring a release live,
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
+  - desktop gateway reinstall when gateway status reports a recovered
+    packaged-resource `_missing` error,
   - `elevate debug share --session/--last` recorder-event support bundle
     section with export-time re-sanitization and redaction report,
   - backend diagnostics string redaction for email/token/password/path values.
