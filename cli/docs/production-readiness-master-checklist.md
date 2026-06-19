@@ -111,10 +111,10 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | DATA-01 | Fresh DB init | PASS iff fresh `ELEVATE_HOME` initializes cleanly | PASS | `test_local_databases.py` proves a temp `ELEVATE_HOME` initializes operational Postgres migrations, session DB, PG-backed memory schema, outreach templates, Admin actions, onboarding rows, and scheduler registration without touching launchd |
-| DATA-02 | Upgrade migrations | PASS iff previous-version data migrates without loss | UNKNOWN | Migration tests |
+| DATA-02 | Upgrade migrations | PASS iff previous-version data migrates without loss | UNKNOWN | Schema migration plus JSONL/outreach backfill tests pass; direct one-shot legacy SQLite-to-PG migrator coverage still missing |
 | DATA-03 | Corrupt state recovery | PASS iff corrupt DB/state shows visible recovery instructions and leaves trace | UNKNOWN | Fault-injection probe |
 | DATA-04 | Duplicate prevention | PASS iff critical write paths avoid duplicate sends/tasks/messages | UNKNOWN | Tests/source review |
-| DATA-05 | Backup/rollback | PASS iff destructive migrations or state resets have documented rollback/backup path | UNKNOWN | Docs/source review |
+| DATA-05 | Backup/rollback | PASS iff destructive migrations or state resets have documented rollback/backup path | PASS | `test_migrate.py` proves backup no-op, backup/restore roundtrip, backup-first backfill, `--no-backup` behavior, and idempotent reruns; `migrate-data --rollback PATH`, pre-PG backup docs, and `db purge-sqlite-backup` are wired |
 
 ## 9. Real Estate And CRM Features
 
@@ -310,3 +310,5 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
 - FAIL then PASS: `db init` reported the deprecated `memory_store.db` label even though memory is initialized in embedded Postgres; now it reports `pgdata` and the fresh-home regression asserts the memory schema exists in PG.
 - PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/elevate_cli/test_local_databases.py`
+- PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/elevate_cli/data/test_migrate.py cli/tests/elevate_cli/data/test_migrations.py`
+- UNKNOWN: DATA-02 still needs direct coverage for the one-shot legacy SQLite-to-PG migrators (`_pg_data_migrate`, `_pg_memory_migrate`, `_pg_response_migrate`, `_pg_kanban_migrate`, `_pg_outreach_migrate`) before marking previous-version upgrade safe.
