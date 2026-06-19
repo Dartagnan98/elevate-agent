@@ -1044,8 +1044,11 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
 
       <div className="ab-scroll">
         {error ? (
-          <div style={{ padding: "8px 12px", margin: "0 0 12px", background: "color-mix(in srgb, #b85a3f 12%, transparent)", border: "1px solid color-mix(in srgb, #b85a3f 30%, transparent)", borderRadius: 6, fontSize: 12 }}>
-            {error}
+          <div className="ab-error mono" role="alert" aria-live="polite">
+            <span>{error}</span>
+            <button className="ab-btn ghost ab-error-retry" type="button" onClick={onRefresh} disabled={loading}>
+              <Refresh /><span>{loading ? "Retrying..." : "Retry"}</span>
+            </button>
           </div>
         ) : null}
 

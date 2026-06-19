@@ -47,6 +47,23 @@ describe("route load error states", () => {
     }
   });
 
+  it("keeps local Real Estate Hub route failures visible with retry support", () => {
+    const adminBoard = read("pages/real-estate-hub/admin/components/admin-board.tsx");
+    const socialPage = read("pages/real-estate-hub/social/index.tsx");
+
+    expect(adminBoard).toContain('role="alert"');
+    expect(adminBoard).toContain('aria-live="polite"');
+    expect(adminBoard).toContain("ab-error");
+    expect(adminBoard).toContain('onClick={onRefresh}');
+    expect(adminBoard).toContain('loading ? "Retrying..." : "Retry"');
+
+    expect(socialPage).toContain('role="alert"');
+    expect(socialPage).toContain('aria-live="polite"');
+    expect(socialPage).toContain("sm-error-retry");
+    expect(socialPage).toContain("onClick={refresh}");
+    expect(socialPage).toContain('loadingSocial ? "Retrying..." : "Retry"');
+  });
+
   it.each([
     ["pages/ActivityPage.tsx", "cacheError", "Could not load activity"],
     ["pages/AnalyticsPage.tsx", "cacheError", "Could not load analytics"],

@@ -32,8 +32,11 @@ describe("admin deal UI recovery wiring", () => {
     expect(shell).toContain("onRefresh={() => handleRefresh()}");
     expect(shell).toContain("onMoveDeal={moveDeal}");
     expect(board).toContain("{error ? (");
+    expect(board).toContain('role="alert"');
+    expect(board).toContain('aria-live="polite"');
     expect(board).toContain("{error}");
     expect(board).toContain('onClick={onRefresh}');
     expect(board).toContain('disabled={loading}');
+    expect(board).toContain('loading ? "Retrying..." : "Retry"');
   });
 });

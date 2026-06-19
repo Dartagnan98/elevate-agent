@@ -605,6 +605,27 @@
   background: transparent;
 }
 .ab-card-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.ab-error {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 0 0 12px; padding: 8px 12px; border-radius: 7px;
+  background: color-mix(in srgb, var(--status-error) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-error) 30%, transparent);
+  color: var(--status-error);
+  font: 500 12px/1.4 "Geist Mono", monospace;
+}
+.ab-error > span { min-width: 0; overflow-wrap: anywhere; }
+.ab-error .ab-error-retry {
+  flex-shrink: 0;
+  color: var(--status-error);
+  border-color: color-mix(in srgb, var(--status-error) 32%, transparent);
+}
+.ab-error .ab-error-retry:hover {
+  background: color-mix(in srgb, var(--status-error) 10%, transparent);
+  color: var(--status-error);
+}
+@media (max-width: 640px) {
+  .ab-error { align-items: stretch; flex-direction: column; }
+}
 
 /* Status badges (action tags) -- sentence case, softer */
 .ab-action-tag {

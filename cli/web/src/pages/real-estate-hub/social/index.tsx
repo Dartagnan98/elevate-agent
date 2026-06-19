@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { SocialIdea, SocialMetricRow, SocialSnapshot } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { HubDataErrorBanner, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { SocialBoard } from "./board";
 import { buildSocialViewModel } from "./view-model";
@@ -118,7 +120,20 @@ export function RealEstateSocialMediaPage() {
   return (
     <div className="sm-root">
       <HubDataErrorBanner className="mb-3" data={data} />
-      {socialError && <div className="sm-error mono">{socialError}</div>}
+      {socialError && (
+        <div className="sm-error mono" role="alert" aria-live="polite">
+          <span>{socialError}</span>
+          <button
+            className="ab-btn ghost sm-error-retry"
+            type="button"
+            onClick={refresh}
+            disabled={loadingSocial}
+          >
+            <RefreshCw className={cn(loadingSocial && "animate-spin")} aria-hidden="true" />
+            <span>{loadingSocial ? "Retrying..." : "Retry"}</span>
+          </button>
+        </div>
+      )}
       <SocialBoard
         vm={vm}
         refreshing={refreshing}
