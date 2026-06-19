@@ -993,6 +993,32 @@ def skip_pending_send(
     return _row_to_send(out)
 
 
+def restore_skipped_send(source_id: str, task_id: str) -> dict[str, Any] | None:
+    """Flip a skipped approval row back into the /leads approval queue."""
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                SELECT * FROM send_queue
+                 WHERE status = ?
+                   AND source_id = ?
+                   AND (task_id = ? OR id = ?)
+                 ORDER BY updated_at DESC
+                 LIMIT 1
+                """,
+                (SEND_STATUS_SKIPPED, source_id, task_id, task_id),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
+                ("pending_approval", now, row["id"]),
+            )
+        out = conn.execute("SELECT * FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    return _row_to_send(out)
+
+
 def mark_sent(queue_id: str, provider_message_id: str) -> dict[str, Any] | None:
     now = _now()
     with connect() as conn:

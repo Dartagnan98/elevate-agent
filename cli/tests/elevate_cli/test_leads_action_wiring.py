@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 
 def test_generated_thread_draft_uses_active_outreach_template(monkeypatch):
@@ -107,6 +109,7 @@ def test_thread_draft_state_persists_template_metadata_on_skip(tmp_path, monkeyp
 
 
 def test_restore_source_task_removes_skipped_state(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
     from elevate_cli import source_connectors as sc
 
     source_root = tmp_path / "sources"
@@ -118,11 +121,48 @@ def test_restore_source_task_removes_skipped_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sc, "get_source_root_info", lambda config=None: {"sourceRoot": str(source_root)})
     monkeypatch.setattr(sc, "build_source_inbox_response", lambda config=None: {"ok": True})
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        outreach_db,
+        "restore_skipped_send",
+        lambda source_id, task_id: calls.append((source_id, task_id)),
+    )
 
     sc.update_source_task_state("email", "task-1", "restore", config={})
 
     state = json.loads((source_dir / "ui-state.json").read_text(encoding="utf-8"))
     assert "task-1" not in state["tasks"]
+    assert calls == [("email", "task-1")]
+
+
+def test_restore_skipped_send_queue_row_moves_back_to_pending_approval(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    source_root = tmp_path / "sources"
+    (source_root / "email").mkdir(parents=True)
+    monkeypatch.setattr(sc, "get_source_root_info", lambda config=None: {"sourceRoot": str(source_root)})
+
+    with outreach_db.connect() as conn:
+        with outreach_db.transaction(conn):
+            row = outreach_db.enqueue_send(
+                conn,
+                source_id="email",
+                thread_id="thread-1",
+                task_id="task-1",
+                channel="email",
+                payload={"draft_text": "Hi Ava"},
+            )
+            conn.execute(
+                "UPDATE send_queue SET status=? WHERE id=?",
+                (outreach_db.SEND_STATUS_SKIPPED, row["id"]),
+            )
+
+    sc.update_source_task_state("email", "task-1", "restore", config={}, return_inbox=False)
+
+    with outreach_db.connect() as conn:
+        restored = conn.execute("SELECT status FROM send_queue WHERE id=?", (row["id"],)).fetchone()
+    assert restored["status"] == "pending_approval"
 
 
 def test_dynamic_composio_source_task_actions_are_allowed(tmp_path, monkeypatch):
@@ -140,6 +180,94 @@ def test_dynamic_composio_source_task_actions_are_allowed(tmp_path, monkeypatch)
 
     state = json.loads((source_dir / "ui-state.json").read_text(encoding="utf-8"))
     assert state["tasks"]["task-1"]["status"] == "skipped"
+
+
+def test_db_only_skipped_send_queue_rows_surface_as_skipped_drafts(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    source_root = tmp_path / "sources"
+    skipped_send = {
+        "id": "queue-1",
+        "sourceId": "email",
+        "threadId": "thread-1",
+        "taskId": "task-1",
+        "channel": "email",
+        "payload": {
+            "draft_text": "Hi Ava, want the shortlist?",
+            "recipient": {"person_name": "Ava Buyer", "contact_id": "contact-1"},
+        },
+        "createdAt": "2026-06-18T10:00:00+00:00",
+        "updatedAt": "2026-06-19T10:00:00+00:00",
+    }
+
+    def fake_recent_sends(*, statuses, limit):
+        if statuses == ("skipped",):
+            return [skipped_send]
+        return []
+
+    monkeypatch.setattr(outreach_db, "list_recent_sends", fake_recent_sends)
+
+    drafts, skipped = sc._collect_drafts_for_db_inbox(
+        source_root=source_root,
+        connectors=[{"id": "email", "label": "Gmail"}],
+        threads=[],
+        skipped_cutoff=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        max_drafts=24,
+    )
+
+    assert drafts == []
+    assert skipped == [
+        {
+            "id": "email:send-queue:queue-1",
+            "sourceId": "email",
+            "sourceLabel": "Gmail",
+            "taskId": "task-1",
+            "threadId": "thread-1",
+            "contactId": "contact-1",
+            "conversationId": None,
+            "personName": "Ava Buyer",
+            "channel": "email",
+            "title": "Approve first-touch draft for Ava Buyer",
+            "draftText": "Hi Ava, want the shortlist?",
+            "context": "",
+            "latestAt": "2026-06-18T10:00:00+00:00",
+            "status": "skipped",
+            "approvalRequired": True,
+            "generated": False,
+            "fallback": False,
+            "record": {},
+            "skippedAt": "2026-06-19T10:00:00+00:00",
+        }
+    ]
+
+
+def test_restore_skipped_send_requeues_db_row():
+    from elevate_cli import outreach_db
+
+    token = uuid.uuid4().hex
+    source_id = "email"
+    thread_id = f"thread-{token}"
+    task_id = f"task-{token}"
+    with outreach_db.connect() as conn:
+        with outreach_db.transaction(conn):
+            send = outreach_db.enqueue_send(
+                conn,
+                source_id=source_id,
+                thread_id=thread_id,
+                task_id=task_id,
+                channel="email",
+                payload={"draft_text": "Hi"},
+            )
+            conn.execute(
+                "UPDATE send_queue SET status=? WHERE id=?",
+                (outreach_db.SEND_STATUS_SKIPPED, send["id"]),
+            )
+
+    restored = outreach_db.restore_skipped_send(source_id, task_id)
+
+    assert restored is not None
+    assert restored["status"] == "pending_approval"
 
 
 def test_update_profile_favorite_persists_flag(monkeypatch):

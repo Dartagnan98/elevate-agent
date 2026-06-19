@@ -3263,6 +3263,7 @@ def _collect_drafts_for_db_inbox(
     drafts: list[JsonRecord] = []
     skipped_drafts: list[JsonRecord] = []
     seen_drafts: set[str] = set()
+    seen_skipped_drafts: set[str] = set()
     seen_thread_drafts: set[tuple[str, str]] = set()
     task_state_by_source: dict[str, JsonRecord] = {}
 
@@ -3310,6 +3311,7 @@ def _collect_drafts_for_db_inbox(
                         draft["score"] = thread_meta.get("score")
                         draft["leadLabel"] = thread_meta.get("label")
                         draft["scoreReason"] = thread_meta.get("reason")
+                    seen_skipped_drafts.add(str(draft.get("id") or ""))
                     skipped_drafts.append(draft)
                 continue
             if status in {"approved", "done", "archived", "cancelled"}:
@@ -3327,6 +3329,52 @@ def _collect_drafts_for_db_inbox(
                 seen_thread_drafts.add((source_id, persisted_thread_id))
             drafts.append(draft)
 
+    def send_queue_draft(send: JsonRecord, *, skipped: bool = False) -> JsonRecord | None:
+        source_id = str(send.get("sourceId") or "")
+        thread_id_str = str(send.get("threadId") or "")
+        if not source_id or not thread_id_str:
+            return None
+        source = source_by_id.get(source_id) or {"id": source_id, "label": source_id}
+        payload = _as_dict(send.get("payload"))
+        recipient = _as_dict(payload.get("recipient"))
+        person_name = (
+            str(recipient.get("person_name") or "").strip()
+            or str(payload.get("person_name") or "").strip()
+            or "Client"
+        )
+        draft_text = str(payload.get("draft_text") or "").strip() or "Draft text has not been generated yet."
+        queue_id = str(send.get("id") or "")
+        task_id = str(send.get("taskId") or queue_id)
+        channel = str(send.get("channel") or "")
+        draft: JsonRecord = {
+            "id": f"{source_id}:send-queue:{queue_id}",
+            "sourceId": source_id,
+            "sourceLabel": str(source.get("label") or source_id),
+            "taskId": task_id,
+            "threadId": thread_id_str,
+            "contactId": recipient.get("contact_id") or payload.get("contact_id"),
+            "conversationId": recipient.get("conversation_id"),
+            "personName": person_name,
+            "channel": channel,
+            "title": f"Approve first-touch draft for {person_name}",
+            "draftText": draft_text,
+            "context": "",
+            "latestAt": str(send.get("createdAt") or send.get("updatedAt") or ""),
+            "status": "skipped" if skipped else "pending",
+            "approvalRequired": True,
+            "generated": False,
+            "fallback": False,
+            "record": {},
+        }
+        if skipped:
+            draft["skippedAt"] = str(send.get("updatedAt") or send.get("createdAt") or "")
+        thread_meta = _meta_by_key.get((source_id, thread_id_str))
+        if thread_meta:
+            draft["score"] = thread_meta.get("score")
+            draft["leadLabel"] = thread_meta.get("label")
+            draft["scoreReason"] = thread_meta.get("reason")
+        return draft
+
     # Source of truth: any send_queue row in pending_approval that isn't
     # already represented by a tasks.jsonl entry. Crons that write directly
     # to send_queue (e.g. run_fresh_first_touch_cron.py) sometimes race with
@@ -3343,55 +3391,39 @@ def _collect_drafts_for_db_inbox(
     for send in pending_sends:
         if len(drafts) >= max_drafts:
             break
-        source_id = str(send.get("sourceId") or "")
-        thread_id_str = str(send.get("threadId") or "")
-        if not source_id or not thread_id_str:
+        synthesized = send_queue_draft(send)
+        if not synthesized:
             continue
+        source_id = str(synthesized.get("sourceId") or "")
+        thread_id_str = str(synthesized.get("threadId") or "")
         if (source_id, thread_id_str) in seen_thread_drafts:
             continue
-        source = source_by_id.get(source_id) or {"id": source_id, "label": source_id}
-        payload = _as_dict(send.get("payload"))
-        recipient = _as_dict(payload.get("recipient"))
-        person_name = (
-            str(recipient.get("person_name") or "").strip()
-            or str(payload.get("person_name") or "").strip()
-            or "Client"
-        )
-        draft_text = str(payload.get("draft_text") or "").strip() or "Draft text has not been generated yet."
-        queue_id = str(send.get("id") or "")
-        task_id = str(send.get("taskId") or queue_id)
-        channel = str(send.get("channel") or "")
-        generated_id = f"{source_id}:send-queue:{queue_id}"
-        if generated_id in seen_drafts:
+        generated_id = str(synthesized.get("id") or "")
+        if not generated_id or generated_id in seen_drafts:
             continue
         seen_drafts.add(generated_id)
         seen_thread_drafts.add((source_id, thread_id_str))
-        synthesized: JsonRecord = {
-            "id": generated_id,
-            "sourceId": source_id,
-            "sourceLabel": str(source.get("label") or source_id),
-            "taskId": task_id,
-            "threadId": thread_id_str,
-            "contactId": recipient.get("contact_id") or payload.get("contact_id"),
-            "conversationId": recipient.get("conversation_id"),
-            "personName": person_name,
-            "channel": channel,
-            "title": f"Approve first-touch draft for {person_name}",
-            "draftText": draft_text,
-            "context": "",
-            "latestAt": str(send.get("createdAt") or send.get("updatedAt") or ""),
-            "status": "pending",
-            "approvalRequired": True,
-            "generated": False,
-            "fallback": False,
-            "record": {},
-        }
-        thread_meta = _meta_by_key.get((source_id, thread_id_str))
-        if thread_meta:
-            synthesized["score"] = thread_meta.get("score")
-            synthesized["leadLabel"] = thread_meta.get("label")
-            synthesized["scoreReason"] = thread_meta.get("reason")
         drafts.append(synthesized)
+
+    try:
+        skipped_sends = _odb.list_recent_sends(
+            statuses=("skipped",), limit=max_drafts * 4
+        )
+    except Exception:
+        skipped_sends = []
+
+    for send in skipped_sends:
+        updated_dt = _parse_record_dt(send.get("updatedAt"))
+        if updated_dt and updated_dt < skipped_cutoff:
+            continue
+        synthesized = send_queue_draft(send, skipped=True)
+        if not synthesized:
+            continue
+        generated_id = str(synthesized.get("id") or "")
+        if not generated_id or generated_id in seen_skipped_drafts:
+            continue
+        seen_skipped_drafts.add(generated_id)
+        skipped_drafts.append(synthesized)
 
     for thread in threads:
         if len(drafts) >= max_drafts:
@@ -4161,6 +4193,15 @@ def update_source_task_state(
         tasks.pop(task_id, None)
         state["tasks"] = tasks
         _write_source_ui_state(source_dir, state)
+        try:
+            from elevate_cli import outreach_db
+
+            outreach_db.restore_skipped_send(source_id, task_id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "restore: pending-send restore failed for %s/%s", source_id, task_id,
+                exc_info=True,
+            )
         return build_source_inbox_response(config) if return_inbox else {"ok": True}
 
     status = "approved" if normalized == "approve" else "skipped" if normalized == "skip" else "pending"
