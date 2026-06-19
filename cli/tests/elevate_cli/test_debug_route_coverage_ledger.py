@@ -22,11 +22,6 @@ MISSING_CONTRACT_FAMILIES = [
         "caller_marker": "getComposioStatus",
     },
     {
-        "family": "ayrshare",
-        "route_marker": "/api/ayrshare/",
-        "caller_marker": "getAyrshareStatus",
-    },
-    {
         "family": "social",
         "route_marker": "/api/social/",
         "caller_marker": "getSocialSnapshot",

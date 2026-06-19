@@ -915,7 +915,9 @@ Deliverables:
   - `/api/activity` has a local route contract proving DB-backed surface
     activity projection, agent filtering, limit handling, and response shape,
   - `/api/integrations` has a local route contract for GET settings, PUT save,
-    POST test, and unsupported action rejection.
+    POST test, and unsupported action rejection,
+  - `/api/ayrshare/*` has local route contracts for status, key set/clear,
+    profiles, scheduled posts, history query params, and invalid-key rejection.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
@@ -1077,8 +1079,6 @@ npm run build
 Current missing local route-family contract ledger:
 
 - `composio`: backend routes and dashboard callers exist; no local
-  `cli/tests` contract yet.
-- `ayrshare`: backend routes and dashboard callers exist; no local
   `cli/tests` contract yet.
 - `social`: backend routes and dashboard callers exist; no local `cli/tests`
   contract yet.

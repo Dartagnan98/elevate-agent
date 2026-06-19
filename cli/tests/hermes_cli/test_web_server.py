@@ -1424,6 +1424,50 @@ class TestNewEndpoints:
             ("test", "lofty", "test"),
         ]
 
+    def test_ayrshare_route_contract(self, monkeypatch):
+        import elevate_cli.ayrshare_client as ayrshare_client
+
+        calls = []
+        status = {"configured": True, "hasKey": True, "valid": True, "baseUrl": "https://ayrshare.test"}
+
+        monkeypatch.setattr(ayrshare_client, "get_status", lambda: calls.append(("status",)) or status)
+        monkeypatch.setattr(
+            ayrshare_client,
+            "set_api_key",
+            lambda api_key: calls.append(("set", api_key)) or {"ok": api_key == "good", "error": "bad key"},
+        )
+        monkeypatch.setattr(ayrshare_client, "clear_api_key", lambda: calls.append(("clear",)) or {"ok": True})
+        monkeypatch.setattr(ayrshare_client, "profiles", lambda: calls.append(("profiles",)) or {"ok": True, "data": []})
+        monkeypatch.setattr(ayrshare_client, "list_scheduled", lambda: calls.append(("scheduled",)) or {"ok": True, "data": []})
+        monkeypatch.setattr(
+            ayrshare_client,
+            "history",
+            lambda *, last_records=100, last_days=None: calls.append(("history", last_records, last_days))
+            or {"ok": True, "data": []},
+        )
+
+        assert self.client.get("/api/ayrshare/status").json() == status
+        assert self.client.post("/api/ayrshare/key", json={"apiKey": "bad"}).status_code == 400
+        assert self.client.post("/api/ayrshare/key", json={"apiKey": "good"}).json() == status
+        assert self.client.delete("/api/ayrshare/key").json() == status
+        assert self.client.get("/api/ayrshare/profiles").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/ayrshare/scheduled").json() == {"ok": True, "data": []}
+        assert self.client.get("/api/ayrshare/history?last_records=7&last_days=30").json() == {
+            "ok": True,
+            "data": [],
+        }
+        assert calls == [
+            ("status",),
+            ("set", "bad"),
+            ("set", "good"),
+            ("status",),
+            ("clear",),
+            ("status",),
+            ("profiles",),
+            ("scheduled",),
+            ("history", 7, 30),
+        ]
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
