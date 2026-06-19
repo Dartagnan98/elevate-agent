@@ -53,7 +53,7 @@ export async function PATCH(req: NextRequest) {
     target_user_id: auth.user.id,
     action: "user.password_changed",
     payload: { signed_out_other_devices: !!parsed.data.sign_out_everywhere },
-  });
+  }).catch(() => undefined);
 
   return NextResponse.json({ ok: true });
 }

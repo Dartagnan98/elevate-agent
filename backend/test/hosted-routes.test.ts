@@ -385,6 +385,54 @@ describe("hosted route handlers", () => {
     );
   });
 
+  it("account email changes still succeed when audit logging fails", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "email-change-user", email: "old-email@example.com" });
+    db.users.push(user);
+    const license = seedLicense({ id: "email-change-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const route = await loadRoute<{ PATCH: (req: Request) => Promise<Response> }>("me/email");
+    failNextSupabaseInsert("audit_log");
+
+    const response = await route.PATCH(
+      jsonRequest(
+        "/api/me/email",
+        { email: "New-Email@Example.COM", password: "secret" },
+        { method: "PATCH", headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body, { ok: true, email: "new-email@example.com" });
+    assert.equal(user.email, "new-email@example.com");
+    assert.equal(db.audit_log.length, 0);
+  });
+
+  it("account password changes still succeed when audit logging fails", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "password-change-user", email: "password-change@example.com" });
+    db.users.push(user);
+    const license = seedLicense({ id: "password-change-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const route = await loadRoute<{ PATCH: (req: Request) => Promise<Response> }>("me/password");
+    failNextSupabaseInsert("audit_log");
+
+    const response = await route.PATCH(
+      jsonRequest(
+        "/api/me/password",
+        { current_password: "secret", new_password: "new-secret" },
+        { method: "PATCH", headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body, { ok: true });
+    assert.equal(await bcrypt.compare("new-secret", user.password_hash), true);
+    assert.equal(db.audit_log.length, 0);
+  });
+
   it("stripe subscription webhooks do not grant pro for unknown prices", async () => {
     const previousSecretKey = process.env.STRIPE_SECRET_KEY;
     const previousWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
