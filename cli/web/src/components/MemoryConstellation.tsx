@@ -261,6 +261,7 @@ export function MemoryConstellation({
   const edgesGroupRef = useRef<SVGGElement>(null);
   const dragNodeRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const growRef = useRef({ start: 0, dur: 520, stagger: 700 });
+  const wakeSimulationRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const pos = new Map<string, Vec>();
@@ -284,6 +285,7 @@ export function MemoryConstellation({
     }
     sim.alpha = 1;
     growRef.current = { start: performance.now(), dur: 1500, stagger: 2400 }; // slower, invokable
+    wakeSimulationRef.current?.();
   }, [base]);
 
   useEffect(() => {
@@ -292,10 +294,16 @@ export function MemoryConstellation({
     const metaArr = ids.map((id) => base.meta.get(id)!);
     const R = base.R;
 
+    function wake() {
+      if (raf !== 0) return;
+      raf = requestAnimationFrame(step);
+    }
+
     function step() {
+      raf = 0;
       const sim = simRef.current;
       if (!sim) {
-        raf = requestAnimationFrame(step);
+        wake();
         return;
       }
       const { pos, vel } = sim;
@@ -311,7 +319,6 @@ export function MemoryConstellation({
       // highlighting is pure CSS, and pan/zoom re-render via React, so none of
       // that needs the sim. Drag and Replay re-arm alpha and resume the loop.
       if (alpha === 0 && globalGrow >= 1) {
-        raf = requestAnimationFrame(step);
         return;
       }
 
@@ -516,10 +523,15 @@ export function MemoryConstellation({
         const pts = h.ids.map((id) => pos.get(id)).filter((p): p is Vec => Boolean(p));
         if (pts.length >= 3) poly.setAttribute("points", expandHull(convexHull(pts.map((p) => ({ x: p.x, y: p.y }))), 28));
       }
-      raf = requestAnimationFrame(step);
+      wake();
     }
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
+
+    wakeSimulationRef.current = wake;
+    wake();
+    return () => {
+      wakeSimulationRef.current = null;
+      if (raf !== 0) cancelAnimationFrame(raf);
+    };
   }, [base, compact]);
 
   const activeNodeId = hoveredNodeId ?? selectedNodeId;
@@ -579,6 +591,7 @@ export function MemoryConstellation({
         const w = clientToWorld(e.clientX, e.clientY);
         dragNodeRef.current.x = w.x;
         dragNodeRef.current.y = w.y;
+        wakeSimulationRef.current?.();
         return;
       }
       if (!panDragRef.current) return;
@@ -600,6 +613,7 @@ export function MemoryConstellation({
     if (dragNodeRef.current) {
       if (simRef.current) simRef.current.alpha = 0.5;
       dragNodeRef.current = null;
+      wakeSimulationRef.current?.();
     }
   }, []);
   const startNodeDrag = useCallback((e: ReactPointerEvent, id: string) => {
@@ -609,6 +623,8 @@ export function MemoryConstellation({
     const p = sim.pos.get(id);
     if (!p) return;
     dragNodeRef.current = { id, x: p.x, y: p.y };
+    sim.alpha = Math.max(sim.alpha, 0.6);
+    wakeSimulationRef.current?.();
     if (svgRef.current) svgRef.current.setPointerCapture(e.pointerId);
   }, []);
 

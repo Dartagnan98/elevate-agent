@@ -173,10 +173,10 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| PERF-01 | Cold start | PASS iff fresh and warm startup fit target and log milestones | UNKNOWN | Startup timeline sample |
-| PERF-02 | Idle load | PASS iff app/gateway idle CPU and memory are acceptable after 10 minutes | UNKNOWN | Activity Monitor/ps sample |
+| PERF-01 | Cold start | PASS iff fresh and warm startup fit target and log milestones | PASS | Installed app `main.log` records startup milestones and recent full dashboard loads at 5546ms, 5917ms, and 7469ms; warm existing-backend window restore at 07:40:13 -> 07:40:14 reached `ready-to-show` in about 911ms |
+| PERF-02 | Idle load | PASS iff app/gateway idle CPU and memory are acceptable after 10 minutes | UNKNOWN | 6h49m installed-app sample: main 0.1%/90M, dashboard backend 0.0%/240M, gateway 0.0%/142M, renderer 1.8%/19M, GPU 3.4%/370M. Memory graph settled-loop rAF leak is fixed, but a post-rebuild 10-minute hidden/visible idle sample is still required |
 | PERF-03 | Long chat | PASS iff long chat does not leak memory or lose transcript | UNKNOWN | Smoke/soak |
-| PERF-04 | Big data pages | PASS iff logs/tasks/real-estate pages handle large local datasets | UNKNOWN | Fixture/manual pass |
+| PERF-04 | Big data pages | PASS iff logs/tasks/real-estate pages handle large local datasets | UNKNOWN | Dashboard bundle is code-split and `web_dist` is about 3.3M; Memory graph now stops its rAF loop after settling and has a guard test. Large fixture/manual passes for logs, tasks, and Real Estate pages are still required |
 | PERF-05 | Update timing | PASS iff update check/download/install does not freeze critical UI | UNKNOWN | Packaged update probe |
 
 ## 15. Environment Matrix
@@ -425,3 +425,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
 - PASS: local-only gate check before checklist closeout: `git status -sb` showed `main...origin/main [ahead 104]`, `git status --short` showed only pre-existing `?? main.js`, and `git diff --stat`/`git diff --cached --stat` were empty.
 - PASS: local-only gate rechecked during runtime-warning classification; only pre-existing untracked root `main.js` remains outside the commit scope and no remote push was performed.
+- PASS/PARTIAL: installed performance sample captured `/api/status` gateway running and 6h49m process uptime. Cold-start logs show full dashboard loads under 7.5s and warm restore about 911ms; idle sample leaves PERF-02 open because visible renderer/GPU still consumed 1.8%/3.4% before the memory-graph fix could be sampled after rebuild.
+- FAIL then PASS: `MemoryConstellation` intended to stop its O(n^2) physics after settle but still scheduled `requestAnimationFrame(step)` forever; it now stops the frame loop after settle and wakes it only for Replay/drag.
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- memory-constellation-performance.test.ts`
+- PASS: `cd cli/web && PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec -- tsc -b`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
