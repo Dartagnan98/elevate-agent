@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,34 @@ from elevate_cli.config import load_config
 from elevate_cli.source_connectors import _candidate_tools_root, get_source_root_info
 
 _log = logging.getLogger(__name__)
+
+_WARNING_THROTTLE_SECONDS = 600.0
+_warning_state: dict[tuple[Any, ...], dict[str, float | int]] = {}
+
+
+def _warn_repeating(key: tuple[Any, ...], template: str, *args: Any) -> None:
+    """Log the first repeated warning, then periodic summaries."""
+    now = time.monotonic()
+    state = _warning_state.get(key)
+    if state is None:
+        _warning_state[key] = {"last": now, "suppressed": 0}
+        _log.warning(template, *args)
+        return
+
+    elapsed = now - state["last"]
+    if elapsed < _WARNING_THROTTLE_SECONDS:
+        state["suppressed"] = int(state["suppressed"]) + 1
+        return
+
+    suppressed = int(state["suppressed"])
+    _log.warning(
+        template + " (suppressed %d repeats over %.0fs)",
+        *args,
+        suppressed,
+        elapsed,
+    )
+    state["last"] = now
+    state["suppressed"] = 0
 
 
 # Toolkit → kind of identity that uniquely keys the sender. Used by the
@@ -602,9 +631,11 @@ def _walk_single(
             args["cursor"] = cursor
         resp = composio_client.execute_tool(inbound_slug, account_id, args, user_id=account_user_id)
         if not resp.get("ok"):
-            _log.warning(
+            error = resp.get("error")
+            _warn_repeating(
+                ("execute_tool", toolkit, account_id, inbound_slug, error),
                 "composio_inbound[%s/%s]: execute_tool failed: %s",
-                toolkit, account_id, resp.get("error"),
+                toolkit, account_id, error,
             )
             break
         data = (resp.get("data") or {}).get("data") or resp.get("data") or {}
