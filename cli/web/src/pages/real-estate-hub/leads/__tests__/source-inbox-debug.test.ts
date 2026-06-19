@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { SourceInboxResponse } from "@/lib/api-types";
 import { loadedListOrUndefined, sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
 import { matchesLeadsSourceFilter } from "../components/leads-board";
+import { mapLeadsPipeline } from "../compute-leads-data";
 
 type SourceInboxDebugCounts = NonNullable<SourceInboxResponse["debug"]>["counts"];
 
@@ -79,5 +80,80 @@ describe("leads source filters", () => {
     expect(matchesLeadsSourceFilter({ sourceId: "apple-messages", source: "SMS" }, "crm")).toBe(false);
     expect(matchesLeadsSourceFilter({ source: "Lofty CRM" }, "lofty")).toBe(true);
     expect(matchesLeadsSourceFilter({ source: "Composio · instagram" }, "composio-insta")).toBe(true);
+  });
+});
+
+describe("leads pipeline sections", () => {
+  it("uses backend leadSections when hot/follow-up rows are not draft-backed", () => {
+    const pipeline = mapLeadsPipeline(
+      [],
+      [],
+      [],
+      {
+        hot: {
+          id: "hot",
+          label: "Hot leads",
+          source: "test",
+          count: 1,
+          contactIds: ["contact-1"],
+          threadIds: [],
+          profileIds: ["profile-1"],
+          draftIds: [],
+          buyerIds: [],
+        },
+        follow_up: {
+          id: "follow_up",
+          label: "Needs follow-up",
+          source: "test",
+          count: 1,
+          contactIds: [],
+          threadIds: ["email:thread-2"],
+          profileIds: [],
+          draftIds: [],
+          buyerIds: [],
+        },
+        buyer_search: {
+          id: "buyer_search",
+          label: "Buyer searches",
+          source: "test",
+          count: 3,
+          contactIds: [],
+          threadIds: [],
+          profileIds: [],
+          draftIds: [],
+          buyerIds: [],
+        },
+      },
+      [
+        {
+          id: "profile-1",
+          displayName: "Ava Buyer",
+          contactIds: ["contact-1"],
+          threadIds: ["email:thread-1"],
+          sourceIds: ["email"],
+          latestText: "Back on the saved search",
+          latestAt: "2099-01-01T00:00:00+00:00",
+        } as any,
+      ],
+      [
+        {
+          id: "email:thread-2",
+          sourceId: "email",
+          threadId: "thread-2",
+          contactId: "contact-2",
+          personName: "Noah Seller",
+          latestText: "Can we talk next week?",
+          latestAt: "2099-01-01T00:00:00+00:00",
+        } as any,
+      ],
+    );
+
+    expect(pipeline.hot).toMatchObject([
+      { id: "profile:profile-1", name: "Ava Buyer", sourceId: "email", threadId: "thread-1" },
+    ]);
+    expect(pipeline.followups).toMatchObject([
+      { id: "thread:email:thread-2", name: "Noah Seller", sourceId: "email", threadId: "thread-2" },
+    ]);
+    expect(pipeline.buyers).toBe(3);
   });
 });

@@ -912,6 +912,8 @@ Deliverables:
     mutation path as static source blueprints,
   - DB-only skipped source-inbox send-queue rows surface in skipped drafts and
     restore back to `pending_approval`,
+  - `/leads` Hot Leads, Follow-ups, and buyer-search pipeline counts consume
+    backend `leadSections` instead of draft-only guesses,
   - `/api/activity` has a local route contract proving DB-backed surface
     activity projection, agent filtering, limit handling, and response shape,
   - `/api/integrations` has a local route contract for GET settings, PUT save,

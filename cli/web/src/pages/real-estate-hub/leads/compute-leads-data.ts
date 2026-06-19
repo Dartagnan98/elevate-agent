@@ -1,5 +1,6 @@
 import type {
   BuyerWatchlistEntry,
+  LeadSectionSummary,
   OutreachTemplate,
   SourceConnectorStatus,
   SourceInboxDraft,
@@ -152,34 +153,111 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
   });
 }
 
+function profileThreadRef(p: SourceInboxProfile): { sourceId?: string; threadId?: string } {
+  const firstThreadKey = (p.threadIds && p.threadIds[0]) || "";
+  const firstSourceId = (p.sourceIds && p.sourceIds[0]) || "";
+  let sourceId = firstSourceId;
+  let threadId = firstThreadKey;
+  if (firstThreadKey.includes(":") && firstSourceId) {
+    const prefix = firstSourceId + ":";
+    if (firstThreadKey.startsWith(prefix)) threadId = firstThreadKey.slice(prefix.length);
+  }
+  if (!sourceId && firstThreadKey.includes(":")) sourceId = firstThreadKey.split(":", 1)[0];
+  return { sourceId, threadId };
+}
+
+function draftQueueEntry(d: SourceInboxDraft, signal: string): LeadsHotEntry {
+  return {
+    id: d.id,
+    name: d.personName || "Unknown",
+    signal: d.scoreReason || signal,
+    age: ageLabel(d.latestAt),
+    sourceId: d.sourceId,
+    threadId: d.threadId,
+  };
+}
+
+function sectionQueueEntries(
+  sectionId: "hot" | "follow_up",
+  leadSections: Record<string, LeadSectionSummary> | undefined,
+  profiles: SourceInboxProfile[],
+  threads: SourceInboxThread[],
+  fallbackDrafts: SourceInboxDraft[],
+  signal: string,
+): LeadsHotEntry[] {
+  const seen = new Set<string>();
+  const usedContacts = new Set<string>();
+  const out: LeadsHotEntry[] = [];
+  const add = (entry: LeadsHotEntry) => {
+    if (!entry.id || seen.has(entry.id)) return;
+    seen.add(entry.id);
+    out.push(entry);
+  };
+  const section = leadSections?.[sectionId];
+  const profileById = new Map(profiles.map((p) => [p.id, p]));
+  const threadById = new Map(threads.map((t) => [t.id, t]));
+
+  for (const profileId of section?.profileIds ?? []) {
+    const p = profileById.get(profileId);
+    if (!p) continue;
+    for (const contactId of p.contactIds ?? []) usedContacts.add(contactId);
+    add({
+      id: `profile:${p.id}`,
+      name: p.displayName || "Unknown",
+      signal: p.latestText || signal,
+      age: ageLabel(p.statusUpdatedAt || p.latestAt),
+      ...profileThreadRef(p),
+    });
+  }
+  const sectionContacts = new Set(section?.contactIds ?? []);
+  for (const p of profiles) {
+    if (!(p.contactIds ?? []).some((contactId) => sectionContacts.has(contactId))) continue;
+    for (const contactId of p.contactIds ?? []) usedContacts.add(contactId);
+    add({
+      id: `profile:${p.id}`,
+      name: p.displayName || "Unknown",
+      signal: p.latestText || signal,
+      age: ageLabel(p.statusUpdatedAt || p.latestAt),
+      ...profileThreadRef(p),
+    });
+  }
+  for (const threadId of section?.threadIds ?? []) {
+    const t = threadById.get(threadId);
+    if (!t || (t.contactId && usedContacts.has(t.contactId))) continue;
+    add({
+      id: `thread:${t.id}`,
+      name: t.personName || "Unknown",
+      signal: t.latestText || signal,
+      age: ageLabel(t.latestAt),
+      sourceId: t.sourceId,
+      threadId: t.threadId,
+    });
+  }
+  for (const draft of fallbackDrafts) add(draftQueueEntry(draft, signal));
+  return out.slice(0, 8);
+}
+
 export function mapLeadsPipeline(
   drafts: SourceInboxDraft[],
   skipped: SourceInboxDraft[],
   buyers: BuyerWatchlistEntry[],
+  leadSections?: Record<string, LeadSectionSummary>,
+  profiles: SourceInboxProfile[] = [],
+  threads: SourceInboxThread[] = [],
 ): LeadsPipeline {
-  const hot: LeadsHotEntry[] = drafts
-    .filter((d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7))
-    .slice(0, 8)
-    .map((d) => ({
-      id: d.id,
-      name: d.personName || "Unknown",
-      signal: d.scoreReason || "Hot signal",
-      age: ageLabel(d.latestAt),
-      sourceId: d.sourceId,
-      threadId: d.threadId,
-    }));
-
-  const followups: LeadsHotEntry[] = drafts
-    .filter((d) => d.outreachLane === "follow-ups")
-    .slice(0, 8)
-    .map((d) => ({
-      id: d.id,
-      name: d.personName || "Unknown",
-      signal: d.scoreReason || "Follow-up cadence",
-      age: ageLabel(d.latestAt),
-      sourceId: d.sourceId,
-      threadId: d.threadId,
-    }));
+  const hotDrafts = drafts.filter(
+    (d) => d.leadLabel === "hot" || (typeof d.score === "number" && d.score >= 0.7),
+  );
+  const followupDrafts = drafts.filter((d) => d.outreachLane === "follow-ups");
+  const hot = sectionQueueEntries("hot", leadSections, profiles, threads, hotDrafts, "Hot signal");
+  const followups = sectionQueueEntries(
+    "follow_up",
+    leadSections,
+    profiles,
+    threads,
+    followupDrafts,
+    "Follow-up cadence",
+  );
 
   const skippedOut: LeadsSkippedEntry[] = skipped.slice(0, 12).map((d) => ({
     id: d.id,
@@ -189,7 +267,12 @@ export function mapLeadsPipeline(
     taskId: d.taskId,
   }));
 
-  return { hot, followups, buyers: buyers.length, skipped: skippedOut };
+  return {
+    hot,
+    followups,
+    buyers: Math.max(buyers.length, leadSections?.buyer_search?.count ?? 0),
+    skipped: skippedOut,
+  };
 }
 
 export function computeLeadsKpis(

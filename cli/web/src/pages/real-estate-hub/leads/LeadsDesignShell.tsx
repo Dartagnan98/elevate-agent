@@ -139,6 +139,9 @@ export function LeadsDesignShell() {
             inbox.drafts ?? [],
             inbox.skippedDrafts ?? [],
             inbox.privateSearchBuyers ?? [],
+            inbox.leadSections,
+            inbox.profiles ?? [],
+            inbox.threads ?? [],
           )
         : undefined,
     [inbox],
