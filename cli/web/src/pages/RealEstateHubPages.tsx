@@ -3890,8 +3890,11 @@ function RealEstateLeadsPageLegacy() {
             <PageSkeleton rows={4} variant="form" />
           </div>
         ) : leadsSetup.error ? (
-          <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
-            Could not load leads setup: {leadsSetup.error}
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+            <span className="min-w-0">Could not load leads setup: {leadsSetup.error}</span>
+            <Button variant="outline" size="sm" onClick={() => void leadsSetup.refresh()}>
+              Retry
+            </Button>
           </div>
         ) : showOnboarding && setupSnapshot ? (
           <LeadsSetupLaunch
@@ -4093,8 +4096,11 @@ export function RealEstateLeadsPage() {
   }
   if (leadsSetup.error) {
     return (
-      <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground m-5">
-        Could not load leads setup: {leadsSetup.error}
+      <div className="m-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+        <span className="min-w-0">Could not load leads setup: {leadsSetup.error}</span>
+        <Button variant="outline" size="sm" onClick={() => void leadsSetup.refresh()}>
+          Retry
+        </Button>
       </div>
     );
   }

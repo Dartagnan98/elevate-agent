@@ -1463,6 +1463,176 @@ class TestNewEndpoints:
         assert resp.json() == {"inbound": False, "outbound": True}
         assert calls == [("set", False, None), ("init",)]
 
+    def test_agent_setup_lifecycle_contract(self, monkeypatch):
+        import elevate_cli.data.agent_setup as agent_setup
+        from elevate_cli.config import load_config
+
+        monkeypatch.setattr(agent_setup, "_detect_runtime_credentials", lambda: {})
+
+        initial = self.client.get("/api/agent/setup")
+        assert initial.status_code == 200
+        initial_body = initial.json()
+        assert initial_body["complete"] is False
+        assert initial_body["requiredCount"] == 2
+        assert set(initial_body["missingRequiredKeys"]) == {"model_primary", "memory_store"}
+
+        incomplete = self.client.post("/api/agent/setup/complete")
+        assert incomplete.status_code == 409
+        assert "model_primary" in incomplete.json()["detail"]
+
+        invalid = self.client.put(
+            "/api/agent/setup",
+            json={"items": [{"key": "model_primary", "status": "jammed"}]},
+        )
+        assert invalid.status_code == 400
+
+        updated = self.client.put(
+            "/api/agent/setup",
+            json={
+                "items": [
+                    {
+                        "key": "model_primary",
+                        "status": "configured",
+                        "provider": "openai",
+                        "value": {"model": "gpt-5.5", "apiKey": "test-key"},
+                    },
+                    {
+                        "key": "model_embedding",
+                        "status": "configured",
+                        "provider": "openai",
+                        "value": {"model": "text-embedding-3-large", "apiKey": "test-key"},
+                    },
+                    {
+                        "key": "memory_store",
+                        "status": "configured",
+                        "provider": "sqlite_local",
+                        "value": {"mode": "local"},
+                    },
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["complete"] is True
+
+        completed = self.client.post("/api/agent/setup/complete")
+        assert completed.status_code == 200
+        body = completed.json()
+        assert body["complete"] is True
+        assert body["completedAt"]
+        assert body["materialized"] == {
+            "model": {"provider": "openai-codex", "model": "gpt-5.5"},
+            "embedding": {"provider": "openai", "model": "text-embedding-3-large"},
+            "memory": {"provider": "holographic"},
+        }
+
+        cfg = load_config()
+        assert cfg["model"]["provider"] == "openai-codex"
+        assert cfg["model"]["default"] == "gpt-5.5"
+        assert cfg["plugins"]["elevate-memory-store"]["embedding_model"] == "text-embedding-3-large"
+        assert cfg["memory"]["provider"] == "holographic"
+
+        reset = self.client.post("/api/agent/setup/reset")
+        assert reset.status_code == 200
+        reset_body = reset.json()
+        assert reset_body["complete"] is True
+        assert reset_body["completedAt"] is None
+
+    def test_leads_setup_lifecycle_contract(self):
+        from elevate_constants import get_elevate_home
+        from elevate_cli.data import connect
+        from elevate_cli.data.admin_setup import get_admin_setup, update_admin_setup
+
+        with connect() as conn:
+            get_admin_setup(conn)
+            update_admin_setup(
+                conn,
+                profile={
+                    "realtorLegalName": "Test Realtor",
+                    "brokerageName": "Test Brokerage",
+                    "crmProvider": "lofty",
+                    "province": "BC",
+                },
+                items=[
+                    {
+                        "key": "crm",
+                        "status": "connected",
+                        "provider": "lofty",
+                        "value": {"verification": {"checkedAt": "2026-06-19T00:00:00+00:00"}},
+                    }
+                ],
+            )
+
+        initial = self.client.get("/api/leads/setup")
+        assert initial.status_code == 200
+        initial_body = initial.json()
+        by_key = {item["key"]: item for item in initial_body["items"]}
+        assert by_key["crm"]["provider"] == "lofty"
+        assert by_key["crm"]["status"] == "connected"
+        assert initial_body["leadSourcesReady"] is True
+        assert initial_body["complete"] is False
+        assert initial_body["missingRequiredKeys"] == ["auto_reply_policy"]
+
+        incomplete = self.client.post("/api/leads/setup/complete")
+        assert incomplete.status_code == 409
+        assert "auto_reply_policy" in incomplete.json()["detail"]
+
+        invalid = self.client.put(
+            "/api/leads/setup",
+            json={"items": [{"key": "auto_reply_policy", "status": "jammed"}]},
+        )
+        assert invalid.status_code == 400
+
+        missing = self.client.put(
+            "/api/leads/setup",
+            json={"items": [{"key": "missing_connector", "status": "configured"}]},
+        )
+        assert missing.status_code == 404
+
+        updated = self.client.put(
+            "/api/leads/setup",
+            json={
+                "items": [
+                    {
+                        "key": "website_form_webhook",
+                        "status": "connected",
+                        "provider": "website",
+                        "value": {"url": "https://example.test/hooks/leads"},
+                    },
+                    {
+                        "key": "auto_reply_policy",
+                        "status": "configured",
+                        "provider": "elevate",
+                        "value": {
+                            "enabled": False,
+                            "initialMessageTemplate": "Thanks, I will follow up shortly.",
+                            "followUpCadenceDays": 2,
+                        },
+                    },
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["complete"] is True
+
+        completed = self.client.post("/api/leads/setup/complete")
+        assert completed.status_code == 200
+        body = completed.json()
+        assert body["complete"] is True
+        assert body["completedAt"]
+        assert body["leadSourcesReady"] is True
+
+        memory_path = get_elevate_home() / "memories" / "LEADS_ONBOARDING.md"
+        memory = memory_path.read_text()
+        assert "Provider: lofty" in memory
+        assert "Auto first-touch: off" in memory
+        assert "Default follow-up cadence: 2 day(s)" in memory
+
+        reset = self.client.post("/api/leads/setup/reset")
+        assert reset.status_code == 200
+        reset_body = reset.json()
+        assert reset_body["complete"] is True
+        assert reset_body["completedAt"] is None
+
     def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
         from cron import jobs as cron_jobs
 
