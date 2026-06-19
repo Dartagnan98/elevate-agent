@@ -163,7 +163,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| SEC-01 | IPC boundary | PASS iff renderer cannot call unscoped filesystem/shell/network IPC | UNKNOWN | Source review/tests |
+| SEC-01 | IPC boundary | PASS iff renderer cannot call unscoped filesystem/shell/network IPC | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/navigation-guard.test.js desktop/test/ipc-contract.test.js` proves preload exposes only the allowlisted invoke channels, has no raw `send`/`sendSync`/`postMessage`, external auth opens only HQ allowlisted paths, and navigation blocks arbitrary file/external schemes |
 | SEC-02 | Token storage | PASS iff local tokens are permissioned and never logged | UNKNOWN | Source review/log scan |
 | SEC-03 | CSP/navigation | PASS iff dashboard CSP/navigation prevents unsafe top-level nav and external schemes | UNKNOWN | Source review/manual probe |
 | SEC-04 | File preview safety | PASS iff previews cannot exfiltrate arbitrary local files or frame unsafe content | UNKNOWN | Tests/source review |
@@ -267,6 +267,7 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- --test-name-pattern "hosted bearer licenses must belong"`
 - FAIL then PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/elevate_cli/test_installed_runtime_smoke.py::test_recent_log_scan_ignores_old_untimestamped_continuations` first proved old untimestamped `BLANK-TRACE` continuations could false-fail fresh smoke, then passed after the scanner was scoped to fresh timestamp blocks
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/navigation-guard.test.js`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/navigation-guard.test.js desktop/test/ipc-contract.test.js` returned 6/6 desktop boundary tests passing after adding scoped-channel and auth external-open assertions
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
 - PASS/BUGS: live installed 1.2.58 route pass rendered Comms, Activity, Skills, and Memory graph; Comms/Activity still show generic `Web UI` page chrome in installed app, while source route-title fix covers them for the next rebuild

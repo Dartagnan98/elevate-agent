@@ -39,10 +39,24 @@ const exposedLeaves = [
   { name: "updater.onEvent", caller: "onEvent?.(" },
 ];
 
-test("preload ipc invokes have main-process handlers", () => {
+const allowedInvokeChannels = [
+  "desktop:retry",
+  "desktop:install",
+  "auth:login",
+  "auth:open-external",
+  "updater:status",
+  "updater:check",
+  "updater:install",
+];
+
+function preloadInvokeChannels() {
   const preload = read(preloadPath);
+  return [...preload.matchAll(/ipcRenderer\.invoke\("([^"]+)"/g)].map((match) => match[1]);
+}
+
+test("preload ipc invokes have main-process handlers", () => {
   const main = read(mainPath);
-  const channels = [...preload.matchAll(/ipcRenderer\.invoke\("([^"]+)"/g)].map((match) => match[1]);
+  const channels = preloadInvokeChannels();
 
   assert.deepEqual([...new Set(channels)], channels);
   for (const channel of channels) {
@@ -59,4 +73,28 @@ test("exposed desktop bridge leaves have renderer callers", () => {
     assert.ok(rendererText.includes(exposed.caller), `${exposed.name} has no caller needle`);
     if (root !== leaf) assert.match(preload, new RegExp(`${root}:\\s*{`));
   }
+});
+
+test("preload exposes only scoped ipc channels", () => {
+  const preload = read(preloadPath);
+
+  assert.deepEqual(preloadInvokeChannels().sort(), [...allowedInvokeChannels].sort());
+  assert.match(preload, /contextBridge\.exposeInMainWorld\("elevateDesktop"/);
+  assert.doesNotMatch(preload, /ipcRenderer\.(send|sendSync|postMessage)\(/);
+  assert.doesNotMatch(preload, /ipcRenderer\.invoke\([^"]/);
+});
+
+test("external auth opener is path allowlisted", () => {
+  const main = read(mainPath);
+  const start = main.indexOf('ipcMain.handle("auth:open-external"');
+  const end = main.indexOf("// ---------------------------------------------------------------------------", start);
+  const handler = main.slice(start, end);
+
+  assert.match(handler, /forgot:\s*"\/forgot\?app=1"/);
+  assert.match(handler, /signup:\s*"\/signup"/);
+  assert.match(handler, /link:\s*"\/link"/);
+  assert.match(handler, /account:\s*"\/account"/);
+  assert.match(handler, /const safePath = paths\[target\]/);
+  assert.match(handler, /shell\.openExternal\(`\$\{HQ_BASE_URL\}\$\{safePath\}`\)/);
+  assert.doesNotMatch(handler, /shell\.openExternal\(target\)/);
 });
