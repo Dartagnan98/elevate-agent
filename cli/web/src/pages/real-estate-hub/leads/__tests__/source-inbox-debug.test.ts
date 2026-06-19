@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { SourceInboxResponse } from "@/lib/api-types";
+import type { SourceInboxProfile, SourceInboxResponse, SourceInboxThread } from "@/lib/api-types";
 import { loadedListOrUndefined, sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
 import { matchesLeadsSourceFilter } from "../components/leads-board";
 import { mapLeadsPipeline } from "../compute-leads-data";
@@ -133,7 +133,7 @@ describe("leads pipeline sections", () => {
           sourceIds: ["email"],
           latestText: "Back on the saved search",
           latestAt: "2099-01-01T00:00:00+00:00",
-        } as any,
+        } as SourceInboxProfile,
       ],
       [
         {
@@ -144,7 +144,7 @@ describe("leads pipeline sections", () => {
           personName: "Noah Seller",
           latestText: "Can we talk next week?",
           latestAt: "2099-01-01T00:00:00+00:00",
-        } as any,
+        } as SourceInboxThread,
       ],
     );
 

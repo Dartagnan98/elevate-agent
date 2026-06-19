@@ -83,7 +83,7 @@ describe("API auth header", () => {
   });
 
   it("sends the injected local session token on API requests", async () => {
-    const fetchMock = vi.fn(async (_input: string, _init?: RequestInit) =>
+    const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ ok: true }), {
         headers: { "Content-Type": "application/json" },
         status: 200,

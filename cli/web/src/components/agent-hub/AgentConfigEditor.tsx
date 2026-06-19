@@ -908,18 +908,18 @@ export function AgentConfigEditor({
             Ecosystem
           </span>
           <div className="grid gap-2 sm:grid-cols-2">
-            {[
+            {([
               ["local_version_control", "Local version control", localVersionControl, setLocalVersionControl],
               ["upstream_sync", "Upstream sync", upstreamSync, setUpstreamSync],
               ["catalog_browse", "Catalog browse", catalogBrowse, setCatalogBrowse],
               ["community_publish", "Community publish", communityPublish, setCommunityPublish],
-            ].map(([key, label, checked, setChecked]) => (
+            ] satisfies Array<[string, string, boolean, (next: boolean) => void]>).map(([key, label, checked, setChecked]) => (
               <label key={String(key)} className="flex items-center justify-between gap-3 rounded-md border border-border/60 bg-background/40 px-2 py-1.5 text-xs text-muted-foreground">
                 <span>{String(label)}</span>
                 <Switch
-                  checked={Boolean(checked)}
-                  onCheckedChange={(value) => (setChecked as (next: boolean) => void)(value)}
-                  aria-label={`${Boolean(checked) ? "Disable" : "Enable"} ${String(label)}`}
+                  checked={checked}
+                  onCheckedChange={setChecked}
+                  aria-label={`${checked ? "Disable" : "Enable"} ${label}`}
                 />
               </label>
             ))}
