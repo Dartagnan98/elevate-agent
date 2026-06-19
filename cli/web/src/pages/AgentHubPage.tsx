@@ -337,6 +337,7 @@ function PairingApprovalBlock({
           value={code}
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void approve(code); }}
+          aria-label="Paste Telegram pairing code"
           placeholder="Paste pairing code"
           spellCheck={false}
           className="mono"
@@ -2269,6 +2270,7 @@ function ExecutiveTelegramControls({
             autoComplete="new-password"
             type="password"
             value={token}
+            aria-label="Executive bot token"
             placeholder={envPlaceholder(
               envVars,
               EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY,
@@ -2283,6 +2285,7 @@ function ExecutiveTelegramControls({
           <input
             className="hub-input mono"
             value={home}
+            aria-label="Executive chat or topic"
             placeholder={envPlaceholder(
               envVars,
               EXECUTIVE_TELEGRAM_CHANNEL_KEY,

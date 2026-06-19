@@ -189,4 +189,21 @@ describe("icon-only control accessibility", () => {
     expect(appCss).toContain("#app-sidebar .nav-row,");
     expect(appCss).toContain("#app-sidebar .icon-btn {\n    width: 40px !important;\n    height: 40px !important;");
   });
+
+  it("keeps browser-probed form controls explicitly named", () => {
+    const adminBoard = read("pages/real-estate-hub/admin/components/admin-board.tsx");
+    const agentHub = read("pages/AgentHubPage.tsx");
+    const comms = read("pages/CommsPage.tsx");
+
+    expect(adminBoard).toContain('aria-label="Search deals"');
+    expect(agentHub).toContain('aria-label="Paste Telegram pairing code"');
+    expect(agentHub).toContain('aria-label="Executive bot token"');
+    expect(agentHub).toContain('aria-label="Executive chat or topic"');
+    expect(comms).toContain('aria-label="Search messages"');
+    expect(comms).toContain('aria-label="Filter channels"');
+    expect(comms).toContain('aria-label="Handoff title"');
+    expect(comms).toContain('aria-label="Handoff task details"');
+    expect(comms).toContain('aria-label="Run handoff now"');
+    expect(comms).toContain('aria-label="Show archived channels"');
+  });
 });

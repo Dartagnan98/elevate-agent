@@ -1100,6 +1100,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 <Search />
                 <input
                   type="text"
+                  aria-label="Search deals"
                   placeholder="Search deals"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}

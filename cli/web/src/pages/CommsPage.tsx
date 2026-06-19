@@ -238,6 +238,7 @@ function HandoffComposer({
       <input
         value={title}
         onChange={(event) => setTitle(event.target.value)}
+        aria-label="Handoff title"
         placeholder="Title"
         className="mt-2 h-8 w-full rounded-md border border-border bg-background px-2.5 text-xs text-foreground placeholder:text-muted-foreground/60"
       />
@@ -245,6 +246,7 @@ function HandoffComposer({
         value={task}
         onChange={(event) => setTask(event.target.value)}
         rows={3}
+        aria-label="Handoff task details"
         placeholder="Task details"
         className="mt-2 w-full resize-y rounded-md border border-border bg-background px-2.5 py-2 text-xs leading-5 text-foreground placeholder:text-muted-foreground/60"
       />
@@ -263,6 +265,7 @@ function HandoffComposer({
           <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <input
               type="checkbox"
+              aria-label="Run handoff now"
               checked={runNow}
               onChange={(event) => setRunNow(event.target.checked)}
               className="accent-foreground"
@@ -1091,6 +1094,7 @@ export default function CommsPage() {
                       <input
                         value={meetingSearch}
                         onChange={(event) => setMeetingSearch(event.target.value)}
+                        aria-label="Search messages"
                         placeholder="Search messages..."
                         className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
                       />
@@ -1157,6 +1161,7 @@ export default function CommsPage() {
                       <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                         <input
                           type="checkbox"
+                          aria-label="Show archived channels"
                           checked={showArchived}
                           onChange={(event) => setShowArchived(event.target.checked)}
                           className="accent-foreground"
@@ -1169,6 +1174,7 @@ export default function CommsPage() {
                       <input
                         value={channelSearch}
                         onChange={(event) => setChannelSearch(event.target.value)}
+                        aria-label="Filter channels"
                         placeholder="Filter channels..."
                         className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/30"
                       />
