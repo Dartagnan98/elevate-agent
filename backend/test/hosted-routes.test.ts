@@ -834,6 +834,103 @@ describe("hosted route handlers", () => {
     assert.equal(otherLicense.last_used_at, null);
   });
 
+  it("admin namespace rejects missing bearer and non-admin callers", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "plain-user", email: "plain@example.com" });
+    db.users.push(user);
+    const license = seedLicense({ id: "plain-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const cases = [
+      { route: "admin/audit", method: "GET", path: "/api/admin/audit" },
+      { route: "admin/search", method: "GET", path: "/api/admin/search?q=agent" },
+      { route: "admin/users", method: "GET", path: "/api/admin/users" },
+      {
+        route: "admin/users/[id]",
+        method: "PATCH",
+        path: "/api/admin/users/plain-user",
+        body: { tier: "builder" },
+        params: { id: "plain-user" },
+      },
+      {
+        route: "admin/users/[id]/licenses",
+        method: "GET",
+        path: "/api/admin/users/plain-user/licenses",
+        params: { id: "plain-user" },
+      },
+      {
+        route: "admin/users/[id]/licenses/[licenseId]",
+        method: "DELETE",
+        path: "/api/admin/users/plain-user/licenses/plain-license",
+        params: { id: "plain-user", licenseId: "plain-license" },
+      },
+      { route: "admin/orgs", method: "GET", path: "/api/admin/orgs" },
+      {
+        route: "admin/orgs",
+        method: "POST",
+        path: "/api/admin/orgs",
+        body: { slug: "matrix", name: "Matrix" },
+      },
+      {
+        route: "admin/orgs/[id]",
+        method: "GET",
+        path: "/api/admin/orgs/org-1",
+        params: { id: "org-1" },
+      },
+      {
+        route: "admin/orgs/[id]",
+        method: "PATCH",
+        path: "/api/admin/orgs/org-1",
+        body: { name: "Matrix" },
+        params: { id: "org-1" },
+      },
+      {
+        route: "admin/orgs/[id]",
+        method: "DELETE",
+        path: "/api/admin/orgs/org-1",
+        params: { id: "org-1" },
+      },
+      {
+        route: "admin/orgs/[id]/members",
+        method: "POST",
+        path: "/api/admin/orgs/org-1/members",
+        body: { email: "member@example.com", role: "member" },
+        params: { id: "org-1" },
+      },
+      {
+        route: "admin/orgs/[id]/members/[userId]",
+        method: "PATCH",
+        path: "/api/admin/orgs/org-1/members/plain-user",
+        body: { role: "member" },
+        params: { id: "org-1", userId: "plain-user" },
+      },
+      {
+        route: "admin/orgs/[id]/members/[userId]",
+        method: "DELETE",
+        path: "/api/admin/orgs/org-1/members/plain-user",
+        params: { id: "org-1", userId: "plain-user" },
+      },
+    ] as const;
+
+    for (const c of cases) {
+      const route = await loadRoute<Record<string, (req: Request, ctx?: unknown) => Promise<Response>>>(
+        c.route,
+      );
+      const call = (headers: Record<string, string> = {}) =>
+        route[c.method](
+          jsonRequest(c.path, "body" in c ? c.body : {}, { method: c.method, headers }),
+          "params" in c ? { params: Promise.resolve(c.params) } : undefined,
+        );
+
+      const missing = await call();
+      assert.equal(missing.status, 401, `${c.method} ${c.route} missing bearer`);
+      assert.deepEqual(await responseJson(missing), { error: "missing bearer token" });
+
+      const nonAdmin = await call({ authorization: `Bearer ${bearer}` });
+      assert.equal(nonAdmin.status, 403, `${c.method} ${c.route} non-admin`);
+      assert.deepEqual(await responseJson(nonAdmin), { error: "admin role required" });
+    }
+  });
+
   it("org seat limits block direct member adds and stale invite accepts", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ id: "seat-admin", email: "seat-admin@example.com", role: "admin" });
