@@ -39,7 +39,10 @@ jobs:
           esac
 
       - name: Install smoke dependency
-        run: python3 -m pip install --user websockets
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/smoke-venv"
+          "$RUNNER_TEMP/smoke-venv/bin/python" -m pip install websockets
 
       - name: Download and copy app
         run: |
@@ -54,6 +57,8 @@ jobs:
           cp -R "$mount_dir/Elevate.app" "$app_path"
           hdiutil detach "$mount_dir"
           trap - EXIT
+          file "$app_path/Contents/MacOS/Elevate" | tee "$RUNNER_TEMP/elevate-binary-file.txt"
+          grep -q "arm64" "$RUNNER_TEMP/elevate-binary-file.txt"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
 
@@ -72,9 +77,10 @@ jobs:
           set -euo pipefail
           app_path="$RUNNER_TEMP/Elevate.app"
           home="$RUNNER_TEMP/elevate-home"
+          smoke_python="$RUNNER_TEMP/smoke-venv/bin/python"
           expected="${{ inputs.expected_app_version }}"
           if [ -z "$expected" ]; then
-            expected="$(python3 -c 'import json; print(json.load(open("desktop/package.json"))["version"])')"
+            expected="$("$smoke_python" -c 'import json; print(json.load(open("desktop/package.json"))["version"])')"
           fi
 
           HOME="$home" \
@@ -100,7 +106,7 @@ jobs:
           fi
 
           ELEVATE_HOME="$home/.elevate" \
-          python3 cli/scripts/installed_runtime_smoke.py \
+          "$smoke_python" cli/scripts/installed_runtime_smoke.py \
             --installed-app "$app_path" \
             --repo-root "$PWD" \
             --port "$ELEVATE_DESKTOP_PORT" \
