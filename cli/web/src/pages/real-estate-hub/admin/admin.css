@@ -190,7 +190,7 @@
   width: 5px; height: 5px; border-radius: 50%;
   background: var(--status-done);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 20%, transparent);
-  animation: ab-pulse 1.6s ease-in-out infinite;
+  animation: ab-pulse 1.6s ease-in-out 3;
 }
 @keyframes ab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
@@ -456,7 +456,7 @@
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--status-done);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 22%, transparent);
-  animation: ab-pulse 1.6s ease-in-out infinite;
+  animation: ab-pulse 1.6s ease-in-out 3;
 }
 .ab-top-actions { margin-left: auto; display: flex; gap: 4px; }
 

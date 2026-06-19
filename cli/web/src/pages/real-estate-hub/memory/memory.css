@@ -173,7 +173,8 @@
   pointer-events: none;
   transition: opacity 180ms cubic-bezier(0.25,1,0.5,1), stroke 180ms cubic-bezier(0.25,1,0.5,1), stroke-width 180ms cubic-bezier(0.25,1,0.5,1);
 }
-.memory-constellation-edge-flow { stroke-dasharray: 20 8; animation: memory-edge-flow 2.8s linear infinite; animation-delay: var(--memory-edge-delay, 0ms); }
+.memory-constellation-edge-flow { stroke-dasharray: 20 8; }
+.memory-constellation-edge-flow.memory-constellation-edge-active { animation: memory-edge-flow 2.8s linear 3; animation-delay: var(--memory-edge-delay, 0ms); }
 .memory-constellation-edge-active { filter: drop-shadow(0 0 6px color-mix(in srgb, #D8DBE2 38%, transparent)); }
 
 /* Nodes are positioned via the SVG `transform` attribute (translate/scale set

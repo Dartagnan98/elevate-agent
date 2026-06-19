@@ -102,7 +102,7 @@
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--status-done);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 22%, transparent);
-  animation: ab-pulse 1.6s ease-in-out infinite;
+  animation: ab-pulse 1.6s ease-in-out 3;
 }
 
 .td-pulse-grid {
@@ -339,7 +339,7 @@
   align-self: center; justify-self: center;
 }
 .td-running-dot.ok   { background: var(--status-done); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 24%, transparent); }
-.td-running-dot.work { background: var(--status-warn); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 24%, transparent); animation: ab-pulse 1.6s ease-in-out infinite; }
+.td-running-dot.work { background: var(--status-warn); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 24%, transparent); animation: ab-pulse 1.6s ease-in-out 3; }
 .td-running-body { min-width: 0; }
 .td-running-title {
   font: 500 12.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
@@ -629,7 +629,7 @@
   justify-self: center;
 }
 .td-source-dot.live    { background: var(--status-done); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-done) 22%, transparent); }
-.td-source-dot.error   { background: var(--status-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-error) 22%, transparent); animation: ab-pulse 1.6s ease-in-out infinite; }
+.td-source-dot.error   { background: var(--status-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-error) 22%, transparent); animation: ab-pulse 1.6s ease-in-out 3; }
 .td-source-dot.blocked { background: var(--status-warn); box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-warn) 22%, transparent); }
 .td-source-name {
   font: 500 12.5px/1.2 "Anthropic Sans Display", "Geist", sans-serif;
