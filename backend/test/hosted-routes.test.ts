@@ -6,6 +6,7 @@ import Stripe from "stripe";
 import {
   assertNoRawDiagnosticsText,
   createFakeDb,
+  failNextSupabaseInsert,
   failNextSupabasePatch,
   issueAccessToken,
   jsonRequest,
@@ -16,6 +17,22 @@ import {
   seedLicense,
   useFakeDb,
 } from "./route-harness";
+
+function patchStripeResource<T>(
+  select: (stripe: Stripe) => Record<string, T>,
+  method: string,
+  impl: T,
+): () => void {
+  const stripe = new Stripe("sk_test_route_harness", {
+    apiVersion: "2025-03-31.basil" as Stripe.LatestApiVersion,
+  });
+  const proto = Object.getPrototypeOf(select(stripe)) as Record<string, T>;
+  const original = proto[method];
+  proto[method] = impl;
+  return () => {
+    proto[method] = original;
+  };
+}
 
 describe("hosted route handlers", () => {
   it("health route is directly callable", async () => {
@@ -436,6 +453,178 @@ describe("hosted route handlers", () => {
       else Reflect.set(process.env, "STRIPE_PRICE_BUILDER_MONTHLY", previousBuilderPrice);
       if (previousProPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_PRO_MONTHLY");
       else Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", previousProPrice);
+    }
+  });
+
+  it("stripe checkout returns JSON when customer creation fails", async () => {
+    const previousSecretKey = process.env.STRIPE_SECRET_KEY;
+    const previousProPrice = process.env.STRIPE_PRICE_PRO_MONTHLY;
+    Reflect.set(process.env, "STRIPE_SECRET_KEY", "sk_test_route_harness");
+    Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", "price_pro");
+    const restore = patchStripeResource(
+      (stripe) => stripe.customers as unknown as Record<string, unknown>,
+      "create",
+      async () => {
+        throw new Error("stripe customer outage");
+      },
+    );
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({ id: "checkout-user", email: "checkout@example.com" });
+      db.users.push(user);
+      const license = seedLicense({ id: "checkout-license", user_id: user.id });
+      const bearer = await issueAccessToken(user, license);
+      const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("stripe/checkout");
+
+      const response = await route.POST(
+        jsonRequest(
+          "/api/stripe/checkout",
+          { plan: "pro" },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(body, { error: "checkout unavailable" });
+      assert.equal(db.users[0].stripe_customer, null);
+      assert.equal(db.audit_log.length, 0);
+    } finally {
+      restore();
+      if (previousSecretKey === undefined) Reflect.deleteProperty(process.env, "STRIPE_SECRET_KEY");
+      else Reflect.set(process.env, "STRIPE_SECRET_KEY", previousSecretKey);
+      if (previousProPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_PRO_MONTHLY");
+      else Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", previousProPrice);
+    }
+  });
+
+  it("stripe checkout returns JSON when session creation fails", async () => {
+    const previousSecretKey = process.env.STRIPE_SECRET_KEY;
+    const previousProPrice = process.env.STRIPE_PRICE_PRO_MONTHLY;
+    Reflect.set(process.env, "STRIPE_SECRET_KEY", "sk_test_route_harness");
+    Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", "price_pro");
+    const restore = patchStripeResource(
+      (stripe) => stripe.checkout.sessions as unknown as Record<string, unknown>,
+      "create",
+      async () => {
+        throw new Error("stripe checkout outage");
+      },
+    );
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({
+        id: "checkout-session-user",
+        email: "checkout-session@example.com",
+        stripe_customer: "cus_checkout_session",
+      });
+      db.users.push(user);
+      const license = seedLicense({ id: "checkout-session-license", user_id: user.id });
+      const bearer = await issueAccessToken(user, license);
+      const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("stripe/checkout");
+
+      const response = await route.POST(
+        jsonRequest(
+          "/api/stripe/checkout",
+          { plan: "pro" },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(body, { error: "checkout unavailable" });
+      assert.equal(db.audit_log.length, 0);
+    } finally {
+      restore();
+      if (previousSecretKey === undefined) Reflect.deleteProperty(process.env, "STRIPE_SECRET_KEY");
+      else Reflect.set(process.env, "STRIPE_SECRET_KEY", previousSecretKey);
+      if (previousProPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_PRO_MONTHLY");
+      else Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", previousProPrice);
+    }
+  });
+
+  it("stripe checkout still returns a session when audit logging fails", async () => {
+    const previousSecretKey = process.env.STRIPE_SECRET_KEY;
+    const previousProPrice = process.env.STRIPE_PRICE_PRO_MONTHLY;
+    Reflect.set(process.env, "STRIPE_SECRET_KEY", "sk_test_route_harness");
+    Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", "price_pro");
+    const restore = patchStripeResource(
+      (stripe) => stripe.checkout.sessions as unknown as Record<string, unknown>,
+      "create",
+      async () => ({ id: "cs_ok", url: "https://checkout.stripe.test/session" }),
+    );
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({
+        id: "checkout-audit-user",
+        email: "checkout-audit@example.com",
+        stripe_customer: "cus_checkout_audit",
+      });
+      db.users.push(user);
+      const license = seedLicense({ id: "checkout-audit-license", user_id: user.id });
+      const bearer = await issueAccessToken(user, license);
+      failNextSupabaseInsert("audit_log");
+      const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("stripe/checkout");
+
+      const response = await route.POST(
+        jsonRequest(
+          "/api/stripe/checkout",
+          { plan: "pro" },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 200);
+      assert.deepEqual(body, { url: "https://checkout.stripe.test/session" });
+      assert.equal(db.audit_log.length, 0);
+    } finally {
+      restore();
+      if (previousSecretKey === undefined) Reflect.deleteProperty(process.env, "STRIPE_SECRET_KEY");
+      else Reflect.set(process.env, "STRIPE_SECRET_KEY", previousSecretKey);
+      if (previousProPrice === undefined) Reflect.deleteProperty(process.env, "STRIPE_PRICE_PRO_MONTHLY");
+      else Reflect.set(process.env, "STRIPE_PRICE_PRO_MONTHLY", previousProPrice);
+    }
+  });
+
+  it("stripe portal returns JSON when session creation fails", async () => {
+    const previousSecretKey = process.env.STRIPE_SECRET_KEY;
+    Reflect.set(process.env, "STRIPE_SECRET_KEY", "sk_test_route_harness");
+    const restore = patchStripeResource(
+      (stripe) => stripe.billingPortal.sessions as unknown as Record<string, unknown>,
+      "create",
+      async () => {
+        throw new Error("stripe portal outage");
+      },
+    );
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({
+        id: "portal-user",
+        email: "portal@example.com",
+        stripe_customer: "cus_portal",
+      });
+      db.users.push(user);
+      const license = seedLicense({ id: "portal-license", user_id: user.id });
+      const bearer = await issueAccessToken(user, license);
+      const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("stripe/portal");
+
+      const response = await route.POST(
+        jsonRequest(
+          "/api/stripe/portal",
+          {},
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const body = await responseJson(response);
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(body, { error: "billing portal unavailable" });
+      assert.equal(db.audit_log.length, 0);
+    } finally {
+      restore();
+      if (previousSecretKey === undefined) Reflect.deleteProperty(process.env, "STRIPE_SECRET_KEY");
+      else Reflect.set(process.env, "STRIPE_SECRET_KEY", previousSecretKey);
     }
   });
 

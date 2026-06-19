@@ -160,6 +160,7 @@ let nextGrantId = 1;
 let nextLoginCodeId = 1;
 let nextPasswordResetTokenId = 1;
 let nextPatchFailure: { table: string; status: number; message: string } | null = null;
+let nextInsertFailure: { table: string; status: number; message: string } | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -189,6 +190,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextLoginCodeId = db.login_codes.length + 1;
   nextPasswordResetTokenId = db.password_reset_tokens.length + 1;
   nextPatchFailure = null;
+  nextInsertFailure = null;
   return activeDb;
 }
 
@@ -198,6 +200,14 @@ export function failNextSupabasePatch(
   message = "supabase patch failed",
 ): void {
   nextPatchFailure = { table, status, message };
+}
+
+export function failNextSupabaseInsert(
+  table: string,
+  status = 500,
+  message = "supabase insert failed",
+): void {
+  nextInsertFailure = { table, status, message };
 }
 
 export async function makeUser(
@@ -656,6 +666,11 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     if (table === "session_diagnostic_events") {
       upsertDiagnostics(body);
       return noContent();
+    }
+    if (nextInsertFailure?.table === table) {
+      const failure = nextInsertFailure;
+      nextInsertFailure = null;
+      return okJson({ message: failure.message }, failure.status);
     }
     return okJson(insertRows(table, body), 201);
   }

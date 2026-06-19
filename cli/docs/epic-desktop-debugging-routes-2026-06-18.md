@@ -860,6 +860,8 @@ Deliverables:
   - account billing distinguishes Stripe customer records from active
     subscriptions so checkout customer creation alone does not hide upgrade
     buttons,
+  - hosted Stripe checkout/portal external failures return JSON errors, and
+    checkout audit logging cannot break a Stripe redirect URL,
   - hosted org seat-limit enforcement for direct member adds and stale
     invitation accepts,
   - hosted inactive invitation accepts do not consume the invite or add
@@ -899,9 +901,8 @@ Deliverables:
     finalized app with `app-update.yml`,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks Stripe checkout/portal route mocks,
-    broader Stripe failure mocks, and deeper admin/org mutation success/
-    permission route contracts,
+  - hosted backend coverage still lacks deeper admin/org mutation success/
+    permission route contracts and automation mutation failure mocks,
   - route-family coverage ledger is seeded, but full row-level route inventory
     is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

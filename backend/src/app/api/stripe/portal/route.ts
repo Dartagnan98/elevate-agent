@@ -46,17 +46,30 @@ export async function POST(req: NextRequest) {
   });
 
   const origin = new URL(req.url).origin;
-  const session = await stripe.billingPortal.sessions.create({
-    customer: fresh.stripe_customer,
-    return_url: `${origin}${returnPath}`,
-  });
+  let session: Stripe.Response<Stripe.BillingPortal.Session>;
+  try {
+    session = await stripe.billingPortal.sessions.create({
+      customer: fresh.stripe_customer,
+      return_url: `${origin}${returnPath}`,
+    });
+  } catch {
+    return NextResponse.json({ error: "billing portal unavailable" }, { status: 503 });
+  }
 
-  await logAdminAction({
-    actor_user_id: fresh.id,
-    target_user_id: fresh.id,
-    action: "billing.portal_opened",
-    payload: { session_id: session.id },
-  });
+  if (!session.url) {
+    return NextResponse.json({ error: "billing portal unavailable" }, { status: 503 });
+  }
+
+  try {
+    await logAdminAction({
+      actor_user_id: fresh.id,
+      target_user_id: fresh.id,
+      action: "billing.portal_opened",
+      payload: { session_id: session.id },
+    });
+  } catch {
+    // Audit is best-effort; Stripe already returned a redirect URL.
+  }
 
   return NextResponse.json({ url: session.url });
 }
