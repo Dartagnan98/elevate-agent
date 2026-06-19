@@ -3396,6 +3396,11 @@
   /* Draft row expansion */
   .lb-draft.expanded { background: color-mix(in srgb, var(--fg) 4%, transparent); }
   .lb-draft-body {
+    color: inherit;
+    font: inherit;
+    min-width: 0;
+  }
+  .lb-draft-summary {
     appearance: none;
     background: transparent;
     border: 0;
@@ -3405,6 +3410,7 @@
     color: inherit;
     min-width: 0;
     font: inherit;
+    width: 100%;
   }
   .lb-draft-expand {
     margin-top: 6px;

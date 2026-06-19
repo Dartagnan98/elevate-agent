@@ -36,6 +36,14 @@ function jsxAttributes(node: ts.JsxOpeningElement): Map<string, string | true> {
   return attrs;
 }
 
+function tagName(node: ts.JsxOpeningElement | ts.JsxSelfClosingElement, ast: ts.SourceFile): string {
+  return node.tagName.getText(ast);
+}
+
+function isButtonLikeTag(name: string): boolean {
+  return name === "button" || name === "Button";
+}
+
 function isStringLiteralText(value: string | true, text: string): boolean {
   return value === `"${text}"` || value === `'${text}'`;
 }
@@ -90,6 +98,52 @@ describe("dead control sweep", () => {
           failures.push(`${relative(file)}:${idx + 1} missing tabIndex=0`);
         }
       });
+    }
+
+    expect(failures).toEqual([]);
+  });
+
+  it("does not nest button controls inside other button controls", () => {
+    const failures: string[] = [];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+      const findNested = (root: ts.JsxElement, parentTag: string) => {
+        const visitDescendant = (node: ts.Node) => {
+          if (node === root) {
+            ts.forEachChild(node, visitDescendant);
+            return;
+          }
+          if (ts.isJsxElement(node) && isButtonLikeTag(tagName(node.openingElement, ast))) {
+            failures.push(
+              `${relative(file)}:${lineNumber(source, node.getStart(ast))} ${parentTag} contains ${tagName(node.openingElement, ast)}`,
+            );
+            return;
+          }
+          if (ts.isJsxSelfClosingElement(node) && isButtonLikeTag(tagName(node, ast))) {
+            failures.push(
+              `${relative(file)}:${lineNumber(source, node.getStart(ast))} ${parentTag} contains ${tagName(node, ast)}`,
+            );
+            return;
+          }
+          ts.forEachChild(node, visitDescendant);
+        };
+        visitDescendant(root);
+      };
+
+      const visit = (node: ts.Node) => {
+        if (ts.isJsxElement(node)) {
+          const parentTag = tagName(node.openingElement, ast);
+          if (isButtonLikeTag(parentTag)) {
+            findNested(node, parentTag);
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+
+      visit(ast);
     }
 
     expect(failures).toEqual([]);

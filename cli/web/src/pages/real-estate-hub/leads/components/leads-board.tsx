@@ -397,13 +397,16 @@ function DraftRow({
           {selected && <span className="lb-check">✓</span>}
         </span>
       </button>
-      <button type="button" className="lb-draft-body" onClick={onExpand}>
-        <div className="lb-draft-head">
-          <span className="lb-draft-name">{draft.name}</span>
-          <span className="lb-draft-meta mono">{draft.source} · {draft.channel}</span>
-          {draft.heat === "hot" && <span className="lb-heat">Hot</span>}
-          <span className="lb-draft-age">{draft.age} ago</span>
-        </div>
+      <div className="lb-draft-body">
+        <button type="button" className="lb-draft-summary" onClick={onExpand}>
+          <div className="lb-draft-head">
+            <span className="lb-draft-name">{draft.name}</span>
+            <span className="lb-draft-meta mono">{draft.source} · {draft.channel}</span>
+            {draft.heat === "hot" && <span className="lb-heat">Hot</span>}
+            <span className="lb-draft-age">{draft.age} ago</span>
+          </div>
+          {!expanded && <p className="lb-draft-text">{draft.body}</p>}
+        </button>
         {expanded ? (
           <div className="lb-draft-expand">
             <div className="lb-draft-recipient mono">To · {draft.name} · {draft.source}</div>
@@ -431,10 +434,8 @@ function DraftRow({
               )}
             </div>
           </div>
-        ) : (
-          <p className="lb-draft-text">{draft.body}</p>
-        )}
-      </button>
+        ) : null}
+      </div>
       <div className="lb-draft-actions">
         <button
           type="button"

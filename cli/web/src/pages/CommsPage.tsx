@@ -535,35 +535,34 @@ function CommsFeedList({
     <ul className="space-y-2">
       {messages.map((msg) => (
         <li key={msg.id}>
-          <button
-            type="button"
-            onClick={() => onOpenPair(msg.pair)}
-            className="w-full rounded-md border border-border bg-card/50 p-2.5 text-left transition-colors hover:border-foreground/20"
-          >
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
-              <span className="font-medium text-foreground/90">{nameOf(msg.from)}</span>
-              <ArrowRight className="h-3 w-3 text-muted-foreground" />
-              <span className="font-medium text-foreground/90">{nameOf(msg.to)}</span>
-              <Badge variant={statusVariant(msg.kind)}>{msg.kind.replace("_", " ")}</Badge>
-              <span className={cn("font-medium", PRIORITY_TONE[msg.priority])}>{msg.priority}</span>
-              <span className="ml-auto text-muted-foreground/70">{timeAgo(msg.timestamp)}</span>
-            </div>
-            {msg.title && <p className="mt-1 text-xs font-medium text-foreground/90">{msg.title}</p>}
-            <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{msg.text}</p>
+          <div className="rounded-md border border-border bg-card/50 p-2.5 transition-colors hover:border-foreground/20">
+            <button
+              type="button"
+              onClick={() => onOpenPair(msg.pair)}
+              className="block w-full text-left"
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                <span className="font-medium text-foreground/90">{nameOf(msg.from)}</span>
+                <ArrowRight className="h-3 w-3 text-muted-foreground" />
+                <span className="font-medium text-foreground/90">{nameOf(msg.to)}</span>
+                <Badge variant={statusVariant(msg.kind)}>{msg.kind.replace("_", " ")}</Badge>
+                <span className={cn("font-medium", PRIORITY_TONE[msg.priority])}>{msg.priority}</span>
+                <span className="ml-auto text-muted-foreground/70">{timeAgo(msg.timestamp)}</span>
+              </div>
+              {msg.title && <p className="mt-1 text-xs font-medium text-foreground/90">{msg.title}</p>}
+              <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{msg.text}</p>
+            </button>
             <div className="mt-2 flex justify-end">
               <Button
                 size="sm"
                 variant="ghost"
                 className="h-6 px-2 text-[10px]"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenHandoff(msg.handoffId);
-                }}
+                onClick={() => onOpenHandoff(msg.handoffId)}
               >
                 Thread
               </Button>
             </div>
-          </button>
+          </div>
         </li>
       ))}
     </ul>

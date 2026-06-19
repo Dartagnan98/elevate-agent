@@ -310,17 +310,17 @@ function SessionRow({
       id={`session-row-${session.id}`}
       className="overflow-hidden rounded-md border border-border bg-card transition-colors"
     >
-      <button
-        type="button"
-        className="flex w-full items-center justify-between p-3 text-left cursor-pointer hover:bg-secondary/30 transition-colors"
-        onClick={onOpenChat}
-        title={
-          resumeInChatEnabled
-            ? t.sessions.resumeInChat
-            : "Start Agent Hub with chat enabled"
-        }
-      >
-        <div className="flex items-center gap-3 min-w-0 flex-1">
+      <div className="flex w-full items-center justify-between p-3 text-left hover:bg-secondary/30 transition-colors">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 text-left"
+          onClick={onOpenChat}
+          title={
+            resumeInChatEnabled
+              ? t.sessions.resumeInChat
+              : "Start Agent Hub with chat enabled"
+          }
+        >
           <div className={`shrink-0 ${sourceInfo.color}`}>
             <SourceIcon className="h-4 w-4" />
           </div>
@@ -371,7 +371,7 @@ function SessionRow({
             </div>
             {snippet && <SnippetHighlight snippet={snippet} />}
           </div>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2 shrink-0">
           <Badge variant="outline" className="text-[10px]">
@@ -420,7 +420,7 @@ function SessionRow({
             <Trash2 className="h-3.5 w-3.5" />
           </Button>
         </div>
-      </button>
+      </div>
 
       {isExpanded && (
         <div className="border-t border-border bg-background p-4">
