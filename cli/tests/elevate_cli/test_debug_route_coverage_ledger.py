@@ -15,13 +15,7 @@ WEB_SERVER_PATH = REPO_ROOT / "cli/elevate_cli/web_server.py"
 API_TS_PATH = REPO_ROOT / "cli/web/src/lib/api.ts"
 CLI_TESTS_ROOT = REPO_ROOT / "cli/tests"
 
-MISSING_CONTRACT_FAMILIES = [
-    {
-        "family": "social",
-        "route_marker": "/api/social/",
-        "caller_marker": "getSocialSnapshot",
-    },
-]
+MISSING_CONTRACT_FAMILIES: list[dict[str, str]] = []
 
 
 def _read(path: Path) -> str:
@@ -42,6 +36,9 @@ def test_missing_local_route_contract_ledger_is_current():
     web_server = _read(WEB_SERVER_PATH)
     api_ts = _read(API_TS_PATH)
     test_text = _cli_test_text()
+
+    if not MISSING_CONTRACT_FAMILIES:
+        assert "No current explicit local route-family contract gaps." in epic
 
     for row in MISSING_CONTRACT_FAMILIES:
         family = row["family"]

@@ -1590,6 +1590,121 @@ class TestNewEndpoints:
             ("pull",),
         ]
 
+    def test_social_route_contract(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        import elevate_cli.source_connectors as source_connectors
+        import elevate_cli.web_server as web_server
+
+        home = tmp_path / "home"
+        source_root = tmp_path / "sources"
+        social_root = source_root / "social"
+        social_root.mkdir(parents=True)
+        monkeypatch.setenv("ELEVATE_HOME", str(home))
+        monkeypatch.setenv("ELEVATE_WORKSPACE_ID", "ws")
+        monkeypatch.setattr(source_connectors, "get_source_root_info", lambda: {"sourceRoot": str(source_root)})
+
+        snapshot_dir = home / "state" / "ws"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "social-snapshot.json").write_text(
+            json.dumps({"exists": True, "summary": {"reach": 12}}),
+            encoding="utf-8",
+        )
+        (social_root / "tasks.jsonl").write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {
+                        "source_record_id": "idea-open",
+                        "task_type": "social_post_idea",
+                        "status": "open",
+                        "timestamp": "2099-01-02T00:00:00+00:00",
+                        "hook": "Open idea",
+                    },
+                    {
+                        "source_record_id": "idea-approved",
+                        "task_type": "social_post_idea",
+                        "status": "approved",
+                        "timestamp": "2099-01-01T00:00:00+00:00",
+                        "hook": "Approved idea",
+                    },
+                    {"source_record_id": "task-other", "task_type": "other", "status": "open"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (snapshot_dir / "social-metrics.jsonl").write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {
+                        "platform": "instagram",
+                        "post_id": "post-1",
+                        "posted_at": "2099-01-01T00:00:00+00:00",
+                        "fetched_at": "2099-01-01T00:00:00+00:00",
+                        "caption": "first",
+                        "raw": {"keep": True},
+                    },
+                    {
+                        "platform": "instagram",
+                        "post_id": "post-1",
+                        "posted_at": "2099-01-02T00:00:00+00:00",
+                        "fetched_at": "2099-01-02T00:00:00+00:00",
+                        "caption": "newest",
+                    },
+                    {"platform": "instagram", "post_id": "account", "media_type": "ACCOUNT"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        refresh_calls = []
+        monkeypatch.setattr(
+            web_server,
+            "_load_social_fetcher",
+            lambda module_name: SimpleNamespace(
+                fetch=lambda *, lookback_days, max_posts: refresh_calls.append((module_name, lookback_days, max_posts))
+                or {"platform": module_name, "status": "ok", "posts_seen": 2}
+            ),
+        )
+
+        assert self.client.get("/api/social/snapshot").json()["summary"] == {"reach": 12}
+        ideas = self.client.get("/api/social/ideas").json()
+        assert ideas["count"] == 1
+        assert ideas["items"][0]["source_record_id"] == "idea-open"
+        approved = self.client.get("/api/social/ideas?status=approved").json()
+        assert approved["items"][0]["source_record_id"] == "idea-approved"
+
+        action = self.client.post(
+            "/api/social/ideas/idea-open/action",
+            json={"action": "approve", "notes": "ship it"},
+        )
+        assert action.json() == {"ok": True, "record_id": "idea-open", "action": "approve"}
+        assert self.client.post("/api/social/ideas/idea-open/action", json={"action": "nope"}).status_code == 400
+        assert self.client.post("/api/social/ideas/missing/action", json={"action": "approve"}).status_code == 404
+
+        updated_tasks = [
+            json.loads(line)
+            for line in (social_root / "tasks.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        updated = next(row for row in updated_tasks if row["source_record_id"] == "idea-open")
+        assert updated["status"] == "approved"
+        assert updated["approval_required"] is False
+        assert updated["notes"][0]["text"] == "ship it"
+
+        posts = self.client.get("/api/social/recent-posts?limit=1").json()
+        assert posts["count"] == 1
+        assert posts["items"][0]["caption"] == "newest"
+        assert posts["items"][0]["raw"] == {"keep": True}
+
+        refreshed = self.client.post(
+            "/api/social/refresh?platform=instagram&lookback_days=3&max_posts=4"
+        ).json()
+        assert refreshed["results"]["instagram"]["posts_seen"] == 2
+        assert refresh_calls == [("instagram_insights", 3, 4)]
+        assert self.client.post("/api/social/refresh?platform=threads").status_code == 400
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
