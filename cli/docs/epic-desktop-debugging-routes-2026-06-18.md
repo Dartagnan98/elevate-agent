@@ -848,6 +848,7 @@ Deliverables:
     buttons,
   - hosted org seat-limit enforcement for direct member adds and stale
     invitation accepts,
+  - hosted admin license listing and tenant-safe revoke contract,
   - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing

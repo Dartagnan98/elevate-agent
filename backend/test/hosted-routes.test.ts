@@ -657,6 +657,72 @@ describe("hosted route handlers", () => {
     assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
   });
 
+  it("admin license revoke mutates only the target user's license", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ id: "license-admin", email: "license-admin@example.com", role: "admin" });
+    const target = await makeUser({ id: "license-target", email: "license-target@example.com" });
+    const other = await makeUser({ id: "license-other", email: "license-other@example.com" });
+    db.users.push(admin, target, other);
+    const adminLicense = seedLicense({ id: "license-admin-session", user_id: admin.id });
+    const targetLicense = seedLicense({ id: "target-session", user_id: target.id });
+    const otherLicense = seedLicense({ id: "other-session", user_id: other.id });
+    const bearer = await issueAccessToken(admin, adminLicense);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const listRoute = await loadRoute<{
+      GET: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/users/[id]/licenses");
+    const revokeRoute = await loadRoute<{
+      DELETE: (
+        req: Request,
+        ctx: { params: Promise<{ id: string; licenseId: string }> },
+      ) => Promise<Response>;
+    }>("admin/users/[id]/licenses/[licenseId]");
+
+    const listBefore = await responseJson(
+      await listRoute.GET(
+        jsonRequest("/api/admin/users/license-target/licenses", {}, { method: "GET", headers }),
+        { params: Promise.resolve({ id: target.id }) },
+      ),
+    );
+    assert.deepEqual(
+      (listBefore.licenses as Array<{ id: string }>).map((license) => license.id),
+      [targetLicense.id],
+    );
+
+    const crossUser = await revokeRoute.DELETE(
+      jsonRequest(
+        "/api/admin/users/license-target/licenses/other-session",
+        {},
+        { method: "DELETE", headers },
+      ),
+      { params: Promise.resolve({ id: target.id, licenseId: otherLicense.id }) },
+    );
+    const crossUserBody = await responseJson(crossUser);
+
+    assert.equal(crossUser.status, 404);
+    assert.deepEqual(crossUserBody, { error: "license not found" });
+    assert.equal(otherLicense.revoked, false);
+
+    const revoked = await revokeRoute.DELETE(
+      jsonRequest(
+        "/api/admin/users/license-target/licenses/target-session",
+        {},
+        { method: "DELETE", headers },
+      ),
+      { params: Promise.resolve({ id: target.id, licenseId: targetLicense.id }) },
+    );
+    const revokedBody = await responseJson(revoked);
+
+    assert.equal(revoked.status, 200);
+    assert.deepEqual(revokedBody, { ok: true });
+    assert.equal(targetLicense.revoked, true);
+    assert.equal(otherLicense.revoked, false);
+    assert.equal(
+      (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
+      "license.admin_revoked",
+    );
+  });
+
   it("skills run returns the requested skill and records an invocation", async () => {
     const db = useFakeDb();
     const user = await makeUser({ id: "skill-user", tier: "pro" });
