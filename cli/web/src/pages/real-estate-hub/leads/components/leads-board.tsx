@@ -36,6 +36,7 @@ import {
 } from "../leads-data";
 import { api } from "@/lib/api";
 import type { ThreadContextResponse } from "@/lib/api-types";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ListSkeleton } from "@/components/ui/skeleton";
 
 export function matchesLeadsSourceFilter(
@@ -1125,6 +1126,7 @@ function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mut
   const [editor, setEditor] = useState<TplEditor | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<LeadsTemplateItem | null>(null);
 
   const openCreate = (laneId: string) => {
     setError(null);
@@ -1183,11 +1185,11 @@ function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mut
 
   const remove = async (t: LeadsTemplateItem) => {
     if (!mutations) return;
-    if (!window.confirm(`Delete "${t.name}"? This can't be undone.`)) return;
     setBusy(true);
     setError(null);
     try {
       await mutations.onDelete(t.id);
+      setDeleteTarget(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not delete template.");
     } finally {
@@ -1256,7 +1258,7 @@ function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mut
                   template={t}
                   onPause={mutations ? () => void togglePause(t) : undefined}
                   onEdit={mutations ? () => openEdit(g.laneId, t) : undefined}
-                  onDelete={mutations ? () => void remove(t) : undefined}
+                  onDelete={mutations ? () => setDeleteTarget(t) : undefined}
                   busy={busy}
                 />
               )
@@ -1273,6 +1275,18 @@ function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mut
           </div>
         </section>
       ))}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete "${deleteTarget?.name ?? "this template"}"?`}
+        description="This removes the outreach template from this lane. This action cannot be undone here."
+        confirmLabel="Delete"
+        destructive
+        loading={busy}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void remove(deleteTarget);
+        }}
+      />
     </div>
   );
 }

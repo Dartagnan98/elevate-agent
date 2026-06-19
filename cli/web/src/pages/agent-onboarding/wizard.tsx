@@ -25,6 +25,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
 import {
@@ -1980,6 +1981,7 @@ function ApiKeysPanel({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [clearTarget, setClearTarget] = useState<ApiKeyField | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -2025,13 +2027,13 @@ function ApiKeysPanel({
   };
 
   const handleClear = async (field: ApiKeyField) => {
-    if (!confirm(`Remove ${field.label} from ~/.elevate/.env?`)) return;
     setSaving(field.envKey);
     try {
       await api.deleteEnvVar(field.envKey);
       setDrafts((prev) => ({ ...prev, [field.envKey]: "" }));
       onSuccess(`${field.label} removed.`);
       await refresh();
+      setClearTarget(null);
     } catch (e) {
       onError(errorMessage(e, `Failed to clear ${field.label}`));
     } finally {
@@ -2125,7 +2127,7 @@ function ApiKeysPanel({
                     size="sm"
                     variant="outline"
                     disabled={isSaving}
-                    onClick={() => handleClear(field)}
+                    onClick={() => setClearTarget(field)}
                     className="h-7 text-[11.5px]"
                   >
                     Clear
@@ -2136,6 +2138,18 @@ function ApiKeysPanel({
           );
         })
       )}
+      <ConfirmDialog
+        open={clearTarget !== null}
+        title={`Remove ${clearTarget?.label ?? "this key"}?`}
+        description="This deletes the saved value from ~/.elevate/.env. You can paste a replacement later."
+        confirmLabel="Clear"
+        destructive
+        loading={clearTarget ? saving === clearTarget.envKey : false}
+        onCancel={() => setClearTarget(null)}
+        onConfirm={() => {
+          if (clearTarget) void handleClear(clearTarget);
+        }}
+      />
     </div>
   );
 }

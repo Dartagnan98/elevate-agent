@@ -13,6 +13,7 @@ import type {
   SourceConnectorStatus,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
@@ -480,6 +481,7 @@ function LeadsOnboardingWizard({
   const [templateEditor, setTemplateEditor] = useState<TemplateEditor | null>(null);
   const [templateMutating, setTemplateMutating] = useState(false);
   const [templateError, setTemplateError] = useState<string | null>(null);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState<OutreachTemplate | null>(null);
 
   const openCreateTemplate = useCallback((lane: string) => {
     setTemplateError(null);
@@ -523,12 +525,12 @@ function LeadsOnboardingWizard({
 
   const deleteTemplate = useCallback(
     async (tpl: OutreachTemplate) => {
-      if (!window.confirm(`Delete "${tpl.name}"? This can't be undone from the wizard.`)) return;
       setTemplateMutating(true);
       setTemplateError(null);
       try {
         await api.deleteOutreachTemplate(tpl.id);
         await refreshTemplates();
+        setDeleteTemplateTarget(null);
       } catch (err) {
         setTemplateError(errorMessage(err, "Could not delete template."));
       } finally {
@@ -963,7 +965,7 @@ function LeadsOnboardingWizard({
                                     type="button"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      void deleteTemplate(tpl);
+                                      setDeleteTemplateTarget(tpl);
                                     }}
                                     className="rounded-sm p-1 text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
                                     title="Delete template"
@@ -1070,6 +1072,18 @@ function LeadsOnboardingWizard({
         </div>
        </div>
       </div>
+      <ConfirmDialog
+        open={deleteTemplateTarget !== null}
+        title={`Delete "${deleteTemplateTarget?.name ?? "this template"}"?`}
+        description="This removes the outreach template from the wizard. This action cannot be undone here."
+        confirmLabel="Delete"
+        destructive
+        loading={templateMutating}
+        onCancel={() => setDeleteTemplateTarget(null)}
+        onConfirm={() => {
+          if (deleteTemplateTarget) void deleteTemplate(deleteTemplateTarget);
+        }}
+      />
     </div>,
     document.body,
   );

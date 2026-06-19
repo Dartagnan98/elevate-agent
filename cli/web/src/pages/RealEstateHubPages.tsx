@@ -74,6 +74,7 @@ import type {
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectOption } from "@/components/ui/select";
 import { RouteSkeleton } from "@/components/route-skeletons";
@@ -3146,6 +3147,7 @@ function TemplatesPanel() {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [suggestingLane, setSuggestingLane] = useState<OutreachLane | null>(null);
   const [showNew, setShowNew] = useState<OutreachLane | null>(null);
+  const [deleteTemplateTarget, setDeleteTemplateTarget] = useState<OutreachTemplate | null>(null);
   const [draft, setDraft] = useState<{ lane: OutreachLane; name: string; body: string }>({
     lane: "new-outreach",
     name: "",
@@ -3270,11 +3272,11 @@ function TemplatesPanel() {
     }
   };
   const remove = async (t: OutreachTemplate) => {
-    if (!confirm(`Delete template "${t.name}"? Past attempts stay logged.`)) return;
     setSavingId(t.id);
     try {
       await api.deleteOutreachTemplate(t.id);
       await reload();
+      setDeleteTemplateTarget(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -3515,7 +3517,7 @@ function TemplatesPanel() {
                             <Button
                               size="sm"
                               variant="ghost"
-                              onClick={() => remove(t)}
+                              onClick={() => setDeleteTemplateTarget(t)}
                               disabled={savingId === t.id}
                               className="text-destructive hover:bg-muted hover:text-destructive"
                             >
@@ -3557,6 +3559,18 @@ function TemplatesPanel() {
           </Card>
         );
       })}
+      <ConfirmDialog
+        open={deleteTemplateTarget !== null}
+        title={`Delete template "${deleteTemplateTarget?.name ?? ""}"?`}
+        description="Past attempts stay logged, but this template will be removed from active editing."
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTemplateTarget ? savingId === deleteTemplateTarget.id : false}
+        onCancel={() => setDeleteTemplateTarget(null)}
+        onConfirm={() => {
+          if (deleteTemplateTarget) void remove(deleteTemplateTarget);
+        }}
+      />
     </div>
   );
 }

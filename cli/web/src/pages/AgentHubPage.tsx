@@ -34,6 +34,7 @@ import { usePageHeader } from "@/contexts/usePageHeader";
 import { AgentLoops } from "@/components/agent/agent-loops";
 import { AgentHubSkeleton } from "@/components/agent-hub/AgentHubSkeleton";
 import { ListSkeleton } from "@/components/ui/skeleton";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   AgentTelegramLaneEditor,
   type AgentEditPatch,
@@ -3782,6 +3783,7 @@ export default function AgentHubPage() {
   const [handoffBusy, setHandoffBusy] = useState(false);
   const [savingTelegram, setSavingTelegram] = useState(false);
   const [savingAgentId, setSavingAgentId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AgentHubAgent | null>(null);
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramHome, setTelegramHome] = useState("");
   const [telegramLanes, setTelegramLanes] = useState<Record<string, string>>({});
@@ -4214,12 +4216,6 @@ export default function AgentHubPage() {
       const isCortextPreset = Boolean(
         (agent.metadata as Record<string, unknown> | undefined)?.cortext_preset,
       );
-      const message = isCortextPreset
-        ? `Delete ${agent.name}? This removes the custom Agent Hub config plus its imported heartbeat surface, onboarding task, and Cortext memory seed.`
-        : `Delete ${agent.name}? This removes only the custom Agent Hub config entry.`;
-      if (!window.confirm(message)) {
-        return;
-      }
       setSavingAgentId(agent.id);
       try {
         if (isCortextPreset) {
@@ -4229,6 +4225,7 @@ export default function AgentHubPage() {
         }
         await load();
         showToast(`${agent.name} deleted.`, "success");
+        setDeleteTarget(null);
       } catch (error) {
         showToast(error instanceof Error ? error.message : "Agent delete failed", "error");
       } finally {
@@ -4255,6 +4252,22 @@ export default function AgentHubPage() {
   return (
     <div className="hub-root">
       <Toast toast={toast} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete ${deleteTarget?.name ?? "this agent"}?`}
+        description={
+          deleteTarget && (deleteTarget.metadata as Record<string, unknown> | undefined)?.cortext_preset
+            ? "This removes the custom Agent Hub config plus its imported heartbeat surface, onboarding task, and Cortext memory seed."
+            : "This removes only the custom Agent Hub config entry."
+        }
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTarget ? savingAgentId === deleteTarget.id : false}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void deleteAgent(deleteTarget);
+        }}
+      />
       <div className="hub">
         <div className="hub-inner">
           {/* Title/status/Refresh live in the app page header (usePageHeader),
@@ -4375,7 +4388,7 @@ export default function AgentHubPage() {
                     workerBusy={handoffBusy}
                     onRunQueuedWork={(agentId) => void runAgentWorker(agentId)}
                     onWakeAgent={(agentId) => void wakeAgentWorker(agentId)}
-                    onDeleteAgent={(targetAgent) => void deleteAgent(targetAgent)}
+                    onDeleteAgent={(targetAgent) => setDeleteTarget(targetAgent)}
                   />
                 );
               })}

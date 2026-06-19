@@ -25,6 +25,7 @@ import { Select, SelectOption } from "@/components/ui/select";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { RouteLoadError } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
 
@@ -516,6 +517,7 @@ export default function HeartbeatPage() {
   const [editForm, setEditForm] = useState<FormValues>(EMPTY_FORM);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<CronJob | null>(null);
   const pollRef = useRef<number | null>(null);
 
   // Cached across tab switches: revisiting Heartbeat paints instantly and
@@ -706,16 +708,13 @@ export default function HeartbeatPage() {
   };
 
   const handleDelete = async (job: CronJob) => {
-    const name = job.name || "this heartbeat";
-    if (!window.confirm(`Delete "${name}"? This removes the heartbeat schedule only.`)) {
-      return;
-    }
     markBusy(job.id, true);
     try {
       await api.deleteCronJob(job.id);
       showToast("Deleted", "success");
       mutateHeartbeat({ jobs: jobs.filter((j) => j.id !== job.id), surfaceByKey });
       if (editingId === job.id) setEditingId(null);
+      setDeleteTarget(null);
     } catch (e) {
       showToast(`Couldn't delete: ${e}`, "error");
     } finally {
@@ -767,6 +766,18 @@ export default function HeartbeatPage() {
   return (
     <div className="mx-auto w-full max-w-3xl space-y-6 pb-16">
       <Toast toast={toast} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={`Delete "${deleteTarget?.name || "this heartbeat"}"?`}
+        description="This removes the heartbeat schedule only. Existing reports stay in the feed."
+        confirmLabel="Delete"
+        destructive
+        loading={deleteTarget ? busyIds.has(deleteTarget.id) : false}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) void handleDelete(deleteTarget);
+        }}
+      />
 
       <header className="space-y-1">
         <div className="flex items-center gap-2">
@@ -951,7 +962,7 @@ export default function HeartbeatPage() {
                           type="button"
                           title="Delete"
                           disabled={busy}
-                          onClick={() => handleDelete(job)}
+                          onClick={() => setDeleteTarget(job)}
                           className="rounded p-1.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive disabled:opacity-50"
                         >
                           <Trash2 className="h-4 w-4" />

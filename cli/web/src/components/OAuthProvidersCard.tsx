@@ -4,6 +4,7 @@ import { api, type OAuthProvider } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { OAuthLoginModal } from "@/components/OAuthLoginModal";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
@@ -38,6 +39,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
+  const [disconnectTarget, setDisconnectTarget] = useState<OAuthProvider | null>(null);
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
@@ -68,14 +70,12 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   };
 
   const handleDisconnect = async (provider: OAuthProvider) => {
-    if (!confirm(`${t.oauth.disconnect} ${provider.name}?`)) {
-      return;
-    }
     setBusyId(provider.id);
     try {
       await api.disconnectOAuthProvider(provider.id);
       onSuccess?.(`${provider.name} ${t.oauth.disconnect.toLowerCase()}ed`);
       refresh();
+      setDisconnectTarget(null);
     } catch (e) {
       onError?.(`${t.oauth.disconnect} failed: ${e}`);
     } finally {
@@ -241,7 +241,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => handleDisconnect(p)}
+                      onClick={() => setDisconnectTarget(p)}
                       disabled={isBusy}
                       className="text-xs h-7"
                     >
@@ -276,6 +276,18 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           onError={(msg) => onError?.(msg)}
         />
       )}
+      <ConfirmDialog
+        open={disconnectTarget !== null}
+        title={`${t.oauth.disconnect} ${disconnectTarget?.name ?? "provider"}?`}
+        description="This removes the stored OAuth credentials for this provider. You can log in again later."
+        confirmLabel={t.oauth.disconnect}
+        destructive
+        loading={disconnectTarget ? busyId === disconnectTarget.id : false}
+        onCancel={() => setDisconnectTarget(null)}
+        onConfirm={() => {
+          if (disconnectTarget) void handleDisconnect(disconnectTarget);
+        }}
+      />
     </Card>
   );
 }

@@ -46,6 +46,8 @@ describe("dead control sweep", () => {
       { name: "empty click handler", pattern: /onClick\s*=\s*\{\s*\(\s*\)\s*=>\s*\{\s*\}\s*\}/g },
       { name: "forced enabled disabled prop", pattern: /disabled\s*=\s*\{\s*false\s*\}/g },
       { name: "blocking browser alert", pattern: /\b(?:window\.)?alert\s*\(/g },
+      { name: "blocking browser confirm", pattern: /\b(?:window\.)?confirm\s*\(/g },
+      { name: "blocking browser prompt", pattern: /\b(?:window\.)?prompt\s*\(/g },
     ];
     const failures: string[] = [];
 
