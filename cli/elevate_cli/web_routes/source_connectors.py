@@ -145,9 +145,9 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
     async def get_source_inbox(limit: int = 16, debug: bool = False):
         try:
             return _source_inbox_response(limit=limit, debug=debug)
-        except Exception as exc:
+        except Exception:
             _log.exception("GET /api/source-inbox failed")
-            raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")
+            raise HTTPException(status_code=500, detail="source_inbox_unavailable")
 
 
     @router.get("/api/source-inbox/thread/{source_id}/{thread_id}")

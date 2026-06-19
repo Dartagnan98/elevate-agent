@@ -1370,6 +1370,32 @@ class TestNewEndpoints:
         assert "agent@example.com" not in body
         assert "/Users/example/.elevate/state.db" not in body
 
+    def test_source_inbox_total_failure_returns_sanitized_error(self, monkeypatch):
+        import elevate_cli.data as data_mod
+        import elevate_cli.source_connectors as source_connectors
+
+        def fail_db_source_inbox_response(*, limit=16):
+            raise RuntimeError("db exploded at /Users/example/.elevate/state.db")
+
+        def fail_jsonl_source_inbox_response(*, limit=16):
+            raise RuntimeError("jsonl exploded with sk-1234567890abcdef")
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fail_db_source_inbox_response)
+        monkeypatch.setattr(
+            source_connectors,
+            "build_source_inbox_response",
+            fail_jsonl_source_inbox_response,
+        )
+
+        resp = self.client.get("/api/source-inbox?debug=1")
+
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "source_inbox_unavailable"
+        body = resp.text
+        assert "/Users/example/.elevate/state.db" not in body
+        assert "sk-1234567890abcdef" not in body
+        assert "jsonl exploded" not in body
+
     def test_source_inbox_profile_update_contract(self, monkeypatch):
         import elevate_cli.source_connectors as source_connectors
 
