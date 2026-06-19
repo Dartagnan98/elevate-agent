@@ -1623,6 +1623,7 @@ ipcMain.handle("auth:open-external", async (_event, target) => {
 let updateState = { status: "idle", info: null, progress: null, error: null };
 let updateCheckInFlight = false;
 const updateBusyStatuses = new Set(["checking", "available", "downloading", "ready"]);
+const UPDATE_CONFIG_PATH = path.join(process.resourcesPath, "app-update.yml");
 
 function broadcastUpdaterEvent(payload) {
   updateState = { ...updateState, ...payload };
@@ -1634,6 +1635,12 @@ function broadcastUpdaterEvent(payload) {
 }
 
 async function runUpdaterCheck(reason) {
+  if (app.isPackaged && !fs.existsSync(UPDATE_CONFIG_PATH)) {
+    const message = "update metadata is not bundled";
+    log.info(`[updater] skip check (${reason}) — ${message}`);
+    return { ok: true, skipped: true, message };
+  }
+
   if (updateCheckInFlight || updateBusyStatuses.has(updateState.status)) {
     const message = updateCheckInFlight
       ? "a check is already in flight"

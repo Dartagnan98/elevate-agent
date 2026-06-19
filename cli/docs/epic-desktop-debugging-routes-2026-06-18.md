@@ -862,16 +862,22 @@ Deliverables:
   - `/social-media` direct loads include workflow/cron data for the jobs header,
   - desktop gateway reinstall when gateway status reports a recovered
     packaged-resource `_missing` error,
+  - fresh arm64 candidate runtime smoke with bundled-vs-repo `web_dist`,
+    served asset parity, protected local HTTP auth, `/api/ws` stream events,
+    final text, and transcript resume proof,
+  - unpacked app-dir updater checks skip cleanly when `app-update.yml` is not
+    bundled instead of logging an ENOENT updater error,
   - `elevate debug share --session/--last` recorder-event support bundle
     section with export-time re-sanitization and redaction report,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
-  - installed/candidate app `web_dist` parity is stale after current bundle
-    changes and needs rebuild + smoke,
-  - installed sidecar runtime smoke still needs a fresh packaged run for
-    WebSocket and updater-state proof,
+  - `/Users/dartagnanpatricio/Applications/Elevate.app` is still stale relative
+    to the fresh candidate and needs replacement from finalized/notarized
+    artifacts plus installed-app smoke,
+  - packaged updater status/check/install still needs focused proof against a
+    finalized app with `app-update.yml`,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
   - hosted backend coverage still lacks Stripe checkout/portal route mocks,
