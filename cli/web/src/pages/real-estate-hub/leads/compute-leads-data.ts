@@ -259,7 +259,7 @@ export function mapLeadsPipeline(
     "Follow-up cadence",
   );
 
-  const skippedOut: LeadsSkippedEntry[] = skipped.slice(0, 12).map((d) => ({
+  const skippedOut: LeadsSkippedEntry[] = skipped.map((d) => ({
     id: d.id,
     name: d.personName || "Unknown",
     reason: d.scoreReason || "Skipped",
@@ -403,7 +403,7 @@ export function mapLeadsSent(items: SourceInboxSentItem[]): LeadsSentMessage[] {
       : it.sourceId;
     return {
       id: it.id,
-      when: ageLabel(it.createdAt),
+      when: ageLabel(it.updatedAt || it.createdAt),
       recipient,
       source,
       transport: transportFromChannel(it.channel),

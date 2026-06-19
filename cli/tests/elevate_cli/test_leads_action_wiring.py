@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def test_generated_thread_draft_uses_active_outreach_template(monkeypatch):
@@ -231,7 +231,7 @@ def test_db_only_skipped_send_queue_rows_surface_as_skipped_drafts(tmp_path, mon
             "title": "Approve first-touch draft for Ava Buyer",
             "draftText": "Hi Ava, want the shortlist?",
             "context": "",
-            "latestAt": "2026-06-18T10:00:00+00:00",
+            "latestAt": "2026-06-19T10:00:00+00:00",
             "status": "skipped",
             "approvalRequired": True,
             "generated": False,
@@ -239,6 +239,99 @@ def test_db_only_skipped_send_queue_rows_surface_as_skipped_drafts(tmp_path, mon
             "record": {},
             "skippedAt": "2026-06-19T10:00:00+00:00",
         }
+    ]
+
+
+def test_db_send_queue_draft_collector_keeps_bulk_pending_rows(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    base = datetime(2026, 6, 19, 10, tzinfo=timezone.utc)
+    pending_sends = [
+        {
+            "id": f"queue-{i}",
+            "sourceId": "email",
+            "threadId": f"thread-{i}",
+            "taskId": f"task-{i}",
+            "channel": "sms",
+            "payload": {
+                "draft_text": f"Hi lead {i}",
+                "recipient": {"person_name": f"Lead {i}", "contact_id": f"contact-{i}"},
+            },
+            "createdAt": (base - timedelta(days=1)).isoformat(),
+            "updatedAt": (base + timedelta(minutes=i)).isoformat(),
+        }
+        for i in range(250)
+    ]
+
+    def fake_recent_sends(*, statuses, limit):
+        assert limit >= 1000
+        if statuses == ("pending_approval",):
+            return pending_sends
+        return []
+
+    monkeypatch.setattr(outreach_db, "list_recent_sends", fake_recent_sends)
+
+    drafts, skipped = sc._collect_drafts_for_db_inbox(
+        source_root=tmp_path / "sources",
+        connectors=[{"id": "email", "label": "Email"}],
+        threads=[],
+        skipped_cutoff=base - timedelta(days=3),
+        max_drafts=250,
+    )
+
+    assert skipped == []
+    assert len(drafts) == 250
+    assert drafts[0]["id"] == "email:send-queue:queue-249"
+    assert drafts[0]["latestAt"] == (base + timedelta(minutes=249)).isoformat()
+    assert drafts[-1]["id"] == "email:send-queue:queue-0"
+
+
+def test_db_send_queue_drafts_sort_by_updated_at(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    sends = [
+        {
+            "id": "old-created-new-updated",
+            "sourceId": "email",
+            "threadId": "thread-1",
+            "taskId": "task-1",
+            "channel": "sms",
+            "payload": {"draft_text": "new update", "recipient": {"person_name": "Ava"}},
+            "createdAt": "2026-06-17T10:00:00+00:00",
+            "updatedAt": "2026-06-19T10:00:00+00:00",
+        },
+        {
+            "id": "new-created-old-updated",
+            "sourceId": "email",
+            "threadId": "thread-2",
+            "taskId": "task-2",
+            "channel": "sms",
+            "payload": {"draft_text": "old update", "recipient": {"person_name": "Bo"}},
+            "createdAt": "2026-06-19T11:00:00+00:00",
+            "updatedAt": "2026-06-18T10:00:00+00:00",
+        },
+    ]
+
+    def fake_recent_sends(*, statuses, limit):
+        if statuses == ("pending_approval",):
+            return sends
+        return []
+
+    monkeypatch.setattr(outreach_db, "list_recent_sends", fake_recent_sends)
+
+    drafts, _ = sc._collect_drafts_for_db_inbox(
+        source_root=tmp_path / "sources",
+        connectors=[{"id": "email", "label": "Email"}],
+        threads=[],
+        skipped_cutoff=datetime(2026, 6, 18, tzinfo=timezone.utc),
+        max_drafts=10,
+    )
+
+    assert [draft["id"] for draft in drafts] == [
+        "email:send-queue:old-created-new-updated",
+        "email:send-queue:new-created-old-updated",
     ]
 
 

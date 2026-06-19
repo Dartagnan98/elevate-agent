@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import type { SourceInboxProfile, SourceInboxResponse, SourceInboxThread } from "@/lib/api-types";
+import type {
+  SourceInboxProfile,
+  SourceInboxResponse,
+  SourceInboxSentItem,
+  SourceInboxThread,
+} from "@/lib/api-types";
 import { loadedListOrUndefined, sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
-import { matchesLeadsSourceFilter } from "../components/leads-board";
-import { mapLeadsPipeline } from "../compute-leads-data";
+import { matchesLeadsSourceFilter, nextDraftQueueSelection } from "../components/leads-board";
+import { mapLeadsPipeline, mapLeadsSent } from "../compute-leads-data";
 
 type SourceInboxDebugCounts = NonNullable<SourceInboxResponse["debug"]>["counts"];
 
@@ -83,7 +88,66 @@ describe("leads source filters", () => {
   });
 });
 
+describe("leads approve queue selection", () => {
+  it("selects every filtered draft instead of only the visible page", () => {
+    const drafts = Array.from({ length: 25 }, (_, i) => ({ id: `draft-${i}` }));
+    const next = nextDraftQueueSelection(new Set<string>(), drafts);
+
+    expect(next.size).toBe(25);
+    expect(next.has("draft-0")).toBe(true);
+    expect(next.has("draft-24")).toBe(true);
+  });
+
+  it("toggles only the active filtered draft set", () => {
+    const current = new Set(["draft-0", "draft-1", "other"]);
+    const next = nextDraftQueueSelection(current, [{ id: "draft-0" }, { id: "draft-1" }]);
+
+    expect(Array.from(next).sort()).toEqual(["other"]);
+  });
+});
+
+describe("leads sent messages", () => {
+  it("uses updatedAt for the visible approved/sent age", () => {
+    const updatedAt = new Date(Date.now() + 1000).toISOString();
+    const rows: SourceInboxSentItem[] = [{
+      id: "send-1",
+      idempotencyKey: "idem-1",
+      sourceId: "email",
+      threadId: "thread-1",
+      taskId: "task-1",
+      channel: "sms",
+      status: "sent",
+      attempts: 1,
+      createdAt: "2000-01-01T00:00:00+00:00",
+      updatedAt,
+      payload: { draft_text: "Hi", recipient: { person_name: "Ava" } },
+    }];
+
+    expect(mapLeadsSent(rows)[0].when).toBe("now");
+  });
+});
+
 describe("leads pipeline sections", () => {
+  it("keeps all skipped drafts for the skipped tab show-all control", () => {
+    const skipped = Array.from({ length: 25 }, (_, i) => ({
+      id: `skipped-${i}`,
+      sourceId: "email",
+      sourceLabel: "Email",
+      taskId: `task-${i}`,
+      threadId: `thread-${i}`,
+      personName: `Lead ${i}`,
+      channel: "sms",
+      latestAt: "2026-06-19T10:00:00+00:00",
+      latestText: "",
+      draftText: "",
+      context: "",
+      title: "",
+      status: "skipped",
+    }));
+
+    expect(mapLeadsPipeline([], skipped, []).skipped).toHaveLength(25);
+  });
+
   it("uses backend leadSections when hot/follow-up rows are not draft-backed", () => {
     const pipeline = mapLeadsPipeline(
       [],

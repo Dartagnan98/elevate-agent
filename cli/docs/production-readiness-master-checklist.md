@@ -514,3 +514,8 @@ If one command fails, fix the smallest failing gate first.
 - FAIL then PASS: WhatsApp was enabled by `platforms.whatsapp.enabled=true`, but `/api/channels/whatsapp/status` only checked `WHATSAPP_ENABLED`; the setup UI could show disabled while the gateway was reporting `whatsapp_not_paired`. The endpoint now reads both config sources and the focused web-server status guard passes.
 - FAIL then PASS: WhatsApp missing-pairing runtime guidance still only said to remove `WHATSAPP_ENABLED`, which is wrong for config-enabled profiles; the adapter warning now also names `platforms.whatsapp.enabled=false`, and the missing-creds test asserts that recovery text.
 - FAIL then PASS: full web-server/route guard rerun first caught `/agents` mounted without a route preloader plus stale desktop-debug route inventory fingerprints/TSV after source line shifts; `/agents` now preloads `AgentHubPage`, the generated route inventory and epic fingerprints are current, and the full bundle passes with `178 passed`.
+- FAIL then PASS: `/leads` outgoing approval queue still had a hidden 24-draft backend cap and the visible "Select all" only selected the current five-row page. DB-primary and JSONL source-inbox paths now return up to the shared bulk queue limit, send-queue drafts sort/display by update time, skipped drafts are no longer truncated before "Show all", and the approve selection helper selects every filtered draft.
+- PASS: `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/elevate_cli/test_leads_action_wiring.py`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- source-inbox-debug.test.ts`
+- PASS: `cd cli/web && PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec -- tsc -b`
+- PASS: `git diff --check`

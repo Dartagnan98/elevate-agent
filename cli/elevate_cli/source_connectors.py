@@ -54,6 +54,7 @@ _JSONL_COUNT_CACHE: dict[str, tuple[int, int, int]] = {}
 _JSONL_RECORD_CACHE: dict[tuple[str, int, bool], tuple[int, int, list[JsonRecord]]] = {}
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+SOURCE_INBOX_DRAFT_QUEUE_LIMIT = 500
 
 SOURCE_CONNECTION_BLUEPRINTS: tuple[JsonRecord, ...] = (
     {
@@ -3035,6 +3036,7 @@ def build_source_inbox_response(
     info = get_source_root_info(config)
     source_root = Path(info["sourceRoot"])
     safe_limit = max(1, min(int(limit or 16), 5000))
+    draft_limit = max(safe_limit, SOURCE_INBOX_DRAFT_QUEUE_LIMIT)
     connectors = [
         view
         for item in SOURCE_CONNECTION_BLUEPRINTS
@@ -3184,7 +3186,7 @@ def build_source_inbox_response(
     )
     source_by_id = {str(source.get("id") or ""): source for source in connectors}
     for thread in threads:
-        if len(drafts) >= 24:
+        if len(drafts) >= draft_limit:
             break
         if str(thread.get("direction") or "") != "inbound":
             continue
@@ -3304,8 +3306,8 @@ def build_source_inbox_response(
         "appleMessages": apple_messages,
         "profiles": profiles[:safe_limit],
         "threads": visible_threads,
-        "drafts": drafts[:safe_limit],
-        "skippedDrafts": skipped_drafts[: max(safe_limit, 50)],
+        "drafts": drafts[:draft_limit],
+        "skippedDrafts": skipped_drafts[: max(draft_limit, 50)],
         "privateSearchBuyers": private_search_buyers,
     }
 
@@ -3316,7 +3318,7 @@ def _collect_drafts_for_db_inbox(
     connectors: list[JsonRecord],
     threads: list[JsonRecord],
     skipped_cutoff: datetime,
-    max_drafts: int = 24,
+    max_drafts: int = SOURCE_INBOX_DRAFT_QUEUE_LIMIT,
 ) -> tuple[list[JsonRecord], list[JsonRecord]]:
     """Build the same drafts/skippedDrafts buckets as
     :func:`build_source_inbox_response`, but driven by externally-provided
@@ -3331,6 +3333,7 @@ def _collect_drafts_for_db_inbox(
     """
     drafts: list[JsonRecord] = []
     skipped_drafts: list[JsonRecord] = []
+    max_drafts = max(1, int(max_drafts or SOURCE_INBOX_DRAFT_QUEUE_LIMIT))
     seen_drafts: set[str] = set()
     seen_skipped_drafts: set[str] = set()
     seen_thread_drafts: set[tuple[str, str]] = set()
@@ -3428,7 +3431,7 @@ def _collect_drafts_for_db_inbox(
             "title": f"Approve first-touch draft for {person_name}",
             "draftText": draft_text,
             "context": "",
-            "latestAt": str(send.get("createdAt") or send.get("updatedAt") or ""),
+            "latestAt": str(send.get("updatedAt") or send.get("createdAt") or ""),
             "status": "skipped" if skipped else "pending",
             "approvalRequired": True,
             "generated": False,

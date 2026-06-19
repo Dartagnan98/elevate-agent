@@ -51,6 +51,20 @@ export function matchesLeadsSourceFilter(
   return false;
 }
 
+export function nextDraftQueueSelection(
+  current: ReadonlySet<string>,
+  drafts: Array<Pick<LeadsDraft, "id">>,
+): Set<string> {
+  const ids = drafts.map((draft) => draft.id).filter(Boolean);
+  const allSelected = ids.length > 0 && ids.every((id) => current.has(id));
+  const next = new Set(current);
+  for (const id of ids) {
+    if (allSelected) next.delete(id);
+    else next.add(id);
+  }
+  return next;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Activity ticker
 // ─────────────────────────────────────────────────────────────────
@@ -510,6 +524,20 @@ function ActionQueue({
     return drafts.filter((draft) => matchesLeadsSourceFilter(draft, sourceFilter));
   }, [drafts, sourceFilter]);
 
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const allowed = new Set(filteredDrafts.map((draft) => draft.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (allowed.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [filteredDrafts]);
+
   const tabs: Array<{ id: QueueTab; label: string; count: number; urgent: boolean }> = [
     { id: "approve", label: "Approve", count: filteredDrafts.length, urgent: filteredDrafts.length > 0 },
     { id: "hot", label: "Hot leads", count: pipeline.hot.length, urgent: false },
@@ -537,17 +565,9 @@ function ActionQueue({
       return next;
     });
   }
-  function toggleAllVisible() {
-    setSelected(prev => {
-      const ids = visible.map(d => d.id);
-      const all = ids.every(id => prev.has(id));
-      const next = new Set(prev);
-      if (all) ids.forEach(id => next.delete(id));
-      else ids.forEach(id => next.add(id));
-      return next;
-    });
+  function toggleAllDrafts() {
+    setSelected(prev => nextDraftQueueSelection(prev, filteredDrafts));
   }
-  const allVisibleSelected = visible.length > 0 && visible.every(d => selected.has(d.id));
 
   return (
     <section className="ab-card lb-queue">
@@ -578,11 +598,14 @@ function ActionQueue({
               </>
             ) : (
               <>
-                <button type="button" className="lb-replies-selectall" onClick={toggleAllVisible}>
-                  <span className={"lb-checkbox" + (allVisibleSelected ? " checked" : "")}>
-                    {allVisibleSelected && <span className="lb-check">✓</span>}
-                  </span>
-                  <span>Select all</span>
+                <button
+                  type="button"
+                  className="lb-replies-selectall"
+                  onClick={toggleAllDrafts}
+                  aria-label={`Select all ${filteredDrafts.length} drafts`}
+                >
+                  <span className="lb-checkbox" aria-hidden="true"></span>
+                  <span>Select all {filteredDrafts.length}</span>
                 </button>
                 <span className="lb-replies-hint">Nothing sends until you click Approve.</span>
               </>
