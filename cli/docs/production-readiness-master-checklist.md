@@ -120,10 +120,10 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph; source now loads workflow data for direct Social Media visits. Button/action safety and rebuilt installed-app pass still required |
+| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph; source now loads workflow data for direct Social Media visits and `/leads` source-inbox debug metadata for empty/fallback reads. Button/action safety and rebuilt installed-app pass still required |
 | CRM-02 | Admin deal flow | PASS iff deal view/edit/advance/actions have API contracts and UI recovery | UNKNOWN | Existing tests/manual pass |
 | CRM-03 | Connectors | PASS iff missing credentials and failed external services show clear recovery | UNKNOWN | Live status proves WhatsApp missing pairing is visible; Oura MCP and Composio Gmail 422 warnings still need owner/recovery classification |
-| CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Route/caller/test map |
+| CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Backend source-inbox debug contracts plus frontend empty/fallback debug note pass; full action/button runtime map still required |
 | CRM-05 | Onboarding | PASS iff onboarding can finish, seed required data, and recover from connector failure | UNKNOWN | Isolated/manual pass |
 
 ## 10. Hosted Backend And HQ API
@@ -135,7 +135,7 @@ Critical path:
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
 | HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts and admin missing-record 404s pass; deeper admin mutation success/permission matrix still needs coverage |
-| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating passes; skills run, automation mutations, Stripe, and external failure mocks still need coverage |
+| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating and `skills/run` requested-skill/invocation audit pass; automation mutations, Stripe, and external failure mocks still need coverage |
 
 ## 11. Release And Update Path
 
@@ -255,7 +255,7 @@ If one command fails, fix the smallest failing gate first.
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec vitest run src/lib/__tests__/resolve-page-title.test.ts src/pages/__tests__/CronPage.errors.test.ts src/pages/real-estate-hub/_shared/__tests__/use-hub-data.flags.test.ts` from `cli/web`
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` rebuilt `cli/elevate_cli/web_dist` with corrected dashboard route titles
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts`
-- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding admin missing-record 404 coverage
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding admin missing-record 404 and `skills/run` requested-skill/invocation coverage
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
 - PASS/BUGS: live installed 1.2.58 route pass rendered Comms, Activity, Skills, and Memory graph; Comms/Activity still show generic `Web UI` page chrome in installed app, while source route-title fix covers them for the next rebuild

@@ -244,7 +244,7 @@ async function loadHubData(flags: HubRequestFlags, force = false): Promise<HubLo
       api.getStatus({ refresh: force }),
       flags.includeWorkflowData ? api.getSessions(36, 0, { includeTotal: false }) : Promise.resolve(null),
       flags.includeWorkflowData ? api.getCronJobs({ compact: true }) : Promise.resolve(null),
-      flags.includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT) : Promise.resolve(null),
+      flags.includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT, { debug: true }) : Promise.resolve(null),
       flags.includeAdminTaskData ? api.getAdminDealTasks({ status: "open", limit: 200 }) : Promise.resolve(null),
       flags.includeAdminTaskData ? api.getAdminActionRuns({ limit: 200 }) : Promise.resolve(null),
     ]);

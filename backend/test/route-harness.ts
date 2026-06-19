@@ -119,6 +119,7 @@ type FakeDb = {
   }>;
   device_grants: DeviceGrantRow[];
   login_codes: LoginCodeRow[];
+  skill_invocations: unknown[];
   audit_log: unknown[];
   session_diagnostic_events: Record<string, unknown>[];
   calls: Array<{ table: string; method: string; body: unknown }>;
@@ -141,6 +142,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     automations: [],
     device_grants: [],
     login_codes: [],
+    skill_invocations: [],
     audit_log: [],
     session_diagnostic_events: [],
     calls: [],
@@ -289,6 +291,10 @@ function insertRows(table: string, body: unknown): unknown {
     activeDb.audit_log.push(...rows);
     return rows;
   }
+  if (table === "skill_invocations") {
+    activeDb.skill_invocations.push(...rows);
+    return rows;
+  }
   if (table === "login_codes") {
     const inserted = rows.map((row) => {
       const now = new Date().toISOString();
@@ -391,7 +397,9 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
   }
   if (table === "skills") {
     let rows = activeDb.skills;
+    const name = readEq(params, "name");
     const enabled = readEq(params, "enabled");
+    if (name) rows = rows.filter((row) => row.name === name);
     if (enabled) rows = rows.filter((row) => row.enabled === (enabled === "true"));
     return maybeSingle(wantsSingle, rows);
   }

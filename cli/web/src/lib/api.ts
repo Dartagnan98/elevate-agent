@@ -1970,8 +1970,11 @@ export const api = {
     ),
   getToday: (sourceLimit = 160) =>
     fetchJSON<TodayDashboardResponse>(`/api/today?source_limit=${encodeURIComponent(String(sourceLimit))}`),
-  getSourceInbox: (limit = 16) =>
-    cachedFetchJSON<SourceInboxResponse>(`/api/source-inbox?limit=${limit}`, 5_000),
+  getSourceInbox: (limit = 16, options?: { debug?: boolean }) =>
+    cachedFetchJSON<SourceInboxResponse>(
+      `/api/source-inbox?limit=${limit}${options?.debug ? "&debug=1" : ""}`,
+      5_000,
+    ),
   getThreadContext: (sourceId: string, threadId: string, limit = 200) =>
     fetchJSON<ThreadContextResponse>(
       `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,

@@ -1584,6 +1584,7 @@ export interface LeadsBoardProps {
   onRefresh?: () => void;
   loading?: boolean;
   error?: string | null;
+  debugNote?: string | null;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onReRunOnboarding?: () => void;
@@ -1673,6 +1674,8 @@ export function LeadsBoard(props: LeadsBoardProps) {
           {props.loading && <span className="ab-live mono">loading…</span>}
           {props.error && <span className="sep">·</span>}
           {props.error && <span className="ab-live mono" style={{ color: "var(--accent-warn, #e0a44c)" }}>{props.error}</span>}
+          {!props.error && props.debugNote && <span className="sep">·</span>}
+          {!props.error && props.debugNote && <span className="ab-live mono">{props.debugNote}</span>}
         </div>
         <div className="ab-top-actions">
           <SourcesHealthPill channels={channels} schedules={schedules} available={available} />

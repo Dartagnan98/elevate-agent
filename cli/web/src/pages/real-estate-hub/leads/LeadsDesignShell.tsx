@@ -4,6 +4,7 @@ import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { api } from "@/lib/api";
 import type {
   OutreachTemplate,
+  SourceInboxResponse,
   SourceInboxSentItem,
 } from "@/lib/api-types";
 import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "./leads-data";
@@ -18,6 +19,24 @@ import {
 } from "./compute-leads-data";
 import { LeadsSetupLaunch, useLeadsSetup } from "./onboarding";
 import "./leads.css";
+
+export function sourceInboxDebugNote(inbox: SourceInboxResponse | null): string | null {
+  const debug = inbox?.debug;
+  if (!debug) return null;
+
+  const { counts } = debug;
+  const total =
+    counts.profiles +
+    counts.threads +
+    counts.drafts +
+    counts.skippedDrafts +
+    counts.privateSearchBuyers;
+  if (!debug.fallback && total > 0) return null;
+
+  const note = `Source inbox read: ${debug.readPath} | ${counts.threads} threads | ${counts.drafts} drafts | ${counts.profiles} profiles | ${counts.skippedDrafts} skipped | ${counts.privateSearchBuyers} private buyers`;
+  if (!debug.fallback) return note;
+  return debug.fallbackError ? `${note} | fallback: ${debug.fallbackError}` : `${note} | fallback`;
+}
 
 export function LeadsDesignShell() {
   const data = useRealEstateHubData();
@@ -195,6 +214,7 @@ export function LeadsDesignShell() {
           kpis={kpis}
           templates={templates && templates.length > 0 ? templates : undefined}
           sent={sent && sent.length > 0 ? sent : undefined}
+          debugNote={sourceInboxDebugNote(inbox)}
           onDraftAction={handleDraftAction}
           onProfileFavoriteChange={handleProfileFavoriteChange}
           onReRunOnboarding={() => setForceOnboarding(true)}

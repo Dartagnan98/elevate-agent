@@ -217,6 +217,69 @@ describe("hosted route handlers", () => {
     );
   });
 
+  it("skills run returns the requested skill and records an invocation", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "skill-user", tier: "pro" });
+    db.users.push(user);
+    const license = seedLicense({ id: "skill-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const now = new Date().toISOString();
+    db.skills.push(
+      {
+        name: "wrong-skill",
+        version: 1,
+        tier_required: "pro",
+        manifest: {},
+        body: "wrong body",
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      },
+      {
+        name: "right-skill",
+        version: 2,
+        tier_required: "pro",
+        manifest: {},
+        body: "right body",
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      },
+    );
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("skills/run");
+    const args = { lead_id: "lead-1" };
+
+    const response = await route.POST(
+      jsonRequest(
+        "/api/skills/run",
+        { skill_name: "right-skill", args },
+        {
+          headers: {
+            authorization: `Bearer ${bearer}`,
+            "x-forwarded-for": "203.0.113.7",
+            "user-agent": "hosted-route-test",
+          },
+        },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.name, "right-skill");
+    assert.equal(body.version, 2);
+    assert.equal(body.body, "right body");
+    assert.equal(db.skill_invocations.length, 1);
+    const [invocation] = db.skill_invocations as Array<Record<string, unknown>>;
+    assert.equal(invocation.user_id, user.id);
+    assert.equal(invocation.skill_name, "right-skill");
+    assert.equal(
+      invocation.args_hash,
+      crypto.createHash("sha256").update(JSON.stringify(args)).digest("hex"),
+    );
+    assert.equal(invocation.ip_address, "203.0.113.7");
+    assert.equal(invocation.user_agent, "hosted-route-test");
+  });
+
   it("admin mutations return 404 for missing records", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ role: "admin" });

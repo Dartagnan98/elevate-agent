@@ -223,10 +223,10 @@ Current verified snapshot, 2026-06-18:
   - `backend/src/app/api/stripe/checkout/route.ts`
   - `backend/src/app/api/stripe/portal/route.ts`
   - `backend/src/app/api/stripe/webhook/route.ts`
-- Caller inventory: the latest sweep found 442 frontend/desktop caller
+- Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `47b3ec051ea25d4b`.
+- Caller inventory fingerprint: `b0a999d38de42254`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
@@ -452,9 +452,10 @@ Debug questions:
 
 First fix candidates:
 
-- Done: add backend `debug=1` metadata to existing source-inbox responses only
-  for active read path, fallback/error, and counts for threads, drafts,
-  skipped/private buyers. Frontend-visible empty-state debug remains a gap.
+- Done: add `debug=1` metadata to existing source-inbox responses only for
+  active read path, fallback/error, and counts for threads, drafts,
+  skipped/private buyers; `/leads` hub loads now request it and surface a
+  compact read-path/count note when the inbox is empty or using fallback.
 - Done: add a direct `/api/cron/attention` contract test. Do not add
   scheduler-thread or lock-owner metadata until a real failure proves "jobs due
   but ticker not moving."
@@ -824,6 +825,7 @@ Deliverables:
   - installed runtime smoke discovers the selected dashboard port from
     `main.log` before sidecar probes,
   - hosted account/org/skills-list/automation-list read contracts,
+  - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing
     `refresh_token_plain` fails,
@@ -845,12 +847,10 @@ Deliverables:
     WebSocket, and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - source-inbox debug metadata is backend-probe only and not yet surfaced in
-    frontend empty/error states,
-  - hosted backend coverage still lacks signup, forgot/reset, skills run,
-    Stripe, and deeper admin/org mutation route contracts,
-  - local row-level route inventory and route-family coverage ledger are not
-    complete yet,
+  - hosted backend coverage still lacks signup, forgot/reset, Stripe, and
+    deeper admin/org mutation route contracts,
+  - route-family coverage ledger is seeded, but full row-level route inventory
+    is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp
     enabled but not paired, Oura MCP connection failure, missing
     `OPENAI_API_KEY` for embeddings, Composio Gmail HTTP 422, and config
@@ -994,6 +994,21 @@ npm run build
 # Remaining missing tests/probes to add with implementation:
 # - Fresh installed app must pass codesign/spctl and bundled web_dist parity.
 ```
+
+Current missing local route-family contract ledger:
+
+- `composio`: backend routes and dashboard callers exist; no local
+  `cli/tests` contract yet.
+- `ayrshare`: backend routes and dashboard callers exist; no local
+  `cli/tests` contract yet.
+- `social`: backend routes and dashboard callers exist; no local `cli/tests`
+  contract yet.
+- `integrations`: backend routes and dashboard callers exist; no local
+  `cli/tests` contract yet.
+- `dashboard-plugins`: manifest/rescan routes and dashboard callers exist; no
+  local `cli/tests` contract yet.
+- `activity`: fleet feed route and dashboard caller exist; no local
+  `cli/tests` contract yet.
 
 ## Done Definition
 
