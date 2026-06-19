@@ -122,6 +122,7 @@ jobs:
           name: env03-previous-macos-smoke
           path: |
             ${{ runner.temp }}/elevate-env03-previous-macos-smoke.json
+            ${{ runner.temp }}/elevate-binary-file.txt
             ${{ runner.temp }}/elevate-stdout.log
             ${{ runner.temp }}/elevate-home/Library/Logs/Elevate/main.log
           if-no-files-found: ignore
