@@ -2,12 +2,12 @@ surface	kind	method	path	family	file	line
 hosted	http	GET	/api/admin/audit	admin	backend/src/app/api/admin/audit/route.ts	7
 hosted	http	GET	/api/admin/orgs	admin	backend/src/app/api/admin/orgs/route.ts	8
 hosted	http	POST	/api/admin/orgs	admin	backend/src/app/api/admin/orgs/route.ts	24
-hosted	http	DELETE	/api/admin/orgs/[id]	admin	backend/src/app/api/admin/orgs/[id]/route.ts	81
+hosted	http	DELETE	/api/admin/orgs/[id]	admin	backend/src/app/api/admin/orgs/[id]/route.ts	89
 hosted	http	GET	/api/admin/orgs/[id]	admin	backend/src/app/api/admin/orgs/[id]/route.ts	15
 hosted	http	PATCH	/api/admin/orgs/[id]	admin	backend/src/app/api/admin/orgs/[id]/route.ts	57
 hosted	http	POST	/api/admin/orgs/[id]/members	admin	backend/src/app/api/admin/orgs/[id]/members/route.ts	27
-hosted	http	DELETE	/api/admin/orgs/[id]/members/[userId]	admin	backend/src/app/api/admin/orgs/[id]/members/[userId]/route.ts	38
-hosted	http	PATCH	/api/admin/orgs/[id]/members/[userId]	admin	backend/src/app/api/admin/orgs/[id]/members/[userId]/route.ts	12
+hosted	http	DELETE	/api/admin/orgs/[id]/members/[userId]	admin	backend/src/app/api/admin/orgs/[id]/members/[userId]/route.ts	52
+hosted	http	PATCH	/api/admin/orgs/[id]/members/[userId]	admin	backend/src/app/api/admin/orgs/[id]/members/[userId]/route.ts	18
 hosted	http	GET	/api/admin/search	admin	backend/src/app/api/admin/search/route.ts	7
 hosted	http	GET	/api/admin/users	admin	backend/src/app/api/admin/users/route.ts	7
 hosted	http	PATCH	/api/admin/users/[id]	admin	backend/src/app/api/admin/users/[id]/route.ts	26

@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `3110b150ce9d70dd`.
+- Caller inventory fingerprint: `42044fe1c64581fd`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,
@@ -902,6 +902,12 @@ Deliverables:
   - `debug.trace` redacts blank-trace email/token/password/path values before
     writing `blank-trace.log`,
   - backend diagnostics string redaction for email/token/password/path values.
+  - hosted self-service email/password changes return success when only
+    post-mutation audit logging is unavailable,
+  - `/social-media` idea approval queue uses the backend default bucket so
+    open approval-required ideas are not filtered out by `status=pending`,
+  - `/leads` loaded-empty live arrays no longer fall back to demo rows, and
+    source filters match real `sourceId` values before demo labels.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
@@ -912,8 +918,8 @@ Deliverables:
     finalized app with `app-update.yml`,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks deeper admin/org mutation success/
-    permission route contracts and automation mutation failure mocks,
+  - hosted backend coverage still lacks the broader admin permission matrix and
+    automation mutation failure mocks,
   - route-family coverage ledger is seeded, but full row-level route inventory
     is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

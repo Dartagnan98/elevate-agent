@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { SourceInboxResponse } from "@/lib/api-types";
-import { sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
+import { loadedListOrUndefined, sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
+import { matchesLeadsSourceFilter } from "../components/leads-board";
 
 type SourceInboxDebugCounts = NonNullable<SourceInboxResponse["debug"]>["counts"];
 
@@ -62,5 +63,21 @@ describe("source inbox profile status labels", () => {
     expect(sourceInboxProfileStatusForLabel("Follow up")).toBe("follow_up");
     expect(sourceInboxProfileStatusForLabel("Closed Seller")).toBe("closed_seller");
     expect(sourceInboxProfileStatusForLabel("not a menu item")).toBeUndefined();
+  });
+});
+
+describe("source inbox live data props", () => {
+  it("passes loaded empty arrays through instead of falling back to demo rows", () => {
+    expect(loadedListOrUndefined([])).toEqual([]);
+    expect(loadedListOrUndefined(undefined)).toBeUndefined();
+  });
+});
+
+describe("leads source filters", () => {
+  it("matches live source ids before demo labels", () => {
+    expect(matchesLeadsSourceFilter({ sourceId: "crm", source: "Real CRM" }, "crm")).toBe(true);
+    expect(matchesLeadsSourceFilter({ sourceId: "apple-messages", source: "SMS" }, "crm")).toBe(false);
+    expect(matchesLeadsSourceFilter({ source: "Lofty CRM" }, "lofty")).toBe(true);
+    expect(matchesLeadsSourceFilter({ source: "Composio · instagram" }, "composio-insta")).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { socialLoadErrorFromResults } from "../index";
+import { socialIdeaQueueStatus, socialLoadErrorFromResults } from "../index";
 
 describe("social load errors", () => {
   it("surfaces partial source failures", () => {
@@ -20,5 +20,9 @@ describe("social load errors", () => {
     ]);
 
     expect(error).toBe("snapshot down");
+  });
+
+  it("loads the approval queue through the backend default bucket", () => {
+    expect(socialIdeaQueueStatus()).toBeUndefined();
   });
 });

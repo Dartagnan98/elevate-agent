@@ -38,6 +38,18 @@ import { api } from "@/lib/api";
 import type { ThreadContextResponse } from "@/lib/api-types";
 import { ListSkeleton } from "@/components/ui/skeleton";
 
+export function matchesLeadsSourceFilter(
+  item: { source?: string; sourceId?: string },
+  sourceFilter: string,
+): boolean {
+  if (!sourceFilter || sourceFilter === "all") return true;
+  if (item.sourceId === sourceFilter) return true;
+  const source = (item.source || "").toLowerCase();
+  if (sourceFilter === "lofty") return source === "lofty crm";
+  if (sourceFilter === "composio-insta") return source.includes("composio") || source.includes("instagram");
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Activity ticker
 // ─────────────────────────────────────────────────────────────────
@@ -493,10 +505,7 @@ function ActionQueue({
   useEffect(() => { setPage(0); setSelected(new Set()); setExpanded(null); }, [tab, sourceFilter]);
 
   const filteredDrafts = useMemo(() => {
-    if (!sourceFilter || sourceFilter === "all") return drafts;
-    if (sourceFilter === "lofty") return drafts.filter(d => d.source === "Lofty CRM");
-    if (sourceFilter === "composio-insta") return drafts.filter(d => d.source.includes("instagram"));
-    return drafts;
+    return drafts.filter((draft) => matchesLeadsSourceFilter(draft, sourceFilter));
   }, [drafts, sourceFilter]);
 
   const tabs: Array<{ id: QueueTab; label: string; count: number; urgent: boolean }> = [
@@ -878,8 +887,7 @@ function ProfilesList({
 
   const filtered = useMemo(() => {
     let list = profiles;
-    if (sourceFilter === "lofty") list = list.filter(p => p.source === "Lofty CRM");
-    if (sourceFilter === "composio-insta") list = list.filter(p => p.source.includes("Composio"));
+    list = list.filter((profile) => matchesLeadsSourceFilter(profile, sourceFilter));
     if (statusFilter === "verified") list = list.filter(p => p.verified);
     if (statusFilter === "unverified") list = list.filter(p => !p.verified);
     if (statusFilter === "potential") list = list.filter(p => !p.verified);

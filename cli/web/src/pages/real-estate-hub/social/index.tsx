@@ -15,6 +15,10 @@ export function socialLoadErrorFromResults(results: PromiseSettledResult<unknown
   return `${failed.length} social source${failed.length === 1 ? "" : "s"} failed: ${message}`;
 }
 
+export function socialIdeaQueueStatus(): string | undefined {
+  return undefined;
+}
+
 export function RealEstateSocialMediaPage() {
   const data = useRealEstateHubData();
 
@@ -38,7 +42,7 @@ export function RealEstateSocialMediaPage() {
     try {
       const [snapRes, ideaRes, recentRes] = await Promise.allSettled([
         api.getSocialSnapshot(signal),
-        api.getSocialIdeas("pending", signal),
+        api.getSocialIdeas(socialIdeaQueueStatus(), signal),
         api.getSocialRecentPosts(1000, signal),
       ]);
       if (signal.aborted) return;
