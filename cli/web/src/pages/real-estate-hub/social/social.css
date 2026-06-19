@@ -449,6 +449,7 @@
   .sm-root .ab-btn {
     appearance: none;
     display: inline-flex; align-items: center; gap: 7px;
+    min-height: 36px;
     padding: 6px 12px;
     border-radius: 4px;
     font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -639,6 +640,7 @@
   .sm-root .ab-hero-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
   .sm-root .ab-pill {
     display: inline-flex; align-items: center; gap: 6px;
+    min-height: 36px;
     padding: 5px 10px;
     border-radius: 4px;
     background: var(--bg-2);
@@ -4875,7 +4877,7 @@
   }
   .sm-root .sm-count.hot { color: var(--accent-fg); background: var(--status-warn); border-color: transparent; }
   .sm-root .sm-icon-btn {
-    appearance: none; width: 26px; height: 26px; border-radius: 5px;
+    appearance: none; width: 36px; height: 36px; border-radius: 5px;
     display: grid; place-items: center; cursor: pointer;
     background: transparent; border: 1px solid var(--border-soft);
     color: var(--fg-muted);
@@ -4982,6 +4984,7 @@
   }
   .sm-root .sm-select {
     display: inline-flex; align-items: center; gap: 7px;
+    min-height: 36px;
     padding: 5px 9px; border-radius: 5px;
     background: var(--bg-2); border: 1px solid var(--border-soft);
     color: var(--fg-muted); font: 500 11.5px/1 "Geist Mono", monospace;
@@ -4994,6 +4997,7 @@
   .sm-root .sm-tab {
     appearance: none; cursor: pointer;
     display: inline-flex; align-items: center; gap: 8px;
+    min-height: 36px;
     padding: 7px 13px; border-radius: 7px;
     background: transparent; border: 1px solid var(--border-soft);
     color: var(--fg-faint); font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -5248,7 +5252,7 @@
     appearance: none; cursor: pointer; border: 0; background: transparent;
     color: var(--fg-faint);
     font: 500 10.5px/1 "Geist Mono", monospace; letter-spacing: 0.04em;
-    padding: 4px 8px; border-radius: 4px;
+    min-width: 32px; min-height: 32px; padding: 0 10px; border-radius: 4px;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
   }
   .sm-root .sm-gran button:hover { color: var(--fg-muted); }
@@ -5323,7 +5327,7 @@
   appearance: none; -webkit-appearance: none;
   background: transparent; border: none; color: var(--fg-muted);
   font: 500 11.5px/1 "Geist Mono", monospace; cursor: pointer;
-  padding: 0; margin: 0; outline: none;
+  min-height: 36px; padding: 0 18px 0 0; margin: 0; outline: none;
 }
 .sm-root .sm-select-native select option { color: #111; }
 

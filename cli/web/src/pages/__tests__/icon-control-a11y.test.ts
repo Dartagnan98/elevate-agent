@@ -168,4 +168,25 @@ describe("icon-only control accessibility", () => {
 
     expect(failures).toEqual([]);
   });
+
+  it("keeps browser-probed Skills and Social controls named and tappable", () => {
+    const appCss = read("index.css");
+    const hubData = read("pages/real-estate-hub/_shared/use-hub-data.tsx");
+    const skills = read("pages/SkillsPage.tsx");
+    const socialBoard = read("pages/real-estate-hub/social/board.tsx");
+    const socialCss = read("pages/real-estate-hub/social/social.css");
+
+    expect(hubData).toContain('className="min-h-[40px]"');
+    expect(skills).toContain('aria-label="Search skills"');
+    expect(skills).toContain('className="min-h-[40px] pl-8 pr-7 text-xs"');
+    expect(socialBoard).toContain('aria-label={"Show chart by " + g.noun}');
+    expect(socialCss).toContain("min-width: 32px; min-height: 32px");
+    expect(socialCss).toContain(".sm-root .sm-icon-btn {\n    appearance: none; width: 36px; height: 36px");
+    expect(socialCss).toContain(".sm-root .sm-tab {\n    appearance: none; cursor: pointer;");
+    expect(socialCss).toContain("min-height: 36px;");
+    expect(socialCss).toContain("min-height: 36px; padding: 0 18px 0 0");
+    expect(appCss).toContain("@media (max-width: 1023px)");
+    expect(appCss).toContain("#app-sidebar .nav-row,");
+    expect(appCss).toContain("#app-sidebar .icon-btn {\n    width: 40px !important;\n    height: 40px !important;");
+  });
 });

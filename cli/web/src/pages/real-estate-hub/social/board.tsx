@@ -253,8 +253,10 @@ function GranToggle({ gran, setGran }: { gran: Gran; setGran: (g: Gran) => void 
       {GRANS.map((g) => (
         <button
           key={g.id}
+          type="button"
           className={gran === g.id ? "active" : ""}
           aria-pressed={gran === g.id}
+          aria-label={"Show chart by " + g.noun}
           title={"By " + g.noun}
           onClick={() => setGran(g.id)}
         >

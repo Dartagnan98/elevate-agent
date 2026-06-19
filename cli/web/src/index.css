@@ -788,6 +788,39 @@ html .font-courier {
   text-overflow: ellipsis;
 }
 
+@media (max-width: 1023px) {
+  #app-sidebar .icon-btn {
+    width: 40px !important;
+    height: 40px !important;
+    border-radius: 8px;
+  }
+
+  #app-sidebar .icon-btn.sm {
+    width: 36px !important;
+    height: 36px !important;
+  }
+
+  #app-sidebar .new-chat,
+  #app-sidebar .user-pill {
+    min-height: 40px;
+  }
+
+  #app-sidebar .section-label {
+    min-height: 36px;
+    padding: 10px 14px 6px;
+  }
+
+  #app-sidebar .nav-row,
+  #app-sidebar .session-row,
+  #app-sidebar .auto-row {
+    min-height: 40px;
+  }
+
+  #app-sidebar .nav-row {
+    padding: 8px 12px;
+  }
+}
+
 .session-group-label {
   padding: 8px 14px 3px;
   font: 500 10px/1 "Geist Mono", monospace;

@@ -530,9 +530,13 @@ export default function SkillsPage() {
           Flows
         </button>
         <div className="relative w-full min-w-0 sm:max-w-xs">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Search
+            aria-hidden="true"
+            className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground"
+          />
           <Input
-            className="h-8 pl-8 pr-7 text-xs"
+            className="min-h-[40px] pl-8 pr-7 text-xs"
+            aria-label="Search skills"
             placeholder={t.common.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}

@@ -447,7 +447,13 @@ export function useHubHeader(
       </span>,
     );
     setEnd(
-      <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={isRefreshing}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="min-h-[40px]"
+        onClick={() => void refresh()}
+        disabled={isRefreshing}
+      >
         <RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} />
         Refresh
       </Button>,
