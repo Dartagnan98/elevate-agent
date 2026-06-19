@@ -237,18 +237,22 @@ Current verified snapshot, 2026-06-18:
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
   hosted account/org/skills-list/automation-list read contracts,
+  hosted admin missing-record mutations return 404 instead of false success,
   dashboard nav/route/preloader drift guard, FastAPI `/docs` shadow moved to
   `/api/docs` and `/api/openapi.json` so the dashboard `/docs` deep link
   serves the SPA and the developer schema does not crash on plugin routes,
   stricter `/api/status` readiness for desktop launch, release-path
   `smoke:mac` gate, preflight public-feed version comparison, post-ship public
   feed/artifact verification, installed app `codesign`/`spctl` smoke gate,
-  packaged WhatsApp bridge/package checks, gateway reinstall when a previously
+  packaged WhatsApp bridge/package checks, installed smoke reads the selected
+  dashboard port from `main.log` before sidecar probes, gateway reinstall when a previously
   missing packaged resource is recovered, gateway version-change installs
   kickstart launchd before advancing `.gateway_version`, Admin cron effective
   skills qualify ambiguous real-estate skill names, cron lane seeding repairs
   existing job agents, cron rejects unknown agent ids instead of silently
-  skipping, debug share rejects nonpositive `--lines`, local route identity
+  skipping, Cron route load/attention failures render real error states,
+  `/social-media` direct loads fetch cron workflow data for the jobs header,
+  debug share rejects nonpositive `--lines`, local route identity
   fingerprint drift guard, release feed merge rejects app-bundle/package version
   mismatch, finalization requires all current x64/arm64 zip/dmg artifacts,
   ship refuses a mismatched local feed before any remote mutation, lazy
@@ -448,9 +452,9 @@ Debug questions:
 
 First fix candidates:
 
-- Done: add `debug=1` metadata to existing source-inbox responses only for
-  active read path, fallback/error, and counts for threads, drafts,
-  skipped/private buyers. Do not add another reader.
+- Done: add backend `debug=1` metadata to existing source-inbox responses only
+  for active read path, fallback/error, and counts for threads, drafts,
+  skipped/private buyers. Frontend-visible empty-state debug remains a gap.
 - Done: add a direct `/api/cron/attention` contract test. Do not add
   scheduler-thread or lock-owner metadata until a real failure proves "jobs due
   but ticker not moving."
@@ -600,7 +604,7 @@ traceable to their owner.
 
 Deliverables:
 
-- Done: source inbox `debug=1` metadata on the existing route.
+- Done: source inbox backend `debug=1` metadata on the existing route.
 - Done: direct `/api/cron/attention` route contract test.
 - Done: positive protected example plugin API mount contract test.
 - Remaining: plugin restart behavior is documented before any public
@@ -758,14 +762,16 @@ Deliverables:
   selected port, auth injection, updater state/log lines, and app version.
 - Current packaged proof: installed app seal validation is part of
   `cli/scripts/installed_runtime_smoke.py`; the installed `1.2.58` app passes
-  app-version, seal validation, `web_dist` parity, and packaged WhatsApp
-  bridge checks. The latest live installed check used `--skip-sidecar`, so it
-  does not prove selected port, injected auth, WebSocket, or updater runtime
-  state.
-- Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
-  local `1.2.58` x64 and arm64 built apps pass app-version, seal, repo
-  `web_dist` parity, and packaged WhatsApp bridge checks; matching DMGs are
-  signed, notarized, stapled, Gatekeeper-accepted, and feed-synced.
+  app-version, seal validation, and packaged WhatsApp bridge checks. Repo
+  `web_dist` changed after that app was built, so installed/candidate parity is
+  currently stale until the app artifacts are rebuilt and smoked again. The
+  latest live installed check used `--skip-sidecar`, so it does not prove
+  injected auth, WebSocket, or updater runtime state.
+- Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`.
+  Prior local `1.2.58` x64 and arm64 built apps passed app-version, seal, repo
+  `web_dist` parity, and packaged WhatsApp bridge checks, but that proof is
+  stale after the current web bundle changes; rerun the release/smoke path
+  before claiming current candidate parity.
 - Preflight proof: `desktop/scripts/preflight-apple-release.js` compares the
   package version to the public update feed, not stale local `dist/` output.
 - Local ship proof: `desktop/scripts/ship-to-hetzner.js` verifies the local
@@ -815,11 +821,16 @@ Deliverables:
   - post-ship public feed/artifact verifier before declaring a release live,
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
-  - installed runtime smoke defaulting to the desktop app's `9119` port,
+  - installed runtime smoke discovers the selected dashboard port from
+    `main.log` before sidecar probes,
+  - hosted account/org/skills-list/automation-list read contracts,
+  - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing
     `refresh_token_plain` fails,
   - social media page surfaces partial route-load failures instead of only
     showing an error when every source fails,
+  - Cron route load and attention failures surface real error text,
+  - `/social-media` direct loads include workflow/cron data for the jobs header,
   - desktop gateway reinstall when gateway status reports a recovered
     packaged-resource `_missing` error,
   - `elevate debug share --session/--last` recorder-event support bundle
@@ -828,12 +839,16 @@ Deliverables:
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
-  - installed sidecar runtime smoke still needs selected-port, auth injection,
+  - installed/candidate app `web_dist` parity is stale after current bundle
+    changes and needs rebuild + smoke,
+  - installed sidecar runtime smoke still needs non-mutating auth injection,
     WebSocket, and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks signup, forgot/reset, admin, skills
-    run, Stripe, and deeper org mutation route contracts,
+  - source-inbox debug metadata is backend-probe only and not yet surfaced in
+    frontend empty/error states,
+  - hosted backend coverage still lacks signup, forgot/reset, skills run,
+    Stripe, and deeper admin/org mutation route contracts,
   - local row-level route inventory and route-family coverage ledger are not
     complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

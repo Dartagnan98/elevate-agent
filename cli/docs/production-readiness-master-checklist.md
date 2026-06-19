@@ -66,7 +66,7 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | WEB-01 | Build | PASS iff TypeScript and Vite build are clean | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` passes; default Node 20.9.0 fails engine |
-| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Source guard now proves nav routes are mounted/preloaded; TestClient proves `/docs` deep-link collision fixed in source (`/docs` serves SPA, `/api/docs` serves Swagger). Live installed 1.2.58 found `/approvals` chrome mislabeled as `Today`; fixed in source/title test and rebuilt `web_dist`, but installed-app rebuild plus browser/manual render pass still required |
+| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Source guard now proves nav routes are mounted/preloaded; TestClient proves `/docs` deep-link collision fixed in source (`/docs` serves SPA, `/api/docs` serves Swagger). Live installed 1.2.58 rendered Chat, Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph. Installed app still has stale page chrome for `/approvals`, `/comms`, and `/activity`; fixed in source/title test and rebuilt `web_dist`, but installed-app rebuild plus browser/manual render pass still required |
 | WEB-03 | Dead buttons | PASS iff every visible button/link/toggle either works, is disabled with reason, or is hidden | UNKNOWN | Browser/manual pass |
 | WEB-04 | UI collisions | PASS iff desktop-width and narrow-width screenshots show no clipped/overlapping critical controls | UNKNOWN | Browser/manual screenshots |
 | WEB-05 | Auth header contract | PASS iff dashboard API client sends the local session header where required | UNKNOWN | Existing frontend/API test |
@@ -120,7 +120,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, and Approvals; source now loads workflow data for direct Social Media visits. Button/action safety and rebuilt installed-app pass still required |
+| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph; source now loads workflow data for direct Social Media visits. Button/action safety and rebuilt installed-app pass still required |
 | CRM-02 | Admin deal flow | PASS iff deal view/edit/advance/actions have API contracts and UI recovery | UNKNOWN | Existing tests/manual pass |
 | CRM-03 | Connectors | PASS iff missing credentials and failed external services show clear recovery | UNKNOWN | Live status proves WhatsApp missing pairing is visible; Oura MCP and Composio Gmail 422 warnings still need owner/recovery classification |
 | CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Route/caller/test map |
@@ -258,6 +258,8 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding admin missing-record 404 coverage
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
+- PASS/BUGS: live installed 1.2.58 route pass rendered Comms, Activity, Skills, and Memory graph; Comms/Activity still show generic `Web UI` page chrome in installed app, while source route-title fix covers them for the next rebuild
+- PASS: live installed 1.2.58 Memory graph populated after initial shell load with 78 nodes / 92 links, replay control, and recent ingest details
 - NOTE: old installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-214427-1.2.51`
 - NOTE: previous 1.2.53 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-220758-1.2.53`
 - NOTE: previous 1.2.57 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235359-1.2.57`; a locally mutated 1.2.58 verification copy was backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235625-1.2.58-pycache-mutated`
