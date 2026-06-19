@@ -8392,6 +8392,8 @@ Examples:
     elevate debug share --lines 500  Include more log lines
     elevate debug share --expire 30  Keep paste for 30 days
     elevate debug share --local      Print report locally (no upload)
+    elevate debug share --session ID Include redacted recorder events for ID
+    elevate debug share --last 30m   Limit recorder events to recent window
     elevate debug delete <url>       Delete a previously uploaded paste
 """,
     )
@@ -8416,6 +8418,15 @@ Examples:
         "--local",
         action="store_true",
         help="Print the report locally instead of uploading",
+    )
+    share_parser.add_argument(
+        "--session",
+        help="Include redacted session-recorder events for this session id",
+    )
+    share_parser.add_argument(
+        "--last",
+        default="30m",
+        help="Session-recorder lookback window, e.g. 600, 30m, 2h, all (default: 30m)",
     )
     share_parser.add_argument(
         "--no-redact",

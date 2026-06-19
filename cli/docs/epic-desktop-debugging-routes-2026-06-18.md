@@ -192,7 +192,8 @@ Current verified snapshot, 2026-06-18:
   updater manual checks, dead updater `dismissToast` preload exposure,
   `GatewayClient` WebSocket close-code/reason propagation, stale updater
   polling comment, backend hosted route-handler harness, route inventory drift
-  guard, and installed app `codesign`/`spctl` smoke gate.
+  guard, installed app `codesign`/`spctl` smoke gate, and production support
+  bundle redaction for session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
   `codesign --verify --deep --strict` and `spctl --assess` report a sealed
@@ -707,11 +708,13 @@ Deliverables:
   - hosted backend route-handler harness,
   - hosted login/refresh/device/diagnostics handler contracts,
   - route inventory drift guard,
-  - installed app `codesign`/`spctl` smoke gate.
+  - installed app `codesign`/`spctl` smoke gate,
+  - `elevate debug share --session/--last` recorder-event support bundle
+    section with export-time re-sanitization and redaction report,
+  - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
   - installed app seal validation failure,
-  - stale installed app `web_dist` versus repo build,
-  - production support bundle redaction.
+  - stale installed app `web_dist` versus repo build.
 
 Acceptance:
 
@@ -815,6 +818,8 @@ rg -n "updater:dismiss-toast|dismissToast|autoUpdater\\.checkForUpdates\\(" desk
 # Production sweep test collection. This is broader than the fast incident path.
 cd /Users/dartagnanpatricio/elevate/cli
 .venv/bin/python -m pytest -q \
+  tests/elevate_cli/test_session_recorder.py \
+  tests/hermes_cli/test_debug.py \
   tests/elevate_cli/test_debug_route_inventory.py \
   tests/elevate_cli/test_installed_runtime_smoke.py
 .venv/bin/python -m pytest --collect-only -q \
@@ -845,7 +850,6 @@ npm run build
 
 # Remaining missing tests/probes to add with implementation:
 # - Fresh installed app must pass codesign/spctl and bundled web_dist parity.
-# - Production support bundle redaction.
 ```
 
 ## Done Definition

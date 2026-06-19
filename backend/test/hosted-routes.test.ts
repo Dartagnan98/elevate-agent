@@ -195,7 +195,7 @@ describe("hosted route handlers", () => {
       payload: {
         message_count: 4,
         success: true,
-        status: "failed",
+        status: "failed for joe@example.com token=sk-1234567890abcdef password=hunter2 /Users/dartagnanpatricio/private/report.pdf",
         prompt: "raw prompt",
         body: "secret body",
         unknown: "dropped",
@@ -221,12 +221,18 @@ describe("hosted route handlers", () => {
     assert.deepEqual(db.session_diagnostic_events[0].payload, {
       message_count: 4,
       success: true,
-      status: "failed",
+      status:
+        "failed for [redacted-email] token=[redacted-secret] password=[redacted-secret] [path:report.pdf]",
     });
     assert.deepEqual(db.session_diagnostic_events[0].redaction, {
       strings_redacted: 2,
     });
     assert.equal(db.session_diagnostic_events[0].event, "diagnostics.raw");
     assertNoRawDiagnosticsText(db);
+    const stored = JSON.stringify(db.session_diagnostic_events);
+    assert.equal(stored.includes("joe@example.com"), false);
+    assert.equal(stored.includes("hunter2"), false);
+    assert.equal(stored.includes("sk-1234567890abcdef"), false);
+    assert.equal(stored.includes("/Users/dartagnanpatricio"), false);
   });
 });

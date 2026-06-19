@@ -1,7 +1,9 @@
 """Tests for ``elevate debug`` CLI command and debug utilities."""
 
+import json
 import os
 import sys
+import time
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -330,6 +332,40 @@ class TestCollectDebugReport:
 
         assert "(file not found)" in report
 
+    def test_report_includes_redacted_session_recorder_events(self, elevate_home):
+        from elevate_cli.debug import collect_debug_report
+
+        snapshot = {
+            "events": [
+                {
+                    "event_id": "evt-1",
+                    "event": "gateway.error",
+                    "session_id": "s1",
+                    "payload": {"error_message": "token=[redacted]", "retry_count": 1},
+                    "redaction": {"strings_redacted": 1},
+                }
+            ],
+            "report": {
+                "events_seen": 1,
+                "events_written": 1,
+                "strings_redacted": 1,
+            },
+        }
+
+        with patch("elevate_cli.dump.run_dump"):
+            report = collect_debug_report(
+                log_lines=50,
+                session_events_snapshot=snapshot,
+                session_id="s1",
+                since_seconds=1800,
+            )
+
+        assert "--- session recorder events (redacted) ---" in report
+        assert "filter.session_id: s1" in report
+        assert '"event":"gateway.error"' in report
+        assert '"strings_redacted":1' in report
+        assert 'event_type_counts: {"gateway.error":1}' in report
+
 
 # ---------------------------------------------------------------------------
 # CLI entry point — run_debug_share
@@ -393,6 +429,48 @@ class TestRunDebugShare:
         assert "FULL agent.log" in out
         assert "FULL gateway.log" in out
 
+    def test_local_session_report_resanitizes_recorder_events(self, elevate_home, capsys):
+        from elevate_cli.debug import run_debug_share
+
+        events_dir = elevate_home / "logs" / "session-events"
+        events_dir.mkdir(parents=True)
+        (events_dir / "2026-06-18.jsonl").write_text(
+            json.dumps(
+                {
+                    "event_id": "legacy-1",
+                    "event": "gateway.error",
+                    "ts": time.time(),
+                    "session_id": "s1",
+                    "payload": {
+                        "prompt": "raw prompt",
+                        "body": "secret body",
+                        "error_message": "password=hunter2",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        args = MagicMock()
+        args.lines = 50
+        args.expire = 7
+        args.local = True
+        args.no_redact = False
+        args.session = "s1"
+        args.last = "all"
+
+        with patch("elevate_cli.dump.run_dump"):
+            run_debug_share(args)
+
+        out = capsys.readouterr().out
+        assert "--- session recorder events (redacted) ---" in out
+        assert "filter.session_id: s1" in out
+        assert "password=[redacted-secret]" in out
+        assert "raw prompt" not in out
+        assert "secret body" not in out
+        assert "hunter2" not in out
+
     def test_share_uploads_three_pastes(self, elevate_home, capsys):
         """Successful share uploads report + agent.log + gateway.log."""
         from elevate_cli.debug import run_debug_share
@@ -433,6 +511,65 @@ class TestRunDebugShare:
         assert "--- elevate dump ---" in gateway_paste
         assert "--- full gateway.log ---" in gateway_paste
 
+    def test_share_uploads_sanitized_session_events_even_with_no_redact(
+        self,
+        elevate_home,
+        capsys,
+    ):
+        from elevate_cli.debug import run_debug_share
+
+        events_dir = elevate_home / "logs" / "session-events"
+        events_dir.mkdir(parents=True)
+        (events_dir / "2026-06-18.jsonl").write_text(
+            json.dumps(
+                {
+                    "event_id": "legacy-1",
+                    "event": "gateway.error",
+                    "ts": time.time(),
+                    "session_id": "s1",
+                    "source": "joe@example.com",
+                    "component": "/Users/dartagnanpatricio/private/report.pdf",
+                    "payload": {
+                        "prompt": "raw prompt",
+                        "content": "raw content",
+                        "error_message": "token=sk-1234567890abcdef",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        args = MagicMock()
+        args.lines = 50
+        args.expire = 7
+        args.local = False
+        args.no_redact = True
+        args.session = "s1"
+        args.last = "all"
+
+        uploaded_content = []
+
+        def _mock_upload(content, expiry_days=7):
+            uploaded_content.append(content)
+            return f"https://paste.rs/paste{len(uploaded_content)}"
+
+        with patch("elevate_cli.dump.run_dump"), \
+             patch("elevate_cli.debug.upload_to_pastebin", side_effect=_mock_upload):
+            run_debug_share(args)
+
+        report = uploaded_content[0]
+        assert "--- session recorder events (redacted) ---" in report
+        assert "token=[redacted-secret]" in report
+        assert "[redacted-email]" in report
+        assert "[path:report.pdf]" in report
+        assert "raw prompt" not in report
+        assert "raw content" not in report
+        assert "joe@example.com" not in report
+        assert "/Users/dartagnanpatricio" not in report
+        assert "sk-1234567890abcdef" not in report
+        assert "Debug report uploaded" in capsys.readouterr().out
+
     def test_share_keeps_report_and_full_log_on_same_snapshot(self, elevate_home, capsys):
         """A mid-run rotation must not make full agent.log older than the report."""
         from elevate_cli.debug import run_debug_share, collect_debug_report as real_collect_debug_report
@@ -456,11 +593,18 @@ class TestRunDebugShare:
             uploaded_content.append(content)
             return f"https://paste.rs/paste{len(uploaded_content)}"
 
-        def _wrapped_collect_debug_report(*, log_lines=200, dump_text="", log_snapshots=None):
+        def _wrapped_collect_debug_report(
+            *,
+            log_lines=200,
+            dump_text="",
+            log_snapshots=None,
+            **kwargs,
+        ):
             report = real_collect_debug_report(
                 log_lines=log_lines,
                 dump_text=dump_text,
                 log_snapshots=log_snapshots,
+                **kwargs,
             )
             # Simulate the live log rotating after the report is built but
             # before the old implementation would have re-read agent.log for

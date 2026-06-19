@@ -134,7 +134,22 @@ function cleanEventName(value: string): string {
 }
 
 function cleanString(value: unknown, maxLen = 512): string {
-  return String(value ?? "").replace(/\0/g, "").slice(0, maxLen);
+  const text = String(value ?? "").replace(/\0/g, "").slice(0, maxLen);
+  return redactSensitive(text);
+}
+
+function redactSensitive(value: string): string {
+  return value
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+    .replace(/\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b/g, "[redacted-secret]")
+    .replace(
+      /\b(token|password|secret|api[_-]?key)=([^\s&]+)/gi,
+      "$1=[redacted-secret]",
+    )
+    .replace(/\/Users\/[^\s"'`]+/g, (match) => {
+      const name = match.split("/").pop() || "path";
+      return `[path:${name}]`;
+    });
 }
 
 function sanitizePayload(payload: Record<string, unknown> | undefined): Record<string, unknown> {

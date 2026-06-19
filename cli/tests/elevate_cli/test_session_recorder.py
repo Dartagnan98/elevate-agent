@@ -221,6 +221,49 @@ def test_collect_skips_malformed_lines(recorder_home):
     assert result["report"]["malformed_lines"] == 1
 
 
+def test_collect_resanitizes_legacy_raw_events(recorder_home):
+    base_dir = recorder_home / "logs" / "session-events"
+    base_dir.mkdir(parents=True)
+    path = base_dir / "2026-06-18.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "event_id": "legacy-1",
+                "event": "gateway.error",
+                "ts": time.time(),
+                "session_id": "s1",
+                "source": "joe@example.com",
+                "component": "/Users/dartagnanpatricio/private/report.pdf",
+                "payload": {
+                    "prompt": "raw prompt",
+                    "body": "secret body",
+                    "error_message": "token=sk-1234567890abcdef password=hunter2",
+                    "retry_count": 2,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = recorder.collect_session_events("s1", since_seconds=None)
+    event = result["events"][0]
+    raw = json.dumps(result)
+
+    assert event["source"] == "[redacted-email]"
+    assert event["component"] == "[path:report.pdf]"
+    assert event["payload"] == {
+        "error_message": "token=[redacted-secret] password=[redacted-secret]",
+        "retry_count": 2,
+    }
+    assert "raw prompt" not in raw
+    assert "secret body" not in raw
+    assert "hunter2" not in raw
+    assert "/Users/dartagnanpatricio" not in raw
+    assert event["redaction"]["forbidden_keys_dropped"] == 2
+    assert event["redaction"]["strings_redacted"] >= 4
+
+
 def test_collect_matches_child_and_task_ids(recorder_home):
     assert recorder.record_session_event(
         "subagent.complete",

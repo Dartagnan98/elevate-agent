@@ -13,6 +13,7 @@ Currently supports:
 import io
 import json
 import logging
+import math
 import sys
 import time
 import urllib.error
@@ -46,6 +47,7 @@ _DPASTE_COM_URL = "https://dpaste.com/api/"
 # Maximum bytes to read from a single log file for upload.
 # paste.rs caps at ~1 MB; we stay under that with headroom.
 _MAX_LOG_BYTES = 512_000
+_MAX_SESSION_EVENTS = 200
 
 # Auto-delete pastes after this many seconds (6 hours).
 _AUTO_DELETE_SECONDS = 21600
@@ -496,6 +498,82 @@ def _capture_default_log_snapshots(
     }
 
 
+def _parse_since_seconds(value: object, default: int = 1800) -> int | None:
+    """Parse --last values like 600, 30m, 2h, 1d."""
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"all", "none"}:
+        return None
+    unit = text[-1]
+    multiplier = {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 1)
+    number = text[:-1] if unit in {"s", "m", "h", "d"} else text
+    try:
+        seconds = float(number) * multiplier
+    except ValueError:
+        return default
+    if not math.isfinite(seconds) or seconds <= 0:
+        return default
+    return int(seconds)
+
+
+def _optional_str_arg(args: object, name: str) -> str | None:
+    value = getattr(args, name, None)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _bool_arg(args: object, name: str, default: bool = False) -> bool:
+    value = getattr(args, name, default)
+    return value if isinstance(value, bool) else default
+
+
+def _capture_session_events(
+    *,
+    session_id: str | None = None,
+    since_seconds: int | None = 1800,
+) -> dict:
+    from elevate_cli.diagnostics.session_recorder import collect_session_events
+
+    return collect_session_events(session_id=session_id, since_seconds=since_seconds)
+
+
+def _format_session_events_section(
+    snapshot: dict | None,
+    *,
+    session_id: str | None,
+    since_seconds: int | None,
+) -> str:
+    snapshot = snapshot or {"events": [], "report": {}}
+    events = list(snapshot.get("events") or [])
+    report = dict(snapshot.get("report") or {})
+    visible = events[-_MAX_SESSION_EVENTS:]
+    truncated = max(0, len(events) - len(visible))
+    event_types: dict[str, int] = {}
+    for event in events:
+        typ = str(event.get("event") or "unknown")
+        event_types[typ] = event_types.get(typ, 0) + 1
+
+    lines = [
+        "--- session recorder events (redacted) ---",
+        f"filter.session_id: {session_id or '(any)'}",
+        f"filter.last_seconds: {since_seconds if since_seconds is not None else 'all'}",
+        "redaction_report: "
+        + json.dumps(report, sort_keys=True, separators=(",", ":")),
+        "event_type_counts: "
+        + json.dumps(event_types, sort_keys=True, separators=(",", ":")),
+        f"events_included: {len(visible)}",
+    ]
+    if truncated:
+        lines.append(f"events_omitted_oldest: {truncated}")
+    lines.extend(
+        json.dumps(event, sort_keys=True, separators=(",", ":"))
+        for event in visible
+    )
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Debug report collection
 # ---------------------------------------------------------------------------
@@ -524,6 +602,9 @@ def collect_debug_report(
     log_lines: int = 200,
     dump_text: str = "",
     log_snapshots: Optional[dict[str, LogSnapshot]] = None,
+    session_events_snapshot: Optional[dict] = None,
+    session_id: str | None = None,
+    since_seconds: int | None = 1800,
 ) -> str:
     """Build the summary debug report: system dump + log tails.
 
@@ -545,6 +626,11 @@ def collect_debug_report(
 
     if log_snapshots is None:
         log_snapshots = _capture_default_log_snapshots(log_lines)
+    if session_events_snapshot is None:
+        session_events_snapshot = _capture_session_events(
+            session_id=session_id,
+            since_seconds=since_seconds,
+        )
 
     # ── Recent log tails (summary only) ──────────────────────────────────
     buf.write("\n\n")
@@ -561,6 +647,15 @@ def collect_debug_report(
     buf.write(log_snapshots["gateway"].tail_text)
     buf.write("\n")
 
+    buf.write("\n")
+    buf.write(
+        _format_session_events_section(
+            session_events_snapshot,
+            session_id=session_id,
+            since_seconds=since_seconds,
+        )
+    )
+
     return buf.getvalue()
 
 
@@ -574,8 +669,10 @@ def run_debug_share(args):
 
     log_lines = getattr(args, "lines", 200)
     expiry = getattr(args, "expire", 7)
-    local_only = getattr(args, "local", False)
-    redact = not getattr(args, "no_redact", False)
+    local_only = _bool_arg(args, "local")
+    redact = not _bool_arg(args, "no_redact")
+    session_id = _optional_str_arg(args, "session")
+    since_seconds = _parse_since_seconds(_optional_str_arg(args, "last"))
 
     if not local_only:
         print(_PRIVACY_NOTICE)
@@ -588,6 +685,10 @@ def run_debug_share(args):
     # redact=True so credentials never reach the public paste service.
     dump_text = _capture_dump()
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
+    session_events_snapshot = _capture_session_events(
+        session_id=session_id,
+        since_seconds=since_seconds,
+    )
 
     if redact:
         logger.info(
@@ -598,6 +699,9 @@ def run_debug_share(args):
         log_lines=log_lines,
         dump_text=dump_text,
         log_snapshots=log_snapshots,
+        session_events_snapshot=session_events_snapshot,
+        session_id=session_id,
+        since_seconds=since_seconds,
     )
     agent_log = log_snapshots["agent"].full_text
     gateway_log = log_snapshots["gateway"].full_text

@@ -288,6 +288,77 @@ def _attach_redaction_report(event: dict[str, Any], report: dict[str, int]) -> N
         event["redaction"] = redaction
 
 
+def _sanitize_existing_redaction(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    clean: dict[str, int] = {}
+    for key, raw in value.items():
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            continue
+        clean[_coerce_str(key, max_len=96).lower()] = max(0, int(raw))
+    return clean
+
+
+def sanitize_recorded_event(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+    """Re-sanitize a stored recorder event before support-bundle use."""
+    report = _base_report()
+    payload, payload_report = sanitize_payload(
+        _coerce_str(event.get("event"), max_len=96),
+        event.get("payload") if isinstance(event.get("payload"), dict) else None,
+    )
+    for key, value in payload_report.items():
+        report[key] = report.get(key, 0) + value
+
+    clean: dict[str, Any] = {
+        "schema_version": 1,
+        "event_id": _sanitize_envelope_field(event.get("event_id"), report, max_len=128)
+        or uuid.uuid4().hex,
+        "event": _clean_event_name(_coerce_str(event.get("event"), max_len=96)),
+        "severity": _sanitize_envelope_field(event.get("severity") or "info", report, max_len=24)
+        or "info",
+        "source": _sanitize_envelope_field(event.get("source") or "backend", report, max_len=64)
+        or "backend",
+        "component": _sanitize_envelope_field(
+            event.get("component") or event.get("source") or "unknown",
+            report,
+            max_len=128,
+        )
+        or "unknown",
+        "payload": payload,
+    }
+
+    for key in ("ts", "ts_monotonic", "seq", "pid"):
+        value = event.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            clean[key] = value
+
+    for key in (
+        "session_id",
+        "parent_session_id",
+        "child_session_id",
+        "turn_id",
+        "task_id",
+        "app_version",
+        "frontend_asset",
+        "backend_build",
+        "install_id_hash",
+        "account_id_hash",
+    ):
+        value = _sanitize_envelope_field(event.get(key), report)
+        if value:
+            clean[key] = value
+
+    redaction = _sanitize_existing_redaction(event.get("redaction"))
+    for key, value in report.items():
+        if value:
+            redaction[key] = redaction.get(key, 0) + value
+    if redaction:
+        clean["redaction"] = redaction
+    return clean, report
+
+
 def build_session_event(
     event_type: str,
     *,
@@ -668,7 +739,10 @@ def collect_session_events(
                 include_lineage=include_lineage,
             ):
                 continue
-            events.append(event)
+            clean_event, sanitize_report = sanitize_recorded_event(event)
+            for key, value in sanitize_report.items():
+                report[key] = report.get(key, 0) + value
+            events.append(clean_event)
 
     report["events_written"] = len(events)
     return {"events": events, "report": report}
