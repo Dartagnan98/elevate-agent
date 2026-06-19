@@ -838,6 +838,8 @@ Deliverables:
   - hosted account/org/skills-list/automation-list read contracts,
   - hosted signup/forgot/reset route contract, production mailer outage
     visibility, and reset cleanup-before-password-change ordering,
+  - hosted self-service license read/revoke tenant guard and
+    sign-out-everywhere current-license preservation,
   - hosted `skills/run` requested-skill and invocation-audit contract,
   - hosted admin missing-record mutation `404` contracts,
   - hosted device poll refuses to return a one-shot refresh token if clearing
@@ -860,8 +862,8 @@ Deliverables:
     WebSocket and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks Stripe, logout/self-revoke, and deeper
-    admin/org mutation route contracts,
+  - hosted backend coverage still lacks Stripe and deeper admin/org mutation
+    route contracts,
   - route-family coverage ledger is seeded, but full row-level route inventory
     is not complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

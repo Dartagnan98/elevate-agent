@@ -377,40 +377,60 @@ function insertRows(table: string, body: unknown): unknown {
   throw new Error(`unexpected insert into ${table}`);
 }
 
-function updateRows(table: string, filters: URLSearchParams, body: Record<string, unknown>): void {
+function updateRows(
+  table: string,
+  filters: URLSearchParams,
+  body: Record<string, unknown>,
+): unknown[] {
   const id = readEq(filters, "id");
+  const notId = readNeq(filters, "id");
   const userId = readEq(filters, "user_id");
+  const matchesId = (rowId: string) => (!id || rowId === id) && (!notId || rowId !== notId);
+  const updated: unknown[] = [];
   if (table === "users") {
     for (const user of activeDb.users) {
-      if (!id || user.id === id) Object.assign(user, body);
+      if (matchesId(user.id)) {
+        Object.assign(user, body);
+        updated.push(user);
+      }
     }
-    return;
+    return updated;
   }
   if (table === "licenses") {
     for (const license of activeDb.licenses) {
-      if ((!id || license.id === id) && (!userId || license.user_id === userId)) {
+      if (matchesId(license.id) && (!userId || license.user_id === userId)) {
         Object.assign(license, body);
+        updated.push(license);
       }
     }
-    return;
+    return updated;
   }
   if (table === "device_grants") {
     for (const grant of activeDb.device_grants) {
-      if (!id || grant.id === id) Object.assign(grant, body);
+      if (matchesId(grant.id)) {
+        Object.assign(grant, body);
+        updated.push(grant);
+      }
     }
-    return;
+    return updated;
   }
   if (table === "login_codes") {
     for (const loginCode of activeDb.login_codes) {
-      if (!id || loginCode.id === id) Object.assign(loginCode, body);
+      if (matchesId(loginCode.id)) {
+        Object.assign(loginCode, body);
+        updated.push(loginCode);
+      }
     }
-    return;
+    return updated;
   }
   if (table === "password_reset_tokens") {
     for (const resetToken of activeDb.password_reset_tokens) {
-      if (!id || resetToken.id === id) Object.assign(resetToken, body);
+      if (matchesId(resetToken.id)) {
+        Object.assign(resetToken, body);
+        updated.push(resetToken);
+      }
     }
-    return;
+    return updated;
   }
   throw new Error(`unexpected update on ${table}`);
 }
@@ -418,6 +438,11 @@ function updateRows(table: string, filters: URLSearchParams, body: Record<string
 function readEq(params: URLSearchParams, key: string): string | null {
   const raw = params.get(key);
   return raw?.startsWith("eq.") ? raw.slice(3) : null;
+}
+
+function readNeq(params: URLSearchParams, key: string): string | null {
+  const raw = params.get(key);
+  return raw?.startsWith("neq.") ? raw.slice(4) : null;
 }
 
 function readIn(params: URLSearchParams, key: string): string[] | null {
@@ -440,18 +465,24 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
     let rows = activeDb.users;
     const email = readEq(params, "email");
     const id = readEq(params, "id");
+    const stripeCustomer = readEq(params, "stripe_customer");
     const statuses = readIn(params, "status");
     if (email) rows = rows.filter((row) => row.email === email.toLowerCase());
     if (id) rows = rows.filter((row) => row.id === id);
+    if (stripeCustomer) rows = rows.filter((row) => row.stripe_customer === stripeCustomer);
     if (statuses) rows = rows.filter((row) => statuses.includes(row.status));
     return maybeSingle(wantsSingle, rows);
   }
   if (table === "licenses") {
     let rows = activeDb.licenses;
     const id = readEq(params, "id");
+    const userId = readEq(params, "user_id");
     const hash = readEq(params, "refresh_token_hash");
+    const revoked = readEq(params, "revoked");
     if (id) rows = rows.filter((row) => row.id === id);
+    if (userId) rows = rows.filter((row) => row.user_id === userId);
     if (hash) rows = rows.filter((row) => row.refresh_token_hash === hash);
+    if (revoked) rows = rows.filter((row) => row.revoked === (revoked === "true"));
     return maybeSingle(wantsSingle, rows);
   }
   if (table === "memberships") {
@@ -579,7 +610,8 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
       nextPatchFailure = null;
       return okJson({ message: failure.message }, failure.status);
     }
-    updateRows(table, url.searchParams, body as Record<string, unknown>);
+    const rows = updateRows(table, url.searchParams, body as Record<string, unknown>);
+    if (url.searchParams.has("select")) return okJson(rows);
     return noContent();
   }
 

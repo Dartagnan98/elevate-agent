@@ -131,7 +131,7 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | HOST-01 | Hosted route inventory | PASS iff every `backend/src/app/api/**/route.ts` is tracked and drift-tested | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts` passes hosted route drift/contracts |
-| HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | UNKNOWN | Login, signup, forgot/reset, refresh, expired subscription, login-code, and revoked bearer are covered; logout/self-revoke route coverage still needs a contract |
+| HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` covers login, signup, forgot/reset, refresh, expired subscription, login-code, revoked bearer, `/api/me/licenses` read/self-revoke tenant guard, and `/api/me/sign-out-everywhere` preserving the current license |
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
 | HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts and admin missing-record 404s pass; deeper admin mutation success/permission matrix still needs coverage |
@@ -193,7 +193,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| GO-01 | All critical gates pass | PASS iff all non-N/A checklist rows above are PASS | FAIL | Checklist still has UNKNOWN rows across UI E2E, auth/license, recovery, observability, security, performance, and environment matrix |
+| GO-01 | All critical gates pass | PASS iff all non-N/A checklist rows above are PASS | FAIL | Checklist still has UNKNOWN rows across UI E2E, recovery, observability, security, performance, and environment matrix |
 | GO-02 | No P0/P1 open bugs | PASS iff no open critical bugs remain in the ledger | FAIL | Open runtime/config issues still need classification: WhatsApp enabled but not paired, config version `24` behind latest `25`, earlier Oura MCP, missing `OPENAI_API_KEY`, Composio Gmail HTTP 422 warnings, and one full-file parallel web-server run timed out in `/api/pub` broadcast before isolated rerun passed |
 | GO-03 | Tests green | PASS iff selected repo-wide test suite is green and listed | PASS | Listed evidence commands pass for web build, backend tests, targeted pytest, desktop preflight, mac smoke, and installed-app smoke |
 | GO-04 | UI E2E checked | PASS iff install -> login -> chat -> tools -> automations -> update -> quit/reopen is checked | UNKNOWN | Manual/browser report |

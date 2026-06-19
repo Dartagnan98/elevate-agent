@@ -278,6 +278,95 @@ describe("hosted route handlers", () => {
     assert.equal(inactiveLicense.revoked, true);
   });
 
+  it("self-service license routes read and revoke only the caller's sessions", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "license-user", email: "license@example.com" });
+    const other = await makeUser({ id: "other-user", email: "other@example.com" });
+    db.users.push(user, other);
+    const current = seedLicense({ id: "current-license", user_id: user.id });
+    const laptop = seedLicense({ id: "laptop-license", user_id: user.id, device_label: "Laptop" });
+    const revoked = seedLicense({ id: "revoked-license", user_id: user.id, revoked: true });
+    const otherLicense = seedLicense({ id: "other-license", user_id: other.id });
+    const bearer = await issueAccessToken(user, current);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const list = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("me/licenses");
+    const revoke = await loadRoute<{
+      DELETE: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("me/licenses/[id]");
+
+    const listResponse = await list.GET(
+      jsonRequest("/api/me/licenses", {}, { method: "GET", headers }),
+    );
+    const listBody = await responseJson(listResponse);
+
+    assert.equal(listResponse.status, 200);
+    assert.equal(listBody.current_license_id, current.id);
+    assert.deepEqual(
+      (listBody.licenses as Array<{ id: string }>).map((license) => license.id).sort(),
+      [current.id, laptop.id],
+    );
+
+    const crossUser = await revoke.DELETE(
+      jsonRequest("/api/me/licenses/other-license", {}, { method: "DELETE", headers }),
+      { params: Promise.resolve({ id: otherLicense.id }) },
+    );
+    const crossUserBody = await responseJson(crossUser);
+
+    assert.equal(crossUser.status, 404);
+    assert.deepEqual(crossUserBody, { error: "not_found" });
+    assert.equal(otherLicense.revoked, false);
+
+    const own = await revoke.DELETE(
+      jsonRequest("/api/me/licenses/laptop-license", {}, { method: "DELETE", headers }),
+      { params: Promise.resolve({ id: laptop.id }) },
+    );
+    const ownBody = await responseJson(own);
+
+    assert.equal(own.status, 200);
+    assert.deepEqual(ownBody, { ok: true });
+    assert.equal(current.revoked, false);
+    assert.equal(laptop.revoked, true);
+    assert.equal(revoked.revoked, true);
+    assert.equal(otherLicense.revoked, false);
+    assert.equal(
+      (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
+      "license.self_revoked",
+    );
+  });
+
+  it("sign out everywhere revokes sibling sessions but keeps the current one", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "session-user", email: "sessions@example.com" });
+    const other = await makeUser({ id: "other-session-user", email: "other-session@example.com" });
+    db.users.push(user, other);
+    const current = seedLicense({ id: "keep-license", user_id: user.id });
+    const stale = seedLicense({ id: "stale-license", user_id: user.id });
+    const otherLicense = seedLicense({ id: "other-user-license", user_id: other.id });
+    const bearer = await issueAccessToken(user, current);
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "me/sign-out-everywhere",
+    );
+
+    const response = await route.POST(
+      jsonRequest(
+        "/api/me/sign-out-everywhere",
+        {},
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body, { ok: true });
+    assert.equal(current.revoked, false);
+    assert.equal(stale.revoked, true);
+    assert.equal(otherLicense.revoked, false);
+    assert.equal(
+      (db.audit_log as Array<{ action?: string }>).at(-1)?.action,
+      "license.sign_out_everywhere",
+    );
+  });
+
   it("account read routes return effective org access and gated catalogs", async () => {
     const db = useFakeDb();
     const user = await makeUser({ entitlements: [] });
