@@ -37,7 +37,7 @@ Critical path:
 | ROOT-01 | Repo state understood | PASS iff `git status --short` is reviewed and unrelated dirty work is preserved | PASS | Reviewed: production checklist, desktop release files, release preflight/doc updates dirty; pre-existing untracked root `main.js` preserved |
 | ROOT-02 | Version ownership | PASS iff root, desktop, backend, CLI/package versions are intentionally aligned or documented as separate schemes | PASS | Separate schemes verified: root bootstrap `0.12.0`, desktop `1.2.58`, backend `0.1.0`, CLI `0.11.0` |
 | ROOT-03 | One-command developer sanity | PASS iff the smallest repo-level sanity command is documented and runs clean | PASS | `npm run smoke:npx-github` passes |
-| ROOT-04 | Local-only commit | PASS iff final production changes are committed locally and no remote push occurs | UNKNOWN | `git log -1`, no `git push` |
+| ROOT-04 | Local-only commit | PASS iff final production changes are committed locally and no remote push occurs | PASS | `git status -sb` showed `main...origin/main [ahead 104]` with only pre-existing untracked root `main.js`; latest production chunks were committed locally through `e1ca1fc17` before this checklist closeout and no remote push was performed |
 
 ## 2. Desktop Shell
 
@@ -197,7 +197,7 @@ Critical path:
 | GO-02 | No P0/P1 open bugs | PASS iff no open critical bugs remain in the ledger | FAIL | Open runtime/config issues still need classification: WhatsApp enabled but not paired, config version `24` behind latest `25`, earlier Oura MCP, missing `OPENAI_API_KEY`, Composio Gmail HTTP 422 warnings, and one full-file parallel web-server run timed out in `/api/pub` broadcast before isolated rerun passed |
 | GO-03 | Tests green | PASS iff selected repo-wide test suite is green and listed | PASS | Listed evidence commands pass for web build, backend tests, targeted pytest, desktop preflight, mac smoke, and installed-app smoke |
 | GO-04 | UI E2E checked | PASS iff install -> login -> chat -> tools -> automations -> update -> quit/reopen is checked | UNKNOWN | Manual/browser report |
-| GO-05 | Local commit | PASS iff all production-readiness changes are committed locally only | UNKNOWN | `git log -1`, remote untouched |
+| GO-05 | Local commit | PASS iff all production-readiness changes are committed locally only | PASS | `git status -sb` showed `main...origin/main [ahead 104]` with only pre-existing untracked root `main.js`; `git diff --stat` and `git diff --cached --stat` were empty before this checklist closeout; no remote push was performed |
 
 ## First Evidence Commands
 
@@ -404,3 +404,4 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `cd cli/web && PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec -- tsc -b`
 - PASS: `git diff --check`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
+- PASS: local-only gate check before checklist closeout: `git status -sb` showed `main...origin/main [ahead 104]`, `git status --short` showed only pre-existing `?? main.js`, and `git diff --stat`/`git diff --cached --stat` were empty.
