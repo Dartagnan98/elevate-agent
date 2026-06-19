@@ -110,7 +110,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| DATA-01 | Fresh DB init | PASS iff fresh `ELEVATE_HOME` initializes cleanly | UNKNOWN | Isolated smoke |
+| DATA-01 | Fresh DB init | PASS iff fresh `ELEVATE_HOME` initializes cleanly | PASS | `test_local_databases.py` proves a temp `ELEVATE_HOME` initializes operational Postgres migrations, session DB, PG-backed memory schema, outreach templates, Admin actions, onboarding rows, and scheduler registration without touching launchd |
 | DATA-02 | Upgrade migrations | PASS iff previous-version data migrates without loss | UNKNOWN | Migration tests |
 | DATA-03 | Corrupt state recovery | PASS iff corrupt DB/state shows visible recovery instructions and leaves trace | UNKNOWN | Fault-injection probe |
 | DATA-04 | Duplicate prevention | PASS iff critical write paths avoid duplicate sends/tasks/messages | UNKNOWN | Tests/source review |
@@ -308,3 +308,5 @@ If one command fails, fix the smallest failing gate first.
 - FAIL then PASS: `/leads` ignored backend `leadSections`, so DB-only hot/follow-up contacts and threads disappeared from the Hot Leads/Follow-ups queue when they were not draft-backed; now `mapLeadsPipeline` consumes section profile/thread ids and buyer-search counts.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- source-inbox-debug.test.ts`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
+- FAIL then PASS: `db init` reported the deprecated `memory_store.db` label even though memory is initialized in embedded Postgres; now it reports `pgdata` and the fresh-home regression asserts the memory schema exists in PG.
+- PASS: `PYTHONDONTWRITEBYTECODE=1 cli/.venv/bin/python -m pytest -q cli/tests/elevate_cli/test_local_databases.py`
