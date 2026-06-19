@@ -112,6 +112,11 @@ export interface SourceConnectorStatus {
   blocked: boolean;
   lastError: string | null;
   nextOperatorStep: string | null;
+  recoveryKind?: "ready" | "missing_config" | "operator_blocked" | "upstream_error" | "needs_operator" | string;
+  recoverySeverity?: "none" | "info" | "warning" | string;
+  recoveryOwner?: string;
+  recoveryAction?: string;
+  recoveryError?: string;
   lastCheckedAt: string | null;
   recordCounts: Record<string, number>;
   prompt: string;

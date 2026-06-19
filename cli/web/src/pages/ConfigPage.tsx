@@ -152,6 +152,12 @@ function connectorSetupCopy(connector: SourceConnectorStatus): string {
     : "Initialize this source to create the connector files.";
 }
 
+function connectorRecoveryClass(connector: SourceConnectorStatus): string {
+  return connector.recoverySeverity === "warning"
+    ? "border-warning/40 bg-warning/5 text-foreground"
+    : "border-border bg-muted/20 text-foreground";
+}
+
 const TOOLKIT_PAGE_SIZE = 24;
 
 function toolkitLogo(tk: ComposioToolkit | undefined): string | undefined {
@@ -1013,9 +1019,23 @@ function SourceConnectorSettingsPanel() {
               </div>
               <Badge variant="outline">{connectorRecordTotal(connector)} records</Badge>
             </div>
-            {connector.nextOperatorStep && (
-              <div className="mt-3 text-sm leading-6 text-muted-foreground">
-                {connector.nextOperatorStep}
+            {connector.recoveryAction && connector.recoverySeverity !== "none" && (
+              <div className={`mt-3 rounded-md border px-3 py-2 text-xs leading-5 ${connectorRecoveryClass(connector)}`}>
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div>{connector.recoveryAction}</div>
+                    <div className="mt-1 text-muted-foreground">
+                      Owner: {connector.recoveryOwner || connector.ownerAgent}
+                      {connector.recoveryKind ? ` · ${connector.recoveryKind.replace(/_/g, " ")}` : ""}
+                    </div>
+                    {connector.recoveryError && (
+                      <div className="mt-1 break-words text-warning">
+                        Error: {connector.recoveryError}
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             )}
             {connector.initializeBehavior === "composio_social_setup" && (

@@ -2302,6 +2302,60 @@ def _state_from_status(source_exists: bool, status: JsonRecord | None) -> str:
     return "needs_operator"
 
 
+def _connector_recovery(
+    *,
+    source_id: str,
+    state: str,
+    owner_agent: str,
+    last_error: str | None,
+    next_operator_step: str | None,
+) -> JsonRecord:
+    """Classify the operator-facing recovery path for connector rows."""
+    if state in {"connected", "import_only"}:
+        return {
+            "recoveryKind": "ready",
+            "recoverySeverity": "none",
+            "recoveryOwner": owner_agent,
+            "recoveryAction": "",
+        }
+    if next_operator_step:
+        action = next_operator_step
+    elif source_id == "social":
+        action = (
+            "Open the Composio panel, verify the API key and connected accounts, "
+            "then run the Social connector again."
+        )
+    elif state == "not_configured":
+        action = "Open setup chat to create this connector's source files."
+    elif state == "blocked":
+        action = "Resolve the listed permission or credential blocker, then click Refresh."
+    elif state == "error":
+        action = "Review the last connector error, fix the upstream service or credential, then run again."
+    else:
+        action = "Open setup chat or copy the prompt for the owner agent to finish this connector."
+
+    if state == "not_configured":
+        kind = "missing_config"
+        severity = "info"
+    elif state == "blocked":
+        kind = "operator_blocked"
+        severity = "warning"
+    elif state == "error":
+        kind = "upstream_error"
+        severity = "warning"
+    else:
+        kind = "needs_operator"
+        severity = "info"
+
+    return {
+        "recoveryKind": kind,
+        "recoverySeverity": severity,
+        "recoveryOwner": owner_agent,
+        "recoveryAction": action,
+        "recoveryError": last_error or "",
+    }
+
+
 def _blueprint(source_id: str) -> JsonRecord | None:
     return next((item for item in SOURCE_CONNECTION_BLUEPRINTS if item["id"] == source_id), None)
 
@@ -2755,6 +2809,28 @@ def connector_view(
     label = blueprint["source"]
     if isinstance(source, dict):
         label = str(source.get("provider") or source.get("account_label") or label).strip() or label
+    owner_agent = owner_agent or OWNER_BY_SOURCE.get(source_id, "Executive Assistant")
+    last_error = (
+        str(status.get("last_error") or "").strip()
+        if isinstance(status, dict) and status.get("last_error")
+        else None
+    )
+    next_operator_step = (
+        str(status.get("next_operator_step") or "").strip()
+        if isinstance(status, dict) and status.get("next_operator_step")
+        else (
+            "Initialize this source to create the connector files."
+            if state == "not_configured"
+            else None
+        )
+    )
+    recovery = _connector_recovery(
+        source_id=source_id,
+        state=state,
+        owner_agent=owner_agent,
+        last_error=last_error,
+        next_operator_step=next_operator_step,
+    )
 
     return {
         "id": source_id,
@@ -2777,21 +2853,14 @@ def connector_view(
             if source_id in AGENT_SESSION_SOURCE_IDS
             else ("server_inline" if source_id in WIRED_SOURCE_IDS else "agent_setup_task")
         ),
-        "ownerAgent": owner_agent or OWNER_BY_SOURCE.get(source_id, "Executive Assistant"),
+        "ownerAgent": owner_agent,
         "enabledUiSurfaces": [str(item) for item in enabled_surfaces if str(item).strip()],
         "connected": bool(status and status.get("connected") is True),
         "importOnly": bool(status and status.get("import_only") is True),
         "blocked": bool(status and status.get("blocked") is True),
-        "lastError": str(status.get("last_error") or "").strip() if isinstance(status, dict) and status.get("last_error") else None,
-        "nextOperatorStep": (
-            str(status.get("next_operator_step") or "").strip()
-            if isinstance(status, dict) and status.get("next_operator_step")
-            else (
-                "Initialize this source to create the connector files."
-                if state == "not_configured"
-                else None
-            )
-        ),
+        "lastError": last_error,
+        "nextOperatorStep": next_operator_step,
+        **recovery,
         "lastCheckedAt": status.get("last_checked_at") if isinstance(status, dict) else None,
         "recordCounts": record_counts,
         "prompt": source_prompt_for(source_id) if include_prompt else "",
