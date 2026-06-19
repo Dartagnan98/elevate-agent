@@ -41,7 +41,7 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
-import type { AgentHubAgent } from "@/lib/api-types";
+import type { AgentHubAgent, CronAttention } from "@/lib/api-types";
 
 /* ------------------------------------------------------------------ */
 /*  Schedule helpers (unchanged from previous version)                 */
@@ -78,6 +78,18 @@ const STATUS_VARIANT: Record<string, "success" | "warning" | "destructive"> = {
 type JobKindFilter = "all" | "automations" | "heartbeats";
 type CreateJobKind = "automation" | "heartbeat";
 type ReportMode = "quiet" | "notify";
+
+function messageFromError(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+export function cronLoadErrorMessage(error: unknown): string {
+  return `Failed to load cron jobs: ${messageFromError(error, "unknown error")}`;
+}
+
+export function cronAttentionErrorMessage(error: unknown): string {
+  return `Cron attention unavailable: ${messageFromError(error, "unknown error")}`;
+}
 
 const HEARTBEAT_ORIGIN_TYPES = new Set([
   "heartbeat",
@@ -1210,7 +1222,8 @@ function MetaCell({
 
 export default function CronPage() {
   const [agents, setAgents] = useState<AgentHubAgent[]>([]);
-  const [attention, setAttention] = useState<import("../lib/api-types").CronAttention | null>(null);
+  const [attention, setAttention] = useState<CronAttention | null>(null);
+  const [attentionError, setAttentionError] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const editParam = searchParams.get("edit");
   const agentParam = searchParams.get("agent") ?? "";
@@ -1284,8 +1297,8 @@ export default function CronPage() {
   }, [jobs, selectedId]);
 
   useEffect(() => {
-    if (jobsError) showToast(t.common.loading, "error");
-  }, [jobsError, showToast, t.common.loading]);
+    if (jobsError) showToast(cronLoadErrorMessage(jobsError), "error");
+  }, [jobsError, showToast]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1299,9 +1312,12 @@ export default function CronPage() {
   const loadAttention = useCallback(() => {
     api
       .getCronAttention()
-      .then(setAttention)
-      .catch(() => {
-        /* silent; banner just won't show */
+      .then((next) => {
+        setAttention(next);
+        setAttentionError(null);
+      })
+      .catch((error) => {
+        setAttentionError(cronAttentionErrorMessage(error));
       });
   }, []);
 
@@ -1361,7 +1377,9 @@ export default function CronPage() {
   const heartbeatCount = jobs.filter(isHeartbeatJob).length;
   const automationCount = jobs.length - heartbeatCount;
   const emptyJobsMessage =
-    kindFilter === "heartbeats"
+    jobsError
+      ? cronLoadErrorMessage(jobsError)
+      : kindFilter === "heartbeats"
       ? "No heartbeats yet. Create one here, or switch to All."
       : kindFilter === "automations"
         ? "No automations yet. Create one here, or switch to All."
@@ -1590,6 +1608,15 @@ export default function CronPage() {
           value={kindFilter}
         />
       </div>
+
+      {attentionError && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-4 py-3 text-xs text-destructive">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertCircle className="h-3.5 w-3.5" />
+            <span>{attentionError}</span>
+          </div>
+        </div>
+      )}
 
       {attention && attention.total > 0 && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/[0.06] px-4 py-3 text-xs">

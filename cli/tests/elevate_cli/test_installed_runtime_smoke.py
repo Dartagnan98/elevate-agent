@@ -75,10 +75,17 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
 
 
-def test_installed_runtime_smoke_defaults_to_desktop_port():
+def test_installed_runtime_smoke_discovers_selected_dashboard_port(tmp_path):
     smoke = _load_smoke_script()
+    log = tmp_path / "main.log"
+    log.write_text(
+        "[2026-06-19 00:00:00.000] [info] [startup] 42ms backend:port-selected 9120\n",
+        encoding="utf-8",
+    )
 
-    assert smoke.parse_args([]).port == 9119
+    assert smoke.parse_args([]).port is None
+    assert smoke.read_selected_dashboard_port(log) == 9120
+    assert smoke.read_selected_dashboard_port(tmp_path / "missing.log") == 9119
 
 
 def test_read_installed_app_version_uses_bundle_info_plist(monkeypatch, tmp_path):

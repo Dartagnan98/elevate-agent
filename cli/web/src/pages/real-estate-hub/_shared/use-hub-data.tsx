@@ -71,13 +71,14 @@ function routeHas(pathname: string, segment: string): boolean {
   return pathname === segment || pathname.startsWith(`${segment}/`);
 }
 
-function flagsForPath(pathname: string): HubRequestFlags {
+export function flagsForPath(pathname: string): HubRequestFlags {
   const includeMemoryGraph = routeHas(pathname, "/memory");
   const includeWorkflowData =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
     routeHas(pathname, "/leads") ||
-    routeHas(pathname, "/admin");
+    routeHas(pathname, "/admin") ||
+    routeHas(pathname, "/social-media");
   const includeSourceInbox =
     pathname === "/" ||
     routeHas(pathname, "/today") ||

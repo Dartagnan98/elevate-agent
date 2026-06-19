@@ -848,6 +848,20 @@ class TestWebServerEndpoints:
 
         assert resp.status_code == 200
         assert "SwaggerUIBundle" in resp.text
+        assert "/api/openapi.json" in resp.text
+
+    def test_fastapi_openapi_schema_lives_under_api(self):
+        """The debug docs page must point at a schema endpoint that actually works."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import app
+
+        client = TestClient(app)
+
+        assert client.get("/openapi.json").status_code in (200, 404)
+        resp = client.get("/api/openapi.json")
+
+        assert resp.status_code == 200
+        assert resp.json()["info"]["title"] == "Elevate"
 
 
 # ---------------------------------------------------------------------------

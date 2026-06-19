@@ -231,6 +231,7 @@ app = FastAPI(
     version=__version__,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
     swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
 )
 
@@ -348,6 +349,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/docs",
     "/api/docs/oauth2-redirect",
+    "/api/openapi.json",
     "/api/redoc",
     "/api/status",
     "/api/config/defaults",
@@ -12710,7 +12712,11 @@ def _mount_plugin_api_routes():
             if router is None:
                 _log.warning("Plugin %s api file has no 'router' attribute", plugin["name"])
                 continue
-            app.include_router(router, prefix=f"/api/plugins/{plugin['name']}")
+            app.include_router(
+                router,
+                prefix=f"/api/plugins/{plugin['name']}",
+                include_in_schema=False,
+            )
             _log.info("Mounted plugin API routes: /api/plugins/%s/", plugin["name"])
         except Exception as exc:
             _log.warning("Failed to load plugin %s API routes: %s", plugin["name"], exc)

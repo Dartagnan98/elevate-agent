@@ -177,7 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
-- Local route identity fingerprint: `f31390ff45328047`.
+- Local route identity fingerprint: `2938aef7acec0223`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -236,8 +236,10 @@ Current verified snapshot, 2026-06-18:
   polling comment, backend hosted route-handler harness, hosted device
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
+  hosted account/org/skills-list/automation-list read contracts,
   dashboard nav/route/preloader drift guard, FastAPI `/docs` shadow moved to
-  `/api/docs` so the dashboard `/docs` deep link serves the SPA,
+  `/api/docs` and `/api/openapi.json` so the dashboard `/docs` deep link
+  serves the SPA and the developer schema does not crash on plugin routes,
   stricter `/api/status` readiness for desktop launch, release-path
   `smoke:mac` gate, preflight public-feed version comparison, post-ship public
   feed/artifact verification, installed app `codesign`/`spctl` smoke gate,
@@ -830,8 +832,8 @@ Deliverables:
     WebSocket, and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks signup, forgot/reset, `me`, orgs,
-    admin, skills, automations, and Stripe route contracts,
+  - hosted backend coverage still lacks signup, forgot/reset, admin, skills
+    run, Stripe, and deeper org mutation route contracts,
   - local row-level route inventory and route-family coverage ledger are not
     complete yet,
   - live runtime warnings still need owner/recovery classification: WhatsApp

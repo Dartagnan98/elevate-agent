@@ -68,10 +68,54 @@ type LoginCodeRow = {
   user_agent: string | null;
 };
 
+type OrgRow = {
+  id: string;
+  slug: string;
+  name: string;
+  stripe_customer: string | null;
+  tier: Tier;
+  status: UserStatus;
+  current_period_end: string | null;
+  entitlements: string[];
+  seat_limit: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type MembershipRow = {
+  id: string;
+  org_id: string;
+  user_id: string;
+  role: "owner" | "admin" | "member";
+  created_at: string;
+  organization: OrgRow;
+};
+
+type CatalogRow = {
+  name: string;
+  version: number;
+  tier_required: Tier;
+  manifest: Record<string, unknown>;
+  body?: string;
+  enabled: boolean;
+  updated_at: string;
+  created_at: string;
+};
+
 type FakeDb = {
   users: UserRow[];
   licenses: LicenseRow[];
-  memberships: unknown[];
+  memberships: MembershipRow[];
+  skills: CatalogRow[];
+  automations: Array<CatalogRow & {
+    surface: string;
+    kind: "heartbeat" | "automation";
+    schedule: string;
+    skill: string;
+    prompt: string;
+    deliver: string;
+    spec: Record<string, unknown>;
+  }>;
   device_grants: DeviceGrantRow[];
   login_codes: LoginCodeRow[];
   audit_log: unknown[];
@@ -91,6 +135,8 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     users: [],
     licenses: [],
     memberships: [],
+    skills: [],
+    automations: [],
     device_grants: [],
     login_codes: [],
     audit_log: [],
@@ -306,7 +352,7 @@ function readGreaterThan(params: URLSearchParams, key: string): string | null {
   return raw?.startsWith("gt.") ? raw.slice(3) : null;
 }
 
-function selectRows(table: string, params: URLSearchParams): unknown {
+function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean): unknown {
   if (table === "users") {
     let rows = activeDb.users;
     const email = readEq(params, "email");
@@ -315,7 +361,7 @@ function selectRows(table: string, params: URLSearchParams): unknown {
     if (email) rows = rows.filter((row) => row.email === email.toLowerCase());
     if (id) rows = rows.filter((row) => row.id === id);
     if (statuses) rows = rows.filter((row) => statuses.includes(row.status));
-    return maybeSingle(params, rows);
+    return maybeSingle(wantsSingle, rows);
   }
   if (table === "licenses") {
     let rows = activeDb.licenses;
@@ -323,10 +369,27 @@ function selectRows(table: string, params: URLSearchParams): unknown {
     const hash = readEq(params, "refresh_token_hash");
     if (id) rows = rows.filter((row) => row.id === id);
     if (hash) rows = rows.filter((row) => row.refresh_token_hash === hash);
-    return maybeSingle(params, rows);
+    return maybeSingle(wantsSingle, rows);
   }
   if (table === "memberships") {
-    return activeDb.memberships;
+    let rows = activeDb.memberships;
+    const userId = readEq(params, "user_id");
+    const orgId = readEq(params, "org_id");
+    if (userId) rows = rows.filter((row) => row.user_id === userId);
+    if (orgId) rows = rows.filter((row) => row.org_id === orgId);
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "skills") {
+    let rows = activeDb.skills;
+    const enabled = readEq(params, "enabled");
+    if (enabled) rows = rows.filter((row) => row.enabled === (enabled === "true"));
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "automations") {
+    let rows = activeDb.automations;
+    const enabled = readEq(params, "enabled");
+    if (enabled) rows = rows.filter((row) => row.enabled === (enabled === "true"));
+    return maybeSingle(wantsSingle, rows);
   }
   if (table === "device_grants") {
     let rows = activeDb.device_grants;
@@ -336,7 +399,7 @@ function selectRows(table: string, params: URLSearchParams): unknown {
     if (id) rows = rows.filter((row) => row.id === id);
     if (userCode) rows = rows.filter((row) => row.user_code === userCode.toUpperCase());
     if (deviceHash) rows = rows.filter((row) => row.device_code_hash === deviceHash);
-    return maybeSingle(params, rows);
+    return maybeSingle(wantsSingle, rows);
   }
   if (table === "login_codes") {
     let rows = activeDb.login_codes;
@@ -354,15 +417,13 @@ function selectRows(table: string, params: URLSearchParams): unknown {
     if ((params.get("order") || "").startsWith("created_at.desc")) {
       rows = [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at));
     }
-    return maybeSingle(params, rows);
+    return maybeSingle(wantsSingle, rows);
   }
   throw new Error(`unexpected select from ${table}`);
 }
 
-function maybeSingle(params: URLSearchParams, rows: unknown[]): unknown {
-  const select = params.get("select") || "";
-  if (select.includes("*") || rows.length <= 1) return rows[0] || null;
-  return rows;
+function maybeSingle(wantsSingle: boolean, rows: unknown[]): unknown {
+  return wantsSingle ? rows[0] || null : rows;
 }
 
 function upsertDiagnostics(body: unknown): void {
@@ -375,10 +436,23 @@ function upsertDiagnostics(body: unknown): void {
   }
 }
 
+function headerValue(headers: HeadersInit | undefined, name: string): string {
+  if (!headers) return "";
+  if (headers instanceof Headers) return headers.get(name) || "";
+  if (Array.isArray(headers)) {
+    const entry = headers.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    return entry?.[1] || "";
+  }
+  const record = headers as Record<string, string>;
+  return String(record[name] || record[name.toLowerCase()] || "");
+}
+
 async function fakeSupabaseFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const request = input instanceof Request ? input : null;
   const url = new URL(request ? request.url : String(input));
   const method = (request?.method || init.method || "GET").toUpperCase();
+  const accept = request?.headers.get("accept") || headerValue(init.headers, "accept");
+  const wantsSingle = accept.includes("application/vnd.pgrst.object+json");
   const bodyText = request ? await request.text() : String(init.body || "");
   const body = bodyText ? JSON.parse(bodyText) : null;
   const parts = url.pathname.split("/").filter(Boolean);
@@ -390,7 +464,7 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
 
   activeDb.calls.push({ table, method, body });
 
-  if (method === "GET") return okJson(selectRows(table, url.searchParams));
+  if (method === "GET") return okJson(selectRows(table, url.searchParams, wantsSingle));
   if (method === "POST") {
     if (table === "session_diagnostic_events") {
       upsertDiagnostics(body);

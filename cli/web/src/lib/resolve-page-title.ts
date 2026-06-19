@@ -13,50 +13,39 @@ const BUILTIN: Record<string, keyof Translations["app"]["nav"]> = {
   "/docs": "documentation",
 };
 
+const ROUTE_TITLES: Record<string, string> = {
+  "/": "Today",
+  "/today": "Today",
+  "/leads": "Leads",
+  "/admin": "Admin",
+  "/listings": "Admin",
+  "/deals": "Admin",
+  "/admin/templates": "Templates",
+  "/social-media": "Social Media",
+  "/marketing": "Social Media",
+  "/overview": "Overview",
+  "/hub": "Agent Hub",
+  "/experiments": "Experiments",
+  "/tasks": "Tasks",
+  "/approvals": "Approvals",
+  "/comms": "Comms",
+  "/activity": "Activity",
+  "/memory": "Memory graph",
+  "/desktop-setup": "Desktop Setup",
+  "/agent-onboarding": "Agent Onboarding",
+  "/config": "Settings",
+  "/heartbeat": "Automations",
+};
+
 export function resolvePageTitle(
   pathname: string,
   t: Translations,
   pluginTabs: { path: string; label: string }[],
 ): string {
   const normalized = pathname.replace(/\/$/, "") || "/";
-  if (normalized === "/") {
-    return "Today";
-  }
-  if (normalized === "/today") {
-    return "Today";
-  }
-  if (normalized === "/leads") {
-    return "Leads";
-  }
-  if (normalized === "/admin") {
-    return "Admin";
-  }
-  if (normalized === "/listings") {
-    return "Admin";
-  }
-  if (normalized === "/deals") {
-    return "Admin";
-  }
-  if (normalized === "/social-media") {
-    return "Social Media";
-  }
-  if (normalized === "/marketing") {
-    return "Social Media";
-  }
-  if (normalized === "/approvals") {
-    return "Today";
-  }
-  if (normalized === "/memory") {
-    return "Memory";
-  }
-  if (normalized === "/hub") {
-    return "Agent Hub";
-  }
-  if (normalized === "/desktop-setup") {
-    return "Desktop Setup";
-  }
-  if (normalized === "/config") {
-    return "Settings";
+  const title = ROUTE_TITLES[normalized];
+  if (title) {
+    return title;
   }
   const plugin = pluginTabs.find((p) => p.path === normalized);
   if (plugin) {

@@ -113,6 +113,110 @@ describe("hosted route handlers", () => {
     assert.equal(inactiveLicense.revoked, true);
   });
 
+  it("account read routes return effective org access and gated catalogs", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ entitlements: [] });
+    db.users.push(user);
+    const license = seedLicense({ id: "account-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const now = new Date().toISOString();
+    const org = {
+      id: "org-1",
+      slug: "elevate-team",
+      name: "Elevate Team",
+      stripe_customer: null,
+      tier: "pro" as const,
+      status: "active" as const,
+      current_period_end: null,
+      entitlements: ["real_estate_cma", "real_estate_admin"],
+      seat_limit: 3,
+      created_at: now,
+      updated_at: now,
+    };
+    db.memberships.push({
+      id: "membership-1",
+      org_id: org.id,
+      user_id: user.id,
+      role: "owner",
+      created_at: now,
+      organization: org,
+    });
+    db.skills.push(
+      {
+        name: "cma-report",
+        version: 1,
+        tier_required: "pro",
+        manifest: { required_entitlement: "real_estate_cma" },
+        body: "skill body",
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      },
+      {
+        name: "builder-only",
+        version: 1,
+        tier_required: "builder",
+        manifest: {},
+        body: "hidden",
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+      },
+    );
+    db.automations.push({
+      name: "admin-digest",
+      surface: "real_estate",
+      kind: "automation",
+      schedule: "daily",
+      skill: "admin",
+      prompt: "Summarize admin work",
+      deliver: "dashboard",
+      spec: { paused: true },
+      version: 1,
+      tier_required: "pro",
+      manifest: { required_entitlement: "real_estate_admin" },
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const headers = { authorization: `Bearer ${bearer}` };
+    const me = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("me");
+    const orgs = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("orgs");
+    const skills = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("skills/list");
+    const automations = await loadRoute<{ GET: (req: Request) => Promise<Response> }>(
+      "automations/list",
+    );
+
+    const meBody = await responseJson(
+      await me.GET(jsonRequest("/api/me", {}, { method: "GET", headers })),
+    );
+    const orgsBody = await responseJson(
+      await orgs.GET(jsonRequest("/api/orgs", {}, { method: "GET", headers })),
+    );
+    const skillsBody = await responseJson(
+      await skills.GET(jsonRequest("/api/skills/list", {}, { method: "GET", headers })),
+    );
+    const automationsBody = await responseJson(
+      await automations.GET(jsonRequest("/api/automations/list", {}, { method: "GET", headers })),
+    );
+
+    assert.equal(meBody.account_type, "team_owner");
+    assert.deepEqual(meBody.entitlements, ["real_estate_cma", "real_estate_admin"]);
+    assert.deepEqual(
+      (orgsBody.orgs as Array<{ slug: string; role: string }>).map((orgRow) => [orgRow.slug, orgRow.role]),
+      [["elevate-team", "owner"]],
+    );
+    assert.deepEqual(
+      (skillsBody.skills as Array<{ name: string }>).map((skill) => skill.name),
+      ["cma-report"],
+    );
+    assert.deepEqual(
+      (automationsBody.automations as Array<{ name: string }>).map((automation) => automation.name),
+      ["admin-digest"],
+    );
+  });
+
   it("device start, approve, and poll issue tokens once", async () => {
     const db = useFakeDb();
     const user = await makeUser();
@@ -266,7 +370,7 @@ describe("hosted route handlers", () => {
 
   it("login-code request and verify issue the desktop token envelope", async () => {
     const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "test";
+    Reflect.set(process.env, "NODE_ENV", "test");
     try {
       const db = useFakeDb();
       const user = await makeUser({ email: "login-code@example.com" });
@@ -328,9 +432,9 @@ describe("hosted route handlers", () => {
       assert.equal(typeof db.login_codes[0].consumed_at, "string");
     } finally {
       if (previousNodeEnv === undefined) {
-        delete process.env.NODE_ENV;
+        Reflect.deleteProperty(process.env, "NODE_ENV");
       } else {
-        process.env.NODE_ENV = previousNodeEnv;
+        Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
       }
     }
   });

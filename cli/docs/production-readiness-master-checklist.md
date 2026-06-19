@@ -66,11 +66,11 @@ Critical path:
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | WEB-01 | Build | PASS iff TypeScript and Vite build are clean | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` passes; default Node 20.9.0 fails engine |
-| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Source guard now proves nav routes are mounted/preloaded; TestClient proves `/docs` deep-link collision fixed in source (`/docs` serves SPA, `/api/docs` serves Swagger). Installed-app rebuild plus browser/manual render pass still required |
+| WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | UNKNOWN | Source guard now proves nav routes are mounted/preloaded; TestClient proves `/docs` deep-link collision fixed in source (`/docs` serves SPA, `/api/docs` serves Swagger). Live installed 1.2.58 found `/approvals` chrome mislabeled as `Today`; fixed in source/title test and rebuilt `web_dist`, but installed-app rebuild plus browser/manual render pass still required |
 | WEB-03 | Dead buttons | PASS iff every visible button/link/toggle either works, is disabled with reason, or is hidden | UNKNOWN | Browser/manual pass |
 | WEB-04 | UI collisions | PASS iff desktop-width and narrow-width screenshots show no clipped/overlapping critical controls | UNKNOWN | Browser/manual screenshots |
 | WEB-05 | Auth header contract | PASS iff dashboard API client sends the local session header where required | UNKNOWN | Existing frontend/API test |
-| WEB-06 | Error states | PASS iff route failures show visible recovery, not silent blank panels | UNKNOWN | Mocked/manual route-failure probes |
+| WEB-06 | Error states | PASS iff route failures show visible recovery, not silent blank panels | UNKNOWN | Cron load/attention failures now have visible messages and unit coverage; broader mocked/manual route-failure probes still required |
 | WEB-07 | Accessibility basics | PASS iff keyboard focus, contrast, labels, and dialog focus are usable on critical pages | UNKNOWN | Manual a11y pass |
 
 ## 5. Local Dashboard Server
@@ -101,7 +101,7 @@ Critical path:
 | --- | --- | --- | --- | --- |
 | GATE-01 | Launchd install | PASS iff gateway install, bootout/bootstrap, and version refresh work on Apple Silicon | PASS | Installed v1.2.58 launch refreshed `.gateway_version` from `1.2.57` to `1.2.58`; `/api/status` shows gateway pid `73142` running |
 | GATE-02 | Gateway death recovery | PASS iff killed gateway is detected and recovered or shown visibly to user | UNKNOWN | Manual kill/recovery probe |
-| GATE-03 | Cron scheduler | PASS iff scheduled jobs run, fail visibly, and do not block unrelated ticks | PASS | `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_agent_hub_effective_skills.py cli/tests/cron/test_scheduler.py -q` passes; post-upgrade log window from line 8110 has no ambiguous-skill scheduler skips |
+| GATE-03 | Cron scheduler | PASS iff scheduled jobs run, fail visibly, and do not block unrelated ticks | PASS | `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_agent_hub_effective_skills.py cli/tests/cron/test_scheduler.py -q` passes; post-upgrade log window from line 8110 has no ambiguous-skill scheduler skips; cron load/attention errors are surfaced in source and covered by Vitest |
 | GATE-04 | Heartbeats | PASS iff heartbeat automation runs and leaves trace/recovery on failure | UNKNOWN | Cron/gateway test |
 | GATE-05 | Platform sends | PASS iff Telegram/SMS/WhatsApp/etc. failures leave visible status and logs | UNKNOWN | Platform tests or scoped manual probes |
 | GATE-06 | Stuck job handling | PASS iff stuck jobs are timeouted, logged, and safe to retry | UNKNOWN | Tests/source review |
@@ -120,7 +120,7 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Browser/manual pass |
+| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, and Approvals; source now loads workflow data for direct Social Media visits. Button/action safety and rebuilt installed-app pass still required |
 | CRM-02 | Admin deal flow | PASS iff deal view/edit/advance/actions have API contracts and UI recovery | UNKNOWN | Existing tests/manual pass |
 | CRM-03 | Connectors | PASS iff missing credentials and failed external services show clear recovery | UNKNOWN | Live status proves WhatsApp missing pairing is visible; Oura MCP and Composio Gmail 422 warnings still need owner/recovery classification |
 | CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Route/caller/test map |
@@ -130,12 +130,12 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| HOST-01 | Hosted route inventory | PASS iff every `backend/src/app/api/**/route.ts` is tracked and drift-tested | UNKNOWN | `backend/test/hosted-routes.test.ts` |
+| HOST-01 | Hosted route inventory | PASS iff every `backend/src/app/api/**/route.ts` is tracked and drift-tested | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts` passes hosted route drift/contracts |
 | HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | UNKNOWN | Backend route tests |
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
-| HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Backend tests |
-| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Backend tests |
+| HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts pass; admin mutation/error surfaces still need coverage |
+| HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating passes; skills run, automation mutations, Stripe, and external failure mocks still need coverage |
 
 ## 11. Release And Update Path
 
@@ -144,7 +144,7 @@ Critical path:
 | REL-01 | Apple preflight | PASS iff release preflight passes on release machine | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix desktop run preflight:apple` passes for 1.2.58 and verifies public feed is 1.2.51 |
 | REL-02 | Packaged build | PASS iff arm64 packaged app builds and launches | PASS | 1.2.58 x64/arm64 app bundles built; `npm --prefix desktop run finalize:mac` signed/notarized/stapled x64 and arm64 DMGs |
 | REL-03 | Code signing/seal | PASS iff installed and built app pass `codesign --verify --deep --strict` and `spctl --assess` | PASS | `npm --prefix desktop run smoke:mac` passes for 1.2.58; installed 1.2.58 passes seal smoke before and after first launch |
-| REL-04 | Bundled runtime parity | PASS iff installed bundle `cli` and `web_dist` match expected source/build | PASS | Built x64, built arm64, and installed 1.2.58 apps pass `web_dist` parity and WhatsApp bridge presence |
+| REL-04 | Bundled runtime parity | PASS iff installed bundle `cli` and `web_dist` match expected source/build | UNKNOWN | Built x64, built arm64, and installed 1.2.58 apps passed `web_dist` parity before current source fixes; current source `web_dist` has been rebuilt and still needs a packaged/installed parity smoke |
 | REL-05 | Updater feed | PASS iff feed version/artifacts/checksums match the build being shipped | PASS | `desktop/dist/latest-mac.yml` is version 1.2.58 with x64/arm64 zip+dmg urls, sha512, and sizes |
 | REL-06 | Update failure recovery | PASS iff failed download/install leaves visible state and retry path | UNKNOWN | Updater tests/manual packaged probe |
 | REL-07 | Rollback | PASS iff rollback procedure is documented and artifact-retention is verified | UNKNOWN | Release docs/artifact store |
@@ -251,6 +251,12 @@ If one command fails, fix the smallest failing gate first.
 - PASS: post-1.2.58 gateway log window from line 8120 has no ambiguous-skill scheduler skips; only WhatsApp not-paired warnings are present
 - PASS: source route guard and `/docs` collision fix: `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py -q`
 - UNKNOWN/FLAKE: full `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_web_server.py cli/tests/elevate_cli/test_dashboard_route_registry.py cli/tests/elevate_cli/test_debug_route_inventory.py -q` reached 152 passed then timed out once in `TestPtyWebSocket::test_pub_broadcasts_to_events_subscribers`; isolated rerun of that test passed
+- FAIL found in live installed 1.2.58 UI pass: `/approvals` route rendered Approvals content while the page chrome title still showed `Today`
+- PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec vitest run src/lib/__tests__/resolve-page-title.test.ts src/pages/__tests__/CronPage.errors.test.ts src/pages/real-estate-hub/_shared/__tests__/use-hub-data.flags.test.ts` from `cli/web`
+- PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` rebuilt `cli/elevate_cli/web_dist` with corrected dashboard route titles
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts`
+- PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
+- PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
 - NOTE: old installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-214427-1.2.51`
 - NOTE: previous 1.2.53 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-220758-1.2.53`
 - NOTE: previous 1.2.57 installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235359-1.2.57`; a locally mutated 1.2.58 verification copy was backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-235625-1.2.58-pycache-mutated`

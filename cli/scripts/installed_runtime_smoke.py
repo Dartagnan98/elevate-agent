@@ -44,6 +44,7 @@ except ImportError:  # pragma: no cover - environment guard
 DEFAULT_APP = Path(
     "/Users/dartagnanpatricio/Applications/Elevate.app"
 )
+DEFAULT_PORT = 9119
 BAD_LOG_PATTERNS = (
     "gateway not connected",
     "Uncaught",
@@ -162,6 +163,17 @@ def read_recent_log_hits(path: Path, since: datetime) -> list[str]:
         if any(pattern in line for pattern in BAD_LOG_PATTERNS):
             hits.append(line.strip())
     return hits[-20:]
+
+
+def read_selected_dashboard_port(path: Path, fallback: int = DEFAULT_PORT) -> int:
+    if not path.exists():
+        return fallback
+    line_re = re.compile(r"\[startup\].*\bbackend:port-selected\s+(\d+)\b")
+    for line in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
+        match = line_re.search(line)
+        if match:
+            return int(match.group(1))
+    return fallback
 
 
 def read_license_state() -> tuple[bool | None, bool | None, str | None]:
@@ -1106,7 +1118,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--installed-app", type=Path, default=DEFAULT_APP)
     parser.add_argument("--repo-root", type=Path, default=repo_root_from_script())
-    parser.add_argument("--port", type=int, default=9119)
+    parser.add_argument("--port", type=int)
     parser.add_argument(
         "--prompt",
         default="Reply exactly: installed compaction smoke ok",
@@ -1168,6 +1180,7 @@ def main(argv: list[str]) -> int:
     repo_web_dist = args.repo_root / "cli/elevate_cli/web_dist"
     installed_cli = args.installed_app / "Contents/Resources/cli"
     installed_web_dist = installed_cli / "elevate_cli/web_dist"
+    dashboard_port = args.port or read_selected_dashboard_port(args.main_log, DEFAULT_PORT)
 
     if args.expected_app_version:
         actual_version = read_installed_app_version(args.installed_app)
@@ -1240,7 +1253,7 @@ def main(argv: list[str]) -> int:
         try:
             asyncio.run(
                 run_sidecar_smoke(
-                    port=args.port,
+                    port=dashboard_port,
                     prompt=args.prompt,
                     expected=args.expected,
                     timeout=args.timeout,
@@ -1266,7 +1279,7 @@ def main(argv: list[str]) -> int:
         try:
             asyncio.run(
                 run_desktop_compacted_followup_smoke(
-                    port=args.port,
+                    port=dashboard_port,
                     timeout=args.timeout,
                     result=result,
                 )
