@@ -50,8 +50,10 @@ jobs:
           mkdir -p "$mount_dir"
           curl --fail --location --show-error --output "$dmg" "${{ inputs.dmg_url }}"
           hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
+          trap 'hdiutil detach "$mount_dir" || true' EXIT
           cp -R "$mount_dir/Elevate.app" "$app_path"
           hdiutil detach "$mount_dir"
+          trap - EXIT
           codesign --verify --deep --strict --verbose=2 "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
 
