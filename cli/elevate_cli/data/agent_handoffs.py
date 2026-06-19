@@ -787,7 +787,11 @@ def _handoff_row_to_comms_message(row: sqlite3.Row) -> dict[str, Any]:
 
 def _message_row_to_comms_message(row: sqlite3.Row) -> dict[str, Any]:
     from_id = row["message_from_agent_id"]
-    to_id = row["message_to_agent_id"] or row["handoff_to_agent_id"]
+    handoff_from = row["handoff_from_agent_id"]
+    handoff_to = row["handoff_to_agent_id"]
+    to_id = row["message_to_agent_id"] or (
+        handoff_from if _normalize_agent_id(from_id) == _normalize_agent_id(handoff_to) else handoff_to
+    )
     created_at = row["message_created_at"]
     return {
         "id": f"handoff-message:{row['message_id']}",

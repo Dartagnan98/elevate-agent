@@ -168,6 +168,13 @@ def test_agent_comms_projection_and_routes(client):
             kind="note",
             content="Packet review is in progress.",
         )
+        record_agent_handoff_message(
+            conn,
+            handoff["id"],
+            from_agent_id="admin",
+            kind="note",
+            content="Implicit reply stays in the original pair.",
+        )
         sent = create_agent_comms_message(
             conn,
             from_agent_id="human-web",
@@ -183,9 +190,11 @@ def test_agent_comms_projection_and_routes(client):
     assert sent["handoff"]["fromAgentId"] == "human-web"
     assert any(msg["text"] == "Please review the disclosure packet." for msg in feed)
     assert any(ch["pair"] == "admin--executive-assistant" for ch in channels)
+    assert all(ch["pair"] != "admin--admin" for ch in channels)
     assert thread["pair"] == "admin--executive-assistant"
     assert [msg["kind"] for msg in thread["messages"]].count("request") >= 1
     assert any(msg["text"] == "Packet review is in progress." for msg in thread["messages"])
+    assert any(msg["text"] == "Implicit reply stays in the original pair." for msg in thread["messages"])
 
     feed_res = client.get("/api/comms/feed?search=addendum")
     assert feed_res.status_code == 200
