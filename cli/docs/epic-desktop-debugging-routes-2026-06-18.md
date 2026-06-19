@@ -177,7 +177,7 @@ Current verified snapshot, 2026-06-18:
   `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
-- Local route identity fingerprint: `52094886efcfdce6`.
+- Local route identity fingerprint: `40b0a8b6391144ae`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -226,7 +226,7 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `42044fe1c64581fd`.
+- Caller inventory fingerprint: `a5e8b84ba11c1449`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,

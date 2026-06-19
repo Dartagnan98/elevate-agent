@@ -165,6 +165,7 @@ const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/social-media": loadRealEstateSocialMediaPage,
   "/memory": loadRealEstateMemoryPage,
   "/hub": loadAgentHubPage,
+  "/agents": loadAgentHubPage,
   "/chat": loadChatPage,
   "/desktop-setup": loadDesktopSetupPage,
   "/agent-onboarding": loadAgentOnboardingPage,
