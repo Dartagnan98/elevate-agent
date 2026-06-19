@@ -195,6 +195,45 @@ describe("hosted route handlers", () => {
     }
   });
 
+  it("reset leaves token retryable when the password write fails", async () => {
+    const db = useFakeDb();
+    const user = await makeUser();
+    db.users.push(user);
+    const license = seedLicense({ id: "reset-license", user_id: user.id });
+    const token = "retryable-reset-token";
+    db.password_reset_tokens.push({
+      id: "reset-token-1",
+      user_id: user.id,
+      token_hash: crypto.createHash("sha256").update(token).digest("hex"),
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      consumed_at: null,
+      ip_addr: null,
+      user_agent: null,
+    });
+    const reset = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/reset");
+
+    failNextSupabasePatch("users");
+    await assert.rejects(
+      () =>
+        reset.POST(
+          jsonRequest("/api/auth/reset", {
+            token,
+            new_password: "new-secret",
+          }),
+        ),
+      (error: unknown) =>
+        typeof error === "object" &&
+        error !== null &&
+        "message" in error &&
+        error.message === "supabase patch failed",
+    );
+
+    assert.equal(license.revoked, true);
+    assert.equal(db.password_reset_tokens[0].consumed_at, null);
+    assert.equal(db.users[0].password_hash, user.password_hash);
+  });
+
   it("license refresh rotates active tokens and revokes inactive licenses", async () => {
     const db = useFakeDb();
     const active = await makeUser({ id: "active-user", email: "active@example.com" });
