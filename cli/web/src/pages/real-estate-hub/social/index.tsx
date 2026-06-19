@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { SocialIdea, SocialMetricRow, SocialSnapshot } from "@/lib/api";
-import { useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { HubDataErrorBanner, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { SocialBoard } from "./board";
 import { buildSocialViewModel } from "./view-model";
 import "./social.css";
@@ -117,6 +117,7 @@ export function RealEstateSocialMediaPage() {
 
   return (
     <div className="sm-root">
+      <HubDataErrorBanner className="mb-3" data={data} />
       {socialError && <div className="sm-error mono">{socialError}</div>}
       <SocialBoard
         vm={vm}

@@ -4,7 +4,7 @@ import { Brain, CheckCircle2, Clock, Network } from "lucide-react";
 import type { AgentHubMemoryEdge, AgentHubMemoryNode } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { isoTimeAgo } from "@/lib/utils";
-import { useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { HubDataErrorBanner, useHubHeader, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import "./memory.css";
 
 const MemoryConstellation = lazy(() =>
@@ -193,11 +193,7 @@ export function RealEstateMemoryPage() {
           </div>
         </div>
 
-        {data.error && (
-          <div className="mem-tile mem-tile-value warn" style={{ marginTop: 16 }}>
-            {data.error}
-          </div>
-        )}
+        <HubDataErrorBanner className="mt-4" data={data} />
       </div>
     </div>
   );

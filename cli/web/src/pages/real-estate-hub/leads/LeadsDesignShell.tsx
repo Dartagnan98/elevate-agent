@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import LeadsBoard from "./components/leads-board";
-import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { HubDataErrorBanner, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { api } from "@/lib/api";
 import type {
   OutreachTemplate,
@@ -228,6 +228,7 @@ export function LeadsDesignShell() {
 
   return (
     <div className="app leads-design-embedded" {...rootAttrs}>
+      <HubDataErrorBanner className="mb-3" data={data} />
       {showOnboarding && setupSnapshot ? (
         <div className="leads-onboarding-wrap">
           <LeadsSetupLaunch

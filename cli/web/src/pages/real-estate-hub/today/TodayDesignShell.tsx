@@ -9,7 +9,7 @@ import type {
   SourceInboxThread,
   TodayDashboardResponse,
 } from "@/lib/api-types";
-import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { HubDataErrorBanner, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { TodayBoard } from "./components/today-board";
 import type {
   TodayAgentRun,
@@ -600,6 +600,7 @@ export function TodayDesignShell() {
 
   return (
     <div className="app today-design-embedded" {...rootAttrs}>
+      <HubDataErrorBanner className="mb-3" data={data} />
       <TodayBoard
         greetingName={greetingName}
         pulse={pulse}

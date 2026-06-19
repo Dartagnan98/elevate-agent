@@ -28,6 +28,25 @@ describe("route load error states", () => {
     expect(source).toContain("onRetry={fetchLogs}");
   });
 
+  it("surfaces shared Real Estate Hub data failures with alert and retry support", () => {
+    const shell = read("pages/real-estate-hub/_shared/hub-shell.tsx");
+
+    expect(shell).toContain("export function HubDataErrorBanner");
+    expect(shell).toContain('role="alert"');
+    expect(shell).toContain('aria-live="polite"');
+    expect(shell).toContain("data.refresh({ force: true })");
+
+    for (const file of [
+      "pages/real-estate-hub/today/TodayDesignShell.tsx",
+      "pages/real-estate-hub/leads/LeadsDesignShell.tsx",
+      "pages/real-estate-hub/social/index.tsx",
+      "pages/real-estate-hub/memory/index.tsx",
+      "pages/real-estate-hub/_shared/hub-shell.tsx",
+    ]) {
+      expect(read(file), file).toContain("HubDataErrorBanner");
+    }
+  });
+
   it.each([
     ["pages/ActivityPage.tsx", "cacheError", "Could not load activity"],
     ["pages/AnalyticsPage.tsx", "cacheError", "Could not load analytics"],
