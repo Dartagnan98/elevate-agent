@@ -99,11 +99,14 @@ jobs:
             exit 1
           fi
 
+          HOME="$home" \
+          ELEVATE_HOME="$home/.elevate" \
           python3 cli/scripts/installed_runtime_smoke.py \
             --installed-app "$app_path" \
             --repo-root "$PWD" \
             --port "$ELEVATE_DESKTOP_PORT" \
             --expected-app-version "$expected" \
+            --main-log "$home/Library/Logs/Elevate/main.log" \
             --timeout 180 \
             --json-out "$RUNNER_TEMP/elevate-env03-previous-macos-smoke.json"
 
