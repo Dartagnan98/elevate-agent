@@ -1633,6 +1633,54 @@ class TestNewEndpoints:
         assert reset_body["complete"] is True
         assert reset_body["completedAt"] is None
 
+    def test_browser_use_launch_missing_api_key_returns_recovery(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from elevate_cli.data import connect
+        from elevate_cli.data.admin_setup import get_admin_setup, update_admin_setup
+
+        monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
+        monkeypatch.delenv("BROWSERUSE_API_KEY", raising=False)
+        monkeypatch.setattr(web_server, "load_config", lambda: {"browser": {"api_key": ""}})
+
+        with connect() as conn:
+            get_admin_setup(conn)
+            update_admin_setup(
+                conn,
+                profile={"province": "BC"},
+                items=[
+                    {
+                        "key": "browser_workflows",
+                        "status": "configured",
+                        "provider": "browser-use",
+                        "value": {
+                            "playbooks": {
+                                "mls": {
+                                    "loginUrl": "https://mls.example.test/login",
+                                    "provider": "Matrix MLS",
+                                    "credentialRef": "1Password:MLS",
+                                }
+                            }
+                        },
+                    }
+                ],
+            )
+
+        resp = self.client.post(
+            "/api/admin/onboarding/browser-use/launch",
+            json={"portalKey": "mls"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "BROWSER_USE_API_KEY not configured" in body["error"]
+        assert "Browser Use" in body["error"]
+        assert body["portal"] == {
+            "loginUrl": "https://mls.example.test/login",
+            "provider": "Matrix MLS",
+            "credentialRef": "1Password:MLS",
+        }
+
     def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
         from cron import jobs as cron_jobs
 

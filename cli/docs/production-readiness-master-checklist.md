@@ -187,7 +187,7 @@ Critical path:
 | ENV-02 | Apple Silicon upgrade | PASS iff upgrade from previous shipped app works end-to-end | UNKNOWN | Manual/update smoke |
 | ENV-03 | Previous macOS | PASS iff same critical path works on previous supported macOS | UNKNOWN | Manual matrix record |
 | ENV-04 | Offline/bad network | PASS iff login/license/update/API failures are visible and recoverable | UNKNOWN | Network fault probe |
-| ENV-05 | Missing permissions/tools | PASS iff missing mic/Messages/imsg/browser credentials show recovery | UNKNOWN | Manual fault probe |
+| ENV-05 | Missing permissions/tools | PASS iff missing mic/Messages/imsg/browser credentials show recovery | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/permission-guard.test.js desktop/test/sms-outbox.test.js` plus `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_browser_use_launch_missing_api_key_returns_recovery tests/gateway/test_whatsapp_connect.py::TestConnectCleanup::test_marks_missing_creds_as_not_paired` prove microphone permission is dashboard-origin/audio-only with denials, missing `imsg`/wedged Messages write visible SMS outbox failures, missing Browser Use credentials return Tools -> Browser Use recovery, and missing WhatsApp pairing marks `whatsapp_not_paired` non-retryable with `elevate whatsapp` recovery |
 
 ## 16. Runtime Warning Ledger
 
@@ -430,3 +430,6 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- memory-constellation-performance.test.ts`
 - PASS: `cd cli/web && PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec -- tsc -b`
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`
+- FAIL then PASS: Browser Use and WhatsApp missing-credential branches had product recovery paths but no focused readiness tests; Browser Use now has an endpoint test for missing API key recovery and WhatsApp connect now proves missing `creds.json` becomes non-retryable `whatsapp_not_paired` before bridge startup.
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --test desktop/test/permission-guard.test.js desktop/test/sms-outbox.test.js`
+- PASS: `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_browser_use_launch_missing_api_key_returns_recovery tests/gateway/test_whatsapp_connect.py::TestConnectCleanup::test_marks_missing_creds_as_not_paired`
