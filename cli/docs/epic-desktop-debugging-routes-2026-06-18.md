@@ -235,9 +235,9 @@ Current verified snapshot, 2026-06-18:
   lookup/deny contracts, hosted login-code request/verify contract, hosted
   revoked-bearer 403 contract, hosted route file-list drift guard,
   stricter `/api/status` readiness for desktop launch, release-path
-  `smoke:mac` gate, installed app `codesign`/`spctl` smoke gate, packaged
-  WhatsApp bridge/package checks, and production support bundle redaction for
-  session-recorder events.
+  `smoke:mac` gate, post-ship public feed/artifact verification, installed app
+  `codesign`/`spctl` smoke gate, packaged WhatsApp bridge/package checks, and
+  production support bundle redaction for session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
   `codesign --verify --deep --strict` and `spctl --assess` report a sealed
@@ -729,6 +729,10 @@ Deliverables:
 - Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
   local `1.2.53` x64 and arm64 built apps pass seal validation, repo
   `web_dist` parity, and packaged WhatsApp bridge checks.
+- Post-ship proof: `desktop/scripts/ship-to-hetzner.js` now refuses to print
+  "live" until the public `latest-mac.yml` matches the package version plus
+  local `url`/`sha512`/`size` entries, and all referenced zip/dmg artifacts
+  plus stable latest DMG aliases answer with the expected byte size.
 - Hosted staging smoke: health, login, refresh, device flow, diagnostics, and
   Stripe webhook only in staging.
 - Support bundle command that collects no secrets and redacts tokens.
@@ -763,6 +767,7 @@ Deliverables:
   - route inventory drift guard with exact hosted file-list comparison,
   - desktop launch readiness requiring `200` plus Elevate status payload,
   - release-path `smoke:mac` gate before `ship:mac`,
+  - post-ship public feed/artifact verifier before declaring a release live,
   - installed app `codesign`/`spctl` smoke gate,
   - packaged WhatsApp bridge script/package/dependency checks,
   - `elevate debug share --session/--last` recorder-event support bundle
@@ -772,7 +777,8 @@ Deliverables:
   - live installed `/Users/dartagnanpatricio/Applications/Elevate.app` seal
     validation failure,
   - live installed app stale `web_dist` versus repo build,
-  - public update feed/artifacts not yet shipped and verified for `1.2.53`.
+  - public update feed/artifacts not yet shipped and verified for `1.2.53`
+    (current public feed is still `1.2.51`; `1.2.53` artifact URLs 404).
 
 Acceptance:
 
