@@ -104,7 +104,7 @@ Critical path:
 | GATE-03 | Cron scheduler | PASS iff scheduled jobs run, fail visibly, and do not block unrelated ticks | PASS | `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_agent_hub_effective_skills.py cli/tests/cron/test_scheduler.py -q` passes; post-upgrade log window from line 8110 has no ambiguous-skill scheduler skips; cron load/attention errors are surfaced in source and covered by Vitest |
 | GATE-04 | Heartbeats | PASS iff heartbeat automation runs and leaves trace/recovery on failure | UNKNOWN | Cron/gateway test |
 | GATE-05 | Platform sends | PASS iff Telegram/SMS/WhatsApp/etc. failures leave visible status and logs | UNKNOWN | Platform tests or scoped manual probes |
-| GATE-06 | Stuck job handling | PASS iff stuck jobs are timeouted, logged, and safe to retry | UNKNOWN | Tests/source review |
+| GATE-06 | Stuck job handling | PASS iff stuck jobs are timeouted, logged, and safe to retry | PASS | `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/elevate_cli/test_kanban_stuck_jobs.py` proves max-runtime timeouts reset tasks to `ready`, close the active run as `timed_out`, record a `timed_out` event, and increment the failure counter; stale-heartbeat recovery resets tasks to `ready`, closes the run as `stale`, records a `stale` event, and does not trip the failure counter |
 
 ## 8. Local Data Layer
 
@@ -357,3 +357,4 @@ If one command fails, fix the smallest failing gate first.
 - PASS: `cd backend && PATH="/opt/homebrew/opt/node@22/bin:$PATH" node --import tsx --test test/middleware.test.ts`
 - FAIL then PASS: `/api/source-inbox` total DB+JSONL failure returned raw exception text; it now returns stable `source_inbox_unavailable` while logging the stack server-side.
 - PASS: `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_source_inbox_debug_reports_db_read_path_and_counts tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_source_inbox_debug_reports_jsonl_fallback tests/hermes_cli/test_web_server.py::TestNewEndpoints::test_source_inbox_total_failure_returns_sanitized_error`
+- PASS: `cd cli && PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q tests/elevate_cli/test_kanban_stuck_jobs.py`
