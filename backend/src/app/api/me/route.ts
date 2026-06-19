@@ -35,6 +35,7 @@ export async function GET(req: NextRequest) {
     orgs: access_info.orgs,
     billing: {
       has_customer: !!user.stripe_customer,
+      has_subscription: !!user.stripe_customer && !!user.current_period_end,
       current_period_end: user.current_period_end,
       personal_tier: user.tier,
       personal_status: user.status,

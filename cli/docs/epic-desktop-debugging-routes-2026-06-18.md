@@ -843,6 +843,9 @@ Deliverables:
     sign-out-everywhere current-license preservation,
   - signed hosted Stripe webhook contract preventing unknown subscription
     prices from granting `pro`,
+  - account billing distinguishes Stripe customer records from active
+    subscriptions so checkout customer creation alone does not hide upgrade
+    buttons,
   - hosted org seat-limit enforcement for direct member adds and stale
     invitation accepts,
   - hosted `skills/run` requested-skill and invocation-audit contract,
@@ -867,7 +870,7 @@ Deliverables:
     WebSocket and updater-state proof,
   - UI E2E is not yet complete across install, login, chat, tools,
     automations, update, and quit/reopen,
-  - hosted backend coverage still lacks Stripe checkout/portal contracts,
+  - hosted backend coverage still lacks Stripe checkout/portal route mocks,
     broader Stripe failure mocks, and deeper admin/org mutation success/
     permission route contracts,
   - route-family coverage ledger is seeded, but full row-level route inventory

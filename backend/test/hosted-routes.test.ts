@@ -528,6 +528,13 @@ describe("hosted route handlers", () => {
     );
 
     assert.equal(meBody.account_type, "team_owner");
+    assert.deepEqual(meBody.billing, {
+      has_customer: false,
+      has_subscription: false,
+      current_period_end: null,
+      personal_tier: "pro",
+      personal_status: "active",
+    });
     assert.deepEqual(meBody.entitlements, ["real_estate_cma", "real_estate_admin"]);
     assert.deepEqual(
       (orgsBody.orgs as Array<{ slug: string; role: string }>).map((orgRow) => [orgRow.slug, orgRow.role]),
@@ -541,6 +548,34 @@ describe("hosted route handlers", () => {
       (automationsBody.automations as Array<{ name: string }>).map((automation) => automation.name),
       ["admin-digest"],
     );
+  });
+
+  it("account billing distinguishes a Stripe customer from a subscription", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({
+      id: "customer-only-user",
+      email: "customer-only@example.com",
+      stripe_customer: "cus_no_subscription",
+      current_period_end: null,
+    });
+    db.users.push(user);
+    const license = seedLicense({ id: "customer-only-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const me = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("me");
+
+    const response = await me.GET(
+      jsonRequest("/api/me", {}, { method: "GET", headers: { authorization: `Bearer ${bearer}` } }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.billing, {
+      has_customer: true,
+      has_subscription: false,
+      current_period_end: null,
+      personal_tier: "pro",
+      personal_status: "active",
+    });
   });
 
   it("org seat limits block direct member adds and stale invite accepts", async () => {
