@@ -2345,10 +2345,19 @@ function SidebarUpdateCard({
 
   if (desktopVisible) {
     if (desktopStatus === "ready") {
-      title = "Update ready";
-      detail = `${desktopVersion} is downloaded.`;
-      action = "Click here to update";
-      blocked = false;
+      if (updateBusy) {
+        title = "Installing update";
+        detail = `${desktopVersion} will restart shortly.`;
+        action = "Installing";
+        icon = RefreshCw;
+        busy = true;
+        blocked = true;
+      } else {
+        title = "Update ready";
+        detail = `${desktopVersion} is downloaded.`;
+        action = "Click here to update";
+        blocked = false;
+      }
     } else if (desktopStatus === "error") {
       title = "Update failed";
       detail = desktopUpdate?.error || "Check again when you are online.";
