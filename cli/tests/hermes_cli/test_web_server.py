@@ -1237,6 +1237,26 @@ class TestNewEndpoints:
         assert "agent@example.com" not in body
         assert "/Users/example/.elevate/state.db" not in body
 
+    def test_source_inbox_profile_update_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+
+        def fake_update_profile_state(profile_id, status, *, return_inbox=True):
+            calls.append((profile_id, status, return_inbox))
+            return {"ok": True}
+
+        monkeypatch.setattr(source_connectors, "update_profile_state", fake_update_profile_state)
+
+        resp = self.client.post(
+            "/api/source-inbox/profile",
+            json={"profileId": "email:test@example.com", "status": "follow_up", "returnInbox": False},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert calls == [("email:test@example.com", "follow_up", False)]
+
     def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
         from cron import jobs as cron_jobs
 

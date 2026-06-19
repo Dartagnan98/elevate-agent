@@ -67,7 +67,7 @@ Critical path:
 | --- | --- | --- | --- | --- |
 | WEB-01 | Build | PASS iff TypeScript and Vite build are clean | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` passes; default Node 20.9.0 fails engine |
 | WEB-02 | Route reachability | PASS iff every sidebar/nav route renders a page, empty state, or visible error | PASS | Source guard proves nav routes are mounted/preloaded; TestClient proves `/docs` serves the SPA and `/api/docs` serves Swagger. Live installed 1.2.58 rendered Chat, Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph. Final installed browser pass shows `/approvals`, `/comms`, `/activity`, `/docs`, and `/cron` have correct headings/current nav and no visible errors |
-| WEB-03 | Dead buttons | PASS iff every visible button/link/toggle either works, is disabled with reason, or is hidden | UNKNOWN | Browser/manual pass |
+| WEB-03 | Dead buttons | PASS iff every visible button/link/toggle either works, is disabled with reason, or is hidden | UNKNOWN | Found/fixed `/leads` profile status dropdown that only changed local UI state; broader browser/manual pass still required |
 | WEB-04 | UI collisions | PASS iff desktop-width and narrow-width screenshots show no clipped/overlapping critical controls | UNKNOWN | Browser/manual screenshots |
 | WEB-05 | Auth header contract | PASS iff dashboard API client sends the local session header where required | PASS | `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- api-errors` proves `fetchJSON` injects `X-Elevate-Session-Token` from `window.__ELEVATE_SESSION_TOKEN__` |
 | WEB-06 | Error states | PASS iff route failures show visible recovery, not silent blank panels | UNKNOWN | Cron load/attention failures now have visible messages and unit coverage; broader mocked/manual route-failure probes still required |
@@ -120,10 +120,10 @@ Critical path:
 
 | ID | Item | Pass/fail done gate | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph; source now loads workflow data for direct Social Media visits and `/leads` source-inbox debug metadata for empty/fallback reads. Final installed `/api/comms/channels` returned `invalid_count: 0` after legacy self-recipient channel projection fix. Button/action safety still required |
+| CRM-01 | Real Estate Hub | PASS iff hub pages render, buttons work, and empty/error states are visible | UNKNOWN | Live installed pass rendered Today, Leads, Admin, Social Media, Automations, Overview, Agents, Experiments, Tasks, Approvals, Comms, Activity, Skills, and Memory graph; source now loads workflow data for direct Social Media visits and `/leads` source-inbox debug metadata for empty/fallback reads. Final installed `/api/comms/channels` returned `invalid_count: 0` after legacy self-recipient channel projection fix. `/leads` profile status dropdown now persists through `/api/source-inbox/profile` and shows a visible failure line. Broader button/action safety still required |
 | CRM-02 | Admin deal flow | PASS iff deal view/edit/advance/actions have API contracts and UI recovery | UNKNOWN | Existing tests/manual pass |
 | CRM-03 | Connectors | PASS iff missing credentials and failed external services show clear recovery | UNKNOWN | Live status proves WhatsApp missing pairing is visible; Oura MCP and Composio Gmail 422 warnings still need owner/recovery classification |
-| CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Backend source-inbox debug contracts plus frontend empty/fallback debug note pass; full action/button runtime map still required |
+| CRM-04 | Source inbox/leads | PASS iff source inbox/leads routes have caller, test, runtime probe | UNKNOWN | Backend source-inbox debug contracts plus frontend empty/fallback debug note pass; `/leads` profile status caller now maps menu labels to source-inbox status enums and route contract proves `POST /api/source-inbox/profile`; full action/button runtime map still required |
 | CRM-05 | Onboarding | PASS iff onboarding can finish, seed required data, and recover from connector failure | UNKNOWN | Isolated/manual pass |
 
 ## 10. Hosted Backend And HQ API
@@ -285,3 +285,7 @@ If one command fails, fix the smallest failing gate first.
 - PASS: final full installed runtime smoke `cli/.venv/bin/python cli/scripts/installed_runtime_smoke.py --installed-app /Users/dartagnanpatricio/Applications/Elevate.app --expected-app-version 1.2.58 --timeout 90`; output `/tmp/elevate-installed-smoke-1781858738.json`
 - PASS: final installed `/api/comms/channels?limit=250` returned `total: 7`, `invalid_count: 0`; legacy `executive-assistant--executive-assistant` channel no longer surfaces
 - PASS: final browser route pass showed `/approvals`, `/comms`, `/activity`, `/docs`, and `/cron` render expected headings/current nav with no visible errors
+- FAIL then PASS: `/leads` profile status dropdown was a dead action that only updated local component state; now it calls `api.updateSourceInboxProfile`, maps labels to source-inbox status enums, shows a visible error line on failure, and preserves a local fallback only for demo data
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web test -- source-inbox-debug.test.ts`
+- PASS: `cli/.venv/bin/python -m pytest cli/tests/hermes_cli/test_web_server.py -k source_inbox_profile_update_contract -q`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build`

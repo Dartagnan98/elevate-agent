@@ -756,7 +756,7 @@ function ProfileRow({
 }: {
   profile: LeadsProfile;
   onOpen?: (p: LeadsProfile) => void;
-  onStatusChange?: (id: string, value: string) => void;
+  onStatusChange?: (profile: LeadsProfile, value: string) => void;
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   favoriteBusy?: boolean;
 }) {
@@ -813,7 +813,7 @@ function ProfileRow({
       <div className="lb-profile-status-cell" onClick={(e) => e.stopPropagation()}>
         <StatusPill
           status={profile.status}
-          onChange={(v) => onStatusChange && onStatusChange(profile.id, v)}
+          onChange={(v) => onStatusChange && onStatusChange(profile, v)}
         />
       </div>
       <div className="lb-profile-source-cell">
@@ -839,7 +839,7 @@ function ProfilesList({
   sourceFilter: string;
   onOpen: (p: LeadsProfile) => void;
   statusOverrides: Record<string, string>;
-  onStatusChange: (id: string, value: string) => void;
+  onStatusChange: (profile: LeadsProfile, value: string) => void;
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
 }) {
   const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "unverified" | "potential" | "favorites">("all");
@@ -1339,10 +1339,10 @@ function ProfileDrawer({
 }: {
   profile: LeadsProfile;
   onClose: () => void;
-  onStatusChange?: (id: string, value: string) => void;
+  onStatusChange?: (profile: LeadsProfile, value: string) => void;
 }) {
   const handleStatusChange = (v: string) => {
-    onStatusChange?.(profile.id, v);
+    onStatusChange?.(profile, v);
   };
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -1587,6 +1587,7 @@ export interface LeadsBoardProps {
   debugNote?: string | null;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
+  onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
   onSentRefresh?: (includePending: boolean) => Promise<void>;
@@ -1599,10 +1600,20 @@ export function LeadsBoard(props: LeadsBoardProps) {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [activeProfile, setActiveProfile] = useState<LeadsProfile | null>(null);
   const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
+  const [profileStatusError, setProfileStatusError] = useState<string | null>(null);
 
-  const handleStatusChange = (id: string, value: string) => {
-    // TODO: no persist endpoint — status lives in local state only for now.
-    setStatusOverrides(o => ({ ...o, [id]: value }));
+  const handleStatusChange = async (profile: LeadsProfile, value: string) => {
+    setProfileStatusError(null);
+    if (props.onProfileStatusChange) {
+      try {
+        await props.onProfileStatusChange(profile, value);
+      } catch (err) {
+        setProfileStatusError(err instanceof Error ? err.message : "Could not update lead status.");
+        return;
+      }
+    }
+    setStatusOverrides(o => ({ ...o, [profile.id]: value }));
+    setActiveProfile(p => (p?.id === profile.id ? { ...p, status: value } : p));
   };
   const activeProfileStatus = activeProfile
     ? (statusOverrides[activeProfile.id] || activeProfile.status)
@@ -1703,6 +1714,10 @@ export function LeadsBoard(props: LeadsBoardProps) {
             ))}
           </div>
         </div>
+
+        {profileStatusError && (
+          <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{profileStatusError}</div>
+        )}
 
         {tab === "action" && (
           <>

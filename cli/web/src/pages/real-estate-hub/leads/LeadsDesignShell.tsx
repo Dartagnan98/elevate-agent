@@ -4,6 +4,7 @@ import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
 import { api } from "@/lib/api";
 import type {
   OutreachTemplate,
+  SourceInboxProfileStatus,
   SourceInboxResponse,
   SourceInboxSentItem,
 } from "@/lib/api-types";
@@ -36,6 +37,18 @@ export function sourceInboxDebugNote(inbox: SourceInboxResponse | null): string 
   const note = `Source inbox read: ${debug.readPath} | ${counts.threads} threads | ${counts.drafts} drafts | ${counts.profiles} profiles | ${counts.skippedDrafts} skipped | ${counts.privateSearchBuyers} private buyers`;
   if (!debug.fallback) return note;
   return debug.fallbackError ? `${note} | fallback: ${debug.fallbackError}` : `${note} | fallback`;
+}
+
+export function sourceInboxProfileStatusForLabel(label: string): SourceInboxProfileStatus | null | undefined {
+  const key = label.trim().toLowerCase();
+  if (key === "no status") return null;
+  if (key === "new lead") return "new_lead";
+  if (key === "follow up") return "follow_up";
+  if (key === "ghosting") return "ghosting";
+  if (key === "dead") return "dead";
+  if (key === "closed seller") return "closed_seller";
+  if (key === "closed buyer") return "closed_buyer";
+  return undefined;
 }
 
 export function LeadsDesignShell() {
@@ -185,6 +198,16 @@ export function LeadsDesignShell() {
     [setSourceInbox],
   );
 
+  const handleProfileStatusChange = useCallback(
+    async (profile: LeadsProfile, label: string) => {
+      const status = sourceInboxProfileStatusForLabel(label);
+      if (status === undefined) throw new Error(`Unsupported lead status: ${label}`);
+      const res = await api.updateSourceInboxProfile(profile.id, status);
+      setSourceInbox(res);
+    },
+    [setSourceInbox],
+  );
+
   const rootAttrs = {
     "data-accent": "graphite" as const,
     "data-density": "compact" as const,
@@ -217,6 +240,7 @@ export function LeadsDesignShell() {
           debugNote={sourceInboxDebugNote(inbox)}
           onDraftAction={handleDraftAction}
           onProfileFavoriteChange={handleProfileFavoriteChange}
+          onProfileStatusChange={handleProfileStatusChange}
           onReRunOnboarding={() => setForceOnboarding(true)}
           onRefresh={() => void data.refresh({ force: true })}
           templateMutations={templateMutations}

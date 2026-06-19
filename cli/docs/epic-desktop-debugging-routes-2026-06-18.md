@@ -756,7 +756,12 @@ Deliverables:
 - UI error-state inventory for dashboard startup, login, chat, admin, leads,
   cron, plugins, agent hub, integrations, social, and hosted auth.
 - Done: frontend tests for central API error parsing, session header injection,
-  and `GatewayClient` close code/reason.
+  `GatewayClient` close code/reason, and `/leads` profile-status label mapping
+  for the persisted source-inbox status route.
+- Done: `/leads` profile status dropdown now calls
+  `POST /api/source-inbox/profile` instead of only mutating local component
+  state; the route contract test proves the dashboard POST reaches
+  `update_profile_state`.
 - Remaining: at least one critical empty/error state per major dashboard
   surface.
 

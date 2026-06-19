@@ -98,12 +98,12 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
 }
 
 function statusLabel(profile: SourceInboxProfile): string {
-  if (profile.status === "new_lead") return "New lead";
-  if (profile.status === "follow_up") return "Follow up";
+  if (profile.status === "new_lead") return "New Lead";
+  if (profile.status === "follow_up") return "Follow Up";
   if (profile.status === "ghosting") return "Ghosting";
   if (profile.status === "dead") return "Dead";
-  if (profile.status === "closed_seller") return "Closed seller";
-  if (profile.status === "closed_buyer") return "Closed buyer";
+  if (profile.status === "closed_seller") return "Closed Seller";
+  if (profile.status === "closed_buyer") return "Closed Buyer";
   if (profile.crmStage) return profile.crmStage;
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }

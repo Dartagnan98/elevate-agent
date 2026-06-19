@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SourceInboxResponse } from "@/lib/api-types";
-import { sourceInboxDebugNote } from "../LeadsDesignShell";
+import { sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
 
 type SourceInboxDebugCounts = NonNullable<SourceInboxResponse["debug"]>["counts"];
 
@@ -52,5 +52,15 @@ describe("source inbox debug note", () => {
     expect(sourceInboxDebugNote(inbox({ threads: 1 }, true))).toBe(
       "Source inbox read: jsonl | 1 threads | 0 drafts | 0 profiles | 0 skipped | 0 private buyers | fallback: db offline",
     );
+  });
+});
+
+describe("source inbox profile status labels", () => {
+  it("maps profile menu labels to persisted source inbox statuses", () => {
+    expect(sourceInboxProfileStatusForLabel("No status")).toBeNull();
+    expect(sourceInboxProfileStatusForLabel("New Lead")).toBe("new_lead");
+    expect(sourceInboxProfileStatusForLabel("Follow up")).toBe("follow_up");
+    expect(sourceInboxProfileStatusForLabel("Closed Seller")).toBe("closed_seller");
+    expect(sourceInboxProfileStatusForLabel("not a menu item")).toBeUndefined();
   });
 });
