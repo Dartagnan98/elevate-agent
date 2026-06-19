@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { __apiTestables } from "../api";
+import { __apiTestables, fetchJSON } from "../api";
 
 describe("API error formatting", () => {
   it("summarizes admin deal gate blocks without dumping JSON", () => {
@@ -57,5 +57,48 @@ describe("API error formatting", () => {
     });
 
     expect(__apiTestables.extractErrorDetail(body)).toBe("Move through Listing Intake first.");
+  });
+});
+
+describe("API auth header", () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { __ELEVATE_SESSION_TOKEN__: "session-token" },
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: originalFetch,
+    });
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: originalWindow,
+    });
+  });
+
+  it("sends the injected local session token on API requests", async () => {
+    const fetchMock = vi.fn(async (_input: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: fetchMock,
+    });
+
+    await expect(fetchJSON<{ ok: boolean }>("/api/status", { cache: "no-store" })).resolves.toEqual({
+      ok: true,
+    });
+
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("X-Elevate-Session-Token")).toBe("session-token");
   });
 });

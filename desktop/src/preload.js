@@ -24,7 +24,6 @@ contextBridge.exposeInMainWorld("elevateDesktop", {
     getStatus: () => ipcRenderer.invoke("updater:status"),
     checkNow: () => ipcRenderer.invoke("updater:check"),
     install: () => ipcRenderer.invoke("updater:install"),
-    dismissToast: () => ipcRenderer.invoke("updater:dismiss-toast"),
     onEvent: (callback) => {
       const handler = (_event, payload) => callback(payload);
       ipcRenderer.on("updater:event", handler);

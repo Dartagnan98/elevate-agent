@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GatewayClient } from "../gatewayClient";
 
-type Listener = (event?: { data?: string }) => void;
+type SocketEvent = { code?: number; data?: string; reason?: string };
+type Listener = (event?: SocketEvent) => void;
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -44,7 +45,7 @@ class FakeWebSocket {
     this.emit("close");
   }
 
-  emit(type: string, event?: { data?: string }) {
+  emit(type: string, event?: SocketEvent) {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
 }
@@ -128,5 +129,21 @@ describe("GatewayClient", () => {
     });
     await expect(request).resolves.toEqual({ ok: true });
     expect(client.state).toBe("open");
+  });
+
+  it("rejects pending requests with websocket close code and reason", async () => {
+    const client = new GatewayClient();
+    const connected = client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.emit("open");
+    await connected;
+
+    const request = client.request("session.list", {}, 1_000);
+    socket.readyState = FakeWebSocket.CLOSED;
+    socket.emit("close", { code: 4401, reason: "bad token" });
+
+    await expect(request).rejects.toThrow(/code=4401, reason=bad token/);
+    expect(client.state).toBe("closed");
   });
 });

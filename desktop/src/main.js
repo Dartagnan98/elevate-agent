@@ -1553,11 +1553,13 @@ ipcMain.handle("auth:open-external", async (_event, target) => {
 //   3. We forward every event to the renderer via `updater:event` so the toast
 //      UI can show progress / "restart to update".
 //   4. User clicks Restart → quitAndInstall() swaps the binary and relaunches.
-//   5. We also re-check every 2 hours while the app is running.
+//   5. We also re-check every 3 minutes while the app is running.
 //
 // Skipped in dev (running from `npm start` rather than a packaged build) — the
 // updater throws "no app-update.yml" without a real install.
 let updateState = { status: "idle", info: null, progress: null, error: null };
+let updateCheckInFlight = false;
+const updateBusyStatuses = new Set(["checking", "available", "downloading", "ready"]);
 
 function broadcastUpdaterEvent(payload) {
   updateState = { ...updateState, ...payload };
@@ -1565,6 +1567,33 @@ function broadcastUpdaterEvent(payload) {
   // update card (App.tsx, fed by these same events) is the single update UI.
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("updater:event", updateState);
+  }
+}
+
+async function runUpdaterCheck(reason) {
+  if (updateCheckInFlight || updateBusyStatuses.has(updateState.status)) {
+    const message = updateCheckInFlight
+      ? "a check is already in flight"
+      : `update already ${updateState.status}`;
+    log.info(`[updater] skip check (${reason}) — ${message}`);
+    return { ok: true, skipped: true, message };
+  }
+
+  updateCheckInFlight = true;
+  try {
+    log.info(`[updater] checking for updates (${reason})`);
+    const result = await autoUpdater.checkForUpdates();
+    return {
+      ok: true,
+      version: result && result.updateInfo ? result.updateInfo.version : null,
+    };
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    log.warn(`[updater] check failed (${reason}): ${message}`);
+    broadcastUpdaterEvent({ status: "error", error: message });
+    return { ok: false, message };
+  } finally {
+    updateCheckInFlight = false;
   }
 }
 
@@ -1596,42 +1625,11 @@ function kickoffUpdates() {
     return;
   }
 
-  // Serialize update checks. Squirrel runs each download+extract as a separate
-  // `ditto` into its own staging dir; when checks stack up (3-min poll + focus +
-  // rapid re-checks while an update is pending), the parallel extractions race
-  // and fail with "ditto: ... No such file", so the install needs several
-  // retries (the "click 3 times" symptom). Only ever have one check in flight,
-  // and stop checking entirely once an update is already downloading/staged —
-  // there's nothing to gain, the user just needs to apply it.
-  let checkInFlight = false;
-  const busyStatuses = new Set(["checking", "available", "downloading", "ready"]);
-  const check = async (reason) => {
-    if (checkInFlight || busyStatuses.has(updateState.status)) {
-      log.info(
-        `[updater] skip check (${reason}) — ${
-          checkInFlight ? "a check is already in flight" : `update already ${updateState.status}`
-        }`,
-      );
-      return;
-    }
-    checkInFlight = true;
-    try {
-      log.info(`[updater] checking for updates (${reason})`);
-      await autoUpdater.checkForUpdates();
-    } catch (err) {
-      const message = err && err.message ? err.message : String(err);
-      log.warn(`[updater] check failed (${reason}): ${message}`);
-      broadcastUpdaterEvent({ status: "error", error: message });
-    } finally {
-      checkInFlight = false;
-    }
-  };
-
-  check("startup");
+  runUpdaterCheck("startup");
   // Poll frequently so a freshly-shipped build reaches the device within
   // minutes. autoDownload pulls it silently; the user still applies it via the
   // one-click "Restart to update" card — no auto-relaunch, no forced install.
-  const timer = setInterval(() => check("poll"), 3 * 60 * 1000);
+  const timer = setInterval(() => runUpdaterCheck("poll"), 3 * 60 * 1000);
   if (typeof timer.unref === "function") timer.unref();
   // Also check the instant the app regains focus, so an update that shipped
   // while you were away shows up right when you come back. Debounced so rapid
@@ -1641,7 +1639,7 @@ function kickoffUpdates() {
     const now = Date.now();
     if (now - lastFocusCheck < 60 * 1000) return;
     lastFocusCheck = now;
-    check("focus");
+    runUpdaterCheck("focus");
   });
 }
 
@@ -1664,12 +1662,7 @@ ipcMain.handle("updater:check", async () => {
   if (!app.isPackaged) {
     return { ok: false, message: "Updates only run in packaged builds." };
   }
-  try {
-    const result = await autoUpdater.checkForUpdates();
-    return { ok: true, version: result && result.updateInfo ? result.updateInfo.version : null };
-  } catch (err) {
-    return { ok: false, message: err && err.message ? err.message : String(err) };
-  }
+  return runUpdaterCheck("manual");
 });
 
 // Register the elevate:// scheme so the web auth flow (a password reset

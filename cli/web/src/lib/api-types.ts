@@ -1413,6 +1413,21 @@ export interface SourceInboxResponse {
   privateSearchBuyers?: BuyerWatchlistEntry[];
   leadSections?: Record<string, LeadSectionSummary>;
   appleMessages?: AppleMessagesDirections;
+  debug?: {
+    readPath: "db" | "jsonl" | string;
+    fallback: boolean;
+    fallbackError?: string;
+    counts: {
+      sources: number;
+      profiles: number;
+      threads: number;
+      drafts: number;
+      skippedDrafts: number;
+      privateSearchBuyers: number;
+      recordCounts: Record<string, number>;
+      hiddenCounts: Record<string, number>;
+    };
+  };
 }
 
 export interface AppleMessagesDirections {

@@ -50,17 +50,54 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
 
     _SOURCE_INBOX_ACTION_LIMIT = 500
 
-    def _source_inbox_response(limit: int = _SOURCE_INBOX_ACTION_LIMIT):
+    def _source_inbox_counts(payload: dict) -> dict:
+        def _len(key: str) -> int:
+            value = payload.get(key)
+            return len(value) if isinstance(value, list) else 0
+
+        return {
+            "sources": _len("sources"),
+            "profiles": _len("profiles"),
+            "threads": _len("threads"),
+            "drafts": _len("drafts"),
+            "skippedDrafts": _len("skippedDrafts"),
+            "privateSearchBuyers": _len("privateSearchBuyers"),
+            "recordCounts": payload.get("recordCounts") or {},
+            "hiddenCounts": payload.get("hiddenCounts") or {},
+        }
+
+    def _with_source_inbox_debug(
+        payload: dict,
+        *,
+        read_path: str,
+        fallback_error: Exception | None = None,
+    ) -> dict:
+        debug = {
+            "readPath": read_path,
+            "fallback": read_path == "jsonl",
+            "counts": _source_inbox_counts(payload),
+        }
+        if fallback_error is not None:
+            debug["fallbackError"] = f"{type(fallback_error).__name__}: {fallback_error}"[:240]
+        return {**payload, "debug": debug}
+
+    def _source_inbox_response(limit: int = _SOURCE_INBOX_ACTION_LIMIT, *, debug: bool = False):
         from elevate_cli.source_connectors import build_source_inbox_response
         from elevate_cli.data import db_source_inbox_response
 
         try:
-            return db_source_inbox_response(limit=limit)
-        except Exception:
+            payload = db_source_inbox_response(limit=limit)
+            return _with_source_inbox_debug(payload, read_path="db") if debug else payload
+        except Exception as exc:
             _log.exception(
                 "db_source_inbox_response failed, falling back to JSONL source inbox"
             )
-            return build_source_inbox_response(limit=limit)
+            payload = build_source_inbox_response(limit=limit)
+            return (
+                _with_source_inbox_debug(payload, read_path="jsonl", fallback_error=exc)
+                if debug
+                else payload
+            )
 
 
     @router.get("/api/source-connectors")
@@ -104,9 +141,9 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
 
 
     @router.get("/api/source-inbox")
-    async def get_source_inbox(limit: int = 16):
+    async def get_source_inbox(limit: int = 16, debug: bool = False):
         try:
-            return _source_inbox_response(limit=limit)
+            return _source_inbox_response(limit=limit, debug=debug)
         except Exception as exc:
             _log.exception("GET /api/source-inbox failed")
             raise HTTPException(status_code=500, detail=f"Source inbox failed: {exc}")

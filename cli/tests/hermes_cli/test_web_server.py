@@ -460,6 +460,42 @@ class TestWebServerEndpoints:
         assert first["method"] == "event"
         assert first["params"]["type"] == "gateway.ready"
 
+    def test_gateway_ws_rejects_bad_token(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect("/api/ws?token=wrong"):
+                pass
+
+        assert exc.value.code == 4401
+
+    def test_gateway_ws_rejects_missing_token(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect("/api/ws"):
+                pass
+
+        assert exc.value.code == 4401
+
+    def test_gateway_ws_rejects_when_embedded_chat_disabled(self, monkeypatch):
+        import elevate_cli.web_server as web_server
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", False)
+
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with self.client.websocket_connect(f"/api/ws?token={web_server._SESSION_TOKEN}"):
+                pass
+
+        assert exc.value.code == 4403
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import elevate_cli.web_server as web_server
@@ -1052,6 +1088,120 @@ class TestNewEndpoints:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    def test_source_inbox_debug_reports_db_read_path_and_counts(self, monkeypatch):
+        import elevate_cli.data as data_mod
+
+        def fake_db_source_inbox_response(*, limit=16):
+            return {
+                "toolsRoot": "/tmp/tools",
+                "toolsRootSource": "test",
+                "toolsRootIo": "local",
+                "sourceRoot": "/tmp/source",
+                "limit": limit,
+                "recordCounts": {"threads": 2, "drafts": 1},
+                "hiddenCounts": {"archived": 1},
+                "sources": [{"id": "lofty"}],
+                "profiles": [{"id": "person-1"}],
+                "threads": [{"id": "thread-1"}, {"id": "thread-2"}],
+                "drafts": [{"id": "draft-1"}],
+                "skippedDrafts": [{"id": "skipped-1"}],
+                "privateSearchBuyers": [{"id": "buyer-1"}],
+            }
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fake_db_source_inbox_response)
+
+        resp = self.client.get("/api/source-inbox?limit=3&debug=1")
+
+        assert resp.status_code == 200
+        debug = resp.json()["debug"]
+        assert debug["readPath"] == "db"
+        assert debug["fallback"] is False
+        assert debug["counts"]["threads"] == 2
+        assert debug["counts"]["drafts"] == 1
+        assert debug["counts"]["recordCounts"] == {"threads": 2, "drafts": 1}
+        assert debug["counts"]["hiddenCounts"] == {"archived": 1}
+
+    def test_source_inbox_debug_reports_jsonl_fallback(self, monkeypatch):
+        import elevate_cli.data as data_mod
+        import elevate_cli.source_connectors as source_connectors
+
+        def fail_db_source_inbox_response(*, limit=16):
+            raise RuntimeError("db offline")
+
+        def fake_jsonl_source_inbox_response(*, limit=16):
+            return {
+                "toolsRoot": "/tmp/tools",
+                "toolsRootSource": "test",
+                "toolsRootIo": "local",
+                "sourceRoot": "/tmp/source",
+                "limit": limit,
+                "recordCounts": {"threads": 1},
+                "hiddenCounts": {},
+                "sources": [],
+                "profiles": [],
+                "threads": [{"id": "thread-jsonl"}],
+                "drafts": [],
+                "skippedDrafts": [],
+                "privateSearchBuyers": [],
+            }
+
+        monkeypatch.setattr(data_mod, "db_source_inbox_response", fail_db_source_inbox_response)
+        monkeypatch.setattr(
+            source_connectors,
+            "build_source_inbox_response",
+            fake_jsonl_source_inbox_response,
+        )
+
+        resp = self.client.get("/api/source-inbox?debug=1")
+
+        assert resp.status_code == 200
+        debug = resp.json()["debug"]
+        assert debug["readPath"] == "jsonl"
+        assert debug["fallback"] is True
+        assert "RuntimeError: db offline" in debug["fallbackError"]
+        assert debug["counts"]["threads"] == 1
+
+    def test_cron_attention_reports_errored_and_stale_jobs(self, monkeypatch):
+        from cron import jobs as cron_jobs
+
+        monkeypatch.setattr(
+            cron_jobs,
+            "list_jobs",
+            lambda include_disabled=False: [
+                {
+                    "id": "job-error",
+                    "name": "broken sync",
+                    "enabled": True,
+                    "last_status": "error",
+                    "last_error": "bad token",
+                    "last_run_at": "2026-06-18T00:00:00+00:00",
+                },
+                {
+                    "id": "job-stale",
+                    "name": "stale sync",
+                    "enabled": True,
+                    "last_status": "ok",
+                    "last_run_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "job-disabled",
+                    "name": "disabled",
+                    "enabled": False,
+                    "last_status": "error",
+                    "last_error": "ignored",
+                    "last_run_at": "2026-01-01T00:00:00+00:00",
+                },
+            ],
+        )
+
+        resp = self.client.get("/api/cron/attention")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [job["id"] for job in data["errored_jobs"]] == ["job-error"]
+        assert [job["id"] for job in data["stale_jobs"]] == ["job-stale"]
+        assert data["total"] == 2
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404
@@ -1064,6 +1214,16 @@ class TestNewEndpoints:
         if skills:
             assert "name" in skills[0]
             assert "enabled" in skills[0]
+
+    def test_example_plugin_api_mount(self):
+        resp = self.client.get("/api/plugins/example/hello")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "message": "Hello from the example plugin!",
+            "plugin": "example",
+            "version": "1.0.0",
+        }
 
     def test_skills_list_includes_disabled_skills(self, monkeypatch):
         import tools.skills_tool as skills_tool

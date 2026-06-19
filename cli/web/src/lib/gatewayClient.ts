@@ -63,6 +63,14 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 /** Wildcard listener key: subscribe to every event regardless of type. */
 const ANY = "*";
 
+function webSocketClosedError(ev?: Pick<CloseEvent, "code" | "reason">): Error {
+  if (ev?.code) {
+    const reason = ev.reason ? `, reason=${ev.reason}` : "";
+    return new Error(`WebSocket closed (code=${ev.code}${reason})`);
+  }
+  return new Error("WebSocket closed");
+}
+
 export class GatewayClient {
   private ws: WebSocket | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -155,26 +163,36 @@ export class GatewayClient {
       }
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (ev) => {
       this.setState("closed");
-      this.rejectAllPending(new Error("WebSocket closed"));
+      this.rejectAllPending(webSocketClosedError(ev));
     });
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const onOpen = () => {
         ws.removeEventListener("error", onError);
+        ws.removeEventListener("close", onClose);
         this.connectPromise = null;
         this.setState("open");
         resolve();
       };
       const onError = () => {
         ws.removeEventListener("open", onOpen);
+        ws.removeEventListener("close", onClose);
         this.connectPromise = null;
         this.setState("error");
         reject(new Error("WebSocket connection failed"));
       };
+      const onClose = (ev: CloseEvent) => {
+        ws.removeEventListener("open", onOpen);
+        ws.removeEventListener("error", onError);
+        this.connectPromise = null;
+        this.setState("closed");
+        reject(webSocketClosedError(ev));
+      };
       ws.addEventListener("open", onOpen, { once: true });
       ws.addEventListener("error", onError, { once: true });
+      ws.addEventListener("close", onClose, { once: true });
     });
     return this.connectPromise;
   }
