@@ -1378,6 +1378,52 @@ class TestNewEndpoints:
             ]
         }
 
+    def test_integrations_route_contract(self, monkeypatch):
+        import elevate_cli.source_connectors as source_connectors
+
+        calls = []
+        settings = {
+            "configPath": "/tmp/config.json",
+            "secretsPath": "/tmp/.env",
+            "sourceRoot": "/tmp/sources",
+            "crm": {"provider": "custom", "label": "CRM"},
+        }
+
+        def fake_get_integration_settings():
+            calls.append(("get",))
+            return settings
+
+        def fake_save_integration_settings(form):
+            calls.append(("save", form["provider"], form["baseUrl"]))
+            return {**settings, "crm": {"provider": form["provider"], "baseUrl": form["baseUrl"]}}
+
+        def fake_test_crm_connection(form):
+            calls.append(("test", form["provider"], form["action"]))
+            return {"success": True, "status": 200, "message": "ok"}
+
+        monkeypatch.setattr(source_connectors, "get_integration_settings", fake_get_integration_settings)
+        monkeypatch.setattr(source_connectors, "save_integration_settings", fake_save_integration_settings)
+        monkeypatch.setattr(source_connectors, "test_crm_connection", fake_test_crm_connection)
+
+        form = {"provider": "lofty", "label": "Lofty", "baseUrl": "https://crm.test"}
+
+        assert self.client.get("/api/integrations").json() == settings
+        assert self.client.put("/api/integrations", json=form).json()["crm"] == {
+            "provider": "lofty",
+            "baseUrl": "https://crm.test",
+        }
+        assert self.client.post("/api/integrations", json={**form, "action": "test"}).json() == {
+            "success": True,
+            "status": 200,
+            "message": "ok",
+        }
+        assert self.client.post("/api/integrations", json=form).status_code == 400
+        assert calls == [
+            ("get",),
+            ("save", "lofty", "https://crm.test"),
+            ("test", "lofty", "test"),
+        ]
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404

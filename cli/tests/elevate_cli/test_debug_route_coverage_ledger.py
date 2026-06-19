@@ -31,11 +31,6 @@ MISSING_CONTRACT_FAMILIES = [
         "route_marker": "/api/social/",
         "caller_marker": "getSocialSnapshot",
     },
-    {
-        "family": "integrations",
-        "route_marker": "/api/integrations",
-        "caller_marker": "getIntegrations",
-    },
 ]
 
 

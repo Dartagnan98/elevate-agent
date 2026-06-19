@@ -911,7 +911,9 @@ Deliverables:
   - dynamic `composio-*` source-inbox draft actions are accepted by the same
     mutation path as static source blueprints,
   - `/api/activity` has a local route contract proving DB-backed surface
-    activity projection, agent filtering, limit handling, and response shape.
+    activity projection, agent filtering, limit handling, and response shape,
+  - `/api/integrations` has a local route contract for GET settings, PUT save,
+    POST test, and unsupported action rejection.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
@@ -1078,8 +1080,6 @@ Current missing local route-family contract ledger:
   `cli/tests` contract yet.
 - `social`: backend routes and dashboard callers exist; no local `cli/tests`
   contract yet.
-- `integrations`: backend routes and dashboard callers exist; no local
-  `cli/tests` contract yet.
 
 ## Done Definition
 
