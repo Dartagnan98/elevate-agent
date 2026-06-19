@@ -178,8 +178,10 @@ Current verified snapshot, 2026-06-18:
   `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
   example plugin API.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
-  `backend/package.json` has `dev`, `build`, `start`, and `lint`, but no test
-  script and no tracked backend test harness.
+  `backend/package.json` now has a `test` script using `node:test` plus the
+  existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
+  health, login 200/402, refresh rotation/402 revoke, device start/approve/poll
+  one-shot claim, and diagnostics auth/sanitizer/idempotent upsert.
 - Caller inventory: the first sweep found 326 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
@@ -188,13 +190,15 @@ Current verified snapshot, 2026-06-18:
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
   `/api/cron/attention` contract test, example plugin API mount test, serialized
   updater manual checks, dead updater `dismissToast` preload exposure,
-  `GatewayClient` WebSocket close-code/reason propagation, and stale updater
-  polling comment.
+  `GatewayClient` WebSocket close-code/reason propagation, stale updater
+  polling comment, backend hosted route-handler harness, route inventory drift
+  guard, and installed app `codesign`/`spctl` smoke gate.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
-  currently runs and serves matching SPA assets on `127.0.0.1:9120`, but
-  `codesign --verify --deep --strict` and `spctl --assess` fail because the
-  signed Python runtime seal is invalid (`edge_tts` version mismatch). This
-  blocks packaged production readiness until fixed by release/install flow.
+  now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
+  `codesign --verify --deep --strict` and `spctl --assess` report a sealed
+  resource is missing or invalid in the Python runtime (`edge_tts` version
+  mismatch). The installed app also has stale `web_dist` assets versus the repo.
+  Both block packaged production readiness until fixed by release/install flow.
 
 ## Route Center
 
@@ -668,9 +672,10 @@ Deliverables:
 - Packaged app smoke: launch installed app, read
   `~/Library/Logs/Elevate/main.log`, compare bundled-vs-served assets, verify
   selected port, auth injection, updater state/log lines, and app version.
-- Current packaged blocker: installed app seal validation fails; add
-  `codesign --verify --deep --strict` and `spctl --assess` to the smoke gate
-  after install and after first launch.
+- Current packaged blocker: installed app seal validation is now part of
+  `cli/scripts/installed_runtime_smoke.py`, but the installed app still fails
+  `codesign --verify --deep --strict` and `spctl --assess` after first launch.
+  The installed `web_dist` is also stale versus the repo build.
 - Hosted staging smoke: health, login, refresh, device flow, diagnostics, and
   Stripe webhook only in staging.
 - Support bundle command that collects no secrets and redacts tokens.
@@ -698,14 +703,14 @@ Deliverables:
   - positive protected example plugin API mount,
   - updater manual-check serialization,
   - dead updater `dismissToast` preload exposure,
-  - `GatewayClient` WebSocket close-code/reason propagation.
+  - `GatewayClient` WebSocket close-code/reason propagation,
+  - hosted backend route-handler harness,
+  - hosted login/refresh/device/diagnostics handler contracts,
+  - route inventory drift guard,
+  - installed app `codesign`/`spctl` smoke gate.
 - Remaining readiness-blocking gaps include:
-  - hosted route-handler harness,
-  - hosted login/refresh,
-  - hosted device approve-to-poll one-shot,
-  - hosted diagnostics sanitizer/idempotency,
   - installed app seal validation failure,
-  - route inventory drift check,
+  - stale installed app `web_dist` versus repo build,
   - production support bundle redaction.
 
 Acceptance:
@@ -809,6 +814,9 @@ rg -n "updater:dismiss-toast|dismissToast|autoUpdater\\.checkForUpdates\\(" desk
 
 # Production sweep test collection. This is broader than the fast incident path.
 cd /Users/dartagnanpatricio/elevate/cli
+.venv/bin/python -m pytest -q \
+  tests/elevate_cli/test_debug_route_inventory.py \
+  tests/elevate_cli/test_installed_runtime_smoke.py
 .venv/bin/python -m pytest --collect-only -q \
   tests/hermes_cli/test_web_server.py \
   tests/hermes_cli/test_web_server_host_header.py \
@@ -832,13 +840,11 @@ npm test
 npm run build
 
 cd /Users/dartagnanpatricio/elevate/backend
+npm test
 npm run build
-# Backend route-handler tests are currently a readiness gap until a harness is added.
 
 # Remaining missing tests/probes to add with implementation:
-# - Hosted login/refresh, device approve-to-poll one-shot, diagnostics sanitizer/idempotency.
-# - Installed-app codesign/spctl seal gate after install and first launch.
-# - Route inventory drift check.
+# - Fresh installed app must pass codesign/spctl and bundled web_dist parity.
 # - Production support bundle redaction.
 ```
 

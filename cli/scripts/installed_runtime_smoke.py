@@ -71,6 +71,7 @@ class SmokeResult:
     telegram_fixture: dict[str, Any] | None = None
     telegram_hygiene: dict[str, Any] | None = None
     desktop_compaction: dict[str, Any] | None = None
+    installed_app_seal: list[dict[str, Any]] = field(default_factory=list)
     log_hits: list[str] = field(default_factory=list)
     output_path: str | None = None
 
@@ -176,6 +177,103 @@ def read_license_state() -> tuple[bool | None, bool | None, str | None]:
     if expired:
         return True, True, "Subscribed, but local access token is expired."
     return True, False, f"Subscribed, token has {remaining // 60}m left."
+
+
+def _command_output(completed: subprocess.CompletedProcess[str]) -> str:
+    text = "\n".join(
+        part.strip()
+        for part in (completed.stdout, completed.stderr)
+        if part and part.strip()
+    )
+    if not text:
+        text = f"exit status {completed.returncode}"
+    if len(text) > 4000:
+        return text[-4000:]
+    return text
+
+
+def run_installed_app_seal(
+    *,
+    installed_app: Path,
+    timeout: float,
+    result: SmokeResult,
+) -> None:
+    """Verify the installed .app code signature and Gatekeeper assessment."""
+
+    if not installed_app.exists():
+        result.fail(f"installed app missing: {installed_app}")
+        return
+
+    commands = [
+        (
+            "codesign",
+            [
+                "codesign",
+                "--verify",
+                "--deep",
+                "--strict",
+                "--verbose=2",
+                str(installed_app),
+            ],
+        ),
+        (
+            "spctl",
+            [
+                "spctl",
+                "--assess",
+                "--type",
+                "execute",
+                "--verbose=4",
+                str(installed_app),
+            ],
+        ),
+    ]
+
+    for name, command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                timeout=min(max(timeout, 1.0), 60.0),
+                check=False,
+            )
+        except FileNotFoundError:
+            result.installed_app_seal.append(
+                {"name": name, "ok": False, "status": None, "output": "not found"}
+            )
+            result.fail(f"{name} unavailable for installed app seal check")
+            continue
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "") + (exc.stderr or "")
+            result.installed_app_seal.append(
+                {
+                    "name": name,
+                    "ok": False,
+                    "status": None,
+                    "output": output.strip() or "timed out",
+                }
+            )
+            result.fail(f"{name} timed out during installed app seal check")
+            continue
+
+        output = _command_output(completed)
+        ok = completed.returncode == 0
+        result.installed_app_seal.append(
+            {
+                "name": name,
+                "ok": ok,
+                "status": completed.returncode,
+                "output": output,
+            }
+        )
+        if not ok:
+            lines = [line for line in output.splitlines() if line.strip()]
+            summary = lines[-1] if lines else f"exit {completed.returncode}"
+            result.fail(f"{name} installed app seal check failed: {summary}")
+
+    if result.installed_app_seal and all(item["ok"] for item in result.installed_app_seal):
+        result.pass_check("installed app seal valid (codesign + spctl)")
 
 
 def _file_size(path: Path) -> int:
@@ -963,6 +1061,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--skip-parity", action="store_true")
     parser.add_argument(
+        "--skip-seal",
+        action="store_true",
+        help="Skip codesign/spctl verification for dev-only installed runtime probes.",
+    )
+    parser.add_argument(
         "--check-file",
         action="append",
         default=[],
@@ -1010,6 +1113,13 @@ def main(argv: list[str]) -> int:
     repo_web_dist = args.repo_root / "cli/elevate_cli/web_dist"
     installed_cli = args.installed_app / "Contents/Resources/cli"
     installed_web_dist = installed_cli / "elevate_cli/web_dist"
+
+    if not args.skip_seal:
+        run_installed_app_seal(
+            installed_app=args.installed_app,
+            timeout=args.timeout,
+            result=result,
+        )
 
     if not args.skip_parity:
         diffs = compare_trees(repo_web_dist, installed_web_dist)

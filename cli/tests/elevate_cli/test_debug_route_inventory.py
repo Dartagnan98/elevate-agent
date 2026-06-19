@@ -1,0 +1,50 @@
+"""Debug route inventory drift guard.
+
+The desktop debugging epic is the production-readiness ledger for route
+coverage. If the route surface changes, the ledger must move with it.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EPIC_PATH = REPO_ROOT / "cli/docs/epic-desktop-debugging-routes-2026-06-18.md"
+LOCAL_ROUTE_RE = re.compile(
+    r"^\s*@(app|router)\.(get|post|put|patch|delete|websocket)\(",
+    re.MULTILINE,
+)
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _local_route_count() -> int:
+    roots = [
+        REPO_ROOT / "cli/elevate_cli/web_server.py",
+        REPO_ROOT / "cli/elevate_cli/web_routes",
+        REPO_ROOT / "cli/plugins",
+    ]
+    count = 0
+    for root in roots:
+        paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+        for path in paths:
+            count += len(LOCAL_ROUTE_RE.findall(_read(path)))
+    return count
+
+
+def _hosted_route_count() -> int:
+    return len(list((REPO_ROOT / "backend/src/app/api").rglob("route.ts")))
+
+
+def test_desktop_debugging_epic_route_inventory_is_current():
+    epic = _read(EPIC_PATH)
+
+    local_count = _local_route_count()
+    hosted_count = _hosted_route_count()
+
+    assert f"Local inventory: {local_count} decorated local routes/WebSockets" in epic
+    assert f"Hosted inventory: {hosted_count} tracked `backend/src/app/api/**/route.ts` files" in epic
