@@ -1549,7 +1549,12 @@ function runInstaller() {
     installProcess = null;
     if (code === 0 && mainWindow) {
       const ready = await ensureBackend();
-      if (ready) loadAppPath(START_PATH);
+      if (ready) {
+        loadAppPath(START_PATH);
+        return;
+      }
+      loadLocalPage("install.html");
+      dialog.showErrorBox("Elevate install failed", "The installer finished, but Elevate was still not ready. Check the terminal logs and try again.");
     } else if (mainWindow) {
       dialog.showErrorBox("Elevate install failed", "The installer exited before Elevate was ready. Check the terminal logs and try again.");
     }

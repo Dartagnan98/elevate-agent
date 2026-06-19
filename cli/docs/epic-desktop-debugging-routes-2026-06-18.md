@@ -849,6 +849,8 @@ Deliverables:
   - desktop preload IPC contract checks every exposed invoke has a main handler
     and every exposed bridge leaf has a renderer caller, with unused
     `auth.status/logout` bridge leaves removed,
+  - desktop install fallback handles rejected install/retry IPC and reloads the
+    setup page when installer exit `0` still leaves the backend unavailable,
   - hosted account/org/skills-list/automation-list read contracts,
   - hosted signup/forgot/reset route contract, production mailer outage
     visibility, and reset cleanup-before-password-change ordering,

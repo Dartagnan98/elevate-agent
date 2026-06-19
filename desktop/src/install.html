@@ -134,15 +134,35 @@
     </main>
     <script>
       const statusEl = document.getElementById("status");
-      document.getElementById("retry").addEventListener("click", async () => {
-        statusEl.textContent = "CHECKING RUNTIME";
-        const result = await window.elevateDesktop.retry();
-        if (!result.ok) statusEl.textContent = "RUNTIME NOT REACHABLE";
+      const retryButton = document.getElementById("retry");
+      const installButton = document.getElementById("install");
+      function setBusy(busy) {
+        retryButton.disabled = busy;
+        installButton.disabled = busy;
+      }
+      retryButton.addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          statusEl.textContent = "CHECKING RUNTIME";
+          const result = await window.elevateDesktop.retry();
+          if (!result.ok) statusEl.textContent = "RUNTIME NOT REACHABLE";
+        } catch {
+          statusEl.textContent = "RETRY FAILED";
+        } finally {
+          setBusy(false);
+        }
       });
-      document.getElementById("install").addEventListener("click", async () => {
-        statusEl.textContent = "STARTING INSTALLER";
-        const result = await window.elevateDesktop.install();
-        statusEl.textContent = (result.message || "INSTALLER STARTED").toUpperCase();
+      installButton.addEventListener("click", async () => {
+        setBusy(true);
+        try {
+          statusEl.textContent = "STARTING INSTALLER";
+          const result = await window.elevateDesktop.install();
+          statusEl.textContent = (result.message || "INSTALLER STARTED").toUpperCase();
+        } catch {
+          statusEl.textContent = "INSTALL FAILED";
+        } finally {
+          setBusy(false);
+        }
       });
     </script>
   </body>
