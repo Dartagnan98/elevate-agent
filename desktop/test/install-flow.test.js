@@ -63,3 +63,12 @@ test("installer exit success reloads setup page when backend is still unavailabl
     /if \(ready\) \{\s*loadAppPath\(START_PATH\);\s*return;\s*}\s*loadLocalPage\("install\.html"\);/s,
   );
 });
+
+test("desktop license writer stores token file at 0600", () => {
+  const main = fs.readFileSync(mainPath, "utf8");
+
+  assert.match(
+    main,
+    /fs\.writeFileSync\(LICENSE_PATH, JSON\.stringify\(license, null, 2\), \{ mode: 0o600 \}\);/,
+  );
+});

@@ -1,3 +1,6 @@
+import json
+import stat
+
 import pytest
 
 from elevate_cli import cloud_skills
@@ -52,6 +55,26 @@ def test_activate_install_can_skip_skill_sync():
     assert result["packs"]["realEstateSales"] is True
     assert result["skill_count"] == 0
     assert result["skill_names"] == []
+
+
+def test_license_save_creates_private_token_file(tmp_path, monkeypatch):
+    path = tmp_path / ".elevate" / "license.json"
+    monkeypatch.setattr(license_mod, "LICENSE_PATH", path)
+    lic = license_mod.License(
+        access_token="access-secret",
+        refresh_token="refresh-secret",
+        license_id="lic_123",
+        tier="pro",
+        email="agent@example.com",
+        expires_at=4_000_000_000,
+        entitlements=["real_estate_sales"],
+    )
+
+    license_mod.save(lic)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not path.with_suffix(".json.tmp").exists()
+    assert json.loads(path.read_text())["refresh_token"] == "refresh-secret"
 
 
 def test_backend_url_requires_explicit_elevation_hq_origin(monkeypatch):
