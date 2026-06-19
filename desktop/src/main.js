@@ -1591,26 +1591,6 @@ ipcMain.handle("auth:login", async (_event, payload) => {
   return result;
 });
 
-ipcMain.handle("auth:status", async () => {
-  const license = await ensureValidLicense();
-  if (!license) return { signedIn: false };
-  return {
-    signedIn: true,
-    email: license.email,
-    tier: license.tier,
-    license_id: license.license_id,
-    expires_at: license.expires_at,
-  };
-});
-
-ipcMain.handle("auth:logout", async () => {
-  clearLicense();
-  // Reload the dashboard; with no license on disk it renders the in-app
-  // <LoginCard /> — the single sign-in screen.
-  if (mainWindow && !mainWindow.isDestroyed()) loadAppPath(START_PATH);
-  return { ok: true };
-});
-
 // Routes the login page's "Forgot?" / "Create account" / "Use a code" links
 // out to the user's default browser. Hard-coded to the HQ origin so a
 // compromised renderer can't open arbitrary URLs.

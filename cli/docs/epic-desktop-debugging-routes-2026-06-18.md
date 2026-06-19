@@ -836,6 +836,9 @@ Deliverables:
     and probes protected local HTTP auth before sidecar prompts,
   - desktop top-level navigation rejects arbitrary `file://` and external
     schemes while allowing dashboard/app-owned local pages,
+  - desktop preload IPC contract checks every exposed invoke has a main handler
+    and every exposed bridge leaf has a renderer caller, with unused
+    `auth.status/logout` bridge leaves removed,
   - hosted account/org/skills-list/automation-list read contracts,
   - hosted signup/forgot/reset route contract, production mailer outage
     visibility, and reset cleanup-before-password-change ordering,

@@ -4,13 +4,9 @@ contextBridge.exposeInMainWorld("elevateDesktop", {
   retry: () => ipcRenderer.invoke("desktop:retry"),
   install: () => ipcRenderer.invoke("desktop:install"),
 
-  // Auth gate. login.html drives this; the dashboard can also call
-  // status() / logout() to show the current user and offer a sign-out
-  // link in the account menu without going back through the web UI.
+  // Auth gate. login.html drives this.
   auth: {
     login: (creds) => ipcRenderer.invoke("auth:login", creds),
-    status: () => ipcRenderer.invoke("auth:status"),
-    logout: () => ipcRenderer.invoke("auth:logout"),
     openExternal: (target) => ipcRenderer.invoke("auth:open-external", target),
   },
 
