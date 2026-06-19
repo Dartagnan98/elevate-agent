@@ -511,34 +511,12 @@ class TestRunDebugShare:
         assert "--- elevate dump ---" in gateway_paste
         assert "--- full gateway.log ---" in gateway_paste
 
-    def test_share_uploads_sanitized_session_events_even_with_no_redact(
+    def test_share_rejects_remote_no_redact_before_upload(
         self,
         elevate_home,
         capsys,
     ):
         from elevate_cli.debug import run_debug_share
-
-        events_dir = elevate_home / "logs" / "session-events"
-        events_dir.mkdir(parents=True)
-        (events_dir / "2026-06-18.jsonl").write_text(
-            json.dumps(
-                {
-                    "event_id": "legacy-1",
-                    "event": "gateway.error",
-                    "ts": time.time(),
-                    "session_id": "s1",
-                    "source": "joe@example.com",
-                    "component": "/Users/dartagnanpatricio/private/report.pdf",
-                    "payload": {
-                        "prompt": "raw prompt",
-                        "content": "raw content",
-                        "error_message": "token=sk-1234567890abcdef",
-                    },
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
 
         args = MagicMock()
         args.lines = 50
@@ -548,27 +526,13 @@ class TestRunDebugShare:
         args.session = "s1"
         args.last = "all"
 
-        uploaded_content = []
-
-        def _mock_upload(content, expiry_days=7):
-            uploaded_content.append(content)
-            return f"https://paste.rs/paste{len(uploaded_content)}"
-
         with patch("elevate_cli.dump.run_dump"), \
-             patch("elevate_cli.debug.upload_to_pastebin", side_effect=_mock_upload):
-            run_debug_share(args)
+             patch("elevate_cli.debug.upload_to_pastebin") as mock_upload:
+            with pytest.raises(ValueError, match="--no-redact can only be used with --local"):
+                run_debug_share(args)
 
-        report = uploaded_content[0]
-        assert "--- session recorder events (redacted) ---" in report
-        assert "token=[redacted-secret]" in report
-        assert "[redacted-email]" in report
-        assert "[path:report.pdf]" in report
-        assert "raw prompt" not in report
-        assert "raw content" not in report
-        assert "joe@example.com" not in report
-        assert "/Users/dartagnanpatricio" not in report
-        assert "sk-1234567890abcdef" not in report
-        assert "Debug report uploaded" in capsys.readouterr().out
+        mock_upload.assert_not_called()
+        assert "Debug report uploaded" not in capsys.readouterr().out
 
     def test_share_keeps_report_and_full_log_on_same_snapshot(self, elevate_home, capsys):
         """A mid-run rotation must not make full agent.log older than the report."""

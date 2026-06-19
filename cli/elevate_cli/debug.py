@@ -7,7 +7,8 @@ Currently supports:
                           ``agent.redact.redact_sensitive_text`` with
                           ``force=True`` before upload so credentials in
                           log lines never reach the public paste service.
-                          Pass ``--no-redact`` to disable.
+                          Pass ``--local --no-redact`` to print an unredacted
+                          report locally without uploading.
 """
 
 import io
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Kept short; the trailing newline guarantees the banner sits on its own line.
 _REDACTION_BANNER = (
     "[redacted by elevate debug share — "
-    "run with --no-redact to disable]\n"
+    "run locally with --local --no-redact to disable]\n"
 )
 
 
@@ -675,6 +676,9 @@ def run_debug_share(args):
     redact = not _bool_arg(args, "no_redact")
     session_id = _optional_str_arg(args, "session")
     since_seconds = _parse_since_seconds(_optional_str_arg(args, "last"))
+
+    if not redact and not local_only:
+        raise ValueError("--no-redact can only be used with --local")
 
     if not local_only:
         print(_PRIVACY_NOTICE)

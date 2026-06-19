@@ -265,8 +265,9 @@ Current verified snapshot, 2026-06-18:
   fingerprint drift guard, release feed merge rejects app-bundle/package version
   mismatch, finalization requires all current x64/arm64 zip/dmg artifacts,
   ship refuses a mismatched local feed before any remote mutation, lazy
-  `tts.edge` install spec matches packaged core dependency policy, and
-  production support bundle redaction for session-recorder events.
+  `tts.edge` install spec matches packaged core dependency policy, production
+  support bundle redaction for session-recorder events, and remote
+  `elevate debug share --no-redact` rejection before upload.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   passes `cli/scripts/installed_runtime_smoke.py` for `1.2.58` before and
   after first launch. The 1.2.57 installed-app seal failure is closed by the
@@ -878,6 +879,8 @@ Deliverables:
     bundled instead of logging an ENOENT updater error,
   - `elevate debug share --session/--last` recorder-event support bundle
     section with export-time re-sanitization and redaction report,
+  - remote `elevate debug share --no-redact` is rejected before upload; no-redact
+    mode is local-only,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`

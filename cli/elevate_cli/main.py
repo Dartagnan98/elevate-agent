@@ -8434,7 +8434,7 @@ Examples:
         "--no-redact",
         action="store_true",
         dest="no_redact",
-        help="Disable credential redaction in log uploads (default: redact)",
+        help="Disable credential redaction for --local output only (default: redact)",
     )
     delete_parser = debug_sub.add_parser(
         "delete",
