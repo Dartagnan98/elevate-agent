@@ -21,6 +21,26 @@ def db(tmp_path):
 # =========================================================================
 
 class TestSessionLifecycle:
+    def test_corrupt_state_db_records_recovery_hint(self, tmp_path):
+        from elevate_state import (
+            _set_last_init_error,
+            format_session_db_unavailable,
+            get_last_init_error,
+        )
+
+        _set_last_init_error(None)
+        db_path = tmp_path / "state.db"
+        db_path.write_text("not sqlite", encoding="utf-8")
+
+        with pytest.raises(Exception):
+            SessionDB(db_path=db_path)
+
+        assert "file is not a database" in (get_last_init_error() or "").lower()
+        message = format_session_db_unavailable("state.db unavailable")
+        assert "copy it aside" in message
+        assert "restart to rebuild an empty session index" in message
+        _set_last_init_error(None)
+
     def test_create_and_get_session(self, db):
         sid = db.create_session(
             session_id="s1",

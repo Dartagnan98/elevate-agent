@@ -59,6 +59,12 @@ _WAL_INCOMPAT_MARKERS = (
     "disk i/o error",         # Flaky network FS during WAL setup
 )
 
+_CORRUPT_DB_MARKERS = (
+    "file is not a database",
+    "database disk image is malformed",
+    "malformed database schema",
+)
+
 # Last SessionDB() init error, per-process.  Surfaced in /resume and
 # related slash-command error strings so users know WHY the DB is
 # unavailable instead of getting a bare "Session database not available."
@@ -122,8 +128,11 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
     if not cause:
         return f"{prefix}."
     hint = ""
-    if any(marker in cause.lower() for marker in _WAL_INCOMPAT_MARKERS):
+    lower = cause.lower()
+    if any(marker in lower for marker in _WAL_INCOMPAT_MARKERS):
         hint = " (state.db may be on NFS/SMB/FUSE — see https://www.sqlite.org/wal.html)"
+    elif any(marker in lower for marker in _CORRUPT_DB_MARKERS):
+        hint = " (state.db appears corrupt; copy it aside, then restart to rebuild an empty session index)"
     return f"{prefix}: {cause}{hint}."
 
 
