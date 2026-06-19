@@ -808,6 +808,24 @@ class TestWebServerEndpoints:
         resp = unauth_client.get("/api/status")
         assert resp.status_code == 200
 
+    def test_dashboard_session_cookie_authorizes_api_requests(self):
+        """The served SPA cookie must cover first-load /api calls before JS runs."""
+        from starlette.testclient import TestClient
+        from elevate_cli.web_server import WEB_DIST, app, _SESSION_TOKEN
+
+        if not (WEB_DIST / "index.html").exists():
+            pytest.skip("frontend bundle not built")
+
+        browser = TestClient(app)
+        index = browser.get("/")
+
+        assert index.status_code == 200
+        assert browser.cookies.get("elevate_session") == _SESSION_TOKEN
+        assert "HttpOnly" in index.headers.get("set-cookie", "")
+
+        resp = browser.get("/api/env")
+        assert resp.status_code == 200
+
     def test_path_traversal_blocked(self):
         """Verify URL-encoded path traversal is blocked."""
         # %2e%2e = ..

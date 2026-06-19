@@ -226,9 +226,10 @@ Current verified snapshot, 2026-06-18:
 - Caller inventory: the latest sweep found 443 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `90a6da8ae011404a`.
+- Caller inventory fingerprint: `11284541a3287764`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
-  tests, frontend `api.ts` session-header injection test,
+  tests, frontend `api.ts` session-header injection test, served-SPA
+  `HttpOnly` session-cookie authorization test,
   `/api/source-inbox?debug=1` read-path/counts/fallback metadata, direct
   `/api/cron/attention` contract test, example plugin API mount test, serialized
   updater manual checks, dead updater `dismissToast` preload exposure,
@@ -338,12 +339,12 @@ Primary files:
 Source anchors:
 
 - Local session header is `X-Elevate-Session-Token` at
-  `cli/elevate_cli/web_server.py:273`.
-- Public local API allowlist starts at `cli/elevate_cli/web_server.py:342`.
+  `cli/elevate_cli/web_server.py:280`.
+- Public local API allowlist starts at `cli/elevate_cli/web_server.py:349`.
 - Header, cookie, and legacy bearer acceptance is in
-  `_has_valid_session_token(...)` at `cli/elevate_cli/web_server.py:353`.
+  `_has_valid_session_token(...)` at `cli/elevate_cli/web_server.py:364`.
 - Non-public `/api/*` routes are gated by middleware at
-  `cli/elevate_cli/web_server.py:499`.
+  `cli/elevate_cli/web_server.py:511`.
 - React injects the header in `cli/web/src/lib/api.ts:270`.
 - Vite dev token scraping warns when it cannot find the dashboard token in
   `cli/web/vite.config.ts:33`.
@@ -594,6 +595,9 @@ Goal: make 401s and chat socket failures self-explanatory.
 Deliverables:
 
 - No-secret local auth diagnostic or equivalent documented curl checklist.
+- Done: local auth contract tests cover missing token, bad token, custom
+  session-header plus proxy `Authorization`, and served-SPA session-cookie
+  authorization before JS runs.
 - Done: `GatewayClient` surfaces `/api/ws` close code/reason.
 - Done: focused backend tests for missing token, bad token, and embedded-chat
   disabled `/api/ws` `4401`/`4403`.
