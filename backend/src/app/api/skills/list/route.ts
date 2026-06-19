@@ -10,10 +10,17 @@ export async function GET(req: NextRequest) {
   if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
   const { user } = guard;
 
-  const access_info = await effectiveAccess(user.id);
-  const merged = { ...user, tier: access_info.tier, entitlements: access_info.entitlements };
+  let access_info;
+  let all;
+  try {
+    access_info = await effectiveAccess(user.id);
+    all = await listEnabledSkills();
+  } catch (e) {
+    console.error("[skills/list] catalog unavailable:", e);
+    return NextResponse.json({ error: "skills catalog unavailable" }, { status: 503 });
+  }
 
-  const all = await listEnabledSkills();
+  const merged = { ...user, tier: access_info.tier, entitlements: access_info.entitlements };
   const visible = all.filter((skill) => userCanAccessSkill(merged, skill));
 
   return NextResponse.json({

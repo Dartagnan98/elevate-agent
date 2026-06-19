@@ -8,6 +8,7 @@ import {
   createFakeDb,
   failNextSupabaseInsert,
   failNextSupabasePatch,
+  failNextSupabaseSelect,
   issueAccessToken,
   jsonRequest,
   loadRoute,
@@ -787,6 +788,35 @@ describe("hosted route handlers", () => {
     );
   });
 
+  it("catalog list routes return JSON when hosted catalog reads fail", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "catalog-user", email: "catalog@example.com" });
+    db.users.push(user);
+    const license = seedLicense({ id: "catalog-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const skills = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("skills/list");
+    const automations = await loadRoute<{ GET: (req: Request) => Promise<Response> }>(
+      "automations/list",
+    );
+
+    failNextSupabaseSelect("skills");
+    const skillsResponse = await skills.GET(
+      jsonRequest("/api/skills/list", {}, { method: "GET", headers }),
+    );
+    assert.equal(skillsResponse.status, 503);
+    assert.deepEqual(await responseJson(skillsResponse), { error: "skills catalog unavailable" });
+
+    failNextSupabaseSelect("automations");
+    const automationsResponse = await automations.GET(
+      jsonRequest("/api/automations/list", {}, { method: "GET", headers }),
+    );
+    assert.equal(automationsResponse.status, 503);
+    assert.deepEqual(await responseJson(automationsResponse), {
+      error: "automations catalog unavailable",
+    });
+  });
+
   it("account billing distinguishes a Stripe customer from a subscription", async () => {
     const db = useFakeDb();
     const user = await makeUser({
@@ -1384,6 +1414,39 @@ describe("hosted route handlers", () => {
     );
     assert.equal(invocation.ip_address, "203.0.113.7");
     assert.equal(invocation.user_agent, "hosted-route-test");
+  });
+
+  it("skills run returns JSON when invocation logging fails", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "skill-log-user", email: "skill-log@example.com" });
+    db.users.push(user);
+    const license = seedLicense({ id: "skill-log-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, license);
+    const now = new Date().toISOString();
+    db.skills.push({
+      name: "logged-skill",
+      version: 1,
+      tier_required: "pro",
+      manifest: {},
+      body: "body",
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    });
+    failNextSupabaseInsert("skill_invocations");
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("skills/run");
+
+    const response = await route.POST(
+      jsonRequest(
+        "/api/skills/run",
+        { skill_name: "logged-skill", args: { lead_id: "lead-2" } },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+
+    assert.equal(response.status, 503);
+    assert.deepEqual(await responseJson(response), { error: "skill invocation unavailable" });
+    assert.equal(db.skill_invocations.length, 0);
   });
 
   it("admin mutations return 404 for missing records", async () => {

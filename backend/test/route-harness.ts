@@ -161,6 +161,7 @@ let nextLoginCodeId = 1;
 let nextPasswordResetTokenId = 1;
 let nextPatchFailure: { table: string; status: number; message: string } | null = null;
 let nextInsertFailure: { table: string; status: number; message: string } | null = null;
+let nextSelectFailure: { table: string; status: number; message: string } | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -191,6 +192,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextPasswordResetTokenId = db.password_reset_tokens.length + 1;
   nextPatchFailure = null;
   nextInsertFailure = null;
+  nextSelectFailure = null;
   return activeDb;
 }
 
@@ -208,6 +210,14 @@ export function failNextSupabaseInsert(
   message = "supabase insert failed",
 ): void {
   nextInsertFailure = { table, status, message };
+}
+
+export function failNextSupabaseSelect(
+  table: string,
+  status = 500,
+  message = "supabase select failed",
+): void {
+  nextSelectFailure = { table, status, message };
 }
 
 export async function makeUser(
@@ -732,7 +742,14 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
 
   activeDb.calls.push({ table, method, body });
 
-  if (method === "GET") return okJson(selectRows(table, url.searchParams, wantsSingle));
+  if (method === "GET") {
+    if (nextSelectFailure?.table === table) {
+      const failure = nextSelectFailure;
+      nextSelectFailure = null;
+      return okJson({ message: failure.message }, failure.status);
+    }
+    return okJson(selectRows(table, url.searchParams, wantsSingle));
+  }
   if (method === "POST") {
     if (table === "session_diagnostic_events") {
       upsertDiagnostics(body);

@@ -21,11 +21,18 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
   const { skill_name, args } = parsed.data;
 
-  const skill = await getEnabledSkill(skill_name);
+  let skill;
+  let access_info;
+  try {
+    skill = await getEnabledSkill(skill_name);
+    access_info = await effectiveAccess(user.id);
+  } catch (e) {
+    console.error("[skills/run] catalog unavailable:", e);
+    return NextResponse.json({ error: "skill catalog unavailable" }, { status: 503 });
+  }
 
   if (!skill) return NextResponse.json({ error: "skill not found" }, { status: 404 });
 
-  const access_info = await effectiveAccess(user.id);
   const merged = { ...user, tier: access_info.tier, entitlements: access_info.entitlements };
   if (!userCanAccessSkill(merged, skill)) {
     return NextResponse.json(
@@ -38,13 +45,18 @@ export async function POST(req: NextRequest) {
     ? crypto.createHash("sha256").update(JSON.stringify(args)).digest("hex")
     : null;
 
-  await logSkillInvocation({
-    user_id: claims.sub,
-    skill_name,
-    args_hash: argsHash,
-    ip_address: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null,
-    user_agent: req.headers.get("user-agent") || null,
-  });
+  try {
+    await logSkillInvocation({
+      user_id: claims.sub,
+      skill_name,
+      args_hash: argsHash,
+      ip_address: req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || null,
+      user_agent: req.headers.get("user-agent") || null,
+    });
+  } catch (e) {
+    console.error("[skills/run] invocation log unavailable:", e);
+    return NextResponse.json({ error: "skill invocation unavailable" }, { status: 503 });
+  }
 
   return NextResponse.json({
     name: skill.name,
