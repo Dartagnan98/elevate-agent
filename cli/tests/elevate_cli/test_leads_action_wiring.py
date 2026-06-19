@@ -125,6 +125,23 @@ def test_restore_source_task_removes_skipped_state(tmp_path, monkeypatch):
     assert "task-1" not in state["tasks"]
 
 
+def test_dynamic_composio_source_task_actions_are_allowed(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    source_root = tmp_path / "sources"
+    source_dir = source_root / "composio-gmail"
+    source_dir.mkdir(parents=True)
+    monkeypatch.setattr(sc, "get_source_root_info", lambda config=None: {"sourceRoot": str(source_root)})
+    monkeypatch.setattr(sc, "build_source_inbox_response", lambda config=None: {"ok": True})
+    monkeypatch.setattr(outreach_db, "skip_pending_send", lambda source_id, task_id: None)
+
+    sc.update_source_task_state("composio-gmail", "task-1", "skip", config={})
+
+    state = json.loads((source_dir / "ui-state.json").read_text(encoding="utf-8"))
+    assert state["tasks"]["task-1"]["status"] == "skipped"
+
+
 def test_update_profile_favorite_persists_flag(monkeypatch):
     from elevate_cli import source_connectors as sc
     from elevate_cli.data import connect

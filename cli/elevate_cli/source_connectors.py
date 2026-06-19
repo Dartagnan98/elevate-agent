@@ -2306,6 +2306,18 @@ def _blueprint(source_id: str) -> JsonRecord | None:
     return next((item for item in SOURCE_CONNECTION_BLUEPRINTS if item["id"] == source_id), None)
 
 
+def _mutable_source_exists(source_root: Path, source_id: str) -> bool:
+    return bool(
+        _blueprint(source_id)
+        or (
+            source_id.startswith("composio-")
+            and "/" not in source_id
+            and "\\" not in source_id
+            and _source_dir(source_root, source_id).is_dir()
+        )
+    )
+
+
 # ─── Per-source operational prompts ────────────────────────────────────
 #
 # Each prompt describes the EXACT code path that runs when the operator
@@ -3998,14 +4010,15 @@ def update_source_thread_state(
     return_inbox: bool = True,
 ) -> JsonRecord:
     config = config or load_config()
-    if not _blueprint(source_id):
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    if not _mutable_source_exists(source_root, source_id):
         raise ValueError(f"Unknown source connector: {source_id}")
     normalized = str(action or "").strip().lower()
     if normalized not in {"done", "archive", "restore", "open"}:
         raise ValueError("Unsupported thread action")
 
-    info = get_source_root_info(config)
-    source_dir = _source_dir(Path(info["sourceRoot"]), source_id)
+    source_dir = _source_dir(source_root, source_id)
     state = _read_source_ui_state(source_dir)
     threads = _as_dict(state.get("threads"))
     if normalized in {"restore", "open"}:
@@ -4132,14 +4145,15 @@ def update_source_task_state(
     return_inbox: bool = True,
 ) -> JsonRecord:
     config = config or load_config()
-    if not _blueprint(source_id):
+    info = get_source_root_info(config)
+    source_root = Path(info["sourceRoot"])
+    if not _mutable_source_exists(source_root, source_id):
         raise ValueError(f"Unknown source connector: {source_id}")
     normalized = str(action or "").strip().lower()
     if normalized not in {"approve", "edit", "skip", "restore", "open"}:
         raise ValueError("Unsupported draft action")
 
-    info = get_source_root_info(config)
-    source_dir = _source_dir(Path(info["sourceRoot"]), source_id)
+    source_dir = _source_dir(source_root, source_id)
     state = _read_source_ui_state(source_dir)
     tasks = _as_dict(state.get("tasks"))
 

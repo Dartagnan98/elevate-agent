@@ -1345,6 +1345,39 @@ class TestNewEndpoints:
         assert [job["id"] for job in data["stale_jobs"]] == ["job-stale"]
         assert data["total"] == 2
 
+    def test_activity_feed_projects_surface_activity(self):
+        from elevate_cli.data import connect, surface_state
+        import elevate_cli.web_server as web_server
+
+        with web_server._FS_SCAN_CACHE_LOCK:
+            web_server._FS_SCAN_CACHE.clear()
+
+        with connect() as conn:
+            surface_state.append_activity(
+                conn,
+                "leads",
+                "contract_ping",
+                message="Activity route contract ready",
+                metadata={"kind": "agent_activity", "severity": "info"},
+                at="2099-01-01T00:00:00+00:00",
+            )
+
+        resp = self.client.get("/api/activity?agent=leads&limit=1")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "items": [
+                {
+                    "kind": "agent_activity",
+                    "agent": "leads",
+                    "ts": "2099-01-01T00:00:00+00:00",
+                    "title": "contract_ping",
+                    "detail": "Activity route contract ready",
+                    "status": "info",
+                }
+            ]
+        }
+
     def test_cron_job_not_found(self):
         resp = self.client.get("/api/cron/jobs/nonexistent-id")
         assert resp.status_code == 404

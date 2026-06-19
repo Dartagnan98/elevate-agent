@@ -907,7 +907,11 @@ Deliverables:
   - `/social-media` idea approval queue uses the backend default bucket so
     open approval-required ideas are not filtered out by `status=pending`,
   - `/leads` loaded-empty live arrays no longer fall back to demo rows, and
-    source filters match real `sourceId` values before demo labels.
+    source filters match real `sourceId` values before demo labels,
+  - dynamic `composio-*` source-inbox draft actions are accepted by the same
+    mutation path as static source blueprints,
+  - `/api/activity` has a local route contract proving DB-backed surface
+    activity projection, agent filtering, limit handling, and response shape.
 - Remaining readiness-blocking gaps include:
   - public update feed/artifacts not yet shipped and verified for `1.2.58`
     (current public feed is still `1.2.51`),
@@ -1075,8 +1079,6 @@ Current missing local route-family contract ledger:
 - `social`: backend routes and dashboard callers exist; no local `cli/tests`
   contract yet.
 - `integrations`: backend routes and dashboard callers exist; no local
-  `cli/tests` contract yet.
-- `activity`: fleet feed route and dashboard caller exist; no local
   `cli/tests` contract yet.
 
 ## Done Definition

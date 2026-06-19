@@ -36,11 +36,6 @@ MISSING_CONTRACT_FAMILIES = [
         "route_marker": "/api/integrations",
         "caller_marker": "getIntegrations",
     },
-    {
-        "family": "activity",
-        "route_marker": "/api/activity",
-        "caller_marker": "getActivity",
-    },
 ]
 
 
