@@ -838,6 +838,9 @@ Acceptance:
 ```bash
 cd /Users/dartagnanpatricio/elevate
 
+# Frontend/desktop builds require Node >=22.12. In Codex desktop, prefer:
+export PATH=/Users/dartagnanpatricio/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH
+
 # Fast-path route-map truth checks. If one fails, fix the epic before debugging behavior.
 rg -n "backendIsReady|backendBundleMatches|dashboardChatEnabled|ensureBackend|updater:check|updater:status|updater:install|elevateDesktop|desktopUpdater|checkNow" \
   desktop/src/main.js desktop/src/preload.js cli/web/src/App.tsx
