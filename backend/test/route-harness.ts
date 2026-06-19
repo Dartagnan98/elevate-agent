@@ -56,11 +56,24 @@ type DeviceGrantRow = {
   refresh_token_plain?: string | null;
 };
 
+type LoginCodeRow = {
+  id: string;
+  user_id: string;
+  code_hash: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  attempts: number;
+  ip_addr: string | null;
+  user_agent: string | null;
+};
+
 type FakeDb = {
   users: UserRow[];
   licenses: LicenseRow[];
   memberships: unknown[];
   device_grants: DeviceGrantRow[];
+  login_codes: LoginCodeRow[];
   audit_log: unknown[];
   session_diagnostic_events: Record<string, unknown>[];
   calls: Array<{ table: string; method: string; body: unknown }>;
@@ -70,6 +83,7 @@ const baseUrl = "https://example.supabase.test";
 let activeDb: FakeDb = createFakeDb();
 let nextLicenseId = 1;
 let nextGrantId = 1;
+let nextLoginCodeId = 1;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -77,6 +91,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
     licenses: [],
     memberships: [],
     device_grants: [],
+    login_codes: [],
     audit_log: [],
     session_diagnostic_events: [],
     calls: [],
@@ -88,6 +103,7 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   activeDb = db;
   nextLicenseId = db.licenses.length + 1;
   nextGrantId = db.device_grants.length + 1;
+  nextLoginCodeId = db.login_codes.length + 1;
   return activeDb;
 }
 
@@ -215,6 +231,25 @@ function insertRows(table: string, body: unknown): unknown {
     activeDb.audit_log.push(...rows);
     return rows;
   }
+  if (table === "login_codes") {
+    const inserted = rows.map((row) => {
+      const now = new Date().toISOString();
+      const loginCode: LoginCodeRow = {
+        id: `login-code-${nextLoginCodeId++}`,
+        user_id: String(row.user_id),
+        code_hash: String(row.code_hash),
+        created_at: (row.created_at as string | undefined) || now,
+        expires_at: String(row.expires_at),
+        consumed_at: (row.consumed_at as string | null | undefined) ?? null,
+        attempts: Number(row.attempts ?? 0),
+        ip_addr: (row.ip_addr as string | null) ?? null,
+        user_agent: (row.user_agent as string | null) ?? null,
+      };
+      activeDb.login_codes.push(loginCode);
+      return loginCode;
+    });
+    return inserted[0];
+  }
   throw new Error(`unexpected insert into ${table}`);
 }
 
@@ -232,6 +267,12 @@ function updateRows(table: string, filters: URLSearchParams, body: Record<string
     }
     return;
   }
+  if (table === "login_codes") {
+    for (const loginCode of activeDb.login_codes) {
+      if (!id || loginCode.id === id) Object.assign(loginCode, body);
+    }
+    return;
+  }
   throw new Error(`unexpected update on ${table}`);
 }
 
@@ -244,6 +285,15 @@ function readIn(params: URLSearchParams, key: string): string[] | null {
   const raw = params.get(key);
   if (!raw?.startsWith("in.")) return null;
   return raw.slice(3).replace(/^\(|\)$/g, "").split(",");
+}
+
+function readIsNull(params: URLSearchParams, key: string): boolean {
+  return params.get(key) === "is.null";
+}
+
+function readGreaterThan(params: URLSearchParams, key: string): string | null {
+  const raw = params.get(key);
+  return raw?.startsWith("gt.") ? raw.slice(3) : null;
 }
 
 function selectRows(table: string, params: URLSearchParams): unknown {
@@ -276,6 +326,24 @@ function selectRows(table: string, params: URLSearchParams): unknown {
     if (id) rows = rows.filter((row) => row.id === id);
     if (userCode) rows = rows.filter((row) => row.user_code === userCode.toUpperCase());
     if (deviceHash) rows = rows.filter((row) => row.device_code_hash === deviceHash);
+    return maybeSingle(params, rows);
+  }
+  if (table === "login_codes") {
+    let rows = activeDb.login_codes;
+    const id = readEq(params, "id");
+    const userId = readEq(params, "user_id");
+    const expiresAfter = readGreaterThan(params, "expires_at");
+    if (id) rows = rows.filter((row) => row.id === id);
+    if (userId) rows = rows.filter((row) => row.user_id === userId);
+    if (readIsNull(params, "consumed_at")) {
+      rows = rows.filter((row) => row.consumed_at === null);
+    }
+    if (expiresAfter) {
+      rows = rows.filter((row) => row.expires_at > expiresAfter);
+    }
+    if ((params.get("order") || "").startsWith("created_at.desc")) {
+      rows = [...rows].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    }
     return maybeSingle(params, rows);
   }
   throw new Error(`unexpected select from ${table}`);

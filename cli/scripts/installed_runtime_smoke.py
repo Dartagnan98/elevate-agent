@@ -73,6 +73,7 @@ class SmokeResult:
     desktop_compaction: dict[str, Any] | None = None
     installed_app_seal: list[dict[str, Any]] = field(default_factory=list)
     log_hits: list[str] = field(default_factory=list)
+    installed_whatsapp_bridge: dict[str, bool] | None = None
     output_path: str | None = None
 
     def pass_check(self, message: str) -> None:
@@ -274,6 +275,34 @@ def run_installed_app_seal(
 
     if result.installed_app_seal and all(item["ok"] for item in result.installed_app_seal):
         result.pass_check("installed app seal valid (codesign + spctl)")
+
+
+def run_installed_whatsapp_bridge(
+    *,
+    installed_cli: Path,
+    result: SmokeResult,
+) -> None:
+    """Verify packaged WhatsApp bridge files that /api/status can report on."""
+
+    bridge_dir = installed_cli / "scripts/whatsapp-bridge"
+    bridge_script = bridge_dir / "bridge.js"
+    package_json = bridge_dir / "package.json"
+    node_modules = bridge_dir / "node_modules"
+    package_lock = bridge_dir / "package-lock.json"
+    status = {
+        "bridge_js": bridge_script.exists(),
+        "package_json": package_json.exists(),
+        "node_modules": node_modules.exists(),
+        "package_lock": package_lock.exists(),
+    }
+    result.installed_whatsapp_bridge = status
+    missing = [name for name, ok in status.items() if not ok]
+    if missing:
+        result.fail(
+            "installed WhatsApp bridge incomplete: " + ", ".join(sorted(missing))
+        )
+        return
+    result.pass_check("installed WhatsApp bridge present with dependencies")
 
 
 def _file_size(path: Path) -> int:
@@ -1140,6 +1169,11 @@ def main(argv: list[str]) -> int:
                 result.fail(f"installed check-file differs: {installed_rel}")
             else:
                 result.pass_check(f"installed {installed_rel} matches repo")
+
+        run_installed_whatsapp_bridge(
+            installed_cli=installed_cli,
+            result=result,
+        )
 
     if args.telegram_fixture:
         try:

@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "1.2.52",
+  "version": "1.2.53",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
@@ -15,8 +15,9 @@
     "preflight:apple": "node scripts/preflight-apple-release.js",
     "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
+    "smoke:mac": "../cli/.venv/bin/python ../cli/scripts/installed_runtime_smoke.py --installed-app dist/mac/Elevate.app --skip-sidecar && ../cli/.venv/bin/python ../cli/scripts/installed_runtime_smoke.py --installed-app dist/mac-arm64/Elevate.app --skip-sidecar",
     "ship:mac": "node scripts/ship-to-hetzner.js",
-    "release:mac": "npm run build:mac && npm run finalize:mac && npm run ship:mac",
+    "release:mac": "npm run build:mac && npm run finalize:mac && npm run smoke:mac && npm run ship:mac",
     "release:apple": "npm run preflight:apple && npm run release:mac"
   },
   "build": {
@@ -79,6 +80,24 @@
           "!**/*.db-wal",
           "!**/*.sqlite",
           "!**/*.sqlite3"
+        ]
+      },
+      {
+        "from": "../cli/scripts/whatsapp-bridge",
+        "to": "cli/scripts/whatsapp-bridge",
+        "filter": [
+          "**/*",
+          "!node_modules/**",
+          "!node_modules",
+          "!**/.DS_Store"
+        ]
+      },
+      {
+        "from": "../cli/scripts/whatsapp-bridge/node_modules",
+        "to": "cli/scripts/whatsapp-bridge/node_modules",
+        "filter": [
+          "**/*",
+          "!**/.DS_Store"
         ]
       }
     ],

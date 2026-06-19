@@ -180,9 +180,49 @@ Current verified snapshot, 2026-06-18:
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
-  health, login 200/402, refresh rotation/402 revoke, device start/approve/poll
-  one-shot claim, and diagnostics auth/sanitizer/idempotent upsert.
-- Caller inventory: the first sweep found 326 frontend/desktop caller
+  health, login 200/402, login-code request/verify, refresh rotation/402
+  revoke, device start/lookup/approve/deny/poll, and diagnostics
+  auth/sanitizer/idempotent upsert.
+- Hosted route file inventory:
+  - `backend/src/app/api/admin/audit/route.ts`
+  - `backend/src/app/api/admin/orgs/[id]/members/[userId]/route.ts`
+  - `backend/src/app/api/admin/orgs/[id]/members/route.ts`
+  - `backend/src/app/api/admin/orgs/[id]/route.ts`
+  - `backend/src/app/api/admin/orgs/route.ts`
+  - `backend/src/app/api/admin/search/route.ts`
+  - `backend/src/app/api/admin/users/[id]/licenses/[licenseId]/route.ts`
+  - `backend/src/app/api/admin/users/[id]/licenses/route.ts`
+  - `backend/src/app/api/admin/users/[id]/route.ts`
+  - `backend/src/app/api/admin/users/route.ts`
+  - `backend/src/app/api/auth/forgot/route.ts`
+  - `backend/src/app/api/auth/login/route.ts`
+  - `backend/src/app/api/auth/login-code/request/route.ts`
+  - `backend/src/app/api/auth/login-code/verify/route.ts`
+  - `backend/src/app/api/auth/reset/route.ts`
+  - `backend/src/app/api/auth/signup/route.ts`
+  - `backend/src/app/api/automations/list/route.ts`
+  - `backend/src/app/api/device/approve/route.ts`
+  - `backend/src/app/api/device/deny/route.ts`
+  - `backend/src/app/api/device/lookup/route.ts`
+  - `backend/src/app/api/device/poll/route.ts`
+  - `backend/src/app/api/device/start/route.ts`
+  - `backend/src/app/api/diagnostics/session-events/route.ts`
+  - `backend/src/app/api/health/route.ts`
+  - `backend/src/app/api/invitations/accept/route.ts`
+  - `backend/src/app/api/license/refresh/route.ts`
+  - `backend/src/app/api/me/email/route.ts`
+  - `backend/src/app/api/me/licenses/[id]/route.ts`
+  - `backend/src/app/api/me/licenses/route.ts`
+  - `backend/src/app/api/me/password/route.ts`
+  - `backend/src/app/api/me/route.ts`
+  - `backend/src/app/api/me/sign-out-everywhere/route.ts`
+  - `backend/src/app/api/orgs/route.ts`
+  - `backend/src/app/api/skills/list/route.ts`
+  - `backend/src/app/api/skills/run/route.ts`
+  - `backend/src/app/api/stripe/checkout/route.ts`
+  - `backend/src/app/api/stripe/portal/route.ts`
+  - `backend/src/app/api/stripe/webhook/route.ts`
+- Caller inventory: the latest sweep found 441 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
@@ -191,15 +231,23 @@ Current verified snapshot, 2026-06-18:
   `/api/cron/attention` contract test, example plugin API mount test, serialized
   updater manual checks, dead updater `dismissToast` preload exposure,
   `GatewayClient` WebSocket close-code/reason propagation, stale updater
-  polling comment, backend hosted route-handler harness, route inventory drift
-  guard, installed app `codesign`/`spctl` smoke gate, and production support
-  bundle redaction for session-recorder events.
+  polling comment, backend hosted route-handler harness, hosted device
+  lookup/deny contracts, hosted login-code request/verify contract, hosted
+  revoked-bearer 403 contract, hosted route file-list drift guard,
+  stricter `/api/status` readiness for desktop launch, release-path
+  `smoke:mac` gate, installed app `codesign`/`spctl` smoke gate, packaged
+  WhatsApp bridge/package checks, and production support bundle redaction for
+  session-recorder events.
 - Installed app smoke: `/Users/dartagnanpatricio/Applications/Elevate.app`
   now fails repeatably in `cli/scripts/installed_runtime_smoke.py` because
   `codesign --verify --deep --strict` and `spctl --assess` report a sealed
   resource is missing or invalid in the Python runtime (`edge_tts` version
   mismatch). The installed app also has stale `web_dist` assets versus the repo.
   Both block packaged production readiness until fixed by release/install flow.
+- Fresh candidate smoke: signed/notarized `desktop/dist/mac-arm64/Elevate.app`
+  for `1.2.53` passes `codesign`, `spctl`, repo `web_dist` parity, and packaged
+  WhatsApp bridge checks, including `bridge.js`, `package.json`,
+  `package-lock.json`, and `node_modules`.
 
 ## Route Center
 
@@ -218,8 +266,8 @@ Source anchors:
   `desktop/src/main.js:45`.
 - Startup milestones use `markStartup(...)` in
   `desktop/src/main.js:122`.
-- Backend readiness currently accepts any `2xx-4xx` response in
-  `desktop/src/main.js:686`.
+- Backend readiness now requires `GET /api/status` to return `200` plus the
+  expected Elevate status payload shape in `desktop/src/main.js:696`.
 - Stale bundle checks compare served and bundled Vite assets in
   `desktop/src/main.js:705` and `desktop/src/main.js:735`.
 - Backend spawn and timeout path live in `ensureBackend(...)` at
@@ -246,8 +294,8 @@ Debug questions:
 
 First fix candidates:
 
-- Make readiness less lossy than `status >= 200 && status < 500`.
-- Add one compact startup probe log with port, status code, asset-match result,
+- Done: make readiness less lossy than `status >= 200 && status < 500`.
+- Remaining: add one compact startup probe log with port, status code, asset-match result,
   embedded-chat flag, and launcher kind.
 - Route `updater:check` through the same serialized updater guard as scheduled
   checks.
@@ -443,7 +491,8 @@ app.
 Deliverables:
 
 - A route-map checklist covering desktop IPC, local auth, active chat, feature
-  routes, and hosted routes.
+  routes, and hosted routes. Hosted route file-list drift is exact-compared,
+  not just count-checked.
 - Each pathway lists read check, contract check, and runtime check.
 - First failed read check is treated as doc drift until source proves otherwise.
 
@@ -484,8 +533,8 @@ Goal: remove the biggest desktop ambiguity.
 
 Deliverables:
 
-- Make `backendIsReady(...)` require a meaningful healthy status.
-- Add compact startup probe logging before `backend:timeout`.
+- Done: make `backendIsReady(...)` require a meaningful healthy status.
+- Remaining: add compact startup probe logging before `backend:timeout`.
 - Done: route `updater:check` through the serialized update-check path.
 - Done: delete the dead `dismissToast` preload exposure.
 - Done: fix stale updater comment that says two hours while code polls every
@@ -620,8 +669,8 @@ state, and billing have route-handler coverage.
 
 Deliverables:
 
-- Add or document a backend test harness for Next route handlers. Current
-  state: 38 tracked route files and no backend `test` script.
+- Backend test harness for Next route handlers exists in
+  `backend/test/route-harness.ts`; `backend/package.json` has a `test` script.
 - Contract tests for auth login/signup/forgot/reset/login-code, license refresh,
   device start/lookup/approve/deny/poll, diagnostics ingestion, `me`, orgs,
   admin, skills, automations, and Stripe webhook route behavior.
@@ -677,6 +726,9 @@ Deliverables:
   `cli/scripts/installed_runtime_smoke.py`, but the installed app still fails
   `codesign --verify --deep --strict` and `spctl --assess` after first launch.
   The installed `web_dist` is also stale versus the repo build.
+- Fresh candidate proof: `release:mac` now runs `smoke:mac` before `ship:mac`;
+  local `1.2.53` x64 and arm64 built apps pass seal validation, repo
+  `web_dist` parity, and packaged WhatsApp bridge checks.
 - Hosted staging smoke: health, login, refresh, device flow, diagnostics, and
   Stripe webhook only in staging.
 - Support bundle command that collects no secrets and redacts tokens.
@@ -707,14 +759,20 @@ Deliverables:
   - `GatewayClient` WebSocket close-code/reason propagation,
   - hosted backend route-handler harness,
   - hosted login/refresh/device/diagnostics handler contracts,
-  - route inventory drift guard,
+  - hosted revoked-bearer `403` contract,
+  - route inventory drift guard with exact hosted file-list comparison,
+  - desktop launch readiness requiring `200` plus Elevate status payload,
+  - release-path `smoke:mac` gate before `ship:mac`,
   - installed app `codesign`/`spctl` smoke gate,
+  - packaged WhatsApp bridge script/package/dependency checks,
   - `elevate debug share --session/--last` recorder-event support bundle
     section with export-time re-sanitization and redaction report,
   - backend diagnostics string redaction for email/token/password/path values.
 - Remaining readiness-blocking gaps include:
-  - installed app seal validation failure,
-  - stale installed app `web_dist` versus repo build.
+  - live installed `/Users/dartagnanpatricio/Applications/Elevate.app` seal
+    validation failure,
+  - live installed app stale `web_dist` versus repo build,
+  - public update feed/artifacts not yet shipped and verified for `1.2.53`.
 
 Acceptance:
 
@@ -762,8 +820,8 @@ rg -n "ChatSidebar|/api/pty|/api/pub|/api/events" \
 rg -n "/api/source-inbox|/api/cron/attention|/api/dashboard/plugins|/api/plugins|/api/today|/api/agent" \
   cli/web/src/lib/api.ts cli/elevate_cli/web_routes cli/elevate_cli/web_server.py
 find backend/src/app/api -path "*route.ts" -type f | sort | \
-  rg "backend/src/app/api/(health|auth/login|auth/login-code/(request|verify)|license/refresh|device/(start|lookup|approve|poll)|diagnostics/session-events)/route.ts"
-rg -n "api\\.openExternal\\(\"link\"\\)|/link|api/license/refresh|api/device/(start|poll)|api/diagnostics/session-events|auth/login-code|requireAccess|requireAdmin" \
+  rg "backend/src/app/api/(health|auth/login|auth/login-code/(request|verify)|license/refresh|device/(start|lookup|approve|deny|poll)|diagnostics/session-events)/route.ts"
+rg -n "api\\.openExternal\\(\"link\"\\)|/link|api/license/refresh|api/device/(start|lookup|approve|deny|poll)|api/diagnostics/session-events|auth/login-code|requireAccess|requireAdmin" \
   desktop/src/main.js desktop/src/login.html cli/elevate_cli/license.py \
   cli/elevate_cli/diagnostics/session_uploader.py backend/src/app/link/page.tsx \
   backend/src/app/admin/login/page.tsx backend/src/app/api backend/src/lib

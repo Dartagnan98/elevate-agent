@@ -683,9 +683,26 @@ function requestText(pathname, timeoutMs = 2000, port = backendPort) {
   });
 }
 
+async function requestJson(pathname, timeoutMs = 2000, port = backendPort) {
+  const body = await requestText(pathname, timeoutMs, port);
+  if (!body) return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
 async function backendIsReady(port = backendPort) {
   const status = await request("/api/status", 2000, port);
-  return status >= 200 && status < 500;
+  if (status !== 200) return false;
+  const payload = await requestJson("/api/status", 2000, port);
+  return Boolean(
+    payload &&
+      typeof payload === "object" &&
+      typeof payload.version === "string" &&
+      Object.prototype.hasOwnProperty.call(payload, "gateway_running"),
+  );
 }
 
 async function dashboardChatEnabled(port = backendPort) {

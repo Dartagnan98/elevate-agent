@@ -73,3 +73,39 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     smoke = _load_smoke_script()
 
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
+
+
+def test_installed_whatsapp_bridge_passes_when_packaged(tmp_path):
+    smoke = _load_smoke_script()
+    installed_cli = tmp_path / "Elevate.app/Contents/Resources/cli"
+    bridge_dir = installed_cli / "scripts/whatsapp-bridge"
+    (bridge_dir / "node_modules").mkdir(parents=True)
+    (bridge_dir / "bridge.js").write_text("console.log('ok')\n", encoding="utf-8")
+    (bridge_dir / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+    (bridge_dir / "package-lock.json").write_text("{}\n", encoding="utf-8")
+
+    result = smoke.SmokeResult()
+    smoke.run_installed_whatsapp_bridge(installed_cli=installed_cli, result=result)
+
+    assert result.ok is True
+    assert result.installed_whatsapp_bridge == {
+        "bridge_js": True,
+        "package_json": True,
+        "node_modules": True,
+        "package_lock": True,
+    }
+    assert "installed WhatsApp bridge present with dependencies" in result.checks
+
+
+def test_installed_whatsapp_bridge_fails_when_missing(tmp_path):
+    smoke = _load_smoke_script()
+    installed_cli = tmp_path / "Elevate.app/Contents/Resources/cli"
+    installed_cli.mkdir(parents=True)
+
+    result = smoke.SmokeResult()
+    smoke.run_installed_whatsapp_bridge(installed_cli=installed_cli, result=result)
+
+    assert result.ok is False
+    assert result.failures == [
+        "installed WhatsApp bridge incomplete: bridge_js, node_modules, package_json, package_lock"
+    ]

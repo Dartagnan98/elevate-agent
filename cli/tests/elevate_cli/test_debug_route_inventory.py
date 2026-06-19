@@ -40,6 +40,23 @@ def _hosted_route_count() -> int:
     return len(list((REPO_ROOT / "backend/src/app/api").rglob("route.ts")))
 
 
+def _hosted_route_files() -> list[str]:
+    return [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in sorted((REPO_ROOT / "backend/src/app/api").rglob("route.ts"))
+    ]
+
+
+def _hosted_route_block(epic: str) -> list[str]:
+    match = re.search(
+        r"^- Hosted route file inventory:\n(?P<body>(?:  - `[^`]+`\n)+)",
+        epic,
+        re.MULTILINE,
+    )
+    assert match is not None, "hosted route file inventory block missing"
+    return [line.strip()[3:-1] for line in match.group("body").splitlines()]
+
+
 def test_desktop_debugging_epic_route_inventory_is_current():
     epic = _read(EPIC_PATH)
 
@@ -48,3 +65,9 @@ def test_desktop_debugging_epic_route_inventory_is_current():
 
     assert f"Local inventory: {local_count} decorated local routes/WebSockets" in epic
     assert f"Hosted inventory: {hosted_count} tracked `backend/src/app/api/**/route.ts` files" in epic
+
+
+def test_desktop_debugging_epic_hosted_route_file_list_is_current():
+    epic = _read(EPIC_PATH)
+
+    assert _hosted_route_block(epic) == _hosted_route_files()

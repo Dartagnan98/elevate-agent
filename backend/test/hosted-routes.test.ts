@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { describe, it } from "node:test";
 import {
   assertNoRawDiagnosticsText,
@@ -168,6 +169,132 @@ describe("hosted route handlers", () => {
     assert.deepEqual(secondBody, { error: "already_claimed", status: "claimed" });
   });
 
+  it("device lookup and deny report the browser approval leg", async () => {
+    const db = useFakeDb();
+    const user = await makeUser();
+    db.users.push(user);
+    const browserLicense = seedLicense({ id: "browser-license", user_id: user.id });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const lookup = await loadRoute<{ GET: (req: Request) => Promise<Response> }>("device/lookup");
+    const deny = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/deny");
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startResponse = await start.POST(
+      jsonRequest(
+        "/api/device/start",
+        { device_label: "CLI lookup" },
+        { headers: { origin: "https://app.test", "user-agent": "lookup-cli" } },
+      ),
+    );
+    const startBody = await responseJson(startResponse);
+
+    const lookupResponse = await lookup.GET(
+      jsonRequest(
+        `/api/device/lookup?code=${startBody.user_code}`,
+        {},
+        { method: "GET", headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const lookupBody = await responseJson(lookupResponse);
+
+    assert.equal(lookupResponse.status, 200);
+    assert.equal(lookupBody.status, "pending");
+    assert.equal(lookupBody.device_label, "CLI lookup");
+    assert.equal(lookupBody.user_agent, "lookup-cli");
+
+    const denyResponse = await deny.POST(
+      jsonRequest(
+        "/api/device/deny",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+
+    assert.equal(denyResponse.status, 200);
+    assert.equal(db.device_grants[0].status, "denied");
+    assert.equal(db.audit_log.length, 1);
+
+    const pollResponse = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const pollBody = await responseJson(pollResponse);
+
+    assert.equal(pollResponse.status, 403);
+    assert.deepEqual(pollBody, { error: "access_denied", status: "denied" });
+  });
+
+  it("login-code request and verify issue the desktop token envelope", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "test";
+    try {
+      const db = useFakeDb();
+      const user = await makeUser({ email: "login-code@example.com" });
+      db.users.push(user);
+      const requestRoute = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+        "auth/login-code/request",
+      );
+      const verifyRoute = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+        "auth/login-code/verify",
+      );
+
+      const requested = await requestRoute.POST(
+        jsonRequest(
+          "/api/auth/login-code/request",
+          { email: "login-code@example.com" },
+          { headers: { "x-forwarded-for": "127.0.0.1", "user-agent": "admin-web" } },
+        ),
+      );
+      const requestedBody = await responseJson(requested);
+      const code = (requestedBody.dev_only as { code?: string } | undefined)?.code;
+
+      assert.equal(requested.status, 200);
+      assert.match(String(code), /^\d{6}$/);
+      assert.equal(db.login_codes.length, 1);
+      assert.equal(db.login_codes[0].user_id, user.id);
+      assert.equal(
+        db.login_codes[0].code_hash,
+        crypto.createHash("sha256").update(String(code)).digest("hex"),
+      );
+
+      const rejected = await verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", {
+          email: "login-code@example.com",
+          code: "000000",
+        }),
+      );
+      const rejectedBody = await responseJson(rejected);
+
+      assert.equal(rejected.status, 401);
+      assert.deepEqual(rejectedBody, { error: "invalid code", attempts_remaining: 4 });
+      assert.equal(db.login_codes[0].attempts, 1);
+
+      const accepted = await verifyRoute.POST(
+        jsonRequest("/api/auth/login-code/verify", {
+          email: "login-code@example.com",
+          code,
+          device_label: "Admin Web",
+        }),
+      );
+      const acceptedBody = await responseJson(accepted);
+
+      assert.equal(accepted.status, 200);
+      assert.equal(typeof acceptedBody.access_token, "string");
+      assert.equal(typeof acceptedBody.refresh_token, "string");
+      assert.equal(acceptedBody.license_id, "license-1");
+      assert.equal(acceptedBody.tier, "pro");
+      assert.deepEqual(acceptedBody.entitlements, ["real_estate_sales"]);
+      assert.equal(db.licenses[0].device_label, "Admin Web");
+      assert.equal(typeof db.login_codes[0].consumed_at, "string");
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+    }
+  });
+
   it("diagnostics requires bearer auth and stores sanitized idempotent rows", async () => {
     const db = useFakeDb(createFakeDb());
     const user = await makeUser();
@@ -234,5 +361,32 @@ describe("hosted route handlers", () => {
     assert.equal(stored.includes("hunter2"), false);
     assert.equal(stored.includes("sk-1234567890abcdef"), false);
     assert.equal(stored.includes("/Users/dartagnanpatricio"), false);
+  });
+
+  it("diagnostics maps revoked hosted bearer licenses to 403", async () => {
+    const db = useFakeDb();
+    const user = await makeUser();
+    db.users.push(user);
+    const license = seedLicense({
+      id: "revoked-diagnostics-license",
+      user_id: user.id,
+      revoked: true,
+    });
+    const bearer = await issueAccessToken(user, license);
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "diagnostics/session-events",
+    );
+
+    const response = await route.POST(
+      jsonRequest(
+        "/api/diagnostics/session-events",
+        { events: [] },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 403);
+    assert.deepEqual(body, { error: "license revoked" });
   });
 });
