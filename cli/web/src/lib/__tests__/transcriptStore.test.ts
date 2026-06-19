@@ -235,6 +235,47 @@ describe("remount mid-turn (cache restore + replay)", () => {
   });
 });
 
+describe("long chat cache bounds", () => {
+  it("persists a bounded tail without shrinking the rendered transcript", () => {
+    const now = Date.now();
+    for (let i = 0; i < 220; i += 1) {
+      appendLocal(KEY, {
+        id: `u${i}`,
+        role: "user",
+        content: `question-${i} ${"q".repeat(1200)}`,
+        createdAt: now + i,
+        status: "complete",
+      });
+    }
+    appendLocal(KEY, {
+      id: "huge-tail",
+      role: "assistant",
+      content: "A".repeat(40_000),
+      createdAt: now + 221,
+      status: "complete",
+    });
+
+    expect(getSnapshot(KEY)).toHaveLength(221);
+    _flushWritesForTests();
+    const raw = JSON.parse(store.getItem("elevate.chat.messageCache.v2")!);
+    const cached = raw[KEY].messages;
+    const cachedChars = cached.reduce(
+      (sum: number, m: { content: string }) => sum + m.content.length,
+      0,
+    );
+
+    expect(cached).toHaveLength(160);
+    expect(cached.some((m: { id: string }) => m.id === "u0")).toBe(false);
+    expect(cached.at(-1).id).toBe("huge-tail");
+    expect(cached.at(-1).content).toContain(
+      "[Cached preview trimmed. Full history reloads from the server.]",
+    );
+    expect(cached.at(-1).content.length).toBeLessThan(17_000);
+    expect(cachedChars).toBeLessThanOrEqual(220_000);
+    expect(getSnapshot(KEY)).toHaveLength(221);
+  });
+});
+
 describe("mint mid-stream (draft -> lineage rekey)", () => {
   it("rekey preserves messages and live streaming continues", () => {
     const draft = "draft:abc";
