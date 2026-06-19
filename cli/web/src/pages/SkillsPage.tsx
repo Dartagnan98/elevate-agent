@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Markdown } from "@/components/Markdown";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 
@@ -362,7 +363,13 @@ function groupSkillsByPurpose(skills: SkillInfo[]) {
 
 export default function SkillsPage() {
   // Cached across tab switches so revisiting Skills paints instantly.
-  const { data: skills = [], loading, error: skillsError, mutate: mutateSkills } = useCachedResource(
+  const {
+    data: skills = [],
+    loading,
+    error: skillsError,
+    refresh: refreshSkills,
+    mutate: mutateSkills,
+  } = useCachedResource(
     "skills-list",
     () => api.getSkills(),
     { ttl: 10000 },
@@ -593,9 +600,30 @@ export default function SkillsPage() {
     });
   };
 
+  if (skillsError && skills.length === 0) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Toast toast={toast} />
+        <RouteLoadError
+          title="Could not load skills"
+          error={skillsError}
+          onRetry={refreshSkills}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Toast toast={toast} />
+
+      {skillsError ? (
+        <RouteLoadError
+          title="Could not load skills"
+          error={skillsError}
+          onRetry={refreshSkills}
+        />
+      ) : null}
 
       {!loading && showWorkflows && (
         <section className="rounded-md border border-border bg-card p-4">

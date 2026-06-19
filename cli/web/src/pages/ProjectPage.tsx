@@ -18,7 +18,7 @@ import { cn, isoTimeAgo } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { RouteSkeleton } from "@/components/route-skeletons";
+import { RouteLoadError, RouteSkeleton } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -132,9 +132,30 @@ export default function ProjectPage() {
     return <RouteSkeleton path="/project" />;
   }
 
+  if (cacheError && !status && !hub) {
+    return (
+      <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
+        <Toast toast={toast} />
+        <RouteLoadError
+          title="Could not load project"
+          error={cacheError}
+          onRetry={refresh}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="normal-case flex flex-col gap-5 pb-4 tracking-normal">
       <Toast toast={toast} />
+
+      {cacheError ? (
+        <RouteLoadError
+          title="Project data may be stale"
+          error={cacheError}
+          onRetry={refresh}
+        />
+      ) : null}
 
       <section className="overflow-hidden rounded-md border border-border bg-card">
         <div className="grid gap-4 p-4 sm:p-5 xl:grid-cols-[minmax(0,1fr)_22rem]">

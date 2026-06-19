@@ -33,6 +33,7 @@ import type {
 import { timeAgo } from "@/lib/utils";
 import { Markdown } from "@/components/Markdown";
 import { PlatformsCard } from "@/components/PlatformsCard";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -574,7 +575,13 @@ export default function SessionsPage() {
   const logScrollRef = useRef<HTMLPreElement | null>(null);
 
   // Paginated list, cached per page across tab switches.
-  const { data: pageData, loading, mutate: mutatePage } = useCachedResource(
+  const {
+    data: pageData,
+    loading,
+    error: pageError,
+    refresh: refreshPage,
+    mutate: mutatePage,
+  } = useCachedResource(
     `sessions-page-${page}`,
     () => api.getSessions(PAGE_SIZE, page * PAGE_SIZE),
     { ttl: 5000 },
@@ -816,6 +823,14 @@ export default function SessionsPage() {
         loading={sessionDelete.isDeleting}
       />
 
+      {pageError ? (
+        <RouteLoadError
+          title="Could not load sessions"
+          error={pageError}
+          onRetry={refreshPage}
+        />
+      ) : null}
+
       {alerts.length > 0 && (
         <div className="rounded-md border border-border bg-card p-4">
           <div className="flex items-start gap-3">
@@ -977,7 +992,7 @@ export default function SessionsPage() {
         </Card>
       )}
 
-      {loading ? (
+      {pageError && !pageData ? null : loading ? (
         <div className="flex flex-col gap-1.5">
           {Array.from({ length: PAGE_SIZE }).map((_, i) => (
             <SessionRowSkeleton key={i} />

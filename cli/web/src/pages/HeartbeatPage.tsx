@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { ListSkeleton } from "@/components/ui/skeleton";
+import { RouteLoadError } from "@/components/route-skeletons";
 import { Toast } from "@/components/Toast";
 import { useToast } from "@/hooks/useToast";
 import { cn } from "@/lib/utils";
@@ -519,7 +520,13 @@ export default function HeartbeatPage() {
 
   // Cached across tab switches: revisiting Heartbeat paints instantly and
   // revalidates in the background.
-  const { data: hbData, loading, refresh, mutate: mutateHeartbeat } = useCachedResource(
+  const {
+    data: hbData,
+    loading,
+    error: heartbeatError,
+    refresh,
+    mutate: mutateHeartbeat,
+  } = useCachedResource(
     "heartbeat-page",
     async () => {
       const [all, surfaceResp] = await Promise.all([
@@ -799,10 +806,18 @@ export default function HeartbeatPage() {
           </div>
         </div>
 
-        {loading ? (
-              <ListSkeleton rows={3} />
-            ) : (
-              sorted.map((job) => {
+        {heartbeatError ? (
+          <RouteLoadError
+            title="Could not load heartbeats"
+            error={heartbeatError}
+            onRetry={refresh}
+          />
+        ) : null}
+
+        {heartbeatError && !hbData ? null : loading ? (
+          <ListSkeleton rows={3} />
+        ) : (
+          sorted.map((job) => {
             const busy = busyIds.has(job.id);
             const isEditing = editingId === job.id;
             const isOpen = expanded.has(job.id);
@@ -995,14 +1010,14 @@ export default function HeartbeatPage() {
                 )}
               </div>
             );
-              })
-            )}
+          })
+        )}
 
-            {!loading && sorted.length === 0 && (
-              <div className="rounded-lg border border-dashed border-border bg-card/20 p-8 text-center text-sm text-muted-foreground">
-                No heartbeats yet. Create one above.
-              </div>
-            )}
+        {!heartbeatError && !loading && sorted.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border bg-card/20 p-8 text-center text-sm text-muted-foreground">
+            No heartbeats yet. Create one above.
+          </div>
+        )}
       </section>
     </div>
   );
