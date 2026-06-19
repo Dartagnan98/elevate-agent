@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/admin-guard";
 import {
+  findUserById,
   logAdminAction,
   revokeLicensesForUser,
   setUserDeveloperFlag,
@@ -30,6 +31,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   const parsed = Body.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
   const body = parsed.data;
+
+  if (!(await findUserById(id))) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
 
   if (body.entitlements) {
     await updateUserEntitlements(id, body.entitlements);

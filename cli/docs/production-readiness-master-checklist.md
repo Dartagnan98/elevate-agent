@@ -134,7 +134,7 @@ Critical path:
 | HOST-02 | Auth/license | PASS iff login, refresh, revoke, expired subscription, and logout paths are tested | UNKNOWN | Backend route tests |
 | HOST-03 | Device code flow | PASS iff start/lookup/approve/deny/poll are tested and visible in UI | UNKNOWN | Backend tests + desktop/dashboard caller |
 | HOST-04 | Diagnostics ingestion | PASS iff diagnostics auth, redaction, idempotency, and failure handling are tested | PASS | `npm --prefix backend test` passes diagnostics auth/sanitizer/idempotency/revoked-license tests |
-| HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts pass; admin mutation/error surfaces still need coverage |
+| HOST-05 | Admin/account | PASS iff account/admin APIs enforce guards and expose visible errors | UNKNOWN | Account/org read contracts and admin missing-record 404s pass; deeper admin mutation success/permission matrix still needs coverage |
 | HOST-06 | Stripe/skills/automations | PASS iff external-service failures are visible and tested with mocks | UNKNOWN | Skills/automations list gating passes; skills run, automation mutations, Stripe, and external failure mocks still need coverage |
 
 ## 11. Release And Update Path
@@ -255,6 +255,7 @@ If one command fails, fix the smallest failing gate first.
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm exec vitest run src/lib/__tests__/resolve-page-title.test.ts src/pages/__tests__/CronPage.errors.test.ts src/pages/real-estate-hub/_shared/__tests__/use-hub-data.flags.test.ts` from `cli/web`
 - PASS in source: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix cli/web run build` rebuilt `cli/elevate_cli/web_dist` with corrected dashboard route titles
 - PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm --prefix backend test -- hosted-routes.test.ts`
+- PASS: `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm test -- hosted-routes.test.ts` from `backend` after adding admin missing-record 404 coverage
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_installed_runtime_smoke.py cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_openapi_schema_lives_under_api cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_docs_dashboard_route_is_not_fastapi_swagger cli/tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_fastapi_swagger_lives_under_api_docs -q`
 - PASS: `cli/.venv/bin/python -m pytest cli/tests/elevate_cli/test_debug_route_inventory.py cli/tests/elevate_cli/test_dashboard_route_registry.py -q`
 - NOTE: old installed app backed up at `/Users/dartagnanpatricio/Applications/Elevate.app.backup-20260618-214427-1.2.51`

@@ -105,6 +105,7 @@ type CatalogRow = {
 type FakeDb = {
   users: UserRow[];
   licenses: LicenseRow[];
+  organizations: OrgRow[];
   memberships: MembershipRow[];
   skills: CatalogRow[];
   automations: Array<CatalogRow & {
@@ -134,6 +135,7 @@ export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
     users: [],
     licenses: [],
+    organizations: [],
     memberships: [],
     skills: [],
     automations: [],
@@ -377,6 +379,14 @@ function selectRows(table: string, params: URLSearchParams, wantsSingle: boolean
     const orgId = readEq(params, "org_id");
     if (userId) rows = rows.filter((row) => row.user_id === userId);
     if (orgId) rows = rows.filter((row) => row.org_id === orgId);
+    return maybeSingle(wantsSingle, rows);
+  }
+  if (table === "organizations") {
+    let rows = activeDb.organizations;
+    const id = readEq(params, "id");
+    const slug = readEq(params, "slug");
+    if (id) rows = rows.filter((row) => row.id === id);
+    if (slug) rows = rows.filter((row) => row.slug === slug);
     return maybeSingle(wantsSingle, rows);
   }
   if (table === "skills") {

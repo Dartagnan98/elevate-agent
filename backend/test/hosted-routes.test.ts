@@ -217,6 +217,64 @@ describe("hosted route handlers", () => {
     );
   });
 
+  it("admin mutations return 404 for missing records", async () => {
+    const db = useFakeDb();
+    const admin = await makeUser({ role: "admin" });
+    db.users.push(admin);
+    const license = seedLicense({ id: "admin-license", user_id: admin.id });
+    const bearer = await issueAccessToken(admin, license);
+    const headers = { authorization: `Bearer ${bearer}` };
+    const userRoute = await loadRoute<{
+      PATCH: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/users/[id]");
+    const orgRoute = await loadRoute<{
+      PATCH: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+      DELETE: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>;
+    }>("admin/orgs/[id]");
+    const memberRoute = await loadRoute<{
+      PATCH: (
+        req: Request,
+        ctx: { params: Promise<{ id: string; userId: string }> },
+      ) => Promise<Response>;
+      DELETE: (
+        req: Request,
+        ctx: { params: Promise<{ id: string; userId: string }> },
+      ) => Promise<Response>;
+    }>("admin/orgs/[id]/members/[userId]");
+
+    const missingUser = await userRoute.PATCH(
+      jsonRequest("/api/admin/users/missing", { tier: "builder" }, { method: "PATCH", headers }),
+      { params: Promise.resolve({ id: "missing-user" }) },
+    );
+    const missingOrgPatch = await orgRoute.PATCH(
+      jsonRequest("/api/admin/orgs/missing", { name: "Missing" }, { method: "PATCH", headers }),
+      { params: Promise.resolve({ id: "missing-org" }) },
+    );
+    const missingOrgDelete = await orgRoute.DELETE(
+      jsonRequest("/api/admin/orgs/missing", {}, { method: "DELETE", headers }),
+      { params: Promise.resolve({ id: "missing-org" }) },
+    );
+    const missingMemberPatch = await memberRoute.PATCH(
+      jsonRequest(
+        "/api/admin/orgs/org-1/members/missing-user",
+        { role: "member" },
+        { method: "PATCH", headers },
+      ),
+      { params: Promise.resolve({ id: "org-1", userId: "missing-user" }) },
+    );
+    const missingMemberDelete = await memberRoute.DELETE(
+      jsonRequest("/api/admin/orgs/org-1/members/missing-user", {}, { method: "DELETE", headers }),
+      { params: Promise.resolve({ id: "org-1", userId: "missing-user" }) },
+    );
+
+    assert.equal(missingUser.status, 404);
+    assert.equal(missingOrgPatch.status, 404);
+    assert.equal(missingOrgDelete.status, 404);
+    assert.equal(missingMemberPatch.status, 404);
+    assert.equal(missingMemberDelete.status, 404);
+    assert.equal(db.audit_log.length, 0);
+  });
+
   it("device start, approve, and poll issue tokens once", async () => {
     const db = useFakeDb();
     const user = await makeUser();

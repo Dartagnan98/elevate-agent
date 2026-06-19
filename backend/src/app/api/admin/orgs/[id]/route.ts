@@ -64,6 +64,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: "bad request", issues: parsed.error.issues }, { status: 400 });
   }
 
+  if (!(await findOrgById(id))) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
   await updateOrg(id, parsed.data);
   await logAdminAction({
     actor_user_id: guard.claims.sub,
@@ -78,6 +82,10 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   const guard = await requireAdmin(req);
   if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
   const { id } = await ctx.params;
+
+  if (!(await findOrgById(id))) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
 
   await deleteOrg(id);
   await logAdminAction({
