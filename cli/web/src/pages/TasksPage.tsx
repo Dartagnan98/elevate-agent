@@ -88,6 +88,8 @@ const STATUS_ORDER: Record<TaskStatus, number> = {
   completed: 3,
   cancelled: 4,
 };
+const TASK_COLUMN_RENDER_LIMIT = 80;
+const TASK_LIST_RENDER_LIMIT = 300;
 
 function unique(values: Array<string | null | undefined>): string[] {
   const out: string[] = [];
@@ -319,9 +321,16 @@ function KanbanBoard({
                   No tasks
                 </p>
               ) : (
-                column.tasks.map((task) => (
-                  <TaskCard key={task.id} task={task} onClick={onTaskClick} />
-                ))
+                <>
+                  {column.tasks.slice(0, TASK_COLUMN_RENDER_LIMIT).map((task) => (
+                    <TaskCard key={task.id} task={task} onClick={onTaskClick} />
+                  ))}
+                  {column.tasks.length > TASK_COLUMN_RENDER_LIMIT && (
+                    <p className="px-2 py-2 text-center text-xs text-muted-foreground">
+                      Showing first {TASK_COLUMN_RENDER_LIMIT} of {column.tasks.length}. Use filters to narrow.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -408,6 +417,7 @@ function TaskListTable({ tasks, onTaskClick }: { tasks: SurfaceTask[]; onTaskCli
     });
     return copy;
   }, [tasks, sortDir, sortField]);
+  const visibleRows = sorted.slice(0, TASK_LIST_RENDER_LIMIT);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -459,20 +469,29 @@ function TaskListTable({ tasks, onTaskClick }: { tasks: SurfaceTask[]; onTaskCli
               </td>
             </tr>
           ) : (
-            sorted.map((task) => (
-              <tr
-                key={task.id}
-                onClick={() => onTaskClick(task)}
-                className="cursor-pointer transition-colors hover:bg-secondary/20"
-              >
-                <td className="max-w-[320px] truncate px-3 py-2 font-medium">{task.title}</td>
-                <td className="px-3 py-2"><StatusBadge status={task.status} /></td>
-                <td className="px-3 py-2"><PriorityBadge priority={task.priority} /></td>
-                <td className="px-3 py-2 text-muted-foreground">{taskAssignee(task) || "-"}</td>
-                <td className="px-3 py-2"><OrgBadge org={task.org} /></td>
-                <td className="px-3 py-2 text-muted-foreground">{timeAgo(createdAt(task)) || "-"}</td>
-              </tr>
-            ))
+            <>
+              {visibleRows.map((task) => (
+                <tr
+                  key={task.id}
+                  onClick={() => onTaskClick(task)}
+                  className="cursor-pointer transition-colors hover:bg-secondary/20"
+                >
+                  <td className="max-w-[320px] truncate px-3 py-2 font-medium">{task.title}</td>
+                  <td className="px-3 py-2"><StatusBadge status={task.status} /></td>
+                  <td className="px-3 py-2"><PriorityBadge priority={task.priority} /></td>
+                  <td className="px-3 py-2 text-muted-foreground">{taskAssignee(task) || "-"}</td>
+                  <td className="px-3 py-2"><OrgBadge org={task.org} /></td>
+                  <td className="px-3 py-2 text-muted-foreground">{timeAgo(createdAt(task)) || "-"}</td>
+                </tr>
+              ))}
+              {sorted.length > TASK_LIST_RENDER_LIMIT && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-3 text-center text-xs text-muted-foreground">
+                    Showing first {TASK_LIST_RENDER_LIMIT} of {sorted.length}. Use filters to narrow.
+                  </td>
+                </tr>
+              )}
+            </>
           )}
         </tbody>
       </table>
