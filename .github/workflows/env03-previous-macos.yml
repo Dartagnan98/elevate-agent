@@ -99,7 +99,6 @@ jobs:
             exit 1
           fi
 
-          HOME="$home" \
           ELEVATE_HOME="$home/.elevate" \
           python3 cli/scripts/installed_runtime_smoke.py \
             --installed-app "$app_path" \
