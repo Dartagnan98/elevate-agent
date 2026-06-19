@@ -211,4 +211,11 @@ describe("dead control sweep", () => {
 
     expect(failures).toEqual([]);
   });
+
+  it("keeps disabled Agent Hub gateway controls explained", () => {
+    const source = readFileSync(path.join(srcRoot, "pages/AgentHubPage.tsx"), "utf8");
+
+    expect(source).toContain('title={snapshot.gateway.running ? "Gateway is already online." : busyAction !== null ? "Gateway action in progress." : undefined}');
+    expect(source).toContain('title={busyAction !== null ? "Gateway action in progress." : undefined}');
+  });
 });

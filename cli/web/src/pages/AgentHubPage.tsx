@@ -4294,6 +4294,7 @@ export default function AgentHubPage() {
                 onClick={() => void runAction("start")}
                 disabled={snapshot.gateway.running || busyAction !== null}
                 aria-label={snapshot.gateway.running ? "Gateway already online" : "Start gateway"}
+                title={snapshot.gateway.running ? "Gateway is already online." : busyAction !== null ? "Gateway action in progress." : undefined}
               >
                 {busyAction === "start" ? (
                   <Ico.refresh width="13" height="13" className="spin" />
@@ -4308,6 +4309,7 @@ export default function AgentHubPage() {
                 onClick={() => void runAction("restart")}
                 disabled={busyAction !== null}
                 aria-label="Restart gateway"
+                title={busyAction !== null ? "Gateway action in progress." : undefined}
               >
                 {busyAction === "restart" ? <Ico.refresh width="13" height="13" className="spin" /> : <Ico.rotate width="13" height="13" />}
                 Restart
