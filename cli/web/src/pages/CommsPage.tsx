@@ -68,7 +68,7 @@ function normalizeCommsAgentId(value: string | null | undefined): string {
 }
 
 export function normalizeCommsPair(pair: string | null | undefined): string | null {
-  const parts = String(pair ?? "").split("--", 2);
+  const parts = String(pair ?? "").split("--");
   if (parts.length !== 2) return null;
   const a = normalizeCommsAgentId(parts[0]);
   const b = normalizeCommsAgentId(parts[1]);

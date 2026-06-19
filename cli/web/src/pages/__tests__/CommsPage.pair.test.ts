@@ -11,6 +11,7 @@ describe("normalizeCommsPair", () => {
 
   it("rejects malformed pairs", () => {
     expect(normalizeCommsPair("executive-assistant")).toBeNull();
+    expect(normalizeCommsPair("admin--executive-assistant--extra")).toBeNull();
     expect(normalizeCommsPair("")).toBeNull();
     expect(normalizeCommsPair(null)).toBeNull();
   });
