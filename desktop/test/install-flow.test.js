@@ -55,6 +55,41 @@ test("install page recovers from rejected retry and install IPC", async () => {
   assert.equal(elements.get("install").disabled, false);
 });
 
+test("install page shows retry and installer result states", async () => {
+  const elements = installDom({
+    retry: async () => ({ ok: false }),
+    install: async () => ({ ok: true, message: "Install started." }),
+  });
+
+  await elements.get("retry").listeners.click();
+  assert.equal(elements.get("status").textContent, "RUNTIME NOT REACHABLE");
+  assert.equal(elements.get("retry").disabled, false);
+  assert.equal(elements.get("install").disabled, false);
+
+  await elements.get("install").listeners.click();
+  assert.equal(elements.get("status").textContent, "INSTALL STARTED.");
+  assert.equal(elements.get("retry").disabled, false);
+  assert.equal(elements.get("install").disabled, false);
+});
+
+test("startup loading page resolves to dashboard or setup page", () => {
+  const main = fs.readFileSync(mainPath, "utf8");
+
+  assert.match(
+    main,
+    /loadLocalPage\("loading\.html"\);\s*const ready = await ensureBackend\(\);[\s\S]+if \(ready\) \{[\s\S]+loadAppPath\(START_PATH\);[\s\S]+} else \{[\s\S]+loadLocalPage\("install\.html"\);/s,
+  );
+});
+
+test("retry route leaves loading for setup page on backend failure", () => {
+  const main = fs.readFileSync(mainPath, "utf8");
+
+  assert.match(
+    main,
+    /ipcMain\.handle\("desktop:retry"[\s\S]+loadLocalPage\("loading\.html"\);[\s\S]+const ready = await ensureBackend\(\);[\s\S]+if \(ready\) \{[\s\S]+loadAppPath\(START_PATH\);[\s\S]+return \{ ok: true \};[\s\S]+loadLocalPage\("install\.html"\);[\s\S]+return \{ ok: false \};/s,
+  );
+});
+
 test("installer exit success reloads setup page when backend is still unavailable", () => {
   const main = fs.readFileSync(mainPath, "utf8");
 
