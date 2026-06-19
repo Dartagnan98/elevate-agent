@@ -11800,7 +11800,7 @@ function ArtifactPreviewPane({
         ) : kind === "html" && blobUrl ? (
           <iframe
             className="h-full w-full bg-white"
-            sandbox="allow-scripts allow-same-origin"
+            sandbox=""
             src={blobUrl}
             title={artifact.title}
           />

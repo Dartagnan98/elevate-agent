@@ -892,6 +892,43 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["info"]["title"] == "Elevate"
 
+    def test_file_preview_allows_temp_artifact(self):
+        artifact = Path(tempfile.gettempdir()) / "elevate-preview-test.txt"
+        artifact.write_text("preview ok", encoding="utf-8")
+        try:
+            resp = self.client.get("/api/files/preview", params={"path": str(artifact)})
+        finally:
+            try:
+                artifact.unlink()
+            except OSError:
+                pass
+
+        assert resp.status_code == 200
+        assert resp.text == "preview ok"
+        assert resp.headers["x-elevate-file-name"] == artifact.name
+
+    def test_file_preview_rejects_license_file_and_symlink_escape(self):
+        from elevate_constants import get_elevate_home
+
+        home = get_elevate_home()
+        home.mkdir(parents=True, exist_ok=True)
+        license_path = home / "license.json"
+        license_path.write_text('{"access_token":"secret"}', encoding="utf-8")
+
+        direct = self.client.get("/api/files/preview", params={"path": str(license_path)})
+        assert direct.status_code == 403
+
+        upload_dir = home / "uploads" / "preview-test"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        link = upload_dir / "license.json"
+        try:
+            link.symlink_to(license_path)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+
+        via_link = self.client.get("/api/files/preview", params={"path": str(link)})
+        assert via_link.status_code == 403
+
 
 # ---------------------------------------------------------------------------
 # _build_schema_from_config tests

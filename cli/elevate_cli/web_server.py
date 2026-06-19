@@ -2840,6 +2840,13 @@ _PREVIEWABLE_SUFFIXES = {
     ".yml",
 }
 _MAX_PREVIEW_BYTES = 100 * 1024 * 1024
+_DENIED_PREVIEW_FILENAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    "credentials.json",
+    "license.json",
+}
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:
@@ -2851,10 +2858,11 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def _preview_roots() -> list[Path]:
+    elevate_home = get_elevate_home()
     roots = [
-        Path.home(),
         PROJECT_ROOT,
-        get_elevate_home(),
+        elevate_home / "uploads",
+        elevate_home / "tools" / "data" / "sources",
         Path(tempfile.gettempdir()),
         # macOS: tempfile.gettempdir() returns /var/folders/.../T, not /tmp.
         # Agents routinely write artifacts to /tmp, so allow it explicitly.
@@ -2884,6 +2892,9 @@ def _resolve_preview_file(raw_path: str) -> Path:
 
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
+
+    if path.name.lower() in _DENIED_PREVIEW_FILENAMES:
+        raise HTTPException(status_code=403, detail="File path is not previewable")
 
     if path.suffix.lower() not in _PREVIEWABLE_SUFFIXES:
         raise HTTPException(status_code=415, detail="File type is not previewable")
