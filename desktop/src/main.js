@@ -155,6 +155,28 @@ function trimLogMessage(value, max = 1200) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+function formatCrashForLog(reason) {
+  if (reason && reason.stack) return trimLogMessage(reason.stack, 4000);
+  if (reason && reason.message) return trimLogMessage(reason.message, 4000);
+  return trimLogMessage(reason, 4000);
+}
+
+function installMainCrashCapture() {
+  process.on("uncaughtException", (err) => {
+    log.error(`[main:uncaughtException] ${formatCrashForLog(err)}`);
+    try {
+      app.exit(1);
+    } catch {
+      process.exit(1);
+    }
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    log.error(`[main:unhandledRejection] ${formatCrashForLog(reason)}`);
+  });
+}
+
+installMainCrashCapture();
 markStartup("main:module-loaded");
 
 function repoRoot() {
