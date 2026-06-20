@@ -98,7 +98,6 @@ from elevate_cli.config import (
     check_config_version,
     redact_key,
 )
-from elevate_cli.access import dashboard_access_status
 from elevate_cli.data.deals import DealPhaseGateBlocked
 from gateway.status import get_running_pid, read_runtime_status
 
@@ -1225,248 +1224,10 @@ async def get_status():
     return payload
 
 
-@app.get("/api/access")
-async def get_access_status():
-    """Return local entitlement state used to unlock paid dashboard packs."""
-    return dashboard_access_status()
-
-
-# ---------------------------------------------------------------------------
-# License / Activation endpoints
-# ---------------------------------------------------------------------------
-
-class LicenseActivateBody(BaseModel):
-    email: str
-    password: str
-    backend_url: Optional[str] = None
-    skip_skill_sync: bool = False
-    # Collected at "Create account" (signup only); ignored by activate/login.
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-
-
-class LoginCodeRequestBody(BaseModel):
-    email: str
-    backend_url: Optional[str] = None
-
-
-class LoginCodeVerifyBody(BaseModel):
-    email: str
-    code: str
-    backend_url: Optional[str] = None
-    skip_skill_sync: bool = False
-
-
-class LicenseLogoutBody(BaseModel):
-    pass
-
-
-@app.get("/api/license/status")
-async def get_license_status():
-    from elevate_cli import license as lic_mod
-
-    lic = lic_mod.load()
-    if not lic:
-        return {
-            "authenticated": False,
-            "email": None,
-            "tier": None,
-            "license_id": None,
-            "entitlements": [],
-            "expires_at": None,
-            "expired": True,
-            "status_text": lic_mod.status_text(),
-            "packs": dashboard_access_status().get("packs", {}),
-        }
-    return {
-        "authenticated": True,
-        "email": lic.email,
-        "tier": lic.tier,
-        "license_id": lic.license_id,
-        "entitlements": list(lic.entitlements or []),
-        "expires_at": lic.expires_at,
-        "expired": lic.is_expired(margin=0),
-        "status_text": lic_mod.status_text(lic),
-        "packs": dashboard_access_status().get("packs", {}),
-    }
-
-
-@app.post("/api/license/activate")
-async def activate_license(body: LicenseActivateBody, request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-
-    if body.backend_url:
-        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
-        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
-        try:
-            from elevate_cli.config import save_env_value
-            save_env_value("ELEVATE_BACKEND_URL", lic_mod.BACKEND_URL)
-        except Exception:
-            pass
-
-    try:
-        lic = lic_mod.login(body.email, body.password)
-    except lic_mod.LicenseError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-
-    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
-    return {
-        "authenticated": True,
-        "email": lic.email,
-        "tier": lic.tier,
-        "license_id": lic.license_id,
-        "entitlements": list(lic.entitlements or []),
-        "expires_at": lic.expires_at,
-        "packs": activation.get("packs", {}),
-        "skill_count": activation.get("skill_count", 0),
-        "skill_names": activation.get("skill_names", []),
-        "skill_error": activation.get("skill_error"),
-    }
-
-
-@app.post("/api/license/signup")
-async def signup_license(body: LicenseActivateBody, request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-
-    if body.backend_url:
-        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
-        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
-        try:
-            from elevate_cli.config import save_env_value
-            save_env_value("ELEVATE_BACKEND_URL", lic_mod.BACKEND_URL)
-        except Exception:
-            pass
-
-    try:
-        lic = lic_mod.create_account(
-            body.email, body.password, first_name=body.first_name, last_name=body.last_name
-        )
-    except lic_mod.LicenseError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
-    return {
-        "authenticated": True,
-        "email": lic.email,
-        "tier": lic.tier,
-        "license_id": lic.license_id,
-        "entitlements": list(lic.entitlements or []),
-        "expires_at": lic.expires_at,
-        "packs": activation.get("packs", {}),
-        "skill_count": activation.get("skill_count", 0),
-        "skill_names": activation.get("skill_names", []),
-        "skill_error": activation.get("skill_error"),
-    }
-
-
-@app.post("/api/license/request-code")
-async def request_license_code(body: LoginCodeRequestBody, request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-
-    if body.backend_url:
-        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
-        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
-
-    try:
-        lic_mod.request_login_code(body.email)
-    except lic_mod.LicenseError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"ok": True}
-
-
-@app.post("/api/license/activate-code")
-async def activate_license_code(body: LoginCodeVerifyBody, request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-
-    if body.backend_url:
-        lic_mod.BACKEND_URL = body.backend_url.rstrip("/")
-        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
-
-    try:
-        lic = lic_mod.login_with_code(body.email, body.code)
-    except lic_mod.LicenseError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-
-    activation = lic_mod.activate_install(lic, sync_skills=not body.skip_skill_sync)
-    return {
-        "authenticated": True,
-        "email": lic.email,
-        "tier": lic.tier,
-        "license_id": lic.license_id,
-        "entitlements": list(lic.entitlements or []),
-        "expires_at": lic.expires_at,
-        "packs": activation.get("packs", {}),
-        "skill_count": activation.get("skill_count", 0),
-        "skill_names": activation.get("skill_names", []),
-        "skill_error": activation.get("skill_error"),
-    }
-
-
-@app.post("/api/license/sync-skills")
-async def sync_license_skills(request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-    from elevate_cli import cloud_skills
-
-    lic = lic_mod.load()
-    if not lic:
-        raise HTTPException(status_code=401, detail="Not authenticated. Activate first.")
-
-    try:
-        if lic.is_expired():
-            lic = lic_mod.refresh(lic)
-    except lic_mod.LicenseError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-
-    try:
-        sync_result = cloud_skills.sync_all()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Skill sync failed: {exc}")
-
-    return {
-        "skill_count": sync_result.get("skill_count", 0),
-        "skill_names": sync_result.get("skill_names", []),
-        "path": sync_result.get("path"),
-        "removed": sync_result.get("removed", []),
-        "errors": sync_result.get("errors", []),
-        "packs": dashboard_access_status().get("packs", {}),
-    }
-
-
-@app.post("/api/license/logout")
-async def logout_license(request: Request):
-    _require_token(request)
-
-    from elevate_cli import license as lic_mod
-
-    cleared = lic_mod.clear()
-
-    from elevate_cli.access import REAL_ESTATE_ENTITLEMENTS, update_entitlement
-    for entitlement in REAL_ESTATE_ENTITLEMENTS:
-        try:
-            update_entitlement(entitlement, status="locked", owned_snapshot=False)
-        except Exception:
-            pass
-
-    return {
-        "authenticated": False,
-        "cleared": cleared,
-        "packs": dashboard_access_status().get("packs", {}),
-    }
-
-
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.cron import create_cron_router
+from elevate_cli.web_routes.license import create_license_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
 from elevate_cli.web_routes.today import create_today_router
 
@@ -4951,6 +4712,8 @@ class IntegrationSettingsUpdate(BaseModel):
 
 
 app.include_router(create_cron_router(log=_log))
+
+app.include_router(create_license_router(require_token=_require_token))
 
 app.include_router(
     create_channels_router(
