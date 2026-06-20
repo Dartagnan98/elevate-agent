@@ -19,8 +19,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import urllib.error
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -68,6 +66,7 @@ from elevate_cli.web_auth import (
     session_id_for_log as _session_id_for_log_impl,
 )
 from elevate_cli.web_middleware import install_dashboard_middlewares
+from elevate_cli.web_server_start import run_dashboard_server
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -739,39 +738,15 @@ def start_server(
     embedded_chat: bool = False,
 ):
     """Start the web UI server."""
-    import uvicorn
-
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
 
-    _LOCALHOST = ("127.0.0.1", "localhost", "::1")
-    if host not in _LOCALHOST and not allow_public:
-        raise SystemExit(
-            f"Refusing to bind to {host} — the dashboard exposes API keys "
-            f"and config without robust authentication.\n"
-            f"Use --insecure to override (NOT recommended on untrusted networks)."
-        )
-    if host not in _LOCALHOST:
-        _log.warning(
-            "Binding to %s with --insecure — the dashboard has no robust "
-            "authentication. Only use on trusted networks.", host,
-        )
-
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
-    # bound_port is also stashed so /api/pty can build the back-WS URL the
-    # PTY child uses to publish events to the dashboard sidebar.
-    app.state.bound_host = host
-    app.state.bound_port = port
-
-    if open_browser:
-        import webbrowser
-
-        def _open():
-            time.sleep(1.0)
-            webbrowser.open(f"http://{host}:{port}")
-
-        threading.Thread(target=_open, daemon=True).start()
-
     print(f"  Elevate Web UI → http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    run_dashboard_server(
+        app,
+        host=host,
+        port=port,
+        open_browser=open_browser,
+        allow_public=allow_public,
+        log=_log,
+    )
