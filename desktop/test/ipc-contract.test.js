@@ -6,6 +6,7 @@ const test = require("node:test");
 const repoRoot = path.resolve(__dirname, "../..");
 const preloadPath = path.join(repoRoot, "desktop/src/preload.js");
 const mainPath = path.join(repoRoot, "desktop/src/main.js");
+const updaterPath = path.join(repoRoot, "desktop/src/updater.js");
 
 function read(filePath) {
   return fs.readFileSync(filePath, "utf8");
@@ -55,12 +56,12 @@ function preloadInvokeChannels() {
 }
 
 test("preload ipc invokes have main-process handlers", () => {
-  const main = read(mainPath);
+  const handlerSource = [read(mainPath), read(updaterPath)].join("\n");
   const channels = preloadInvokeChannels();
 
   assert.deepEqual([...new Set(channels)], channels);
   for (const channel of channels) {
-    assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel.replace(/[-:]/g, "\\$&")}"`));
+    assert.match(handlerSource, new RegExp(`ipcMain\\.handle\\("${channel.replace(/[-:]/g, "\\$&")}"`));
   }
 });
 

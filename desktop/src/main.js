@@ -27,6 +27,7 @@ const { createDesktopAuth } = require("./desktop-auth");
 const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
 const startupLog = require("./startup-log");
+const { createUpdaterController } = require("./updater");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -115,6 +116,15 @@ let dashboardLoadRetryCount = 0;
 let dashboardLoadRetryTimer = null;
 let lastDashboardPath = START_PATH;
 const startupTracker = startupLog.createStartupLogger(log);
+const updater = createUpdaterController({
+  app,
+  autoUpdater,
+  fs,
+  ipcMain,
+  log,
+  mainWindow: () => mainWindow,
+  resourcesPath: () => process.resourcesPath,
+});
 
 app.setName("Elevate");
 
@@ -1323,131 +1333,21 @@ ipcMain.handle("auth:open-external", async (_event, target) => {
 //   4. User clicks Restart → quitAndInstall() swaps the binary and relaunches.
 //   5. We also re-check every 3 minutes while the app is running.
 //
-// Skipped in dev (running from `npm start` rather than a packaged build) — the
-// updater throws "no app-update.yml" without a real install.
-let updateState = { status: "idle", info: null, progress: null, error: null };
-let updateCheckInFlight = false;
-const updateBusyStatuses = new Set(["checking", "available", "downloading", "ready"]);
-const UPDATE_CONFIG_PATH = path.join(process.resourcesPath, "app-update.yml");
-
 function broadcastUpdaterEvent(payload) {
-  updateState = { ...updateState, ...payload };
-  // The floating "update available" toast window was removed — the in-app
-  // update card (App.tsx, fed by these same events) is the single update UI.
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("updater:event", updateState);
-  }
+  updater.broadcastUpdaterEvent(payload);
 }
 
 async function runUpdaterCheck(reason) {
-  if (app.isPackaged && !fs.existsSync(UPDATE_CONFIG_PATH)) {
-    const message = "update metadata is not bundled";
-    log.warn(`[updater] skip check (${reason}) — ${message}`);
-    broadcastUpdaterEvent({ status: "error", info: null, progress: null, error: message });
-    return { ok: false, message };
-  }
-
-  if (updateCheckInFlight || updateBusyStatuses.has(updateState.status)) {
-    const message = updateCheckInFlight
-      ? "a check is already in flight"
-      : `update already ${updateState.status}`;
-    log.info(`[updater] skip check (${reason}) — ${message}`);
-    return { ok: true, skipped: true, message };
-  }
-
-  updateCheckInFlight = true;
-  try {
-    log.info(`[updater] checking for updates (${reason})`);
-    const result = await autoUpdater.checkForUpdates();
-    return {
-      ok: true,
-      version: result && result.updateInfo ? result.updateInfo.version : null,
-    };
-  } catch (err) {
-    const message = err && err.message ? err.message : String(err);
-    log.warn(`[updater] check failed (${reason}): ${message}`);
-    broadcastUpdaterEvent({ status: "error", error: message });
-    return { ok: false, message };
-  } finally {
-    updateCheckInFlight = false;
-  }
+  return updater.runUpdaterCheck(reason);
 }
 
-autoUpdater.on("checking-for-update", () => {
-  broadcastUpdaterEvent({ status: "checking", error: null });
-});
-autoUpdater.on("update-available", (info) => {
-  broadcastUpdaterEvent({ status: "available", info, error: null });
-});
-autoUpdater.on("update-not-available", (info) => {
-  broadcastUpdaterEvent({ status: "current", info, error: null });
-});
-autoUpdater.on("download-progress", (progress) => {
-  broadcastUpdaterEvent({ status: "downloading", progress, error: null });
-});
-autoUpdater.on("update-downloaded", (info) => {
-  broadcastUpdaterEvent({ status: "ready", info, progress: null, error: null });
-});
-autoUpdater.on("error", (err) => {
-  broadcastUpdaterEvent({
-    status: "error",
-    error: err && err.message ? err.message : String(err),
-  });
-});
+updater.registerAutoUpdaterEvents();
 
 function kickoffUpdates() {
-  if (!app.isPackaged) {
-    log.info("[updater] skipped in development build");
-    return;
-  }
-
-  runUpdaterCheck("startup");
-  // Poll frequently so a freshly-shipped build reaches the device within
-  // minutes. autoDownload pulls it silently; the user still applies it via the
-  // one-click "Restart to update" card — no auto-relaunch, no forced install.
-  const timer = setInterval(() => runUpdaterCheck("poll"), 3 * 60 * 1000);
-  if (typeof timer.unref === "function") timer.unref();
-  // Also check the instant the app regains focus, so an update that shipped
-  // while you were away shows up right when you come back. Debounced so rapid
-  // focus changes don't hammer the feed.
-  let lastFocusCheck = 0;
-  app.on("browser-window-focus", () => {
-    const now = Date.now();
-    if (now - lastFocusCheck < 60 * 1000) return;
-    lastFocusCheck = now;
-    runUpdaterCheck("focus");
-  });
+  updater.kickoffUpdates();
 }
 
-// Renderer can ask "what's the latest status?" on mount so it doesn't miss
-// events that fired before the listener was attached.
-ipcMain.handle("updater:status", () => updateState);
-
-// Renderer fires this when the user clicks "Restart to update".
-ipcMain.handle("updater:install", () => {
-  if (updateState.status !== "ready") {
-    return { ok: false, message: "Update is not ready yet." };
-  }
-  // setImmediate so the IPC reply is sent before quit kicks in.
-  setImmediate(() => {
-    try {
-      autoUpdater.quitAndInstall(false, true);
-    } catch (err) {
-      const message = err && err.message ? err.message : String(err);
-      log.warn(`[updater] install failed: ${message}`);
-      broadcastUpdaterEvent({ status: "error", error: message });
-    }
-  });
-  return { ok: true };
-});
-
-// Manual "check now" button (useful from a Help menu).
-ipcMain.handle("updater:check", async () => {
-  if (!app.isPackaged) {
-    return { ok: false, message: "Updates only run in packaged builds." };
-  }
-  return runUpdaterCheck("manual");
-});
+updater.registerIpcHandlers();
 
 // Register the elevate:// scheme so the web auth flow (a password reset
 // completed in the browser) can bounce the user back into the app. The reset

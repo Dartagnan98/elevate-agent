@@ -1,10 +1,7 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
-const mainPath = path.resolve(__dirname, "../src/main.js");
+const { createUpdaterController } = require("../src/updater");
 
 function loadUpdater({
   isPackaged = true,
@@ -12,32 +9,24 @@ function loadUpdater({
   checkForUpdates,
   quitAndInstall,
 } = {}) {
-  const main = fs.readFileSync(mainPath, "utf8");
-  const start = main.indexOf('let updateState = { status: "idle"');
-  const end = main.indexOf("// Register the elevate:// scheme");
-  assert.ok(start > 0);
-  assert.ok(end > start);
-
   const handlers = new Map();
   const updaterEvents = new Map();
   const sent = [];
   const quitCalls = [];
   let checkCalls = 0;
 
-  const context = {
-    path,
-    process: { resourcesPath: "/tmp/elevate-updater-test" },
+  const controller = createUpdaterController({
     fs: { existsSync: () => hasMetadata },
     log: { info() {}, warn() {} },
     app: { isPackaged, on() {} },
-    mainWindow: {
+    mainWindow: () => ({
       isDestroyed: () => false,
       webContents: {
         send(channel, payload) {
           sent.push({ channel, payload });
         },
       },
-    },
+    }),
     ipcMain: {
       handle(channel, handler) {
         handlers.set(channel, handler);
@@ -56,18 +45,17 @@ function loadUpdater({
         if (quitAndInstall) quitAndInstall(...args);
       },
     },
-    setImmediate(callback) {
+    resourcesPath: () => "/tmp/elevate-updater-test",
+    setImmediateImpl(callback) {
       callback();
     },
-    setInterval() {
+    setIntervalImpl() {
       return { unref() {} };
     },
-    Date,
-    Set,
-    String,
-  };
+  });
+  controller.registerAutoUpdaterEvents();
+  controller.registerIpcHandlers();
 
-  vm.runInNewContext(main.slice(start, end), context);
   return {
     handlers,
     updaterEvents,
