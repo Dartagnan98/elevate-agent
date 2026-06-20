@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from elevate_cli.config import get_env_value, load_config, load_env, save_env_value
+from elevate_cli.web_routes.channel_bluebubbles import register_bluebubbles_routes
 from elevate_cli.web_routes.channel_discord import register_discord_routes
 from elevate_cli.web_routes.channel_gateway import register_gateway_routes
 from elevate_cli.web_routes.channel_slack import register_slack_routes
@@ -272,42 +273,7 @@ def create_channels_router(
 
     register_discord_routes(router, require_token=require_token, token_preview=_token_preview)
     register_slack_routes(router, require_token=require_token, token_preview=_token_preview)
-
-    @router.post("/api/channels/imessage/bluebubbles/configure")
-    async def configure_bluebubbles(request: Request):
-        """Mirror ``setup._setup_bluebubbles``."""
-        require_token(request)
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        server_url = _strip(body.get("server_url")).rstrip("/")
-        password = _strip(body.get("password"))
-        allowed = _strip(body.get("allowed_users"))
-        home = _strip(body.get("home_channel"))
-
-        if server_url:
-            save_env_value("BLUEBUBBLES_SERVER_URL", server_url)
-        if password:
-            save_env_value("BLUEBUBBLES_PASSWORD", password)
-        if allowed:
-            save_env_value("BLUEBUBBLES_ALLOWED_USERS", allowed.replace(" ", ""))
-        if home:
-            save_env_value("BLUEBUBBLES_HOME_CHANNEL", home)
-
-        if not get_env_value("BLUEBUBBLES_SERVER_URL") or not get_env_value("BLUEBUBBLES_PASSWORD"):
-            raise HTTPException(
-                status_code=400,
-                detail="BlueBubbles server URL + password are required",
-            )
-
-        return {
-            "ok": True,
-            "serverUrl": get_env_value("BLUEBUBBLES_SERVER_URL") or "",
-            "passwordSet": bool(get_env_value("BLUEBUBBLES_PASSWORD")),
-            "allowedUsers": get_env_value("BLUEBUBBLES_ALLOWED_USERS") or "",
-            "homeChannel": get_env_value("BLUEBUBBLES_HOME_CHANNEL") or "",
-        }
+    register_bluebubbles_routes(router, require_token=require_token)
 
     @router.post("/api/channels/whatsapp/configure")
     async def configure_whatsapp(request: Request):
