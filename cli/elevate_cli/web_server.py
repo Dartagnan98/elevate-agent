@@ -121,12 +121,10 @@ from elevate_cli.web_telegram_aliases import (
     _sync_executive_telegram_aliases,
 )
 try:
-    from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.middleware.gzip import GZipMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-    from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel, Field
+    from fastapi.responses import JSONResponse
 except ImportError:
     raise SystemExit(
         "Web UI requires fastapi and uvicorn.\n"
@@ -145,15 +143,6 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
 )
 
-
-class ImmutableStaticFiles(StaticFiles):
-    """StaticFiles variant for hashed Vite assets."""
-
-    async def get_response(self, path: str, scope):
-        response = await super().get_response(path, scope)
-        if response.status_code == 200:
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-        return response
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -444,6 +433,7 @@ from elevate_cli.web_routes.threads import create_threads_router
 from elevate_cli.web_routes.today import create_today_router
 from elevate_cli.web_routes.workspace import create_workspace_router, git_value as _git_value
 from elevate_cli.web_spa import mount_spa as _mount_spa
+from elevate_cli.web_static import ImmutableStaticFiles
 from elevate_cli.pty_bridge import PtyBridge, PtyUnavailableError
 
 _normalise_theme_definition = _dashboard_routes._normalise_theme_definition
