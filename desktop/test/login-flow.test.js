@@ -5,7 +5,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const loginPath = path.resolve(__dirname, "../src/login.html");
-const mainPath = path.resolve(__dirname, "../src/main.js");
+const authIpcPath = path.resolve(__dirname, "../src/auth-ipc.js");
 
 function loadLoginScript() {
   const html = fs.readFileSync(loginPath, "utf8");
@@ -102,8 +102,8 @@ test("legacy login page external links use allowlisted auth targets", () => {
 });
 
 test("legacy login success reloads the dashboard", () => {
-  const main = fs.readFileSync(mainPath, "utf8");
+  const authIpc = fs.readFileSync(authIpcPath, "utf8");
 
-  assert.match(main, /ipcMain\.handle\("auth:login"[\s\S]+performLogin\(payload \|\| \{\}\)/);
-  assert.match(main, /if \(result\.ok\)[\s\S]+loadAppPath\(START_PATH\);/);
+  assert.match(authIpc, /ipcMain\.handle\("auth:login"[\s\S]+performLogin\(payload \|\| \{\}\)/);
+  assert.match(authIpc, /if \(result\.ok\)[\s\S]+loadAppPath\(startPath\);/);
 });

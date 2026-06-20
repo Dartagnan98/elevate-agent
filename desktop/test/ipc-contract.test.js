@@ -6,6 +6,7 @@ const test = require("node:test");
 const repoRoot = path.resolve(__dirname, "../..");
 const preloadPath = path.join(repoRoot, "desktop/src/preload.js");
 const mainPath = path.join(repoRoot, "desktop/src/main.js");
+const authIpcPath = path.join(repoRoot, "desktop/src/auth-ipc.js");
 const updaterPath = path.join(repoRoot, "desktop/src/updater.js");
 
 function read(filePath) {
@@ -56,7 +57,7 @@ function preloadInvokeChannels() {
 }
 
 test("preload ipc invokes have main-process handlers", () => {
-  const handlerSource = [read(mainPath), read(updaterPath)].join("\n");
+  const handlerSource = [read(mainPath), read(authIpcPath), read(updaterPath)].join("\n");
   const channels = preloadInvokeChannels();
 
   assert.deepEqual([...new Set(channels)], channels);
@@ -86,16 +87,16 @@ test("preload exposes only scoped ipc channels", () => {
 });
 
 test("external auth opener is path allowlisted", () => {
-  const main = read(mainPath);
-  const start = main.indexOf('ipcMain.handle("auth:open-external"');
-  const end = main.indexOf("// ---------------------------------------------------------------------------", start);
-  const handler = main.slice(start, end);
+  const authIpc = read(authIpcPath);
+  const start = authIpc.indexOf('ipcMain.handle("auth:open-external"');
+  const end = authIpc.indexOf("});", start);
+  const handler = authIpc.slice(start, end);
 
   assert.match(handler, /forgot:\s*"\/forgot\?app=1"/);
   assert.match(handler, /signup:\s*"\/signup"/);
   assert.match(handler, /link:\s*"\/link"/);
   assert.match(handler, /account:\s*"\/account"/);
   assert.match(handler, /const safePath = paths\[target\]/);
-  assert.match(handler, /shell\.openExternal\(`\$\{HQ_BASE_URL\}\$\{safePath\}`\)/);
+  assert.match(handler, /shell\.openExternal\(`\$\{hqBaseUrl\}\$\{safePath\}`\)/);
   assert.doesNotMatch(handler, /shell\.openExternal\(target\)/);
 });

@@ -16,6 +16,7 @@ const path = require("path");
 const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
+const { registerAuthIpc } = require("./auth-ipc");
 const backendHttp = require("./backend-http");
 const { createBackendPortController } = require("./backend-port");
 const { createBackendRunner } = require("./backend-runner");
@@ -864,40 +865,15 @@ ipcMain.handle("desktop:retry", async () => {
 
 ipcMain.handle("desktop:install", async () => runInstaller());
 
-// ---- Auth IPC ---------------------------------------------------------
-// Login form on login.html calls these. After a successful login we route
-// the window straight into the dashboard so the user doesn't have to click
-// anything else.
-
-ipcMain.handle("auth:login", async (_event, payload) => {
-  const result = await performLogin(payload || {});
-  if (result.ok) {
-    // Reload the dashboard so the chat WebSocket reopens and picks up the new
-    // license. The login screen is the in-app <LoginCard /> — there's no
-    // separate native login window to close.
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        loadAppPath(START_PATH);
-      }
-    }, 250);
-  }
-  return result;
-});
-
-// Routes the login page's "Forgot?" / "Create account" / "Use a code" links
-// out to the user's default browser. Hard-coded to the HQ origin so a
-// compromised renderer can't open arbitrary URLs.
-ipcMain.handle("auth:open-external", async (_event, target) => {
-  const paths = {
-    forgot: "/forgot?app=1",
-    signup: "/signup",
-    link: "/link",
-    account: "/account",
-  };
-  const safePath = paths[target];
-  if (!safePath) return { ok: false };
-  await shell.openExternal(`${HQ_BASE_URL}${safePath}`);
-  return { ok: true };
+registerAuthIpc({
+  hqBaseUrl: HQ_BASE_URL,
+  ipcMain,
+  loadAppPath,
+  mainWindow: () => mainWindow,
+  performLogin,
+  setTimeout,
+  shell,
+  startPath: START_PATH,
 });
 
 // ---------------------------------------------------------------------------
