@@ -108,6 +108,14 @@ from elevate_cli.web_config_schema import (
     _build_schema_from_config,
     _infer_type,
 )
+from elevate_cli.web_session_activity import (
+    _SESSION_LIST_FIELDS,
+    gateway_session_run_states as _gateway_session_run_states_impl,
+    live_subagent_child_session_ids as _live_subagent_child_session_ids_impl,
+    mark_session_activity as _mark_session_activity_impl,
+    platform_chat_sources as _platform_chat_sources_impl,
+    session_list_payload as _session_list_payload_impl,
+)
 from elevate_cli.web_telegram_aliases import (
     _AGENT_TELEGRAM_BOT_TOKEN_RE,
     _EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY,
@@ -754,40 +762,7 @@ _SESSION_ACTIVE_WINDOW_SEC = 25
 
 
 def _gateway_session_run_states() -> tuple[set[str], set[str]]:
-    """(running_keys, known_keys) for sessions the in-process gateway hosts.
-
-    A long interactive turn persists nothing until it finishes, so its
-    ``last_active`` freezes at the user-message time and the 25s active-window
-    check above flips ``is_active`` to False mid-turn — which makes the sidebar
-    drop its "working" dots while the agent is genuinely still working. The
-    gateway tracks ``session["running"]`` in-process (dashboard --tui hosts both),
-    so consult it as the source of truth for "running right now". Best-effort:
-    returns empty sets if the gateway module isn't loaded (headless dashboard).
-
-    ``known_keys`` covers every hosted session regardless of run state. A
-    session that is KNOWN but not RUNNING is authoritatively idle — e.g. the
-    user hit Stop and the turn ended ``interrupted_by_user``. The recency
-    window must not keep showing it as working for another 25 seconds.
-    """
-    running: set[str] = set()
-    known: set[str] = set()
-    try:
-        from tui_gateway import server as _gw
-
-        for sess in list(getattr(_gw, "_sessions", {}).values()):
-            if not isinstance(sess, dict):
-                continue
-            keys = [
-                str(k)
-                for k in (sess.get("session_key"), sess.get("session_id"))
-                if k
-            ]
-            known.update(keys)
-            if sess.get("running"):
-                running.update(keys)
-    except Exception:
-        pass
-    return running, known
+    return _gateway_session_run_states_impl()
 
 
 def _live_running_session_keys() -> set[str]:
@@ -796,95 +771,24 @@ def _live_running_session_keys() -> set[str]:
 
 
 def _live_subagent_child_session_ids() -> set[str]:
-    """Child session ids currently present in the live delegation registry."""
-    ids: set[str] = set()
-    try:
-        from tools.delegate_tool import list_active_subagents
-
-        for record in list_active_subagents():
-            if not isinstance(record, dict):
-                continue
-            child_session_id = str(record.get("child_session_id") or "").strip()
-            if child_session_id:
-                ids.add(child_session_id)
-    except Exception:
-        pass
-    return ids
+    return _live_subagent_child_session_ids_impl()
 
 
 def _mark_session_activity(sessions: list[dict[str, Any]], now: float) -> None:
-    """Stamp ``is_active`` on session list rows.
-
-    Priority: gateway-running (True) > gateway-known-but-idle (False — a
-    stopped/interrupted session is NOT active no matter how fresh its last
-    message is) > recency window (covers turns run outside this process,
-    e.g. cron jobs, where the gateway has no entry to consult).
-    """
-    running, known = _gateway_session_run_states()
-    for s in sessions:
-        sid = str(s.get("id") or "")
-        if sid in running:
-            s["is_active"] = True
-        elif sid in known:
-            s["is_active"] = False
-        else:
-            s["is_active"] = (
-                s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0)))
-                < _SESSION_ACTIVE_WINDOW_SEC
-            )
-
-
-_SESSION_LIST_FIELDS = (
-    "id",
-    "source",
-    "user_id",
-    "model",
-    "parent_session_id",
-    "started_at",
-    "ended_at",
-    "end_reason",
-    "message_count",
-    "tool_call_count",
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "title",
-    "api_call_count",
-    "preview",
-    "last_active",
-    "_lineage_root_id",
-    "is_active",
-)
+    _mark_session_activity_impl(
+        sessions,
+        now,
+        session_active_window_sec=_SESSION_ACTIVE_WINDOW_SEC,
+        gateway_session_run_states_func=_gateway_session_run_states,
+    )
 
 
 def _session_list_payload(session: dict[str, Any]) -> dict[str, Any]:
-    """Return only fields needed by dashboard session lists."""
-    return {key: session.get(key) for key in _SESSION_LIST_FIELDS if key in session}
+    return _session_list_payload_impl(session)
 
 
 def _platform_chat_sources() -> list[str]:
-    """Gateway chat-platform sources hidden from the app's session sidebar.
-
-    Telegram/Discord/etc. conversations live on the messenger — surfacing
-    their gateway sessions in the desktop app duplicates them as fake
-    "chats" the user never started there. ``local`` is the gateway's own
-    terminal mode and stays visible.
-    """
-    try:
-        from gateway.config import Platform
-
-        return [p.value for p in Platform if p.value != "local"]
-    except Exception:
-        return [
-            "telegram", "discord", "whatsapp", "slack", "signal",
-            "mattermost", "matrix", "homeassistant", "email", "sms",
-            "dingtalk", "api_server", "webhook", "feishu", "wecom",
-            "wecom_callback", "weixin", "bluebubbles", "qqbot", "yuanbao",
-            "msgraph_webhook",
-        ]
+    return _platform_chat_sources_impl()
 
 
 app.include_router(
