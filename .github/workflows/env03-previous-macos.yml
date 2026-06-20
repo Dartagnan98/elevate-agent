@@ -18,6 +18,16 @@ on:
         required: false
         default: false
         type: boolean
+      skip_parity:
+        description: "Skip repo web_dist parity for externally built app artifacts; keeps ENV-03 partial"
+        required: false
+        default: false
+        type: boolean
+      skip_sidecar:
+        description: "Skip JSON-RPC sidecar prompt smoke when no model/API key is configured; keeps ENV-03 partial"
+        required: false
+        default: false
+        type: boolean
       expected_app_version:
         description: "Expected app version; blank uses desktop/package.json"
         required: false
@@ -54,6 +64,21 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/smoke-venv"
           "$RUNNER_TEMP/smoke-venv/bin/python" -m pip install websockets
+
+      - name: Set up Node for dashboard parity
+        if: ${{ inputs.skip_parity == false }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cli/web/package-lock.json
+
+      - name: Build dashboard assets for parity
+        if: ${{ inputs.skip_parity == false }}
+        run: |
+          set -euo pipefail
+          npm --prefix cli/web ci
+          npm --prefix cli/web run build
 
       - name: Download and copy app
         run: |
@@ -134,8 +159,7 @@ jobs:
             exit 1
           fi
 
-          ELEVATE_HOME="$home/.elevate" \
-          "$smoke_python" cli/scripts/installed_runtime_smoke.py \
+          smoke_args=(
             --installed-app "$app_path" \
             --repo-root "$PWD" \
             --port "$actual_port" \
@@ -143,6 +167,16 @@ jobs:
             --main-log "$home/Library/Logs/Elevate/main.log" \
             --timeout 180 \
             --json-out "$RUNNER_TEMP/elevate-env03-previous-macos-smoke.json"
+          )
+          if [ "${{ inputs.skip_parity }}" = "true" ]; then
+            smoke_args+=(--skip-parity)
+          fi
+          if [ "${{ inputs.skip_sidecar }}" = "true" ]; then
+            smoke_args+=(--skip-sidecar)
+          fi
+
+          ELEVATE_HOME="$home/.elevate" \
+          "$smoke_python" cli/scripts/installed_runtime_smoke.py "${smoke_args[@]}"
 
       - name: Upload smoke evidence
         if: always()
