@@ -116,15 +116,19 @@ jobs:
           trap 'kill "$app_pid" 2>/dev/null || true' EXIT
 
           ready=0
+          actual_port="$ELEVATE_DESKTOP_PORT"
           for _ in $(seq 1 90); do
-            if curl --fail --silent "http://127.0.0.1:$ELEVATE_DESKTOP_PORT/chat?new=env03" >/dev/null; then
-              ready=1
-              break
-            fi
+            for port in $(seq "$ELEVATE_DESKTOP_PORT" "$((ELEVATE_DESKTOP_PORT + 10))"); do
+              if curl --fail --silent "http://127.0.0.1:$port/chat?new=env03" >/dev/null; then
+                actual_port="$port"
+                ready=1
+                break 2
+              fi
+            done
             sleep 2
           done
           if [ "$ready" != "1" ]; then
-            echo "Elevate did not open dashboard port $ELEVATE_DESKTOP_PORT" >&2
+            echo "Elevate did not open dashboard port range $ELEVATE_DESKTOP_PORT-$((ELEVATE_DESKTOP_PORT + 10))" >&2
             tail -200 "$RUNNER_TEMP/elevate-stdout.log" || true
             tail -200 "$home/Library/Logs/Elevate/main.log" || true
             exit 1
@@ -134,7 +138,7 @@ jobs:
           "$smoke_python" cli/scripts/installed_runtime_smoke.py \
             --installed-app "$app_path" \
             --repo-root "$PWD" \
-            --port "$ELEVATE_DESKTOP_PORT" \
+            --port "$actual_port" \
             --expected-app-version "$expected" \
             --main-log "$home/Library/Logs/Elevate/main.log" \
             --timeout 180 \
