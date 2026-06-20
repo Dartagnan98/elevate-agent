@@ -21,6 +21,7 @@ const {
   isAllowedAudioPermission,
   requestPermissionOrigin,
 } = require("./permission-guard");
+const backendHttp = require("./backend-http");
 const dashboardBundle = require("./dashboard-bundle");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
@@ -731,79 +732,23 @@ function ensureGatewayInstalled(launcher, baseEnv) {
 }
 
 function request(pathname, timeoutMs = 2000, port = backendPort) {
-  return new Promise((resolve) => {
-    const req = http.get(
-      {
-        host: HOST,
-        port,
-        path: pathname,
-        timeout: timeoutMs,
-      },
-      (res) => {
-        res.resume();
-        resolve(res.statusCode || 0);
-      },
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(0);
-    });
-    req.on("error", () => resolve(0));
-  });
+  return backendHttp.request({ http, host: HOST, pathname, port, timeoutMs });
 }
 
 function requestText(pathname, timeoutMs = 2000, port = backendPort) {
-  return new Promise((resolve) => {
-    let body = "";
-    const req = http.get(
-      {
-        host: HOST,
-        port,
-        path: pathname,
-        timeout: timeoutMs,
-      },
-      (res) => {
-        res.setEncoding("utf8");
-        res.on("data", (chunk) => {
-          body += chunk;
-          if (body.length > 1024 * 1024) req.destroy();
-        });
-        res.on("end", () => resolve(body));
-      },
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      resolve("");
-    });
-    req.on("error", () => resolve(""));
-  });
+  return backendHttp.requestText({ http, host: HOST, pathname, port, timeoutMs });
 }
 
 async function requestJson(pathname, timeoutMs = 2000, port = backendPort) {
-  const body = await requestText(pathname, timeoutMs, port);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return null;
-  }
+  return backendHttp.requestJson({ http, host: HOST, pathname, port, timeoutMs });
 }
 
 async function backendIsReady(port = backendPort) {
-  const status = await request("/api/status", 2000, port);
-  if (status !== 200) return false;
-  const payload = await requestJson("/api/status", 2000, port);
-  return Boolean(
-    payload &&
-      typeof payload === "object" &&
-      typeof payload.version === "string" &&
-      Object.prototype.hasOwnProperty.call(payload, "gateway_running"),
-  );
+  return backendHttp.backendIsReady({ http, host: HOST, port });
 }
 
 async function dashboardChatEnabled(port = backendPort) {
-  const html = await requestText("/", 2000, port);
-  return html.includes("window.__ELEVATE_DASHBOARD_EMBEDDED_CHAT__=true");
+  return backendHttp.dashboardChatEnabled({ http, host: HOST, port });
 }
 
 // Hashed asset references (assets/<name>-<hash>.js|css) declared in an
