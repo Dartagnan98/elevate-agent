@@ -1036,6 +1036,7 @@ from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes.env import create_env_router
 from elevate_cli.web_routes.files import create_files_router
+from elevate_cli.web_routes.integrations import create_integrations_router
 from elevate_cli.web_routes.license import create_license_router
 from elevate_cli.web_routes.logs import create_logs_router
 from elevate_cli.web_routes.sessions import create_sessions_router
@@ -2852,21 +2853,6 @@ class SourceConnectorAction(BaseModel):
     sourceId: str
 
 
-class IntegrationSettingsUpdate(BaseModel):
-    provider: str = "custom"
-    label: str = "CRM"
-    apiKeyEnv: str = "CRM_API_KEY"
-    apiKey: str = ""
-    baseUrl: str = ""
-    authType: str = "header"
-    authHeader: str = "Authorization"
-    authPrefix: str = "Bearer "
-    authQueryParam: str = "api_key"
-    dbColumns: dict = Field(default_factory=dict)
-    endpoints: dict = Field(default_factory=dict)
-    action: str = ""
-
-
 app.include_router(create_cron_router(log=_log))
 
 app.include_router(
@@ -2938,6 +2924,8 @@ app.include_router(
 )
 
 app.include_router(create_source_connectors_router(log=_log))
+
+app.include_router(create_integrations_router(log=_log))
 
 app.include_router(create_today_router(log=_log))
 
@@ -8801,41 +8789,6 @@ async def social_refresh(platform: Optional[str] = None, lookback_days: int = 73
         results[p] = await asyncio.to_thread(_run_one, p)
 
     return {"ok": True, "results": results}
-
-
-@app.get("/api/integrations")
-async def get_integrations():
-    try:
-        from elevate_cli.source_connectors import get_integration_settings
-
-        return get_integration_settings()
-    except Exception as exc:
-        _log.exception("GET /api/integrations failed")
-        raise HTTPException(status_code=500, detail=f"Integration settings failed: {exc}")
-
-
-@app.put("/api/integrations")
-async def update_integrations(body: IntegrationSettingsUpdate):
-    try:
-        from elevate_cli.source_connectors import save_integration_settings
-
-        return save_integration_settings(body.dict())
-    except Exception as exc:
-        _log.exception("PUT /api/integrations failed")
-        raise HTTPException(status_code=500, detail=f"Integration settings save failed: {exc}")
-
-
-@app.post("/api/integrations")
-async def test_integrations(body: IntegrationSettingsUpdate):
-    if body.action != "test":
-        raise HTTPException(status_code=400, detail="Unsupported integration action")
-    try:
-        from elevate_cli.source_connectors import test_crm_connection
-
-        return test_crm_connection(body.dict())
-    except Exception as exc:
-        _log.exception("POST /api/integrations failed")
-        raise HTTPException(status_code=500, detail=f"Integration test failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
