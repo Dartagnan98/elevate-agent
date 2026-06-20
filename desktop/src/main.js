@@ -21,6 +21,7 @@ const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDesktopAuth } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
+const { createLauncherTools } = require("./launcher");
 const { installDesktopPermissions } = require("./permissions");
 const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
@@ -114,6 +115,21 @@ let dashboardLoadRetryCount = 0;
 let dashboardLoadRetryTimer = null;
 let lastDashboardPath = START_PATH;
 const startupTracker = startupLog.createStartupLogger(log);
+const launcherTools = createLauncherTools({
+  app,
+  backendPort: () => backendPort,
+  defaultPath: DEFAULT_PATH,
+  embeddedChat: EMBEDDED_CHAT,
+  execFileSync,
+  fileExists: (filePath) => fs.existsSync(filePath),
+  fs,
+  home: HOME,
+  host: HOST,
+  os,
+  path,
+  process,
+  repoRoot,
+});
 const gatewaySelfHeal = createGatewaySelfHeal({
   app,
   appendBackendLog,
@@ -285,120 +301,19 @@ async function performLogin({ email, password }) {
 }
 
 function envWithPath(extra = {}) {
-  const pythonCacheDir = path.join(HOME, "Library", "Caches", "Elevate", "python-pycache");
-  const env = { ...process.env };
-  // Cache compiled bytecode OUTSIDE the signed bundle so 2nd+ launches skip
-  // re-parsing every .py from source (the bundled .pyc are stripped at build
-  // time). Safe since 1.1.28 disabled differential updates: PYTHONPYCACHEPREFIX
-  // points into ~/Library/Caches, so .pyc never land in Contents/Resources and
-  // the codesign seal stays intact. We must UNSET PYTHONDONTWRITEBYTECODE rather
-  // than set it to "0" — CPython treats ANY non-empty value (incl. "0") as
-  // "don't write bytecode", so an inherited value would silently re-disable it.
-  delete env.PYTHONDONTWRITEBYTECODE;
-  env.PATH = process.env.PATH ? `${DEFAULT_PATH}:${process.env.PATH}` : DEFAULT_PATH;
-  env.PYTHONPYCACHEPREFIX = process.env.PYTHONPYCACHEPREFIX || pythonCacheDir;
-  return { ...env, ...extra };
+  return launcherTools.envWithPath(extra);
 }
 
 function fileExists(filePath) {
-  try {
-    return fs.existsSync(filePath);
-  } catch {
-    return false;
-  }
+  return launcherTools.fileExists(filePath);
 }
 
 function findCommand(name) {
-  try {
-    return execFileSync("/usr/bin/env", ["bash", "-lc", `command -v ${name}`], {
-      env: envWithPath(),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return "";
-  }
+  return launcherTools.findCommand(name);
 }
 
 function resolveElevateLauncher() {
-  const dashboardArgs = [
-    "dashboard",
-    "--port",
-    String(backendPort),
-    "--host",
-    HOST,
-    "--no-open",
-  ];
-  if (EMBEDDED_CHAT) {
-    dashboardArgs.push("--tui");
-  }
-
-  if (process.env.ELEVATE_DESKTOP_CLI) {
-    return {
-      command: process.env.ELEVATE_DESKTOP_CLI,
-      args: dashboardArgs,
-      cwd: os.homedir(),
-    };
-  }
-
-  // Bundled runtime (the .app ships its own Python + CLI source under
-  // Contents/Resources so a fresh install doesn't need a separate
-  // `elevate` CLI on the user's PATH). Highest priority when packaged.
-  if (app.isPackaged) {
-    const bundledPython = path.join(
-      process.resourcesPath,
-      "runtime",
-      "python",
-      "bin",
-      "python3.12",
-    );
-    const bundledCli = path.join(process.resourcesPath, "cli");
-    if (fileExists(bundledPython) && fileExists(bundledCli)) {
-      // The agent works out of a dedicated user folder (~/Elevation), NOT its
-      // own read-only bundled code. Imports still resolve via PYTHONPATH.
-      const userWorkspace = path.join(os.homedir(), "Elevation");
-      try {
-        fs.mkdirSync(userWorkspace, { recursive: true });
-      } catch (e) {
-        /* best-effort */
-      }
-      return {
-        command: bundledPython,
-        args: ["-m", "elevate_cli.main", ...dashboardArgs],
-        cwd: userWorkspace,
-        extraEnv: {
-          PYTHONPATH: bundledCli,
-          PYTHONNOUSERSITE: "1",
-          ELEVATE_WORKSPACE: userWorkspace,
-        },
-      };
-    }
-  }
-
-  const root = repoRoot();
-  const localPython = path.join(root, "cli", ".venv", "bin", "python");
-  if (fileExists(localPython)) {
-    return {
-      command: localPython,
-      args: [
-        "-m",
-        "elevate_cli.main",
-        ...dashboardArgs,
-      ],
-      cwd: path.join(root, "cli"),
-    };
-  }
-
-  const elevate = findCommand("elevate");
-  if (elevate) {
-    return {
-      command: elevate,
-      args: dashboardArgs,
-      cwd: os.homedir(),
-    };
-  }
-
-  return null;
+  return launcherTools.resolveElevateLauncher();
 }
 
 // Run an `elevate gateway <...>` command using the SAME resolved CLI launcher as
