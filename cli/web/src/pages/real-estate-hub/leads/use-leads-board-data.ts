@@ -184,6 +184,13 @@ export function useLeadsBoardData() {
     [setSourceInbox],
   );
 
+  const handleDraftActionComplete = useCallback(
+    async (action: LeadsDraftAction) => {
+      if (action === "approve") await refreshSent(false);
+    },
+    [refreshSent],
+  );
+
   const handleProfileFavoriteChange = useCallback(
     async (profile: LeadsProfile, favorite: boolean) => {
       try {
@@ -221,6 +228,7 @@ export function useLeadsBoardData() {
     sent,
     debugNote: sourceInboxDebugNote(inbox),
     handleDraftAction,
+    handleDraftActionComplete,
     handleProfileFavoriteChange,
     handleProfileStatusChange,
     handleToggleDirection,

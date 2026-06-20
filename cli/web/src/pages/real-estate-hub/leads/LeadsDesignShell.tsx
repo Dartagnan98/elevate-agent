@@ -49,6 +49,7 @@ export function LeadsDesignShell() {
           sent={boardData.sent}
           debugNote={boardData.debugNote}
           onDraftAction={boardData.handleDraftAction}
+          onDraftActionComplete={boardData.handleDraftActionComplete}
           onProfileFavoriteChange={boardData.handleProfileFavoriteChange}
           onProfileStatusChange={boardData.handleProfileStatusChange}
           onReRunOnboarding={() => setForceOnboarding(true)}

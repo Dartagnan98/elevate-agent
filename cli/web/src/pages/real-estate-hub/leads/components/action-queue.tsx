@@ -13,12 +13,13 @@ import { DraftRow } from "./draft-row";
 type QueueTab = "approve" | "hot" | "followups" | "skipped";
 
 export function ActionQueue({
-  drafts, pipeline, sourceFilter, onDraftAction, onEditTemplate, onOpenHotLead,
+  drafts, pipeline, sourceFilter, onDraftAction, onDraftActionComplete, onEditTemplate, onOpenHotLead,
 }: {
   drafts: LeadsDraft[];
   pipeline: LeadsPipeline;
   sourceFilter: string;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onEditTemplate?: () => void;
   onOpenHotLead?: (entry: LeadsHotEntry) => void;
 }) {
@@ -31,12 +32,18 @@ export function ActionQueue({
   const [actionError, setActionError] = useState<string | null>(null);
   const PAGE = 5;
 
-  const handleDraftAction = async (action: LeadsDraftAction, draft: LeadsDraft) => {
+  const handleDraftAction = async (
+    action: LeadsDraftAction,
+    draft: LeadsDraft,
+    options: { notifyComplete?: boolean } = {},
+  ) => {
     if (!onDraftAction) return;
+    const notifyComplete = options.notifyComplete ?? true;
     setActionError(null);
     setBusy((b) => { const n = new Set(b); n.add(draft.id); return n; });
     try {
       await onDraftAction(action, draft);
+      if (notifyComplete) await onDraftActionComplete?.(action);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : `Could not ${action} draft.`);
     } finally {
@@ -49,8 +56,9 @@ export function ActionQueue({
     const targets = filteredDrafts.filter((d) => selected.has(d.id));
     setSelected(new Set());
     for (const draft of targets) {
-      await handleDraftAction(action, draft);
+      await handleDraftAction(action, draft, { notifyComplete: false });
     }
+    await onDraftActionComplete?.(action);
   };
 
   useEffect(() => { setPage(0); setSelected(new Set()); setExpanded(null); }, [tab, sourceFilter]);

@@ -75,6 +75,7 @@ export interface LeadsBoardProps {
   error?: string | null;
   debugNote?: string | null;
   onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
   onReRunOnboarding?: () => void;
@@ -247,6 +248,7 @@ export function LeadsBoard(props: LeadsBoardProps) {
               pipeline={pipeline}
               sourceFilter={sourceFilter}
               onDraftAction={props.onDraftAction}
+              onDraftActionComplete={props.onDraftActionComplete}
               onEditTemplate={() => setTab("templates")}
               onOpenHotLead={openHotLead}
             />
