@@ -5,6 +5,7 @@ const test = require("node:test");
 
 const repoRoot = path.resolve(__dirname, "../..");
 const mainPath = path.join(repoRoot, "desktop/src/main.js");
+const smsPath = path.join(repoRoot, "desktop/src/sms-outbox.js");
 const senderPath = path.join(repoRoot, "cli/elevate_cli/sender.py");
 
 function read(filePath) {
@@ -13,6 +14,7 @@ function read(filePath) {
 
 test("sms outbox producer and desktop watcher share request/result files", () => {
   const main = read(mainPath);
+  const sms = read(smsPath);
   const sender = read(senderPath);
 
   assert.match(sender, /_SMS_OUTBOX_DIR = os\.path\.expanduser\("~\/\.elevate\/sms-outbox"\)/);
@@ -21,16 +23,14 @@ test("sms outbox producer and desktop watcher share request/result files", () =>
   assert.match(sender, /os\.replace\(tmp, req_path\)/);
   assert.match(sender, /return \(124, "", "app-send timed out \(Elevate app not draining sms-outbox\?\)"\)/);
 
-  assert.match(main, /const dir = path\.join\(os\.homedir\(\), "\.elevate", "sms-outbox"\)/);
-  assert.match(main, /f\.endsWith\("\.req\.json"\)/);
-  assert.match(main, /const resPath = path\.join\(dir, `\$\{id\}\.res\.json`\)/);
+  assert.match(sms, /const dir = path\.join\(os\.homedir\(\), "\.elevate", "sms-outbox"\)/);
+  assert.match(sms, /f\.endsWith\("\.req\.json"\)/);
+  assert.match(sms, /const resPath = path\.join\(dir, `\$\{id\}\.res\.json`\)/);
+  assert.match(main, /startSmsOutboxWatcher\(\)/);
 });
 
 test("sms outbox writes visible results atomically and consumes each request once", () => {
-  const main = read(mainPath);
-  const start = main.indexOf("function startSmsOutboxWatcher()");
-  const end = main.indexOf('app.whenReady().then', start);
-  const outbox = main.slice(start, end);
+  const outbox = read(smsPath);
 
   assert.match(outbox, /fs\.unlinkSync\(reqPath\)/);
   assert.match(outbox, /const tmp = `\$\{resPath\}\.tmp`/);
@@ -42,9 +42,7 @@ test("sms outbox writes visible results atomically and consumes each request onc
 
 test("sms outbox forces service, captures failures, retries wedged Messages once", () => {
   const main = read(mainPath);
-  const start = main.indexOf("function startSmsOutboxWatcher()");
-  const end = main.indexOf('app.whenReady().then', start);
-  const outbox = main.slice(start, end);
+  const outbox = read(smsPath);
 
   assert.match(outbox, /const svc = String\(req\.service \|\| "sms"\)\.toLowerCase\(\) === "imessage" \? "imessage" : "sms"/);
   assert.match(outbox, /"send", "--to", String\(req\.to \|\| ""\), "--text", String\(req\.text \|\| ""\), "--service", svc, "--json"/);
