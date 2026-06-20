@@ -1,0 +1,38 @@
+source_host=Skyleighs-MacBook-Pro.local
+source_path=/Users/admin/.elevate/elevate-current-src
+captured_at_utc=2026-06-20T21:47:25Z
+branch=main
+head=0056717e85b2b52035dc250366b62dd2aedb15a8
+
+status_short:
+ M cli/elevate_cli/admin_deal_flow.py
+ M cli/elevate_cli/web_auth.py
+ M cli/elevate_cli/web_routes/admin_deals.py
+ M cli/web/src/pages/real-estate-hub/admin/admin.css
+ M cli/web/src/pages/real-estate-hub/admin/components/admin-board.tsx
+ M cli/web/src/pages/real-estate-hub/admin/components/deal-modal.tsx
+
+diff_name_status:
+M	cli/elevate_cli/admin_deal_flow.py
+M	cli/elevate_cli/web_auth.py
+M	cli/elevate_cli/web_routes/admin_deals.py
+M	cli/web/src/pages/real-estate-hub/admin/admin.css
+M	cli/web/src/pages/real-estate-hub/admin/components/admin-board.tsx
+M	cli/web/src/pages/real-estate-hub/admin/components/deal-modal.tsx
+
+diff_stat:
+ cli/elevate_cli/admin_deal_flow.py                 |   21 +-
+ cli/elevate_cli/web_auth.py                        |   22 +-
+ cli/elevate_cli/web_routes/admin_deals.py          |   33 +
+ cli/web/src/pages/real-estate-hub/admin/admin.css  |  215 +++-
+ .../admin/components/admin-board.tsx               |   16 +-
+ .../admin/components/deal-modal.tsx                | 1087 ++++++++++----------
+ 6 files changed, 822 insertions(+), 572 deletions(-)
+
+web_tsc:
+PASS
+
+python_ast_parse:
+PASS cli/elevate_cli/admin_deal_flow.py
+PASS cli/elevate_cli/web_auth.py
+PASS cli/elevate_cli/web_routes/admin_deals.py

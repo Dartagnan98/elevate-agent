@@ -1,0 +1,447 @@
+diff --git a/dashboard/src/app/api/realestate/deals/[id]/collapse/route.ts b/dashboard/src/app/api/realestate/deals/[id]/collapse/route.ts
+new file mode 100644
+index 0000000..8c3741c
+--- /dev/null
++++ b/dashboard/src/app/api/realestate/deals/[id]/collapse/route.ts
+@@ -0,0 +1,223 @@
++import { spawnSync } from 'child_process';
++import { NextResponse, type NextRequest } from 'next/server';
++
++const DEFAULT_ELEVATE_PYTHON = '/Applications/Elevate.app/Contents/Resources/cli/.venv/bin/python';
++const DEAL_ID_RE = /^[A-Za-z0-9_.:-]{1,160}$/;
++
++function elevatePython(): string {
++  return process.env.ELEVATE_PYTHON || DEFAULT_ELEVATE_PYTHON;
++}
++
++function normalizeSide(value: unknown): 'listing' | 'buyer' | null {
++  return value === 'listing' || value === 'buyer' ? value : null;
++}
++
++export async function POST(
++  request: NextRequest,
++  { params }: { params: Promise<{ id: string }> },
++) {
++  const { id } = await params;
++  const dealId = decodeURIComponent(id || '');
++  if (!DEAL_ID_RE.test(dealId)) {
++    return NextResponse.json({ error: 'Invalid deal id.' }, { status: 400 });
++  }
++
++  const body = await request.json().catch(() => ({}));
++  const requestedSide = normalizeSide((body as { side?: unknown }).side);
++
++  const script = String.raw`
++import json
++import re
++import sys
++from datetime import datetime, timezone
++
++from elevate_cli.data.connection import connect
++from elevate_cli.data.deals import (
++    _decode_json,
++    _encode_json,
++    _insert_deal_event,
++    get_deal,
++    list_deal_contacts,
++    move_deal_stage,
++    set_deal_fields,
++    set_deal_toggle,
++)
++
++DEAL_ID = sys.argv[1]
++REQUESTED_SIDE = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
++ACTOR = 'dashboard:deal-collapsed-button'
++LISTING_RESET_STAGE = 5
++BUYER_RESET_STAGE = 0
++LISTING_CLEAR_FIELDS = {
++    'offerDate': None,
++    'subjectRemovalDate': None,
++    'depositDueDate': None,
++    'completionDate': None,
++    'possessionDate': None,
++    'offerPrice': None,
++    'depositAmount': None,
++    'offerAcceptedAt': None,
++    'subjectsRemovedAt': None,
++    'completedAt': None,
++    'depositInTrustAt': None,
++}
++BUYER_CLEAR_FIELDS = {
++    **LISTING_CLEAR_FIELDS,
++    'mlsNumber': None,
++    'legalDescription': None,
++    'lotSizeSqft': None,
++    'yearBuilt': None,
++    'listPrice': None,
++    'listingDate': None,
++    'listingPublishedAt': None,
++}
++LISTING_EXTRA_RE = re.compile(r'(buyer|purchaser|offer|accepted|deposit|subject|completion|possession|adjustment)', re.I)
++BUYER_EXTRA_RE = re.compile(r'(property|listing|address|mls|legal|pid|strata|offer|accepted|deposit|subject|completion|possession|adjustment)', re.I)
++BUYER_ROLE_RE = re.compile(r'(buyer|purchaser|tenant)', re.I)
++
++
++def contact_name(item):
++    contact = item.get('contact') or {}
++    for key in ('displayName', 'display_name', 'name', 'fullName', 'primaryEmail', 'primary_email'):
++        value = contact.get(key)
++        if value:
++            return str(value)
++    return None
++
++
++def scrub_extra(conn, deal_id, pattern):
++    row = conn.execute('SELECT extra_toggles_json FROM deals WHERE id=?', (deal_id,)).fetchone()
++    extra = _decode_json(row['extra_toggles_json']) if row and row['extra_toggles_json'] else {}
++    if not isinstance(extra, dict):
++        extra = {}
++    removed = {key: extra[key] for key in list(extra.keys()) if pattern.search(str(key))}
++    if removed:
++        for key in removed:
++            extra.pop(key, None)
++        conn.execute('UPDATE deals SET extra_toggles_json=?, updated_at=? WHERE id=?', (
++            _encode_json(extra),
++            datetime.now(timezone.utc).isoformat(),
++            deal_id,
++        ))
++    return removed
++
++
++def remove_listing_buyers(conn, deal_id):
++    rows = conn.execute('SELECT id, role, contact_id, notes FROM deal_contacts WHERE deal_id=?', (deal_id,)).fetchall()
++    removed = []
++    for row in rows:
++        role = str(row['role'] or '')
++        if BUYER_ROLE_RE.search(role):
++            removed.append({'id': row['id'], 'role': role, 'contactId': row['contact_id'], 'notes': row['notes']})
++            conn.execute('DELETE FROM deal_contacts WHERE id=?', (row['id'],))
++    return removed
++
++
++def maybe_rename_buyer_card(conn, deal_id):
++    contacts = list_deal_contacts(conn, deal_id)
++    buyer_names = []
++    for item in contacts:
++        role = str(item.get('role') or '')
++        if BUYER_ROLE_RE.search(role) or role.lower() in {'client', 'primary'}:
++            name = contact_name(item)
++            if name and name not in buyer_names:
++                buyer_names.append(name)
++    if not buyer_names:
++        return None
++    new_title = 'Buyer: ' + ' & '.join(buyer_names[:2])
++    conn.execute('UPDATE deals SET title=?, updated_at=? WHERE id=?', (
++        new_title,
++        datetime.now(timezone.utc).isoformat(),
++        deal_id,
++    ))
++    return new_title
++
++
++def collapse_deal():
++    with connect() as conn:
++        deal = get_deal(conn, DEAL_ID)
++        if deal is None:
++            raise LookupError(f'deal {DEAL_ID!r} not found')
++        side = REQUESTED_SIDE or deal.get('side')
++        if side not in {'listing', 'buyer'}:
++            raise ValueError(f'unsupported deal side {side!r}')
++        current_stage = int(deal.get('currentStage') or 0)
++        if side == 'listing' and current_stage not in {6, 7}:
++            raise ValueError('listing deal collapse is only available from Accepted Offer or Condition Removal')
++        if side == 'buyer' and current_stage not in {1, 2, 3}:
++            raise ValueError('buyer deal collapse is only available from accepted-offer buyer stages')
++
++        target_stage = LISTING_RESET_STAGE if side == 'listing' else BUYER_RESET_STAGE
++        clear_fields = LISTING_CLEAR_FIELDS if side == 'listing' else BUYER_CLEAR_FIELDS
++        removed_contacts = remove_listing_buyers(conn, DEAL_ID) if side == 'listing' else []
++        removed_extra = scrub_extra(conn, DEAL_ID, LISTING_EXTRA_RE if side == 'listing' else BUYER_EXTRA_RE)
++        new_title = None
++
++        set_deal_fields(conn, DEAL_ID, actor=ACTOR, fields=clear_fields)
++        if side == 'buyer':
++            conn.execute('UPDATE deals SET listing_address=NULL, source_row_id=NULL, updated_at=? WHERE id=?', (
++                datetime.now(timezone.utc).isoformat(),
++                DEAL_ID,
++            ))
++            new_title = maybe_rename_buyer_card(conn, DEAL_ID)
++        set_deal_toggle(conn, DEAL_ID, field='deal_collapsed', value=True, actor=ACTOR)
++        set_deal_toggle(conn, DEAL_ID, field='collapsed_reset_target_stage', value=target_stage, actor=ACTOR)
++        set_deal_toggle(conn, DEAL_ID, field='collapsed_reset_side', value=side, actor=ACTOR)
++        moved = move_deal_stage(conn, DEAL_ID, to_stage=target_stage, actor=ACTOR, force=True)
++        _insert_deal_event(
++            conn,
++            deal_id=DEAL_ID,
++            kind='toggle_change',
++            actor=ACTOR,
++            field_name='deal_collapsed_reset',
++            old_value={'stage': current_stage, 'side': side},
++            new_value={'stage': target_stage, 'side': side},
++            payload={
++                'reason': 'deal_collapsed_button',
++                'listingBehavior': 'move_to_listing_live_and_clear_previous_buyers',
++                'buyerBehavior': 'move_to_top_25_and_clear_property_information',
++                'clearedFields': sorted(clear_fields.keys()),
++                'removedBuyerContacts': removed_contacts,
++                'removedExtraKeys': sorted(removed_extra.keys()),
++                'newTitle': new_title,
++            },
++        )
++        conn.commit()
++        return {'deal': moved, 'targetStage': target_stage, 'removedBuyerContacts': len(removed_contacts), 'removedExtraKeys': sorted(removed_extra.keys()), 'newTitle': new_title}
++
++try:
++    print(json.dumps({'success': True, **collapse_deal()}, default=str))
++except Exception as exc:
++    print(json.dumps({'success': False, 'error': str(exc), 'type': exc.__class__.__name__}, default=str))
++    sys.exit(1)
++`;
++
++  const result = spawnSync(elevatePython(), ['-c', script, dealId, requestedSide ?? ''], {
++    cwd: process.cwd(),
++    encoding: 'utf-8',
++    timeout: 20_000,
++    env: process.env,
++  });
++
++  const stdout = result.stdout?.trim();
++  let parsed: Record<string, unknown> | null = null;
++  if (stdout) {
++    try {
++      parsed = JSON.parse(stdout) as Record<string, unknown>;
++    } catch {
++      parsed = null;
++    }
++  }
++
++  if (result.error) {
++    return NextResponse.json({ error: result.error.message }, { status: 500 });
++  }
++  if (result.status !== 0 || !parsed?.success) {
++    const error = typeof parsed?.error === 'string'
++      ? parsed.error
++      : result.stderr?.trim() || stdout || `Collapse command exited ${result.status}`;
++    return NextResponse.json({ error }, { status: 500 });
++  }
++
++  return NextResponse.json(parsed);
++}
+diff --git a/dashboard/src/components/realestate/deal-collapsed-button.tsx b/dashboard/src/components/realestate/deal-collapsed-button.tsx
+new file mode 100644
+index 0000000..0a9be8d
+--- /dev/null
++++ b/dashboard/src/components/realestate/deal-collapsed-button.tsx
+@@ -0,0 +1,64 @@
++'use client';
++
++import { useState, useTransition } from 'react';
++import { useRouter } from 'next/navigation';
++import { Button } from '@/components/ui/button';
++
++export function DealCollapsedButton({
++  dealId,
++  dealTitle,
++  side,
++}: {
++  dealId: string;
++  dealTitle: string;
++  side: string;
++}) {
++  const router = useRouter();
++  const [isPending, startTransition] = useTransition();
++  const [error, setError] = useState<string | null>(null);
++
++  const label = isPending ? 'Collapsing...' : 'Deal collapsed';
++
++  async function handleClick() {
++    const target = side === 'buyer' ? 'Top 25 and clear the property details' : 'Listing Live and clear the buyer memory';
++    const confirmed = window.confirm(
++      `Mark ${dealTitle} as collapsed? This will move it back to ${target}.`,
++    );
++    if (!confirmed) return;
++
++    setError(null);
++    startTransition(async () => {
++      try {
++        const response = await fetch(`/api/realestate/deals/${encodeURIComponent(dealId)}/collapse`, {
++          method: 'POST',
++          headers: { 'Content-Type': 'application/json' },
++          body: JSON.stringify({ side }),
++        });
++        const body = await response.json().catch(() => ({}));
++        if (!response.ok) {
++          const message = typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`;
++          throw new Error(message);
++        }
++        router.refresh();
++      } catch (err) {
++        setError(err instanceof Error ? err.message : 'Could not collapse deal.');
++      }
++    });
++  }
++
++  return (
++    <div className="grid gap-1">
++      <Button
++        type="button"
++        variant="destructive"
++        size="sm"
++        className="h-8 rounded-md px-2 text-xs"
++        disabled={isPending}
++        onClick={handleClick}
++      >
++        {label}
++      </Button>
++      {error && <p className="text-[11px] text-destructive">{error}</p>}
++    </div>
++  );
++}
+diff --git a/dashboard/src/lib/realestate/operational-deals.ts b/dashboard/src/lib/realestate/operational-deals.ts
+new file mode 100644
+index 0000000..c29d9b6
+--- /dev/null
++++ b/dashboard/src/lib/realestate/operational-deals.ts
+@@ -0,0 +1,142 @@
++import { spawnSync } from 'child_process';
++
++const DEFAULT_ELEVATE_PYTHON = '/Applications/Elevate.app/Contents/Resources/cli/.venv/bin/python';
++
++export interface OperationalDeal {
++  id: string;
++  title: string;
++  side: 'listing' | 'buyer' | string;
++  currentStage: number;
++  stageEnteredAt: string | null;
++  completionDate: string | null;
++  subjectRemovalDate: string | null;
++  listingDate: string | null;
++  listPrice: number | null;
++  offerPrice: number | null;
++  sourceLabel: string | null;
++  sourceKey: string | null;
++  primaryContactId: string | null;
++  mlsNumber: string | null;
++}
++
++export interface OperationalDealsOverview {
++  generatedAt: string;
++  today: string;
++  totals: {
++    activeAfterFilter: number;
++    mockExcluded: number;
++    rawMatched: number;
++    byStatus: Record<string, number>;
++    bySide: Record<string, number>;
++  };
++  byStage: Record<string, number>;
++  bySource: Record<string, number>;
++  closingsSoon: OperationalDeal[];
++  subjectsSoon: OperationalDeal[];
++  staleStages: Array<OperationalDeal & { daysInStage?: number }>;
++  deals: OperationalDeal[];
++}
++
++export type OperationalDealsResult =
++  | { kind: 'ok'; data: OperationalDealsOverview }
++  | { kind: 'unavailable'; message: string };
++
++function elevatePython(): string {
++  return process.env.ELEVATE_PYTHON || DEFAULT_ELEVATE_PYTHON;
++}
++
++export function getOperationalDealsOverview(): OperationalDealsResult {
++  const script = String.raw`
++import json
++import sys
++from elevate_cli.data.connection import connect
++from elevate_cli.data.deals import deals_overview
++
++try:
++    with connect() as conn:
++        payload = deals_overview(conn, status='active', exclude_mock=True)
++    print(json.dumps(payload, default=str))
++except Exception as exc:
++    print(json.dumps({'error': str(exc), 'type': exc.__class__.__name__}))
++    sys.exit(1)
++`;
++
++  const result = spawnSync(elevatePython(), ['-c', script], {
++    cwd: process.cwd(),
++    encoding: 'utf-8',
++    timeout: 12_000,
++    env: process.env,
++  });
++
++  if (result.error) {
++    return { kind: 'unavailable', message: result.error.message };
++  }
++  if (result.status !== 0) {
++    const stderr = result.stderr?.trim();
++    const stdout = result.stdout?.trim();
++    return { kind: 'unavailable', message: stderr || stdout || `Elevate Python exited ${result.status}` };
++  }
++
++  try {
++    const parsed = JSON.parse(result.stdout) as OperationalDealsOverview;
++    if (!parsed || !Array.isArray(parsed.deals)) {
++      return { kind: 'unavailable', message: 'Operational deals overview returned an unexpected payload.' };
++    }
++    return { kind: 'ok', data: parsed };
++  } catch (err) {
++    return {
++      kind: 'unavailable',
++      message: err instanceof Error ? err.message : 'Could not parse operational deals overview.',
++    };
++  }
++}
++
++export function stageLabel(side: string, stage: number): string {
++  if (side === 'buyer') {
++    switch (stage) {
++      case 0:
++        return 'Top 25 / Buyer Offer Prep';
++      case 1:
++        return 'Buyer Accepted Offer';
++      case 2:
++        return 'Buyer Conditions';
++      case 3:
++        return 'Buyer Subjects Off';
++      case 8:
++        return 'Closed';
++      default:
++        return `Buyer Stage ${stage}`;
++    }
++  }
++
++  switch (stage) {
++    case 0:
++      return 'Pre-CMA';
++    case 1:
++      return 'CMA / Evaluation';
++    case 2:
++      return 'Listing Intake';
++    case 3:
++      return 'SkySlope & Matrix Prep';
++    case 4:
++      return 'Marketing Go';
++    case 5:
++      return 'Listing Live';
++    case 6:
++      return 'Accepted Offer';
++    case 7:
++      return 'Condition Removal';
++    case 8:
++      return 'Closed';
++    case 10:
++      return 'Nurture / Pre-CMA Watch';
++    default:
++      return `Stage ${stage}`;
++  }
++}
++
++export function isCollapseEligible(deal: Pick<OperationalDeal, 'side' | 'currentStage'>): boolean {
++  if (deal.side === 'listing') return deal.currentStage === 6 || deal.currentStage === 7;
++  if (deal.side === 'buyer') return deal.currentStage >= 1 && deal.currentStage <= 3;
++  return false;
++}

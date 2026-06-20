@@ -1,0 +1,176 @@
+diff --git a/dashboard/src/app/(dashboard)/deals/page.tsx b/dashboard/src/app/(dashboard)/deals/page.tsx
+index 7e81e1c..213f76e 100644
+--- a/dashboard/src/app/(dashboard)/deals/page.tsx
++++ b/dashboard/src/app/(dashboard)/deals/page.tsx
+@@ -9,6 +9,7 @@ import {
+ } from '@tabler/icons-react';
+ import { Badge } from '@/components/ui/badge';
+ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
++import { DealCollapsedButton } from '@/components/realestate/deal-collapsed-button';
+ import {
+   getRealtorCommandCenter,
+   REALTOR_DEAL_STAGES,
+@@ -16,6 +17,12 @@ import {
+   type RealtorDeal,
+   type RealtorDealStage,
+ } from '@/lib/realestate/command-center';
++import {
++  getOperationalDealsOverview,
++  isCollapseEligible,
++  stageLabel,
++  type OperationalDeal,
++} from '@/lib/realestate/operational-deals';
+ 
+ export const dynamic = 'force-dynamic';
+ 
+@@ -40,6 +47,104 @@ const STAGE_DESCRIPTIONS: Partial<Record<RealtorDealStage, string>> = {
+   Closed: 'Closed properties live here only and are excluded from the active top-seller / pending-deal lists.',
+ };
+ 
++const OPERATIONAL_STAGE_COLUMNS: Array<{
++  label: string;
++  description: string;
++  include: (deal: OperationalDeal) => boolean;
++}> = [
++  {
++    label: 'Top 25 Buyers',
++    description: 'Buyer cards that are still active prospects.',
++    include: (deal) => deal.side === 'buyer' && deal.currentStage === 0,
++  },
++  {
++    label: 'Buyer Accepted Offer',
++    description: 'Buyer-side accepted offers, conditions, and subject removal.',
++    include: (deal) => deal.side === 'buyer' && deal.currentStage >= 1 && deal.currentStage <= 3,
++  },
++  {
++    label: 'Listing Live',
++    description: 'Active seller listings before an accepted offer.',
++    include: (deal) => deal.side === 'listing' && deal.currentStage === 5,
++  },
++  {
++    label: 'Accepted Offer',
++    description: 'Seller listing cards with an accepted offer. Collapse button appears here.',
++    include: (deal) => deal.side === 'listing' && deal.currentStage === 6,
++  },
++  {
++    label: 'Condition Removal',
++    description: 'Accepted offers moving through subject removal and closing prep.',
++    include: (deal) => deal.side === 'listing' && deal.currentStage === 7,
++  },
++];
++
++function formatMoney(value: number | null): string | null {
++  if (value === null || Number.isNaN(value)) return null;
++  return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(value);
++}
++
++function collapseResetCopy(deal: OperationalDeal): string {
++  if (deal.side === 'buyer') return 'Moves buyer back to Top 25 and clears property-specific fields.';
++  return 'Moves listing back to Listing Live and removes prior buyer memory from the seller card.';
++}
++
++function OperationalDealCard({ deal }: { deal: OperationalDeal }) {
++  const price = formatMoney(deal.offerPrice ?? deal.listPrice);
++  return (
++    <div className="rounded-md border bg-card p-3">
++      <div className="flex items-start justify-between gap-3">
++        <div className="min-w-0">
++          <h3 className="truncate text-sm font-medium">{deal.title}</h3>
++          <p className="mt-1 text-xs text-muted-foreground">{deal.side} · {stageLabel(deal.side, deal.currentStage)}</p>
++        </div>
++        <Badge variant="outline">Stage {deal.currentStage}</Badge>
++      </div>
++      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
++        {price && <span>{price}</span>}
++        {deal.mlsNumber && <span>MLS {deal.mlsNumber}</span>}
++        {deal.subjectRemovalDate && <span>Subjects {deal.subjectRemovalDate}</span>}
++        {deal.completionDate && <span>Completion {deal.completionDate}</span>}
++      </div>
++      {isCollapseEligible(deal) && (
++        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/35 p-2">
++          <p className="max-w-[260px] text-xs text-muted-foreground">{collapseResetCopy(deal)}</p>
++          <DealCollapsedButton dealId={deal.id} dealTitle={deal.title} side={deal.side} />
++        </div>
++      )}
++    </div>
++  );
++}
++
++function OperationalStageColumn({
++  label,
++  description,
++  deals,
++}: {
++  label: string;
++  description?: string;
++  deals: OperationalDeal[];
++}) {
++  return (
++    <section className="min-h-40 rounded-md border bg-muted/20 p-3">
++      <div className="mb-2 flex items-center justify-between gap-2">
++        <h2 className="text-sm font-semibold">{label}</h2>
++        <Badge variant="secondary">{deals.length}</Badge>
++      </div>
++      {description && <p className="mb-3 text-xs text-muted-foreground">{description}</p>}
++      {deals.length === 0 ? (
++        <p className="rounded-md border border-dashed bg-background/70 p-3 text-xs text-muted-foreground">
++          No deals in this stage.
++        </p>
++      ) : (
++        <div className="grid gap-2">
++          {deals.map((deal) => <OperationalDealCard key={deal.id} deal={deal} />)}
++        </div>
++      )}
++    </section>
++  );
++}
++
+ function DealCard({ deal }: { deal: RealtorDeal }) {
+   return (
+     <div className="rounded-md border bg-card p-3">
+@@ -96,7 +201,9 @@ function StageColumn({ stage, deals }: { stage: RealtorDealStage; deals: Realtor
+ 
+ export default async function DealsPage() {
+   const result = await getRealtorCommandCenter();
++  const operationalResult = getOperationalDealsOverview();
+   const data = result.data;
++  const operationalDeals = operationalResult.kind === 'ok' ? operationalResult.data.deals : [];
+   const activeDeals = data.deals.filter((deal) => deal.stage !== 'Closed');
+   const urgentDeals = activeDeals.filter((deal) => deal.risk === 'red');
+   const replyDeals = activeDeals.filter((deal) => deal.lastInbound);
+@@ -171,6 +278,35 @@ export default async function DealsPage() {
+         </Card>
+       </div>
+ 
++      <section className="space-y-3">
++        <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
++          <div>
++            <h2 className="text-lg font-semibold tracking-tight">Property score cards</h2>
++            <p className="text-sm text-muted-foreground">
++              Live Admin deal cards grouped by stage. The Deal collapsed button shows on accepted-offer seller cards and buyer accepted-offer cards.
++            </p>
++          </div>
++          {operationalResult.kind !== 'ok' && (
++            <Badge variant="outline" className="w-fit">Operational cards unavailable</Badge>
++          )}
++        </div>
++        {operationalResult.kind !== 'ok' && (
++          <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
++            {operationalResult.message}
++          </div>
++        )}
++        <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-5">
++          {OPERATIONAL_STAGE_COLUMNS.map((column) => (
++            <OperationalStageColumn
++              key={column.label}
++              label={column.label}
++              description={column.description}
++              deals={operationalDeals.filter(column.include)}
++            />
++          ))}
++        </div>
++      </section>
++
+       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+         <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+           {REALTOR_DEAL_STAGES.map((stage) => (
