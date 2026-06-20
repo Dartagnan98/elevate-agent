@@ -173,11 +173,10 @@ Production readiness artifacts:
 
 Current verified snapshot, 2026-06-18:
 
-- Local inventory: 325 decorated local routes/WebSockets, split as 242 in
-  `web_server.py`, 18 in `agent_hub.py`, 15 in `source_connectors.py`, 12 in
-  `cron.py`, 1 in `today.py`, 36 in the Kanban plugin API, and 1 in the
+- Local inventory: 325 decorated local routes/WebSockets, now split across
+  focused `web_routes/*` modules plus 36 in the Kanban plugin API and 1 in the
   example plugin API.
-- Local route identity fingerprint: `40b0a8b6391144ae`.
+- Local route identity fingerprint: `3456afb363092450`.
 - Hosted inventory: 38 tracked `backend/src/app/api/**/route.ts` files.
   `backend/package.json` now has a `test` script using `node:test` plus the
   existing `tsx` dependency. `backend/test/hosted-routes.test.ts` covers
@@ -223,10 +222,10 @@ Current verified snapshot, 2026-06-18:
   - `backend/src/app/api/stripe/checkout/route.ts`
   - `backend/src/app/api/stripe/portal/route.ts`
   - `backend/src/app/api/stripe/webhook/route.ts`
-- Caller inventory: the latest sweep found 443 frontend/desktop caller
+- Caller inventory: the latest sweep found 442 frontend/desktop caller
   references across `fetchJSON`, raw fetches, `/api/` strings, WebSockets, and
   desktop IPC.
-- Caller inventory fingerprint: `a5e8b84ba11c1449`.
+- Caller inventory fingerprint: `088e982eeb81743d`.
 - Closed in this pass: `/api/ws` missing/bad-token/embedded-disabled backend
   tests, frontend `api.ts` session-header injection test, served-SPA
   `HttpOnly` session-cookie authorization test,
