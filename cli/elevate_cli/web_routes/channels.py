@@ -15,6 +15,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from elevate_cli.config import get_env_value, load_config, load_env, save_env_value
+from elevate_cli.web_routes.channel_gateway import register_gateway_routes
 
 
 SpawnElevateAction = Callable[[List[str], str], subprocess.Popen]
@@ -68,33 +69,7 @@ def create_channels_router(
         except Exception:
             return False
 
-    @router.post("/api/gateway/restart")
-    async def restart_gateway():
-        """Kick off a ``elevate gateway restart`` in the background."""
-        try:
-            proc = spawn_elevate_action(["gateway", "restart"], "gateway-restart")
-        except Exception as exc:
-            _log.exception("Failed to spawn gateway restart")
-            raise HTTPException(status_code=500, detail=f"Failed to restart gateway: {exc}")
-        return {
-            "ok": True,
-            "pid": proc.pid,
-            "name": "gateway-restart",
-        }
-
-    @router.post("/api/gateway/start")
-    async def start_gateway_action():
-        """Start a detached local gateway runner using the current interpreter."""
-        try:
-            proc = spawn_elevate_action(["gateway", "run", "--replace"], "gateway-start")
-        except Exception as exc:
-            _log.exception("Failed to spawn gateway start")
-            raise HTTPException(status_code=500, detail=f"Failed to start gateway: {exc}")
-        return {
-            "ok": True,
-            "pid": proc.pid,
-            "name": "gateway-start",
-        }
+    register_gateway_routes(router, log=_log, spawn_elevate_action=spawn_elevate_action)
 
     @router.post("/api/telegram/pair/start")
     async def start_telegram_pairing(request: Request):
