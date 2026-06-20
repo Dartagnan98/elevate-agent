@@ -87,6 +87,28 @@ def _combined_env(config: dict[str, Any]) -> dict[str, str]:
     return values
 
 
+def _configured_composio_server(config: dict[str, Any]) -> JsonRecord | None:
+    servers = _as_dict(config.get("mcp_servers"))
+    for name, raw_server in servers.items():
+        server = _as_dict(raw_server)
+        args = server.get("args")
+        haystack_parts = [
+            str(name),
+            str(server.get("url") or ""),
+            str(server.get("command") or ""),
+            " ".join(str(item) for item in args) if isinstance(args, list) else str(args or ""),
+        ]
+        if "composio" not in " ".join(haystack_parts).lower():
+            continue
+        return {
+            "name": str(name),
+            "transport": "http" if server.get("url") else "stdio",
+            "url": str(server.get("url") or ""),
+            "command": str(server.get("command") or ""),
+        }
+    return None
+
+
 def _basic_auth_header(api_key: str) -> str:
     encoded = base64.b64encode(f"{api_key}:".encode("utf-8")).decode("ascii")
     return f"Basic {encoded}"

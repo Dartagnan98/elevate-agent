@@ -153,28 +153,6 @@ from elevate_cli.source_connector_modules.profile_helpers import (
 )
 
 
-def _configured_composio_server(config: dict[str, Any]) -> JsonRecord | None:
-    servers = _as_dict(config.get("mcp_servers"))
-    for name, raw_server in servers.items():
-        server = _as_dict(raw_server)
-        args = server.get("args")
-        haystack_parts = [
-            str(name),
-            str(server.get("url") or ""),
-            str(server.get("command") or ""),
-            " ".join(str(item) for item in args) if isinstance(args, list) else str(args or ""),
-        ]
-        if "composio" not in " ".join(haystack_parts).lower():
-            continue
-        return {
-            "name": str(name),
-            "transport": "http" if server.get("url") else "stdio",
-            "url": str(server.get("url") or ""),
-            "command": str(server.get("command") or ""),
-        }
-    return None
-
-
 from elevate_cli.source_connector_modules.apple_messages import (
     APPLE_EPOCH,
     _apple_dt,
@@ -2274,6 +2252,7 @@ from elevate_cli.source_connector_modules.integration_settings import (
     _candidate_tools_root,
     _canonical_crm_provider,
     _combined_env,
+    _configured_composio_server,
     _crm_to_ui,
     _expand_path,
     _merge_crm,
