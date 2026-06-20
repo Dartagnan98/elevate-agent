@@ -22,6 +22,7 @@ const { createBackendPortController } = require("./backend-port");
 const { createBackendRunner } = require("./backend-runner");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
+const { createDeepLinks } = require("./deep-links");
 const { createDesktopAuth } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
 const { createLauncherTools } = require("./launcher");
@@ -92,9 +93,6 @@ const smsOutbox = createSmsOutbox({ log });
 
 let mainWindow = null;
 let backendProcess = null;
-// Deep link (elevate://…) captured before the main window exists, replayed
-// once startup finishes. macOS can fire open-url before app.whenReady().
-let pendingDeepLink = null;
 
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
@@ -202,6 +200,11 @@ const installer = createInstallerController({
   spawn,
   startPath: START_PATH,
 });
+const deepLinks = createDeepLinks({
+  app,
+  mainWindow: () => mainWindow,
+  openLoginWindow,
+});
 
 app.setName("Elevate");
 
@@ -226,7 +229,7 @@ if (!isPrimaryInstance) {
     const deepLink = argv.find(
       (a) => typeof a === "string" && a.startsWith("elevate://"),
     );
-    if (deepLink) handleDeepLink(deepLink);
+    if (deepLink) deepLinks.handleDeepLink(deepLink);
   });
 }
 
@@ -903,36 +906,8 @@ function kickoffUpdates() {
 
 updater.registerIpcHandlers();
 
-// Register the elevate:// scheme so the web auth flow (a password reset
-// completed in the browser) can bounce the user back into the app. The reset
-// success page links to elevate://signin; macOS fires `open-url` on the running
-// instance, and we just focus the dashboard (which shows the in-app login).
-app.setAsDefaultProtocolClient("elevate");
-
-// Bounce the user back into the app after a browser auth flow (e.g. a password
-// reset completing on the HQ site links to elevate://signin). If the window
-// isn't up yet (cold start triggered by the link itself), stash the URL and
-// replay it once startDesktop() has created the window.
-function handleDeepLink(url) {
-  if (!url) return;
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    pendingDeepLink = url;
-    return;
-  }
-  // steal:true brings Elevate to the foreground over the browser the user
-  // clicked the link from — window.focus() alone won't activate a backgrounded
-  // macOS app.
-  app.focus({ steal: true });
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-  openLoginWindow();
-}
-
-app.on("open-url", (event, url) => {
-  event.preventDefault();
-  handleDeepLink(url);
-});
+deepLinks.registerProtocolClient();
+deepLinks.registerOpenUrl();
 
 function startSmsOutboxWatcher() {
   smsOutbox.startSmsOutboxWatcher();
@@ -960,13 +935,7 @@ app.whenReady().then(async () => {
   await startDesktop();
   startSmsOutboxWatcher();
   kickoffUpdates();
-  // A deep link that launched the app fires open-url before the window exists;
-  // replay it now that startDesktop() has created mainWindow.
-  if (pendingDeepLink) {
-    const url = pendingDeepLink;
-    pendingDeepLink = null;
-    handleDeepLink(url);
-  }
+  deepLinks.replayPending();
 });
 
 app.on("activate", () => {
