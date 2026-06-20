@@ -1231,6 +1231,7 @@ from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes.files import create_files_router
 from elevate_cli.web_routes.license import create_license_router
+from elevate_cli.web_routes.logs import create_logs_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
 from elevate_cli.web_routes.today import create_today_router
 
@@ -4031,69 +4032,6 @@ async def delete_session_endpoint(session_id: str):
         db.close()
 
 
-# ---------------------------------------------------------------------------
-# Log viewer endpoint
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/logs")
-async def get_logs(
-    file: str = "agent",
-    lines: int = 100,
-    level: Optional[str] = None,
-    component: Optional[str] = None,
-    search: Optional[str] = None,
-):
-    from elevate_cli.logs import _read_tail, LOG_FILES
-
-    log_name = LOG_FILES.get(file)
-    if not log_name:
-        raise HTTPException(status_code=400, detail=f"Unknown log file: {file}")
-    log_path = get_elevate_home() / "logs" / log_name
-    if not log_path.exists():
-        return {"file": file, "lines": []}
-
-    try:
-        from elevate_logging import COMPONENT_PREFIXES
-    except ImportError:
-        COMPONENT_PREFIXES = {}
-
-    # Normalize "ALL" / "all" / empty → no filter. _matches_filters treats an
-    # empty tuple as "must match a prefix" (startswith(()) is always False),
-    # so passing () instead of None silently drops every line.
-    min_level = level if level and level.upper() != "ALL" else None
-    if component and component.lower() != "all":
-        comp_prefixes = COMPONENT_PREFIXES.get(component)
-        if comp_prefixes is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown component: {component}. "
-                       f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}",
-            )
-    else:
-        comp_prefixes = None
-
-    has_filters = bool(min_level or comp_prefixes or search)
-    result = _read_tail(
-        log_path, min(lines, 500) if not search else 2000,
-        has_filters=has_filters,
-        min_level=min_level,
-        component_prefixes=comp_prefixes,
-    )
-    # Post-filter by search term (case-insensitive substring match).
-    # _read_tail doesn't support free-text search, so we filter here and
-    # trim to the requested line count afterward.
-    if search:
-        needle = search.lower()
-        result = [l for l in result if needle in l.lower()][-min(lines, 500):]
-    return {"file": file, "lines": result}
-
-
-# ---------------------------------------------------------------------------
-# Cron job management endpoints
-# ---------------------------------------------------------------------------
-
-
 class SourceConnectorAction(BaseModel):
     action: str
     sourceId: str
@@ -4119,6 +4057,8 @@ app.include_router(create_cron_router(log=_log))
 app.include_router(create_license_router(require_token=_require_token))
 
 app.include_router(create_files_router(project_root=PROJECT_ROOT, log=_log))
+
+app.include_router(create_logs_router())
 
 app.include_router(
     create_config_router(
