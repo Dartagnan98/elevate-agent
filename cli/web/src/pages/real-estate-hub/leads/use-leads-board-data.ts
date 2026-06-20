@@ -1,0 +1,230 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import { api } from "@/lib/api";
+import type {
+  OutreachTemplate,
+  SourceInboxProfileStatus,
+  SourceInboxResponse,
+  SourceInboxSentItem,
+} from "@/lib/api-types";
+import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "./leads-data";
+import {
+  computeLeadsKpis,
+  mapLeadsDrafts,
+  mapLeadsPipeline,
+  mapLeadsProfiles,
+  mapLeadsSent,
+  mapLeadsSources,
+  mapLeadsTemplates,
+} from "./compute-leads-data";
+
+export function sourceInboxDebugNote(inbox: SourceInboxResponse | null): string | null {
+  const debug = inbox?.debug;
+  if (!debug) return null;
+
+  const { counts } = debug;
+  const total =
+    counts.profiles +
+    counts.threads +
+    counts.drafts +
+    counts.skippedDrafts +
+    counts.privateSearchBuyers;
+  if (!debug.fallback && total > 0) return null;
+
+  const note = `Source inbox read: ${debug.readPath} | ${counts.threads} threads | ${counts.drafts} drafts | ${counts.profiles} profiles | ${counts.skippedDrafts} skipped | ${counts.privateSearchBuyers} private buyers`;
+  if (!debug.fallback) return note;
+  return debug.fallbackError ? `${note} | fallback: ${debug.fallbackError}` : `${note} | fallback`;
+}
+
+export function sourceInboxProfileStatusForLabel(label: string): SourceInboxProfileStatus | null | undefined {
+  const key = label.trim().toLowerCase();
+  if (key === "no status") return null;
+  if (key === "new lead") return "new_lead";
+  if (key === "follow up") return "follow_up";
+  if (key === "ghosting") return "ghosting";
+  if (key === "dead") return "dead";
+  if (key === "closed seller") return "closed_seller";
+  if (key === "closed buyer") return "closed_buyer";
+  return undefined;
+}
+
+export function useLeadsBoardData() {
+  const data = useRealEstateHubData();
+  const inbox = data.sourceInbox;
+  const setSourceInbox = data.setSourceInbox;
+  const [templatesRaw, setTemplatesRaw] = useState<OutreachTemplate[] | null>(null);
+  const [sentRaw, setSentRaw] = useState<SourceInboxSentItem[] | null>(null);
+
+  const refreshTemplates = useCallback(async () => {
+    const res = await api.getOutreachTemplates();
+    setTemplatesRaw(res.templates ?? []);
+  }, []);
+
+  const refreshSent = useCallback(async (includePending = false) => {
+    const res = await api.getSourceInboxSent(100, includePending);
+    setSentRaw(res.items ?? []);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getOutreachTemplates()
+      .then((res) => {
+        if (!cancelled) setTemplatesRaw(res.templates ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setTemplatesRaw([]);
+      });
+    api
+      .getSourceInboxSent(100)
+      .then((res) => {
+        if (!cancelled) setSentRaw(res.items ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSentRaw([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const templateMutations = useMemo(
+    () => ({
+      onCreate: async (laneId: string, name: string, body: string) => {
+        await api.createOutreachTemplate({ lane: laneId, name, body });
+        await refreshTemplates();
+      },
+      onSave: async (id: string, name: string, body: string) => {
+        await api.updateOutreachTemplate(id, { name, body });
+        await refreshTemplates();
+      },
+      onTogglePause: async (id: string, active: boolean) => {
+        await api.updateOutreachTemplate(id, { active });
+        await refreshTemplates();
+      },
+      onDelete: async (id: string) => {
+        await api.deleteOutreachTemplate(id);
+        await refreshTemplates();
+      },
+      onSuggest: async (laneId: string) => {
+        const res = await api.suggestOutreachTemplate({ lane: laneId });
+        await refreshTemplates();
+        return { name: res.template.name, body: res.template.body };
+      },
+    }),
+    [refreshTemplates],
+  );
+
+  const sources = useMemo(
+    () =>
+      inbox ? mapLeadsSources(inbox.sources ?? [], inbox.drafts ?? [], inbox.threads ?? []) : undefined,
+    [inbox],
+  );
+  const drafts = useMemo(
+    () => (inbox ? mapLeadsDrafts(inbox.drafts ?? []) : undefined),
+    [inbox],
+  );
+  const profiles = useMemo(
+    () => (inbox ? mapLeadsProfiles(inbox.profiles ?? []) : undefined),
+    [inbox],
+  );
+  const pipeline = useMemo(
+    () =>
+      inbox
+        ? mapLeadsPipeline(
+            inbox.drafts ?? [],
+            inbox.skippedDrafts ?? [],
+            inbox.privateSearchBuyers ?? [],
+            inbox.leadSections,
+            inbox.profiles ?? [],
+            inbox.threads ?? [],
+          )
+        : undefined,
+    [inbox],
+  );
+  const kpis = useMemo(
+    () => (inbox ? computeLeadsKpis(inbox.drafts ?? [], inbox.profiles ?? []) : undefined),
+    [inbox],
+  );
+  const templates = useMemo(
+    () => (templatesRaw ? mapLeadsTemplates(templatesRaw) : undefined),
+    [templatesRaw],
+  );
+  const sent = useMemo(
+    () => (sentRaw ? mapLeadsSent(sentRaw) : undefined),
+    [sentRaw],
+  );
+
+  const handleToggleDirection = useCallback(
+    async (dir: "inbound" | "outbound", value: boolean) => {
+      try {
+        await api.setAppleMessagesDirections({ [dir]: value });
+        await data.refresh({ force: true });
+      } catch (err) {
+        console.error("apple messages direction toggle failed", err);
+        throw err;
+      }
+    },
+    [data],
+  );
+
+  const handleDraftAction = useCallback(
+    async (action: LeadsDraftAction, draft: LeadsDraft) => {
+      if (!draft.sourceId || !draft.taskId) throw new Error("Draft is missing source/task identifiers.");
+      try {
+        const res = await api.updateSourceInboxDraft(
+          draft.sourceId, draft.taskId, action, draft.body ?? "",
+        );
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("draft action failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
+  const handleProfileFavoriteChange = useCallback(
+    async (profile: LeadsProfile, favorite: boolean) => {
+      try {
+        const res = await api.updateSourceInboxProfileFavorite(profile.id, favorite, {
+          contactId: profile.contactIds?.[0] ?? null,
+        });
+        setSourceInbox(res);
+      } catch (err) {
+        console.error("favorite toggle failed", err);
+        throw err;
+      }
+    },
+    [setSourceInbox],
+  );
+
+  const handleProfileStatusChange = useCallback(
+    async (profile: LeadsProfile, label: string) => {
+      const status = sourceInboxProfileStatusForLabel(label);
+      if (status === undefined) throw new Error(`Unsupported lead status: ${label}`);
+      const res = await api.updateSourceInboxProfile(profile.id, status);
+      setSourceInbox(res);
+    },
+    [setSourceInbox],
+  );
+
+  return {
+    data,
+    inbox,
+    sources,
+    drafts,
+    profiles,
+    pipeline,
+    kpis,
+    templates,
+    sent,
+    debugNote: sourceInboxDebugNote(inbox),
+    handleDraftAction,
+    handleProfileFavoriteChange,
+    handleProfileStatusChange,
+    handleToggleDirection,
+    refreshSent,
+    templateMutations,
+  };
+}
