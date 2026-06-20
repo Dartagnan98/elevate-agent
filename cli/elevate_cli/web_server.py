@@ -85,18 +85,14 @@ def _is_packaged_desktop_runtime() -> bool:
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
     DEFAULT_CONFIG,
-    get_config_path,
-    get_env_path,
     get_elevate_home,
     get_env_value,
     load_config,
     load_env,
     save_config,
     save_env_value,
-    check_config_version,
 )
 from elevate_cli.data.deals import DealPhaseGateBlocked
-from gateway.status import get_running_pid, read_runtime_status
 
 try:
     from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -1032,172 +1028,6 @@ def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
     return synced
 
 
-_GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
-try:
-    _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "3"))
-except (ValueError, TypeError):
-    _log.warning(
-        "Invalid GATEWAY_HEALTH_TIMEOUT value %r — using default 3.0s",
-        os.getenv("GATEWAY_HEALTH_TIMEOUT"),
-    )
-    _GATEWAY_HEALTH_TIMEOUT = 3.0
-
-
-def _probe_gateway_health() -> tuple[bool, dict | None]:
-    """Probe the gateway via its HTTP health endpoint (cross-container).
-
-    Uses ``/health/detailed`` first (returns full state), falling back to
-    the simpler ``/health`` endpoint.  Returns ``(is_alive, body_dict)``.
-
-    Accepts any of these as ``GATEWAY_HEALTH_URL``:
-    - ``http://gateway:8642``                (base URL — recommended)
-    - ``http://gateway:8642/health``         (explicit health path)
-    - ``http://gateway:8642/health/detailed`` (explicit detailed path)
-
-    This is a **blocking** call — run via ``run_in_executor`` from async code.
-    """
-    if not _GATEWAY_HEALTH_URL:
-        return False, None
-
-    # Normalise to base URL so we always probe the right paths regardless of
-    # whether the user included /health or /health/detailed in the env var.
-    base = _GATEWAY_HEALTH_URL.rstrip("/")
-    if base.endswith("/health/detailed"):
-        base = base[: -len("/health/detailed")]
-    elif base.endswith("/health"):
-        base = base[: -len("/health")]
-
-    for path in (f"{base}/health/detailed", f"{base}/health"):
-        try:
-            req = urllib.request.Request(path, method="GET")
-            with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
-                if resp.status == 200:
-                    body = json.loads(resp.read())
-                    return True, body
-        except Exception:
-            continue
-    return False, None
-
-
-@app.get("/api/status")
-async def get_status():
-    cached = _cached_status_payload()
-    if cached is not None:
-        return cached
-
-    current_ver, latest_ver = check_config_version()
-
-    # --- Gateway liveness detection ---
-    # Try local PID check first (same-host).  If that fails and a remote
-    # GATEWAY_HEALTH_URL is configured, probe the gateway over HTTP so the
-    # dashboard works when the gateway runs in a separate container.
-    gateway_pid = get_running_pid()
-    gateway_running = gateway_pid is not None
-    remote_health_body: dict | None = None
-
-    if not gateway_running and _GATEWAY_HEALTH_URL:
-        loop = asyncio.get_event_loop()
-        alive, remote_health_body = await loop.run_in_executor(
-            None, _probe_gateway_health
-        )
-        if alive:
-            gateway_running = True
-            # PID from the remote container (display only — not locally valid)
-            if remote_health_body:
-                gateway_pid = remote_health_body.get("pid")
-
-    gateway_state = None
-    gateway_platforms: dict = {}
-    gateway_exit_reason = None
-    gateway_updated_at = None
-    configured_gateway_platforms: set[str] | None = None
-    try:
-        from gateway.config import load_gateway_config
-
-        gateway_config = load_gateway_config()
-        configured_gateway_platforms = {
-            platform.value for platform in gateway_config.get_connected_platforms()
-        }
-    except Exception:
-        configured_gateway_platforms = None
-
-    # Prefer the detailed health endpoint response (has full state) when the
-    # local runtime status file is absent or stale (cross-container).
-    runtime = read_runtime_status()
-    if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
-        runtime = remote_health_body
-
-    if runtime:
-        gateway_state = runtime.get("gateway_state")
-        gateway_platforms = runtime.get("platforms") or {}
-        if configured_gateway_platforms is not None:
-            gateway_platforms = {
-                key: value
-                for key, value in gateway_platforms.items()
-                if key in configured_gateway_platforms
-            }
-        gateway_exit_reason = runtime.get("exit_reason")
-        gateway_updated_at = runtime.get("updated_at")
-        if not gateway_running:
-            gateway_state = gateway_state if gateway_state in ("stopped", "startup_failed") else "stopped"
-            gateway_platforms = {}
-        elif gateway_running and remote_health_body is not None:
-            # The health probe confirmed the gateway is alive, but the local
-            # runtime status file may be stale (cross-container).  Override
-            # stopped/None state so the dashboard shows the correct badge.
-            if gateway_state in (None, "stopped"):
-                gateway_state = "running"
-
-    # If there was no runtime info at all but the health probe confirmed alive,
-    # ensure we still report the gateway as running (no shared volume scenario).
-    if gateway_running and gateway_state is None and remote_health_body is not None:
-        gateway_state = "running"
-
-    active_sessions = 0
-    try:
-        from elevate_cli.data.chat_sessions import active_session_count
-
-        active_sessions = active_session_count(_SESSION_ACTIVE_WINDOW_SEC)
-    except Exception:
-        try:
-            from elevate_state import SessionDB
-            db = _get_session_db()
-            try:
-                sessions = db.list_sessions_rich(limit=50)
-                now = time.time()
-                active_sessions = sum(
-                    1 for s in sessions
-                    if s.get("ended_at") is None
-                    and (now - s.get("last_active", s.get("started_at", 0)))
-                    < _SESSION_ACTIVE_WINDOW_SEC
-                )
-            finally:
-                db.close()
-        except Exception:
-            pass
-
-    payload = {
-        "version": __version__,
-        "release_date": __release_date__,
-        "project_root": str(WORKSPACE_ROOT),
-        "elevate_home": str(get_elevate_home()),
-        "config_path": str(get_config_path()),
-        "env_path": str(get_env_path()),
-        "config_version": current_ver,
-        "latest_config_version": latest_ver,
-        "gateway_running": gateway_running,
-        "gateway_pid": gateway_pid,
-        "gateway_health_url": _GATEWAY_HEALTH_URL,
-        "gateway_state": gateway_state,
-        "gateway_platforms": gateway_platforms,
-        "gateway_exit_reason": gateway_exit_reason,
-        "gateway_updated_at": gateway_updated_at,
-        "active_sessions": active_sessions,
-    }
-    _store_status_payload(payload)
-    return payload
-
-
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.analytics import create_analytics_router
@@ -1209,6 +1039,7 @@ from elevate_cli.web_routes.files import create_files_router
 from elevate_cli.web_routes.license import create_license_router
 from elevate_cli.web_routes.logs import create_logs_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
+from elevate_cli.web_routes.status import create_status_router
 from elevate_cli.web_routes.today import create_today_router
 from elevate_cli.web_routes.workspace import create_workspace_router, git_value as _git_value
 
@@ -1320,7 +1151,6 @@ def _open_in_file_manager(path: Path) -> None:
 # landed within this many seconds. The spinner means genuinely working right
 # now, not recently-touched — so this stays tight. 300s made idle chats spin.
 _SESSION_ACTIVE_WINDOW_SEC = 25
-_STATUS_CACHE_TTL_SEC = 1.5
 
 
 def _gateway_session_run_states() -> tuple[set[str], set[str]]:
@@ -1403,9 +1233,6 @@ def _mark_session_activity(sessions: list[dict[str, Any]], now: float) -> None:
                 and (now - s.get("last_active", s.get("started_at", 0)))
                 < _SESSION_ACTIVE_WINDOW_SEC
             )
-_status_cache_payload: dict[str, Any] | None = None
-_status_cache_expires_at = 0.0
-_status_cache_lock = threading.Lock()
 
 
 _SESSION_LIST_FIELDS = (
@@ -1436,25 +1263,6 @@ _SESSION_LIST_FIELDS = (
 def _session_list_payload(session: dict[str, Any]) -> dict[str, Any]:
     """Return only fields needed by dashboard session lists."""
     return {key: session.get(key) for key in _SESSION_LIST_FIELDS if key in session}
-
-
-def _cached_status_payload() -> dict[str, Any] | None:
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return None
-    now = time.monotonic()
-    with _status_cache_lock:
-        if _status_cache_payload is None or _status_cache_expires_at <= now:
-            return None
-        return dict(_status_cache_payload)
-
-
-def _store_status_payload(payload: dict[str, Any]) -> None:
-    global _status_cache_payload, _status_cache_expires_at
-    if os.environ.get("PYTEST_CURRENT_TEST"):
-        return
-    with _status_cache_lock:
-        _status_cache_payload = dict(payload)
-        _status_cache_expires_at = time.monotonic() + _STATUS_CACHE_TTL_SEC
 
 
 def _platform_chat_sources() -> list[str]:
@@ -3160,6 +2968,15 @@ class IntegrationSettingsUpdate(BaseModel):
 
 
 app.include_router(create_cron_router(log=_log))
+
+app.include_router(
+    create_status_router(
+        workspace_root=WORKSPACE_ROOT,
+        get_session_db=_get_session_db,
+        session_active_window_sec=_SESSION_ACTIVE_WINDOW_SEC,
+        log=_log,
+    )
+)
 
 app.include_router(create_license_router(require_token=_require_token))
 
