@@ -88,7 +88,11 @@ def _load_social_fetcher(module_name: str):
     return mod
 
 
-def create_social_router(*, log: logging.Logger | None = None) -> APIRouter:
+def create_social_router(
+    *,
+    load_social_fetcher_func=_load_social_fetcher,
+    log: logging.Logger | None = None,
+) -> APIRouter:
     """Build social content engine routes."""
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
@@ -232,7 +236,7 @@ def create_social_router(*, log: logging.Logger | None = None) -> APIRouter:
 
         def _run_one(p: str) -> dict:
             try:
-                mod = _load_social_fetcher(module_map[p])
+                mod = load_social_fetcher_func(module_map[p])
                 return mod.fetch(lookback_days=lookback_days, max_posts=max_posts)
             except Exception as exc:
                 _log.exception("social refresh %s failed", p)

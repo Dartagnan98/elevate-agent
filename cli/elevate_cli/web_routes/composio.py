@@ -113,7 +113,11 @@ def _prewarm_composio_toolkits_in_background(log: logging.Logger) -> None:
     threading.Thread(target=_warm, daemon=True, name="composio-prewarm").start()
 
 
-def create_composio_router(*, log: logging.Logger | None = None) -> APIRouter:
+def create_composio_router(
+    *,
+    prewarm_composio_toolkits_func=_prewarm_composio_toolkits_in_background,
+    log: logging.Logger | None = None,
+) -> APIRouter:
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
 
@@ -130,7 +134,7 @@ def create_composio_router(*, log: logging.Logger | None = None) -> APIRouter:
                 _log,
             )
             if isinstance(result, dict) and result.get("valid"):
-                _prewarm_composio_toolkits_in_background(_log)
+                prewarm_composio_toolkits_func(_log)
             return result
         except Exception as exc:
             _log.exception("GET /api/composio/status failed")

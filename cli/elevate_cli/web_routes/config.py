@@ -32,69 +32,82 @@ class RawConfigUpdate(BaseModel):
     yaml_text: str
 
 
+def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
+    config = dict(config)
+    model_val = config.get("model")
+    if isinstance(model_val, dict):
+        ctx_len = model_val.get("context_length", 0)
+        config["model"] = model_val.get("default", model_val.get("name", ""))
+        config["model_context_length"] = ctx_len if isinstance(ctx_len, int) else 0
+    else:
+        config["model_context_length"] = 0
+    return config
+
+
+def _denormalize_config_from_web(
+    config: Dict[str, Any],
+    *,
+    load_config_func=load_config,
+) -> Dict[str, Any]:
+    config = dict(config)
+    config.pop("_model_meta", None)
+
+    ctx_override = config.pop("model_context_length", 0)
+    if not isinstance(ctx_override, int):
+        try:
+            ctx_override = int(ctx_override)
+        except (TypeError, ValueError):
+            ctx_override = 0
+
+    model_val = config.get("model")
+    if isinstance(model_val, str) and model_val:
+        try:
+            disk_config = load_config_func()
+            disk_model = disk_config.get("model")
+            if isinstance(disk_model, dict):
+                disk_model["default"] = model_val
+                if ctx_override > 0:
+                    disk_model["context_length"] = ctx_override
+                else:
+                    disk_model.pop("context_length", None)
+                config["model"] = disk_model
+            elif ctx_override > 0:
+                config["model"] = {
+                    "default": model_val,
+                    "context_length": ctx_override,
+                }
+        except Exception:
+            pass
+    return config
+
+
 def create_config_router(
     *,
     default_config: Dict[str, Any],
     config_schema: Dict[str, Dict[str, Any]],
     category_order: list[str],
+    load_config_func=load_config,
+    save_config_func=save_config,
     log: logging.Logger | None = None,
 ) -> APIRouter:
     """Build routes for config, schema, and model metadata."""
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
 
-    def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
-        config = dict(config)
-        model_val = config.get("model")
-        if isinstance(model_val, dict):
-            ctx_len = model_val.get("context_length", 0)
-            config["model"] = model_val.get("default", model_val.get("name", ""))
-            config["model_context_length"] = ctx_len if isinstance(ctx_len, int) else 0
-        else:
-            config["model_context_length"] = 0
-        return config
-
-    def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
-        config = dict(config)
-        config.pop("_model_meta", None)
-
-        ctx_override = config.pop("model_context_length", 0)
-        if not isinstance(ctx_override, int):
-            try:
-                ctx_override = int(ctx_override)
-            except (TypeError, ValueError):
-                ctx_override = 0
-
-        model_val = config.get("model")
-        if isinstance(model_val, str) and model_val:
-            try:
-                disk_config = load_config()
-                disk_model = disk_config.get("model")
-                if isinstance(disk_model, dict):
-                    disk_model["default"] = model_val
-                    if ctx_override > 0:
-                        disk_model["context_length"] = ctx_override
-                    else:
-                        disk_model.pop("context_length", None)
-                    config["model"] = disk_model
-                elif ctx_override > 0:
-                    config["model"] = {
-                        "default": model_val,
-                        "context_length": ctx_override,
-                    }
-            except Exception:
-                pass
-        return config
-
     @router.get("/api/config")
     async def get_config():
-        config = _normalize_config_for_web(load_config())
+        config = _normalize_config_for_web(load_config_func())
         return {k: v for k, v in config.items() if not k.startswith("_")}
 
     @router.put("/api/config")
     async def update_config(body: ConfigUpdate):
         try:
-            save_config(_denormalize_config_from_web(body.config))
+            save_config_func(
+                _denormalize_config_from_web(
+                    body.config,
+                    load_config_func=load_config_func,
+                )
+            )
             return {"ok": True}
         except Exception:
             _log.exception("PUT /api/config failed")
@@ -112,7 +125,7 @@ def create_config_router(
     def get_model_info():
         """Return resolved model metadata for the currently configured model."""
         try:
-            cfg = load_config()
+            cfg = load_config_func()
             model_cfg = cfg.get("model", "")
 
             if isinstance(model_cfg, dict):
@@ -249,7 +262,7 @@ def create_config_router(
             parsed = yaml.safe_load(body.yaml_text)
             if not isinstance(parsed, dict):
                 raise HTTPException(status_code=400, detail="YAML must be a mapping")
-            save_config(parsed)
+            save_config_func(parsed)
             return {"ok": True}
         except yaml.YAMLError as e:
             raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")

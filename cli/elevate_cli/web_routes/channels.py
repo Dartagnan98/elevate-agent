@@ -23,6 +23,12 @@ TelegramTokenValidator = Callable[[Any], bool]
 TelegramAliasSync = Callable[[str, str], list[str]]
 
 
+def _elevate_repo_root() -> Path:
+    """Locate the repo root that holds ``scripts/whatsapp-bridge``."""
+    # channels.py lives at <repo>/cli/elevate_cli/web_routes/channels.py
+    return Path(__file__).resolve().parents[2]
+
+
 def create_channels_router(
     *,
     log: logging.Logger | None = None,
@@ -30,6 +36,7 @@ def create_channels_router(
     spawn_elevate_action: SpawnElevateAction,
     looks_like_telegram_bot_token: TelegramTokenValidator,
     sync_executive_telegram_aliases: TelegramAliasSync,
+    elevate_repo_root_func: Callable[[], Path] = _elevate_repo_root,
 ) -> APIRouter:
     """Build routes for gateway controls and messaging channel setup."""
     router = APIRouter()
@@ -44,11 +51,6 @@ def create_channels_router(
         if len(s) <= 4:
             return "•" * len(s)
         return "•" * (len(s) - 4) + s[-4:]
-
-    def _elevate_repo_root() -> Path:
-        """Locate the repo root that holds ``scripts/whatsapp-bridge``."""
-        # channels.py lives at <repo>/cli/elevate_cli/web_routes/channels.py
-        return Path(__file__).resolve().parents[2]
 
     def _whatsapp_enabled() -> bool:
         env_value = (get_env_value("WHATSAPP_ENABLED") or "").strip().lower()
@@ -452,7 +454,7 @@ def create_channels_router(
         if allowed:
             save_env_value("WHATSAPP_ALLOWED_USERS", allowed.replace(" ", ""))
 
-        bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+        bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         has_node_modules = (bridge_dir / "node_modules").exists()
         bridge_present = (bridge_dir / "bridge.js").exists()
         session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
@@ -472,7 +474,7 @@ def create_channels_router(
     async def install_whatsapp_bridge(request: Request):
         """Run ``npm install`` inside the WhatsApp bridge directory."""
         require_token(request)
-        bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+        bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         if not (bridge_dir / "bridge.js").exists():
             raise HTTPException(status_code=404, detail=f"bridge.js not found at {bridge_dir}")
 
@@ -509,7 +511,7 @@ def create_channels_router(
     @router.get("/api/channels/whatsapp/status")
     async def whatsapp_status():
         """Lightweight status: is bridge installed, has session been paired."""
-        bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+        bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
         return {
             "bridgePresent": (bridge_dir / "bridge.js").exists(),
@@ -524,7 +526,7 @@ def create_channels_router(
     async def whatsapp_pair_stream(request: Request):
         """Server-Sent Events stream of WhatsApp pairing progress."""
         require_token(request)
-        bridge_dir = _elevate_repo_root() / "scripts" / "whatsapp-bridge"
+        bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         bridge_script = bridge_dir / "bridge.js"
         if not bridge_script.exists():
             raise HTTPException(status_code=404, detail="bridge.js not found")

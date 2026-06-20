@@ -82,6 +82,7 @@ def _is_packaged_desktop_runtime() -> bool:
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
     DEFAULT_CONFIG,
+    check_config_version,
     get_elevate_home,
     get_env_value,
     load_config,
@@ -89,6 +90,7 @@ from elevate_cli.config import (
     save_config,
     save_env_value,
 )
+from gateway.status import get_running_pid, read_runtime_status
 try:
     from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
@@ -275,6 +277,40 @@ _LOG_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``elevate dashboard --tui``
 # or ELEVATE_DASHBOARD_TUI=1.  Set from :func:`start_server`.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
+
+
+_GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
+try:
+    _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "3"))
+except (ValueError, TypeError):
+    _log.warning(
+        "Invalid GATEWAY_HEALTH_TIMEOUT value %r - using default 3.0s",
+        os.getenv("GATEWAY_HEALTH_TIMEOUT"),
+    )
+    _GATEWAY_HEALTH_TIMEOUT = 3.0
+
+
+def _probe_gateway_health() -> tuple[bool, dict | None]:
+    """Probe the gateway via its HTTP health endpoint."""
+    if not _GATEWAY_HEALTH_URL:
+        return False, None
+
+    base = _GATEWAY_HEALTH_URL.rstrip("/")
+    if base.endswith("/health/detailed"):
+        base = base[: -len("/health/detailed")]
+    elif base.endswith("/health"):
+        base = base[: -len("/health")]
+
+    for path in (f"{base}/health/detailed", f"{base}/health"):
+        try:
+            req = urllib.request.Request(path, method="GET")
+            with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
+                if resp.status == 200:
+                    body = json.loads(resp.read())
+                    return True, body
+        except Exception:
+            continue
+    return False, None
 
 
 # ---------------------------------------------------------------------------
@@ -1039,17 +1075,28 @@ from elevate_cli.web_routes.admin_setup import (
 )
 from elevate_cli.web_routes.admin_templates import create_admin_templates_router
 from elevate_cli.web_routes.ayrshare import create_ayrshare_router
-from elevate_cli.web_routes.channels import create_channels_router
+from elevate_cli.web_routes.channels import _elevate_repo_root, create_channels_router
 from elevate_cli.web_routes.chat_websockets import (
     create_chat_websocket_router,
     default_resolve_chat_argv,
 )
-from elevate_cli.web_routes.composio import create_composio_router
-from elevate_cli.web_routes.config import create_config_router
+from elevate_cli.web_routes.composio import (
+    _COMPOSIO_SWR,
+    _COMPOSIO_SWR_LOCK,
+    _COMPOSIO_TOOLKITS_CACHE,
+    _prewarm_composio_toolkits_in_background,
+    create_composio_router,
+)
+from elevate_cli.web_routes.config import (
+    _denormalize_config_from_web,
+    _normalize_config_for_web,
+    create_config_router,
+)
 from elevate_cli.web_routes.cron import create_cron_router
+from elevate_cli.web_routes import dashboard as _dashboard_routes
 from elevate_cli.web_routes.dashboard import create_dashboard_router, mount_dashboard_plugin_api_routes
 from elevate_cli.web_routes.env import create_env_router
-from elevate_cli.web_routes.files import create_files_router
+from elevate_cli.web_routes.files import _UPLOAD_MAX_PER_FILE, create_files_router
 from elevate_cli.web_routes.heartbeats import create_heartbeats_router
 from elevate_cli.web_routes.integrations import create_integrations_router
 from elevate_cli.web_routes.lanes import create_lanes_router
@@ -1060,7 +1107,7 @@ from elevate_cli.web_routes.outreach_templates import create_outreach_templates_
 from elevate_cli.web_routes.session_details import create_session_detail_router
 from elevate_cli.web_routes.sessions import create_sessions_router
 from elevate_cli.web_routes.skills import create_skills_router
-from elevate_cli.web_routes.social import create_social_router
+from elevate_cli.web_routes.social import _load_social_fetcher, create_social_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
 from elevate_cli.web_routes.status import create_status_router
 from elevate_cli.web_routes.surface_tasks import create_surface_tasks_router
@@ -1069,6 +1116,22 @@ from elevate_cli.web_routes.today import create_today_router
 from elevate_cli.web_routes.workspace import create_workspace_router, git_value as _git_value
 from elevate_cli.web_spa import mount_spa as _mount_spa
 from elevate_cli.pty_bridge import PtyBridge, PtyUnavailableError
+
+_normalise_theme_definition = _dashboard_routes._normalise_theme_definition
+_discover_user_themes = _dashboard_routes._discover_user_themes
+_dashboard_plugins_cache = None
+
+
+def _get_dashboard_plugins(force_rescan: bool = False) -> list:
+    global _dashboard_plugins_cache
+    _dashboard_routes._dashboard_plugins_cache = _dashboard_plugins_cache
+    plugins = _dashboard_routes._get_dashboard_plugins(
+        PROJECT_ROOT,
+        _log,
+        force_rescan=force_rescan,
+    )
+    _dashboard_plugins_cache = _dashboard_routes._dashboard_plugins_cache
+    return plugins
 
 # ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page).
@@ -1339,13 +1402,25 @@ app.include_router(
         workspace_root=WORKSPACE_ROOT,
         get_session_db=_get_session_db,
         session_active_window_sec=_SESSION_ACTIVE_WINDOW_SEC,
+        check_config_version_func=lambda: check_config_version(),
+        get_running_pid_func=lambda: get_running_pid(),
+        read_runtime_status_func=lambda: read_runtime_status(),
+        gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
+        probe_gateway_health_func=lambda: _probe_gateway_health(),
         log=_log,
     )
 )
 
 app.include_router(create_license_router(require_token=_require_token))
 
-app.include_router(create_files_router(project_root=PROJECT_ROOT, log=_log))
+app.include_router(
+    create_files_router(
+        project_root=PROJECT_ROOT,
+        get_elevate_home_func=lambda: get_elevate_home(),
+        upload_max_per_file_func=lambda: _UPLOAD_MAX_PER_FILE,
+        log=_log,
+    )
+)
 
 app.include_router(create_logs_router())
 
@@ -1403,6 +1478,8 @@ app.include_router(
         default_config=DEFAULT_CONFIG,
         config_schema=CONFIG_SCHEMA,
         category_order=_CATEGORY_ORDER,
+        load_config_func=lambda: load_config(),
+        save_config_func=lambda config: save_config(config),
         log=_log,
     )
 )
@@ -1428,6 +1505,7 @@ app.include_router(
         spawn_elevate_action=_spawn_elevate_action,
         looks_like_telegram_bot_token=_looks_like_telegram_bot_token,
         sync_executive_telegram_aliases=_sync_executive_telegram_aliases,
+        elevate_repo_root_func=lambda: _elevate_repo_root(),
     )
 )
 
@@ -1435,7 +1513,12 @@ app.include_router(create_source_connectors_router(log=_log))
 
 app.include_router(create_integrations_router(log=_log))
 
-app.include_router(create_composio_router(log=_log))
+app.include_router(
+    create_composio_router(
+        prewarm_composio_toolkits_func=lambda log: _prewarm_composio_toolkits_in_background(log),
+        log=_log,
+    )
+)
 
 app.include_router(create_dashboard_router(project_root=PROJECT_ROOT, log=_log))
 
@@ -1445,7 +1528,12 @@ app.include_router(create_outreach_templates_router(log=_log))
 
 app.include_router(create_skills_router())
 
-app.include_router(create_social_router(log=_log))
+app.include_router(
+    create_social_router(
+        load_social_fetcher_func=lambda module_name: _load_social_fetcher(module_name),
+        log=_log,
+    )
+)
 
 app.include_router(create_surface_tasks_router(log=_log))
 

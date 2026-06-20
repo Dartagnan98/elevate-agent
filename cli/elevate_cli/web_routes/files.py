@@ -50,6 +50,8 @@ _UPLOAD_DIRNAME_SANITIZE = re.compile(r"[^A-Za-z0-9._-]")
 def create_files_router(
     *,
     project_root: Path,
+    get_elevate_home_func=get_elevate_home,
+    upload_max_per_file_func=lambda: _UPLOAD_MAX_PER_FILE,
     log: logging.Logger | None = None,
 ) -> APIRouter:
     """Build routes for file preview and chat uploads."""
@@ -64,7 +66,7 @@ def create_files_router(
             return False
 
     def _preview_roots() -> list[Path]:
-        elevate_home = get_elevate_home()
+        elevate_home = get_elevate_home_func()
         roots = [
             project_root,
             elevate_home / "uploads",
@@ -140,7 +142,7 @@ def create_files_router(
     async def upload_attachment(session_id: str, file: UploadFile = File(...)):
         """Accept a chat attachment and stash it under ~/.elevate/uploads/<sid>/."""
         sid_clean = _sanitize_upload_filename(session_id) or "anon"
-        upload_dir = get_elevate_home() / "uploads" / sid_clean
+        upload_dir = get_elevate_home_func() / "uploads" / sid_clean
         try:
             upload_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -159,7 +161,8 @@ def create_files_router(
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _UPLOAD_MAX_PER_FILE:
+                    upload_max_per_file = upload_max_per_file_func()
+                    if total > upload_max_per_file:
                         handle.close()
                         try:
                             dest.unlink()
@@ -167,7 +170,7 @@ def create_files_router(
                             pass
                         raise HTTPException(
                             status_code=413,
-                            detail=f"File exceeds {_UPLOAD_MAX_PER_FILE // (1024 * 1024)} MB cap",
+                            detail=f"File exceeds {upload_max_per_file // (1024 * 1024)} MB cap",
                         )
                     handle.write(chunk)
         except HTTPException:

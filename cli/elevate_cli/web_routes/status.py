@@ -86,6 +86,11 @@ def create_status_router(
     workspace_root: Path,
     get_session_db: GetSessionDb,
     session_active_window_sec: int,
+    check_config_version_func=check_config_version,
+    get_running_pid_func=get_running_pid,
+    read_runtime_status_func=read_runtime_status,
+    gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
+    probe_gateway_health_func=_probe_gateway_health,
     log: logging.Logger | None = None,
 ) -> APIRouter:
     """Build the dashboard status route."""
@@ -98,16 +103,17 @@ def create_status_router(
         if cached is not None:
             return cached
 
-        current_ver, latest_ver = check_config_version()
+        current_ver, latest_ver = check_config_version_func()
 
-        gateway_pid = get_running_pid()
+        gateway_pid = get_running_pid_func()
         gateway_running = gateway_pid is not None
         remote_health_body: dict | None = None
+        gateway_health_url = gateway_health_url_func()
 
-        if not gateway_running and _GATEWAY_HEALTH_URL:
+        if not gateway_running and gateway_health_url:
             loop = asyncio.get_event_loop()
             alive, remote_health_body = await loop.run_in_executor(
-                None, _probe_gateway_health
+                None, probe_gateway_health_func
             )
             if alive:
                 gateway_running = True
@@ -129,7 +135,7 @@ def create_status_router(
         except Exception:
             configured_gateway_platforms = None
 
-        runtime = read_runtime_status()
+        runtime = read_runtime_status_func()
         if runtime is None and remote_health_body and remote_health_body.get("gateway_state"):
             runtime = remote_health_body
 
@@ -187,7 +193,7 @@ def create_status_router(
             "latest_config_version": latest_ver,
             "gateway_running": gateway_running,
             "gateway_pid": gateway_pid,
-            "gateway_health_url": _GATEWAY_HEALTH_URL,
+            "gateway_health_url": gateway_health_url,
             "gateway_state": gateway_state,
             "gateway_platforms": gateway_platforms,
             "gateway_exit_reason": gateway_exit_reason,
