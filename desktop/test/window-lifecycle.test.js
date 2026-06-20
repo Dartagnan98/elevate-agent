@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const overlayManagerPath = path.resolve(__dirname, "../src/computer-use-overlay.js");
 
 function readMain() {
   return fs.readFileSync(mainPath, "utf8");
@@ -34,11 +35,13 @@ test("activate restores existing window or recreates dashboard after close", () 
 
 test("before-quit tears down overlay watcher and overlay window", () => {
   const main = readMain();
+  const overlay = fs.readFileSync(overlayManagerPath, "utf8");
   const start = main.indexOf('app.on("before-quit"');
   const beforeQuitBlock = main.slice(start);
 
-  assert.match(beforeQuitBlock, /clearInterval\(overlayWatcher\)/);
-  assert.match(beforeQuitBlock, /overlayWatcher = null/);
-  assert.match(beforeQuitBlock, /overlayWindow && !overlayWindow\.isDestroyed\(\)/);
-  assert.match(beforeQuitBlock, /overlayWindow\.destroy\(\)/);
+  assert.match(beforeQuitBlock, /computerUseOverlay\.dispose\(\)/);
+  assert.match(overlay, /clearInterval\(overlayWatcher\)/);
+  assert.match(overlay, /overlayWatcher = null/);
+  assert.match(overlay, /overlayWindow && !overlayWindow\.isDestroyed\(\)/);
+  assert.match(overlay, /overlayWindow\.destroy\(\)/);
 });

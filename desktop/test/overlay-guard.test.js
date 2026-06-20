@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const overlayManagerPath = path.resolve(__dirname, "../src/computer-use-overlay.js");
 const overlayPath = path.resolve(__dirname, "../src/overlay.html");
 
 function read(filePath) {
@@ -11,10 +12,7 @@ function read(filePath) {
 }
 
 test("computer-use overlay window cannot steal focus or clicks", () => {
-  const main = read(mainPath);
-  const start = main.indexOf("function createOverlay()");
-  const end = main.indexOf("function setOverlayVisible", start);
-  const overlayBlock = main.slice(start, end);
+  const overlayBlock = read(overlayManagerPath);
 
   assert.match(overlayBlock, /focusable:\s*false/);
   assert.match(overlayBlock, /skipTaskbar:\s*true/);
@@ -26,15 +24,16 @@ test("computer-use overlay window cannot steal focus or clicks", () => {
 
 test("computer-use overlay is shown inactive and only while flag is fresh", () => {
   const main = read(mainPath);
+  const overlay = read(overlayManagerPath);
 
   assert.match(main, /const COMPUTER_USE_FLAG = path\.join\(HOME, "\.elevate", "computer-use-active"\)/);
   assert.match(main, /const COMPUTER_USE_FRESH_MS = 6000/);
-  assert.match(main, /fresh = Date\.now\(\) - stat\.mtimeMs < COMPUTER_USE_FRESH_MS/);
-  assert.match(main, /setOverlayVisible\(fresh\)/);
-  assert.match(main, /if \(visible\) \{\s*createOverlay\(\);\s*}/s);
-  assert.match(main, /overlayWindow\.showInactive\(\)/);
-  assert.match(main, /overlayWindow\.destroy\(\);\s*overlayWindow = null;/s);
-  assert.doesNotMatch(main, /overlayWindow\.show\(\)/);
+  assert.match(overlay, /fresh = Date\.now\(\) - stat\.mtimeMs < freshMs/);
+  assert.match(overlay, /setOverlayVisible\(fresh\)/);
+  assert.match(overlay, /if \(visible\) \{\s*createOverlay\(\);\s*}/s);
+  assert.match(overlay, /overlayWindow\.showInactive\(\)/);
+  assert.match(overlay, /overlayWindow\.destroy\(\);\s*overlayWindow = null;/s);
+  assert.doesNotMatch(overlay, /overlayWindow\.show\(\)/);
 });
 
 test("computer-use overlay renderer is not created while idle", () => {
