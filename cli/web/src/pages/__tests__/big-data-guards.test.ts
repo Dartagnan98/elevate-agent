@@ -30,12 +30,12 @@ describe("large data page guards", () => {
   });
 
   it("keeps real estate boards bounded on large local datasets", () => {
-    const leads = readPage("real-estate-hub/leads/components/leads-board.tsx");
+    const leadsQueue = readPage("real-estate-hub/leads/components/action-queue.tsx");
     const admin = readPage("real-estate-hub/admin/components/admin-board.tsx");
     const social = readPage("real-estate-hub/social/board.tsx");
 
-    expect(leads).toContain("const PAGE = 5;");
-    expect(leads).toContain("const visible = showAll ? activeList : activeList.slice(safePage * PAGE, safePage * PAGE + PAGE);");
+    expect(leadsQueue).toContain("const PAGE = 5;");
+    expect(leadsQueue).toContain("const visible = showAll ? activeList : activeList.slice(safePage * PAGE, safePage * PAGE + PAGE);");
     expect(admin).toContain("const PAGE = 3;");
     expect(admin).toContain("return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);");
     expect(admin).toContain("const visible = showAll ? filtered : filtered.slice(safePage * PAGE, safePage * PAGE + PAGE);");
