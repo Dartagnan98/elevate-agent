@@ -9,7 +9,6 @@ const {
   screen,
 } = require("electron");
 const { execFileSync, spawn, spawnSync } = require("child_process");
-const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -23,6 +22,7 @@ const {
 } = require("./permission-guard");
 const backendHttp = require("./backend-http");
 const dashboardBundle = require("./dashboard-bundle");
+const { createDesktopAuth } = require("./desktop-auth");
 const desktopMenu = require("./menu");
 const startupLog = require("./startup-log");
 
@@ -76,6 +76,12 @@ const DEFAULT_PATH = [
   "/usr/sbin",
   "/sbin",
 ].join(":");
+const auth = createDesktopAuth({
+  accessRefreshMarginMs: ACCESS_REFRESH_MARGIN_MS,
+  hqBaseUrl: HQ_BASE_URL,
+  licensePath: LICENSE_PATH,
+  log,
+});
 
 let mainWindow = null;
 let overlayWindow = null;
@@ -172,89 +178,27 @@ function repoRoot() {
 // sees the desktop session.
 
 function readLicense() {
-  try {
-    const raw = fs.readFileSync(LICENSE_PATH, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  return auth.readLicense();
 }
 
 function writeLicense(license) {
-  fs.mkdirSync(path.dirname(LICENSE_PATH), { recursive: true });
-  fs.writeFileSync(LICENSE_PATH, JSON.stringify(license, null, 2), { mode: 0o600 });
+  return auth.writeLicense(license);
 }
 
 function clearLicense() {
-  try {
-    fs.unlinkSync(LICENSE_PATH);
-  } catch {
-    // already gone is fine
-  }
+  return auth.clearLicense();
 }
 
 function decodeJwtExp(token) {
-  try {
-    const payload = token.split(".")[1];
-    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-    const claims = JSON.parse(json);
-    return Number(claims.exp || 0);
-  } catch {
-    return 0;
-  }
+  return auth.decodeJwtExp(token);
 }
 
 function hqJsonRequestHeaders(scope) {
-  const requestId = `desktop-${scope}-${crypto.randomUUID()}`;
-  log.info(`[desktop:request] request_id=${requestId} scope=${scope}`);
-  return {
-    requestId,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-Id": requestId,
-    },
-  };
+  return auth.hqJsonRequestHeaders(scope);
 }
 
 async function refreshLicense(license) {
-  if (!license || !license.refresh_token) return null;
-  const { requestId, headers } = hqJsonRequestHeaders("license-refresh");
-  try {
-    // Same endpoint the CLI's elevate_cli/license.py refresh() uses, so a
-     // session refreshed here is interchangeable with one refreshed by the CLI.
-    const res = await fetch(`${HQ_BASE_URL}/api/license/refresh`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ refresh_token: license.refresh_token }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      log.warn(
-        `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
-      );
-      return null;
-    }
-    const data = await res.json();
-    if (!data || !data.access_token || !data.refresh_token) {
-      log.warn(`[license] refresh response missing tokens request_id=${requestId}`);
-      return null;
-    }
-    const next = {
-      ...license,
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
-      license_id: data.license_id || license.license_id,
-      tier: data.tier || license.tier,
-      entitlements: data.entitlements || license.entitlements,
-      expires_at: decodeJwtExp(data.access_token),
-    };
-    writeLicense(next);
-    log.info(`[license] refresh succeeded request_id=${requestId}`);
-    return next;
-  } catch (err) {
-    log.warn(`[license] refresh threw request_id=${requestId}: ${err && err.message ? err.message : err}`);
-    return null;
-  }
+  return auth.refreshLicense(license);
 }
 
 // Retry wrapper for startup. Transient network failures during app launch
@@ -262,30 +206,14 @@ async function refreshLicense(license) {
 // login popup even though the user had a valid refresh_token on disk. We try
 // up to 3 times with short backoff before giving up.
 async function refreshLicenseWithRetry(license, attempts = 3) {
-  for (let i = 0; i < attempts; i++) {
-    const next = await refreshLicense(license);
-    if (next) return next;
-    if (i < attempts - 1) {
-      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
-    }
-  }
-  return null;
+  return auth.refreshLicenseWithRetry(license, attempts);
 }
 
 // Returns a valid license, refreshing if needed. Returns null if there's no
 // usable session. On startup the network may not be fully ready, so refresh
 // is retried before we give up and pop the login window.
 async function ensureValidLicense({ retry = false } = {}) {
-  let license = readLicense();
-  if (!license || !license.access_token) return null;
-
-  const expMs = (Number(license.expires_at) || 0) * 1000;
-  if (!Number.isFinite(expMs) || Date.now() > expMs - ACCESS_REFRESH_MARGIN_MS) {
-    license = retry
-      ? await refreshLicenseWithRetry(license)
-      : await refreshLicense(license);
-  }
-  return license;
+  return auth.ensureValidLicense({ retry });
 }
 
 // Forces a token refresh regardless of expiry — used on window focus and a
@@ -311,58 +239,7 @@ async function forceRefreshLicense() {
 }
 
 async function performLogin({ email, password }) {
-  if (!email || !password) {
-    return { ok: false, error: "Email and password are required." };
-  }
-  const { requestId, headers } = hqJsonRequestHeaders("auth-login");
-  try {
-    const res = await fetch(`${HQ_BASE_URL}/api/auth/login`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        email: String(email).trim().toLowerCase(),
-        password,
-        device_label: `Elevate Desktop (${os.hostname()})`,
-      }),
-    });
-
-    if (res.status === 401) {
-      log.warn(`[auth] login rejected request_id=${requestId}: HTTP 401`);
-      return { ok: false, error: "Email or password is wrong." };
-    }
-    if (res.status === 402) {
-      log.warn(`[auth] login rejected request_id=${requestId}: HTTP 402`);
-      return {
-        ok: false,
-        error: "Your account has no active subscription. Upgrade in your browser, then sign in.",
-      };
-    }
-    if (!res.ok) {
-      const text = await res.text();
-      log.warn(`[auth] login failed request_id=${requestId}: HTTP ${res.status} ${text.slice(0, 160)}`);
-      return { ok: false, error: `Sign-in failed (${res.status}): ${text.slice(0, 160)}` };
-    }
-
-    const data = await res.json();
-    const license = {
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
-      license_id: data.license_id,
-      tier: data.tier,
-      email: String(email).trim().toLowerCase(),
-      expires_at: decodeJwtExp(data.access_token),
-      entitlements: data.entitlements || [],
-    };
-    writeLicense(license);
-    log.info(`[auth] login succeeded request_id=${requestId}`);
-    return { ok: true, license };
-  } catch (err) {
-    log.warn(`[auth] login threw request_id=${requestId}: ${err && err.message ? err.message : err}`);
-    return {
-      ok: false,
-      error: `Could not reach ${HQ_BASE_URL}. Check your connection and try again.`,
-    };
-  }
+  return auth.performLogin({ email, password });
 }
 
 function envWithPath(extra = {}) {
