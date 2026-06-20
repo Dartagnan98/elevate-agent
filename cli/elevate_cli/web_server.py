@@ -1038,6 +1038,7 @@ from elevate_cli.web_routes.env import create_env_router
 from elevate_cli.web_routes.files import create_files_router
 from elevate_cli.web_routes.license import create_license_router
 from elevate_cli.web_routes.logs import create_logs_router
+from elevate_cli.web_routes.sessions import create_sessions_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
 from elevate_cli.web_routes.status import create_status_router
 from elevate_cli.web_routes.today import create_today_router
@@ -1287,116 +1288,15 @@ def _platform_chat_sources() -> list[str]:
         ]
 
 
-@app.get("/api/sessions")
-async def get_sessions(
-    limit: int = 20,
-    offset: int = 0,
-    include_total: bool = True,
-    include_details: bool = False,
-):
-    try:
-        limit = max(1, min(int(limit or 20), 200))
-        offset = max(0, int(offset or 0))
-        if not include_details:
-            try:
-                from elevate_cli.data.chat_sessions import (
-                    list_session_summaries,
-                    session_count as pg_session_count,
-                )
-
-                _hidden = _platform_chat_sources()
-                sessions = list_session_summaries(
-                    limit=limit, offset=offset, exclude_sources=_hidden
-                )
-                total = (
-                    pg_session_count(exclude_sources=_hidden)
-                    if include_total
-                    else offset + len(sessions)
-                )
-                now = time.time()
-                _mark_session_activity(sessions, now)
-                return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
-            except Exception:
-                _log.debug("PG slim session list failed, falling back to SessionDB", exc_info=True)
-
-        from elevate_state import SessionDB
-        db = _get_session_db()
-        try:
-            _hidden = _platform_chat_sources()
-            sessions = db.list_sessions_rich(
-                limit=limit, offset=offset, exclude_sources=_hidden
-            )
-            total = (
-                db.session_count(exclude_sources=_hidden)
-                if include_total
-                else offset + len(sessions)
-            )
-            now = time.time()
-            _mark_session_activity(sessions, now)
-            if not include_details:
-                sessions = [_session_list_payload(s) for s in sessions]
-            return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
-        finally:
-            db.close()
-    except Exception as e:
-        _log.exception("GET /api/sessions failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.get("/api/sessions/search")
-async def search_sessions(q: str = "", limit: int = 20):
-    """Full-text search across session message content using FTS5."""
-    if not q or not q.strip():
-        return {"results": []}
-    try:
-        from elevate_state import SessionDB
-        db = _get_session_db()
-        try:
-            # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
-            # Preserve quoted phrases and existing wildcards as-is
-            import re
-            terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
-                if token.startswith('"') or token.endswith("*"):
-                    terms.append(token)
-                else:
-                    terms.append(token + "*")
-            prefix_query = " ".join(terms)
-            matches = db.search_messages(query=prefix_query, limit=limit)
-            # Group by session_id — return unique sessions with their best snippet
-            _hidden = set(_platform_chat_sources())
-            seen: dict = {}
-            # Mirror the transcript filter (get_session_messages / ChatPage
-            # shouldKeepTranscriptMessage): compaction-internal role=user rows are
-            # scaffolding, not content, and must not surface as search snippets.
-            _internal_prefixes = (
-                "[CONTEXT COMPACTION",
-                "[Your latest Plan panel plan was preserved",
-                "[Your active task list was preserved",
-                "[RECENT AUTONOMOUS ACTIVITY",
-            )
-            for m in matches:
-                if str(m.get("source") or "") in _hidden:
-                    continue  # platform-chat sessions are hidden from the app
-                if m.get("role") == "user" and str(m.get("content") or "").lstrip().startswith(_internal_prefixes):
-                    continue  # compaction-internal scaffolding, not real content
-                sid = m["session_id"]
-                if sid not in seen:
-                    seen[sid] = {
-                        "session_id": sid,
-                        "snippet": m.get("snippet", ""),
-                        "role": m.get("role"),
-                        "source": m.get("source"),
-                        "model": m.get("model"),
-                        "session_started": m.get("session_started"),
-                    }
-            return {"results": list(seen.values())}
-        finally:
-            db.close()
-    except Exception:
-        _log.exception("GET /api/sessions/search failed")
-        raise HTTPException(status_code=500, detail="Search failed")
+app.include_router(
+    create_sessions_router(
+        get_session_db=_get_session_db,
+        platform_chat_sources=_platform_chat_sources,
+        mark_session_activity=_mark_session_activity,
+        session_list_payload=_session_list_payload,
+        log=_log,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
