@@ -10271,35 +10271,6 @@ async def get_toolsets():
 
 
 # ---------------------------------------------------------------------------
-# Raw YAML config endpoint
-# ---------------------------------------------------------------------------
-
-
-class RawConfigUpdate(BaseModel):
-    yaml_text: str
-
-
-@app.get("/api/config/raw")
-async def get_config_raw():
-    path = get_config_path()
-    if not path.exists():
-        return {"yaml": ""}
-    return {"yaml": path.read_text(encoding="utf-8")}
-
-
-@app.put("/api/config/raw")
-async def update_config_raw(body: RawConfigUpdate):
-    try:
-        parsed = yaml.safe_load(body.yaml_text)
-        if not isinstance(parsed, dict):
-            raise HTTPException(status_code=400, detail="YAML must be a mapping")
-        save_config(parsed)
-        return {"ok": True}
-    except yaml.YAMLError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
-
-
-# ---------------------------------------------------------------------------
 # Token / cost analytics endpoint
 # ---------------------------------------------------------------------------
 

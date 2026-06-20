@@ -3,10 +3,11 @@
 import logging
 from typing import Any, Dict
 
+import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from elevate_cli.config import load_config
+from elevate_cli.config import get_config_path, load_config, save_config
 
 
 _EMPTY_MODEL_INFO: dict = {
@@ -21,6 +22,10 @@ _EMPTY_MODEL_INFO: dict = {
 
 class TierMappingBody(BaseModel):
     mapping: Dict[str, Any]
+
+
+class RawConfigUpdate(BaseModel):
+    yaml_text: str
 
 
 def create_config_router(
@@ -185,5 +190,23 @@ def create_config_router(
         except Exception as exc:
             _log.exception("PUT /api/config/tiers failed")
             raise HTTPException(status_code=500, detail=str(exc))
+
+    @router.get("/api/config/raw")
+    async def get_config_raw():
+        path = get_config_path()
+        if not path.exists():
+            return {"yaml": ""}
+        return {"yaml": path.read_text(encoding="utf-8")}
+
+    @router.put("/api/config/raw")
+    async def update_config_raw(body: RawConfigUpdate):
+        try:
+            parsed = yaml.safe_load(body.yaml_text)
+            if not isinstance(parsed, dict):
+                raise HTTPException(status_code=400, detail="YAML must be a mapping")
+            save_config(parsed)
+            return {"ok": True}
+        except yaml.YAMLError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
     return router
