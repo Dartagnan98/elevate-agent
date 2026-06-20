@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import type { LeadsTemplateItem, LeadsTemplateLane } from "../leads-data";
+import { TemplateEditorRow, TemplateRow, type TplEditor } from "./template-rows";
 
 export interface TemplateMutations {
   // Create a template in a lane. Returns once the list is refreshed.
@@ -15,90 +16,6 @@ export interface TemplateMutations {
   // Ask the backend for a suggested variant for a lane. Resolves to the
   // suggested name/body so the caller can open a prefilled editor.
   onSuggest: (laneId: string) => Promise<{ name: string; body: string }>;
-}
-
-type TplEditor =
-  | { mode: "create"; laneId: string; name: string; body: string }
-  | { mode: "edit"; id: string; laneId: string; name: string; body: string };
-
-function TemplateEditorRow({
-  editor, onChange, onSave, onCancel, busy,
-}: {
-  editor: TplEditor;
-  onChange: (patch: Partial<{ name: string; body: string }>) => void;
-  onSave: () => void;
-  onCancel: () => void;
-  busy: boolean;
-}) {
-  return (
-    <div className="lb-tpl-row lb-tpl-editor">
-      <div className="lb-tpl-row-body">
-        <input
-          type="text"
-          className="lb-tpl-edit-name"
-          value={editor.name}
-          placeholder="Template name"
-          onChange={(e) => onChange({ name: e.target.value })}
-          disabled={busy}
-        />
-        <textarea
-          className="lb-draft-edit"
-          value={editor.body}
-          placeholder="Body. Use {first_name}, {area}, {topic}, etc."
-          rows={4}
-          onChange={(e) => onChange({ body: e.target.value })}
-          disabled={busy}
-        />
-      </div>
-      <div className="lb-tpl-row-actions">
-        <button type="button" className="lb-btn ghost sm" onClick={onCancel} disabled={busy}>Cancel</button>
-        <button type="button" className="lb-btn primary sm" onClick={onSave} disabled={busy}>
-          {busy ? "…" : editor.mode === "create" ? "Add" : "Save"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function TemplateRow({
-  template, onPause, onEdit, onDelete, busy,
-}: {
-  template: LeadsTemplateItem;
-  onPause?: () => void;
-  onEdit?: () => void;
-  onDelete?: () => void;
-  busy?: boolean;
-}) {
-  return (
-    <div className={"lb-tpl-row" + (template.active ? "" : " paused")}>
-      <div className="lb-tpl-row-body">
-        <div className="lb-tpl-row-name">{template.name}</div>
-        <div className="lb-tpl-row-text">{template.body}</div>
-        <div className="lb-tpl-row-meta mono">
-          <span>Used {template.used}×</span>
-          <span className="lb-tpl-meta-sep">·</span>
-          <span>{template.replies} replies</span>
-          {template.replyRate != null && (
-            <>
-              <span className="lb-tpl-meta-sep">·</span>
-              <span>{template.replyRate}% reply rate</span>
-            </>
-          )}
-          {!template.active && (
-            <>
-              <span className="lb-tpl-meta-sep">·</span>
-              <span>paused</span>
-            </>
-          )}
-        </div>
-      </div>
-      <div className="lb-tpl-row-actions">
-        <button type="button" className="lb-tpl-icon-btn" aria-label={template.active ? "Pause" : "Resume"} title={template.active ? "Pause" : "Resume"} disabled={busy || !onPause} onClick={onPause}>{template.active ? "‖" : "▸"}</button>
-        <button type="button" className="lb-tpl-icon-btn" aria-label="Edit" disabled={busy || !onEdit} onClick={onEdit}>✎</button>
-        <button type="button" className="lb-tpl-icon-btn danger" aria-label="Delete" disabled={busy || !onDelete} onClick={onDelete}>🗑</button>
-      </div>
-    </div>
-  );
 }
 
 export function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mutations?: TemplateMutations }) {
