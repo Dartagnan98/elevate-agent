@@ -5,6 +5,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_cli.web_routes.source_inbox_debug import with_source_inbox_debug
+
 
 class SourceInboxThreadAction(BaseModel):
     action: str
@@ -37,40 +39,6 @@ class SourceInboxFavoriteAction(BaseModel):
 _SOURCE_INBOX_ACTION_LIMIT = 500
 
 
-def _source_inbox_counts(payload: dict) -> dict:
-    def _len(key: str) -> int:
-        value = payload.get(key)
-        return len(value) if isinstance(value, list) else 0
-
-    return {
-        "sources": _len("sources"),
-        "profiles": _len("profiles"),
-        "threads": _len("threads"),
-        "drafts": _len("drafts"),
-        "skippedDrafts": _len("skippedDrafts"),
-        "privateSearchBuyers": _len("privateSearchBuyers"),
-        "recordCounts": payload.get("recordCounts") or {},
-        "hiddenCounts": payload.get("hiddenCounts") or {},
-    }
-
-
-def _with_source_inbox_debug(
-    payload: dict,
-    *,
-    read_path: str,
-    fallback_error: Exception | None = None,
-) -> dict:
-    debug = {
-        "readPath": read_path,
-        "fallback": read_path == "jsonl",
-        "counts": _source_inbox_counts(payload),
-    }
-    if fallback_error is not None:
-        debug["fallbackError"] = type(fallback_error).__name__
-        debug["fallbackErrorCode"] = "source_inbox_db_read_failed"
-    return {**payload, "debug": debug}
-
-
 def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> None:
     def _source_inbox_response(limit: int = _SOURCE_INBOX_ACTION_LIMIT, *, debug: bool = False):
         from elevate_cli.source_connectors import build_source_inbox_response
@@ -78,14 +46,14 @@ def register_source_inbox_routes(router: APIRouter, *, log: logging.Logger) -> N
 
         try:
             payload = db_source_inbox_response(limit=limit)
-            return _with_source_inbox_debug(payload, read_path="db") if debug else payload
+            return with_source_inbox_debug(payload, read_path="db") if debug else payload
         except Exception as exc:
             log.exception(
                 "db_source_inbox_response failed, falling back to JSONL source inbox"
             )
             payload = build_source_inbox_response(limit=limit)
             return (
-                _with_source_inbox_debug(payload, read_path="jsonl", fallback_error=exc)
+                with_source_inbox_debug(payload, read_path="jsonl", fallback_error=exc)
                 if debug
                 else payload
             )
