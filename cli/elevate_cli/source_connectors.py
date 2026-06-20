@@ -17,7 +17,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +42,10 @@ from elevate_cli.source_connector_modules.prompts import (
     _source_file_count_commands,
     source_prompt_for,
 )
+from elevate_cli.source_connector_modules.runtime_helpers import (
+    now_iso as _now_impl,
+    walk_jsonl_into_pg as _walk_jsonl_into_pg_impl,
+)
 
 
 JsonRecord = dict[str, Any]
@@ -64,7 +67,7 @@ from elevate_cli.source_connector_modules.source_catalog import (
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _now_impl()
 
 
 from elevate_cli.source_connector_modules.source_io import (
@@ -299,18 +302,7 @@ from elevate_cli.source_connector_modules.crm_helpers import (
 
 
 def _walk_jsonl_into_pg(source_dir: Path) -> dict[str, Any]:
-    """Replay the just-written JSONL snapshot through the operational
-    Postgres walker so DB-primary readers see fresh data without a
-    manual ``elevate migrate-data`` rerun. Idempotent — every helper
-    underneath ``walk_jsonl_source`` is keyed on source_key /
-    event_hash / etc."""
-    from elevate_cli.data import connect as _data_connect
-    from elevate_cli.data.migrate import BackfillStats, walk_jsonl_source
-
-    stats = BackfillStats()
-    with _data_connect() as conn:
-        walk_jsonl_source(source_dir, conn=conn, stats=stats, dry_run=False)
-    return stats.to_dict()
+    return _walk_jsonl_into_pg_impl(source_dir)
 
 
 
