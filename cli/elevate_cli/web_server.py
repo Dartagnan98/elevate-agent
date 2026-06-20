@@ -68,6 +68,7 @@ from elevate_cli.web_auth import (
 from elevate_cli.web_middleware import install_dashboard_middlewares
 from elevate_cli.web_server_start import run_dashboard_server
 from elevate_cli.web_agent_admin_routes import register_agent_admin_routes
+from elevate_cli.web_session_system_routes import register_session_system_routes
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -315,8 +316,6 @@ install_dashboard_middlewares(
 )
 
 
-from elevate_cli.web_routes.actions import create_actions_router
-from elevate_cli.web_routes.activity_comms import create_activity_comms_router
 from elevate_cli.web_routes.analytics import create_analytics_router
 from elevate_cli.web_routes.admin_actions import create_admin_actions_router
 from elevate_cli.web_routes.admin_deals import create_admin_deals_router
@@ -342,27 +341,20 @@ from elevate_cli.web_routes.config import (
     _normalize_config_for_web,
     create_config_router,
 )
-from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes import dashboard as _dashboard_routes
 from elevate_cli.web_routes.dashboard import create_dashboard_router, mount_dashboard_plugin_api_routes
 from elevate_cli.web_routes.env import create_env_router
-from elevate_cli.web_routes.files import _UPLOAD_MAX_PER_FILE, create_files_router
+from elevate_cli.web_routes.files import _UPLOAD_MAX_PER_FILE
 from elevate_cli.web_routes.integrations import create_integrations_router
 from elevate_cli.web_routes.lanes import create_lanes_router
-from elevate_cli.web_routes.license import create_license_router
-from elevate_cli.web_routes.logs import create_logs_router
-from elevate_cli.web_routes.oauth import create_oauth_router
 from elevate_cli.web_routes.outreach_templates import create_outreach_templates_router
-from elevate_cli.web_routes.session_details import create_session_detail_router
-from elevate_cli.web_routes.sessions import create_sessions_router
 from elevate_cli.web_routes.skills import create_skills_router
 from elevate_cli.web_routes.social import _load_social_fetcher, create_social_router
 from elevate_cli.web_routes.source_connectors import create_source_connectors_router
-from elevate_cli.web_routes.status import create_status_router
 from elevate_cli.web_routes.surface_tasks import create_surface_tasks_router
 from elevate_cli.web_routes.threads import create_threads_router
 from elevate_cli.web_routes.today import create_today_router
-from elevate_cli.web_routes.workspace import create_workspace_router, git_value as _git_value
+from elevate_cli.web_routes.workspace import git_value as _git_value
 from elevate_cli.web_spa import mount_spa as _mount_spa
 from elevate_cli.web_static import ImmutableStaticFiles
 from elevate_cli.pty_bridge import PtyBridge, PtyUnavailableError
@@ -466,85 +458,36 @@ def _platform_chat_sources() -> list[str]:
     return _platform_chat_sources_impl()
 
 
-app.include_router(
-    create_sessions_router(
-        get_session_db=_get_session_db,
-        platform_chat_sources=_platform_chat_sources,
-        mark_session_activity=_mark_session_activity,
-        session_list_payload=_session_list_payload,
-        log=_log,
-    )
-)
-
-app.include_router(create_oauth_router(require_token=_require_token))
-
-app.include_router(
-    create_session_detail_router(
-        get_session_db=_get_session_db,
-        session_reveal_target=_session_reveal_target,
-        open_in_file_manager=_open_in_file_manager,
-        live_subagent_child_session_ids=_live_subagent_child_session_ids,
-        log=_log,
-    )
-)
-
-app.include_router(create_cron_router(log=_log))
-
-app.include_router(
-    create_status_router(
-        workspace_root=WORKSPACE_ROOT,
-        get_session_db=_get_session_db,
-        session_active_window_sec=_SESSION_ACTIVE_WINDOW_SEC,
-        check_config_version_func=lambda: check_config_version(),
-        get_running_pid_func=lambda: get_running_pid(),
-        read_runtime_status_func=lambda: read_runtime_status(),
-        gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
-        probe_gateway_health_func=lambda: _probe_gateway_health(),
-        log=_log,
-    )
-)
-
-app.include_router(create_license_router(require_token=_require_token))
-
-app.include_router(
-    create_files_router(
-        project_root=PROJECT_ROOT,
-        get_elevate_home_func=lambda: get_elevate_home(),
-        upload_max_per_file_func=lambda: _UPLOAD_MAX_PER_FILE,
-        log=_log,
-    )
-)
-
-app.include_router(create_logs_router())
-
-app.include_router(
-    create_workspace_router(
-        workspace_root=WORKSPACE_ROOT,
-        open_in_file_manager=_open_in_file_manager,
-        log=_log,
-    )
-)
-
-app.include_router(
-    create_actions_router(
-        project_root=PROJECT_ROOT,
-        action_log_dir=_ACTION_LOG_DIR,
-        action_log_files=_ACTION_LOG_FILES,
-        action_procs=_ACTION_PROCS,
-        spawn_elevate_action=_spawn_elevate_action,
-        tail_lines=_tail_lines,
-        is_packaged_desktop_runtime=_is_packaged_desktop_runtime,
-        git_value=_git_value,
-        log=_log,
-    )
-)
-
-app.include_router(
-    create_activity_comms_router(
-        fs_cache_get=_fs_cache_get,
-        fs_cache_put=_fs_cache_put,
-        log=_log,
-    )
+register_session_system_routes(
+    app,
+    log=_log,
+    get_session_db=_get_session_db,
+    platform_chat_sources=_platform_chat_sources,
+    mark_session_activity=_mark_session_activity,
+    session_list_payload=_session_list_payload,
+    require_token=_require_token,
+    session_reveal_target=_session_reveal_target,
+    open_in_file_manager=_open_in_file_manager,
+    live_subagent_child_session_ids=_live_subagent_child_session_ids,
+    workspace_root=WORKSPACE_ROOT,
+    session_active_window_sec=_SESSION_ACTIVE_WINDOW_SEC,
+    check_config_version_func=lambda: check_config_version(),
+    get_running_pid_func=lambda: get_running_pid(),
+    read_runtime_status_func=lambda: read_runtime_status(),
+    gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
+    probe_gateway_health_func=lambda: _probe_gateway_health(),
+    project_root=PROJECT_ROOT,
+    get_elevate_home_func=lambda: get_elevate_home(),
+    upload_max_per_file_func=lambda: _UPLOAD_MAX_PER_FILE,
+    action_log_dir=_ACTION_LOG_DIR,
+    action_log_files=_ACTION_LOG_FILES,
+    action_procs=_ACTION_PROCS,
+    spawn_elevate_action=_spawn_elevate_action,
+    tail_lines=_tail_lines,
+    is_packaged_desktop_runtime=_is_packaged_desktop_runtime,
+    git_value=_git_value,
+    fs_cache_get=_fs_cache_get,
+    fs_cache_put=_fs_cache_put,
 )
 
 app.include_router(
