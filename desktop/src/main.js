@@ -18,6 +18,7 @@ const log = require("electron-log");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
 const backendHttp = require("./backend-http");
 const { createBackendPortController } = require("./backend-port");
+const { createBackendRunner } = require("./backend-runner");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDesktopAuth } = require("./desktop-auth");
@@ -156,6 +157,27 @@ const gatewaySelfHeal = createGatewaySelfHeal({
   path,
   process,
   spawnSync,
+});
+const backendRunner = createBackendRunner({
+  backendMatchesDesktopMode,
+  backendProbeSummary,
+  chooseBackendPort,
+  embeddedChat: EMBEDDED_CHAT,
+  ensureGatewayInstalled,
+  envWithPath,
+  getBackendPort: () => backendPort,
+  markStartup,
+  path,
+  resolveElevateLauncher,
+  setBackendProcess: (proc) => {
+    backendProcess = proc;
+  },
+  setOwnsBackend: (value) => {
+    ownsBackend = value;
+  },
+  setTimeout,
+  spawn,
+  waitForBackend,
 });
 const updater = createUpdaterController({
   app,
@@ -474,76 +496,15 @@ async function chooseBackendPort() {
 }
 
 function appendBackendLog(data) {
-  const text = data.toString();
-  if (text.trim()) {
-    console.log(`[elevate-backend] ${text.trimEnd()}`);
-  }
+  backendRunner.appendBackendLog(data);
 }
 
 function scheduleGatewaySelfHeal(launcher, baseEnv) {
-  if (!launcher) return;
-  // Self-heal the gateway service (cron ticker that seeds + runs automations +
-  // heartbeats). Deferred so it never blocks UI startup. Idempotent.
-  setTimeout(() => {
-    try {
-      ensureGatewayInstalled(launcher, baseEnv);
-    } catch (e) {
-      appendBackendLog(`[gateway] self-heal threw: ${e}\n`);
-    }
-  }, 8000);
+  backendRunner.scheduleGatewaySelfHeal(launcher, baseEnv);
 }
 
 async function ensureBackend() {
-  markStartup("backend:ensure-start");
-  await chooseBackendPort();
-  markStartup("backend:port-selected", String(backendPort));
-
-  const launcher = resolveElevateLauncher();
-  const baseEnv = {
-    ELEVATE_DESKTOP_APP: "1",
-    // SMS sends go via the sms-outbox spool drained by THIS foreground app
-    // (the headless backend can't hold macOS Automation→Messages). See
-    // startSmsOutboxWatcher + cli/elevate_cli/sender._imsg_send_via_app.
-    ELEVATE_SMS_VIA_APP: "1",
-    ...(EMBEDDED_CHAT ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
-  };
-
-  if (await backendMatchesDesktopMode()) {
-    markStartup("backend:already-ready");
-    scheduleGatewaySelfHeal(launcher, baseEnv);
-    return true;
-  }
-
-  if (!launcher) {
-    markStartup("backend:launcher-missing");
-    return false;
-  }
-
-  markStartup("backend:spawn", path.basename(launcher.command));
-  backendProcess = spawn(launcher.command, launcher.args, {
-    cwd: launcher.cwd,
-    env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  ownsBackend = true;
-
-  backendProcess.stdout.on("data", appendBackendLog);
-  backendProcess.stderr.on("data", appendBackendLog);
-  backendProcess.on("exit", (code, signal) => {
-    console.log(`[elevate-backend] exited code=${code} signal=${signal}`);
-    backendProcess = null;
-    ownsBackend = false;
-  });
-
-  const ready = await waitForBackend();
-  if (!ready) {
-    markStartup("backend:timeout-detail", await backendProbeSummary());
-  }
-  markStartup(ready ? "backend:ready" : "backend:timeout");
-
-  scheduleGatewaySelfHeal(launcher, baseEnv);
-
-  return ready;
+  return backendRunner.ensureBackend();
 }
 
 function createMenu() {

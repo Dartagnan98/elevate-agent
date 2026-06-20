@@ -3,12 +3,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const mainPath = path.resolve(__dirname, "../src/main.js");
+const runnerPath = path.resolve(__dirname, "../src/backend-runner.js");
 const gatewayPath = path.resolve(__dirname, "../src/gateway-self-heal.js");
-
-function readMain() {
-  return fs.readFileSync(mainPath, "utf8");
-}
 
 function functionBlock(source, name) {
   const start = source.indexOf(`function ${name}`);
@@ -50,8 +46,8 @@ test("gateway self-heal installs missing service and direct-bootstraps as fallba
 });
 
 test("desktop schedules gateway self-heal for adopted and spawned dashboards", () => {
-  const main = readMain();
-  const block = functionBlock(main, "ensureBackend");
+  const runner = fs.readFileSync(runnerPath, "utf8");
+  const block = functionBlock(runner, "ensureBackend");
   const calls = block.match(/scheduleGatewaySelfHeal\(launcher, baseEnv\)/g) || [];
 
   assert.equal(calls.length, 2);
