@@ -2,6 +2,7 @@ import threading
 
 import pytest
 
+import plugins.memory.holographic as holographic_memory
 from plugins.memory.holographic.embeddings import (
     EmbeddingError,
     HashEmbeddingClient,
@@ -86,3 +87,24 @@ def test_local_minilm_rejects_dimension_override():
                 "embedding_dimensions": "256",
             }
         )
+
+
+def test_embedding_unavailable_warning_is_once_per_error(monkeypatch):
+    calls = []
+
+    holographic_memory._embedding_warning_messages.clear()
+    monkeypatch.setattr(
+        holographic_memory.logger,
+        "warning",
+        lambda template, *args: calls.append((template, args)),
+    )
+
+    exc = EmbeddingError("OPENAI_API_KEY is not set")
+    holographic_memory._warn_embedding_unavailable_once(exc)
+    holographic_memory._warn_embedding_unavailable_once(exc)
+    holographic_memory._warn_embedding_unavailable_once(EmbeddingError("Ollama unavailable"))
+
+    assert calls == [
+        ("Embedding provider unavailable: %s", ("OPENAI_API_KEY is not set",)),
+        ("Embedding provider unavailable: %s", ("Ollama unavailable",)),
+    ]

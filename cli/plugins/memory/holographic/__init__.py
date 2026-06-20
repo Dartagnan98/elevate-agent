@@ -40,6 +40,17 @@ from .store import MemoryStore
 from .retrieval import FactRetriever
 
 logger = logging.getLogger(__name__)
+_embedding_warning_lock = threading.Lock()
+_embedding_warning_messages: set[str] = set()
+
+
+def _warn_embedding_unavailable_once(exc: EmbeddingError) -> None:
+    message = str(exc)
+    with _embedding_warning_lock:
+        if message in _embedding_warning_messages:
+            return
+        _embedding_warning_messages.add(message)
+    logger.warning("Embedding provider unavailable: %s", message)
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +461,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 embedding_client = build_embedding_client(self._config)
             except EmbeddingError as exc:
                 self._embedding_error = str(exc)
-                logger.warning("Embedding provider unavailable: %s", exc)
+                _warn_embedding_unavailable_once(exc)
 
         self._store = MemoryStore(
             db_path=db_path,
