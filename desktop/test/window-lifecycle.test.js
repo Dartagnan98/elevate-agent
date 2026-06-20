@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const mainWindowPath = path.resolve(__dirname, "../src/main-window.js");
 const overlayManagerPath = path.resolve(__dirname, "../src/computer-use-overlay.js");
 
 function readMain() {
@@ -11,11 +12,11 @@ function readMain() {
 }
 
 test("closed main window clears the singleton before reopen", () => {
-  const main = readMain();
+  const mainWindow = fs.readFileSync(mainWindowPath, "utf8");
 
   assert.match(
-    main,
-    /mainWindow\.on\("closed",\s*\(\) => \{\s*mainWindow = null;\s*}\);/s,
+    mainWindow,
+    /mainWindow\.on\("closed",\s*\(\) => \{\s*setMainWindow\(null\);\s*}\);/s,
   );
 });
 

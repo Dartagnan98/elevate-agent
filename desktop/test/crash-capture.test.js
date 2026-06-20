@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const mainWindowPath = path.resolve(__dirname, "../src/main-window.js");
 const startupLogPath = path.resolve(__dirname, "../src/startup-log.js");
 
 function readMain() {
@@ -30,12 +31,12 @@ test("main process crash handlers write supportable log breadcrumbs", () => {
 });
 
 test("renderer crash and hang states write supportable log breadcrumbs", () => {
-  const main = readMain();
+  const mainWindow = fs.readFileSync(mainWindowPath, "utf8");
 
-  assert.match(main, /webContents\.on\("render-process-gone"/);
-  assert.match(main, /\[renderer:gone\]/);
-  assert.match(main, /mainWindow\.on\("unresponsive"/);
-  assert.match(main, /\[renderer:unresponsive\]/);
-  assert.match(main, /mainWindow\.on\("responsive"/);
-  assert.match(main, /\[renderer:responsive\]/);
+  assert.match(mainWindow, /webContents\.on\("render-process-gone"/);
+  assert.match(mainWindow, /\[renderer:gone\]/);
+  assert.match(mainWindow, /mainWindow\.on\("unresponsive"/);
+  assert.match(mainWindow, /\[renderer:unresponsive\]/);
+  assert.match(mainWindow, /mainWindow\.on\("responsive"/);
+  assert.match(mainWindow, /\[renderer:responsive\]/);
 });

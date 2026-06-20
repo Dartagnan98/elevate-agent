@@ -26,6 +26,7 @@ const { createDeepLinks } = require("./deep-links");
 const { createDesktopAuth } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
 const { createLauncherTools } = require("./launcher");
+const { createMainWindowController } = require("./main-window");
 const { installDesktopPermissions } = require("./permissions");
 const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
@@ -204,6 +205,29 @@ const deepLinks = createDeepLinks({
   app,
   mainWindow: () => mainWindow,
   openLoginWindow,
+});
+const mainWindowController = createMainWindowController({
+  BrowserWindow,
+  Menu,
+  appRoot: __dirname,
+  backendUrl: () => backendUrl,
+  currentMainWindowUrl,
+  finishStartup,
+  isTrustedNavigationUrl,
+  log,
+  markStartup,
+  path,
+  process,
+  resetDashboardLoadRetry: () => {
+    clearDashboardLoadRetryTimer();
+    dashboardLoadRetryCount = 0;
+  },
+  scheduleDashboardLoadRetry,
+  setMainWindow: (win) => {
+    mainWindow = win;
+  },
+  shell,
+  trimLogMessage,
 });
 
 app.setName("Elevate");
@@ -527,164 +551,7 @@ function createMenu() {
 }
 
 function createWindow() {
-  markStartup("window:create");
-  mainWindow = new BrowserWindow({
-    width: 1360,
-    height: 900,
-    minWidth: 380,
-    minHeight: 480,
-    title: "Elevate",
-    backgroundColor: "#0F0F0F",
-    show: false,
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    trafficLightPosition:
-      process.platform === "darwin" ? { x: 14, y: 18 } : undefined,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      // Sandbox the renderer: the preload only uses contextBridge + ipcRenderer
-      // (both work under sandbox), so a renderer-side XSS can't reach Node.
-      sandbox: true,
-    },
-  });
-
-  mainWindow.once("ready-to-show", () => {
-    markStartup("window:ready-to-show");
-    mainWindow.show();
-  });
-
-  mainWindow.webContents.on("dom-ready", () => {
-    const url = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
-    markStartup("renderer:dom-ready", url.startsWith(backendUrl) ? "dashboard" : path.basename(url));
-  });
-
-  mainWindow.webContents.on("did-finish-load", () => {
-    const url = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : "";
-    const isDashboard = url.startsWith(backendUrl);
-    markStartup("renderer:did-finish-load", isDashboard ? "dashboard" : path.basename(url));
-    if (isDashboard) {
-      clearDashboardLoadRetryTimer();
-      dashboardLoadRetryCount = 0;
-      finishStartup("dashboard-loaded");
-    }
-  });
-
-  mainWindow.webContents.on("did-fail-load", (_event, code, description, validatedUrl) => {
-    const failedUrl = validatedUrl || currentMainWindowUrl();
-    log.warn(
-      `[renderer:did-fail-load] code=${code} desc=${trimLogMessage(description, 300)} url=${trimLogMessage(failedUrl, 500)}`,
-    );
-    if (code !== -3 && failedUrl.startsWith(backendUrl)) {
-      scheduleDashboardLoadRetry(`did-fail-load:${code}`);
-    }
-  });
-
-  mainWindow.webContents.on("console-message", (_event, ...args) => {
-    const details =
-      args.length === 1 && args[0] && typeof args[0] === "object"
-        ? args[0]
-        : {
-            level: args[0],
-            message: args[1],
-            line: args[2],
-            sourceId: args[3],
-          };
-    const level = Number(details.level ?? 0);
-    if (level < 2) return;
-    const label = level >= 3 ? "error" : "warn";
-    log[label](
-      `[renderer:console:${level}] ${trimLogMessage(details.message)} (${trimLogMessage(details.sourceId || currentMainWindowUrl(), 500)}:${details.line ?? 0})`,
-    );
-  });
-
-  mainWindow.webContents.on("render-process-gone", (_event, details) => {
-    log.error(
-      `[renderer:gone] reason=${details.reason} exitCode=${details.exitCode} url=${trimLogMessage(currentMainWindowUrl(), 500)}`,
-    );
-  });
-
-  mainWindow.on("unresponsive", () => {
-    log.error(`[renderer:unresponsive] url=${trimLogMessage(currentMainWindowUrl(), 500)}`);
-  });
-
-  mainWindow.on("responsive", () => {
-    log.info(`[renderer:responsive] url=${trimLogMessage(currentMainWindowUrl(), 500)}`);
-  });
-
-  // Without this, a closed main window leaves `mainWindow` pointing at a
-  // destroyed BrowserWindow. The `if (!mainWindow)` guards elsewhere stay
-  // truthy, so the next loadURL/loadFile throws — that's the reopen glitch.
-  mainWindow.on("closed", () => {
-    mainWindow = null;
-  });
-
-  mainWindow.on("page-title-updated", (event) => {
-    event.preventDefault();
-  });
-
-  // Native chat apps (Claude, Codex, ChatGPT desktop) don't let you
-  // refresh the window — a refresh would blow away in-memory chat
-  // state and force a reconnect/re-render dance. Swallow Cmd+R /
-  // Ctrl+R / F5 so users get the same "close-and-reopen-only" feel.
-  mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown") return;
-    const key = (input.key || "").toLowerCase();
-    const isReloadCombo =
-      (key === "r" && (input.meta || input.control)) || key === "f5";
-    if (isReloadCombo) {
-      event.preventDefault();
-    }
-  });
-
-  // Native right-click menu (copy / paste / cut / select-all). Electron shows
-  // no context menu by default, so wire one up like a normal mac app.
-  mainWindow.webContents.on("context-menu", (_event, params) => {
-    const editFlags = params.editFlags || {};
-    const hasSelection = (params.selectionText || "").trim().length > 0;
-    const items = [];
-    if (params.isEditable) {
-      items.push(
-        { role: "cut", enabled: !!editFlags.canCut },
-        { role: "copy", enabled: !!editFlags.canCopy },
-        { role: "paste", enabled: !!editFlags.canPaste },
-        { type: "separator" },
-        { role: "selectAll" },
-      );
-    } else {
-      if (hasSelection) items.push({ role: "copy" }, { type: "separator" });
-      items.push({ role: "selectAll" });
-    }
-    if (items.length) {
-      Menu.buildFromTemplate(items).popup({ window: mainWindow });
-    }
-  });
-
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(backendUrl)) {
-      return { action: "allow" };
-    }
-    // Only hand http(s)/mailto to the OS. The renderer shows untrusted content
-    // (AI output, lead/MLS fields); without this, a window.open("file://…") or
-    // an OS-handler scheme would be launched via openExternal.
-    try {
-      const scheme = new URL(url).protocol;
-      if (scheme === "https:" || scheme === "http:" || scheme === "mailto:") {
-        shell.openExternal(url);
-      }
-    } catch {
-      /* malformed URL — ignore */
-    }
-    return { action: "deny" };
-  });
-
-  // Lock the main window to the trusted local origin: block top-level
-  // navigation elsewhere (setWindowOpenHandler only covers window.open).
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    if (!isTrustedNavigationUrl(url, { backendUrl, appRoot: __dirname })) {
-      event.preventDefault();
-    }
-  });
+  mainWindowController.createWindow();
 }
 
 function createOverlay() {
