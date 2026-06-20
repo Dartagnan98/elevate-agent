@@ -85,7 +85,6 @@ def _is_packaged_desktop_runtime() -> bool:
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
     DEFAULT_CONFIG,
-    OPTIONAL_ENV_VARS,
     get_config_path,
     get_env_path,
     get_elevate_home,
@@ -94,9 +93,7 @@ from elevate_cli.config import (
     load_env,
     save_config,
     save_env_value,
-    remove_env_value,
     check_config_version,
-    redact_key,
 )
 from elevate_cli.data.deals import DealPhaseGateBlocked
 from gateway.status import get_running_pid, read_runtime_status
@@ -320,11 +317,6 @@ def _license_signed_in() -> bool:
     # 30s of slack so we don't flap right at the boundary; the desktop and CLI
     # both refresh well before this triggers in practice.
     return float(expires_at) > (time.time() + 30)
-
-# Simple rate limiter for the reveal endpoint
-_reveal_timestamps: List[float] = []
-_REVEAL_MAX_PER_WINDOW = 5
-_REVEAL_WINDOW_SECONDS = 30
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -946,20 +938,6 @@ for _k, _v in CONFIG_SCHEMA.items():
 CONFIG_SCHEMA = _ordered_schema
 
 
-class EnvVarUpdate(BaseModel):
-    key: str
-    value: str
-
-
-class EnvVarDelete(BaseModel):
-    key: str
-
-
-class EnvVarReveal(BaseModel):
-    key: str
-
-
-_AGENT_TELEGRAM_CHANNEL_RE = re.compile(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_CHANNEL$")
 _AGENT_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$")
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 _EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY = "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN"
@@ -1226,6 +1204,7 @@ from elevate_cli.web_routes.analytics import create_analytics_router
 from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.cron import create_cron_router
+from elevate_cli.web_routes.env import create_env_router
 from elevate_cli.web_routes.files import create_files_router
 from elevate_cli.web_routes.license import create_license_router
 from elevate_cli.web_routes.logs import create_logs_router
@@ -1610,114 +1589,6 @@ async def search_sessions(q: str = "", limit: int = 20):
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
-
-
-@app.get("/api/env")
-async def get_env_vars():
-    env_on_disk = load_env()
-    result = {}
-    for var_name, info in OPTIONAL_ENV_VARS.items():
-        value = env_on_disk.get(var_name)
-        result[var_name] = {
-            "is_set": bool(value),
-            "redacted_value": redact_key(value) if value else None,
-            "description": info.get("description", ""),
-            "url": info.get("url"),
-            "category": info.get("category", ""),
-            "is_password": info.get("password", False),
-            "tools": info.get("tools", []),
-            "advanced": info.get("advanced", False),
-        }
-    for var_name, value in env_on_disk.items():
-        if var_name in result:
-            continue
-        if not re.match(r"^ELEVATE_AGENT_[A-Z0-9_]+_TELEGRAM_(BOT_TOKEN|CHANNEL)$", var_name):
-            continue
-        is_token = var_name.endswith("_BOT_TOKEN")
-        result[var_name] = {
-            "is_set": bool(value),
-            "redacted_value": redact_key(value) if value else None,
-            "description": "Telegram bot token" if is_token else "Telegram chat or topic routed to this agent",
-            "url": "https://t.me/BotFather" if is_token else None,
-            "category": "messaging",
-            "is_password": is_token,
-            "tools": [],
-            "advanced": False,
-        }
-    return result
-
-
-@app.put("/api/env")
-async def set_env_var(body: EnvVarUpdate):
-    try:
-        key = str(body.key or "").strip()
-        value = str(body.value or "").strip()
-        if key == "TELEGRAM_HOME_CHANNEL" and _looks_like_telegram_bot_token(value):
-            raise HTTPException(
-                status_code=400,
-                detail="That looks like a Telegram bot token. Paste it into the Bot token field, not the home chat field.",
-            )
-        channel_match = _AGENT_TELEGRAM_CHANNEL_RE.fullmatch(key)
-        if channel_match and _looks_like_telegram_bot_token(value):
-            raise HTTPException(
-                status_code=400,
-                detail="That looks like a Telegram bot token. Paste it into the Bot token field, not the chat/topic field.",
-            )
-        token_match = _AGENT_TELEGRAM_BOT_TOKEN_RE.fullmatch(key)
-        if token_match:
-            _reject_shared_agent_token(token_match.group(1), value)
-        synced = _sync_executive_telegram_aliases(key, value)
-        save_env_value(key, value)
-        return {"ok": True, "key": key, "synced": synced}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        _log.exception("PUT /api/env failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.delete("/api/env")
-async def remove_env_var(body: EnvVarDelete):
-    try:
-        removed = remove_env_value(body.key)
-        if not removed:
-            raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
-        return {"ok": True, "key": body.key}
-    except HTTPException:
-        raise
-    except Exception as e:
-        _log.exception("DELETE /api/env failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-
-@app.post("/api/env/reveal")
-async def reveal_env_var(body: EnvVarReveal, request: Request):
-    """Return the real (unredacted) value of a single env var.
-
-    Protected by:
-    - Ephemeral session token (generated per server start, injected into SPA)
-    - Rate limiting (max 5 reveals per 30s window)
-    - Audit logging
-    """
-    # --- Token check ---
-    _require_token(request)
-
-    # --- Rate limit ---
-    now = time.time()
-    cutoff = now - _REVEAL_WINDOW_SECONDS
-    _reveal_timestamps[:] = [t for t in _reveal_timestamps if t > cutoff]
-    if len(_reveal_timestamps) >= _REVEAL_MAX_PER_WINDOW:
-        raise HTTPException(status_code=429, detail="Too many reveal requests. Try again shortly.")
-    _reveal_timestamps.append(now)
-
-    # --- Reveal ---
-    env_on_disk = load_env()
-    value = env_on_disk.get(body.key)
-    if value is None:
-        raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
-
-    _log.info("env/reveal: %s", body.key)
-    return {"key": body.key, "value": value}
 
 
 # ---------------------------------------------------------------------------
@@ -3323,6 +3194,16 @@ app.include_router(
         default_config=DEFAULT_CONFIG,
         config_schema=CONFIG_SCHEMA,
         category_order=_CATEGORY_ORDER,
+        log=_log,
+    )
+)
+
+app.include_router(
+    create_env_router(
+        require_token=_require_token,
+        looks_like_telegram_bot_token=_looks_like_telegram_bot_token,
+        reject_shared_agent_token=_reject_shared_agent_token,
+        sync_executive_telegram_aliases=_sync_executive_telegram_aliases,
         log=_log,
     )
 )

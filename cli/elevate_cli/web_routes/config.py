@@ -39,7 +39,7 @@ def create_config_router(
     category_order: list[str],
     log: logging.Logger | None = None,
 ) -> APIRouter:
-    """Build read-only routes for config, schema, and model metadata."""
+    """Build routes for config, schema, and model metadata."""
     router = APIRouter()
     _log = log or logging.getLogger(__name__)
 
