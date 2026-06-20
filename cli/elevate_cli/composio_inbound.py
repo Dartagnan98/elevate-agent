@@ -56,12 +56,15 @@ def _warn_repeating(key: tuple[Any, ...], template: str, *args: Any) -> None:
         return
 
     suppressed = int(state["suppressed"])
-    _log.warning(
-        template + " (suppressed %d repeats over %.0fs)",
-        *args,
-        suppressed,
-        elapsed,
-    )
+    if suppressed > 0:
+        _log.warning(
+            template + " (suppressed %d repeats over %.0fs)",
+            *args,
+            suppressed,
+            elapsed,
+        )
+    else:
+        _log.warning(template, *args)
     state["last"] = now
     state["suppressed"] = 0
 
