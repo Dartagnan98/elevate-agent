@@ -21,6 +21,7 @@ const {
   isAllowedAudioPermission,
   requestPermissionOrigin,
 } = require("./permission-guard");
+const dashboardBundle = require("./dashboard-bundle");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -815,50 +816,23 @@ async function dashboardChatEnabled(port = backendPort) {
 // version-string check does NOT work: the cli __version__ (0.12.x) is a
 // different scheme from the desktop app version (1.2.x).
 function assetRefs(html) {
-  const set = new Set();
-  const re = /assets\/[A-Za-z0-9_.-]+\.(?:js|css)/g;
-  let m;
-  while ((m = re.exec(html || "")) !== null) set.add(m[0]);
-  return set;
+  return dashboardBundle.assetRefs(html);
 }
 
 function bundledIndexHtml() {
-  const candidates = [];
-  if (app.isPackaged) {
-    candidates.push(
-      path.join(process.resourcesPath, "cli", "elevate_cli", "web_dist", "index.html"),
-    );
-  }
-  try {
-    candidates.push(path.join(repoRoot(), "cli", "elevate_cli", "web_dist", "index.html"));
-  } catch {
-    /* repoRoot may throw when packaged */
-  }
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
-    } catch {
-      /* try next */
-    }
-  }
-  return "";
+  return dashboardBundle.bundledIndexHtml({ app, fs, path, process, repoRoot });
 }
 
 async function backendBundleMatches(port = backendPort) {
-  const bundledHtml = bundledIndexHtml();
-  const expected = assetRefs(bundledHtml);
-  // No bundled reference to compare against → can't judge, don't block startup.
-  if (expected.size === 0) return true;
-  const servedHtml = await requestText("/", 2500, port);
-  if (!servedHtml) return true; // unreachable handled elsewhere
-  const served = assetRefs(servedHtml);
-  if (served.size === 0) return true; // non-bundle response (e.g. login gate)
-  // Stale if any entry chunk the new app expects is absent from what the
-  // running server serves.
-  for (const ref of expected) {
-    if (!served.has(ref)) return false;
-  }
-  return true;
+  return dashboardBundle.backendBundleMatches({
+    app,
+    backendPort: port,
+    fs,
+    path,
+    process,
+    repoRoot,
+    requestText,
+  });
 }
 
 // Kill whatever process is listening on a dashboard port — used to evict a
