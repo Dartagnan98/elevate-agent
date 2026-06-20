@@ -343,51 +343,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _expand_path(value: str) -> Path:
-    return Path(os.path.expandvars(value)).expanduser()
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _candidate_tools_root(config: dict[str, Any]) -> Path:
-    sources_cfg = _as_dict(config.get("sources"))
-    integrations_cfg = _as_dict(config.get("integrations"))
-    env_root = os.getenv("ELEVATE_TOOLS_ROOT", "").strip()
-    configured = str(sources_cfg.get("tools_root") or integrations_cfg.get("tools_root") or "").strip()
-    client_tools_tmp = get_elevate_home() / "tmp" / "client-tools"
-    if env_root:
-        return _expand_path(env_root)
-    if configured:
-        return _expand_path(configured)
-    if client_tools_tmp.exists():
-        return client_tools_tmp
-    return get_elevate_home() / "tools"
-
-
-def get_source_root_info(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    config = config or load_config()
-    sources_cfg = _as_dict(config.get("sources"))
-    tools_root = _candidate_tools_root(config)
-    source_root = tools_root / "data" / "sources"
-    if os.getenv("ELEVATE_TOOLS_ROOT", "").strip():
-        root_source = "env"
-    elif sources_cfg.get("tools_root"):
-        root_source = "config"
-    elif (get_elevate_home() / "tmp" / "client-tools").exists():
-        root_source = "detected-client-tools"
-    else:
-        root_source = "default-local"
-
-    return {
-        "toolsRoot": str(tools_root),
-        "toolsRootSource": root_source,
-        "toolsRootIo": "local",
-        "sourceRoot": str(source_root),
-    }
-
-
 from elevate_cli.source_connector_modules.source_io import (
     PROFILE_STATUS_VALUES,
     _JSONL_COUNT_CACHE,
@@ -971,23 +926,6 @@ def build_source_records_response(
         "limit": safe_limit,
         "records": records,
     }
-
-
-def _combined_env(config: dict[str, Any]) -> dict[str, str]:
-    values = dict(load_env())
-    tools_env = _candidate_tools_root(config) / ".env"
-    try:
-        if tools_env.exists():
-            for line in tools_env.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if "=" not in line or line.lstrip().startswith("#"):
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                if key and key not in values:
-                    values[key] = value.strip().strip("\"'")
-    except Exception:
-        pass
-    return values
 
 
 def _candidate_records_for_source(source_dir: Path, source: JsonRecord, safe_limit: int) -> list[JsonRecord]:
@@ -4002,12 +3940,17 @@ from elevate_cli.source_connector_modules.integration_settings import (
     DEFAULT_CRM,
     _CRM_PROVIDER_ALIASES,
     _CRM_PROVIDER_ENV_DEFAULTS,
+    _as_dict,
+    _candidate_tools_root,
     _canonical_crm_provider,
+    _combined_env,
     _crm_to_ui,
+    _expand_path,
     _merge_crm,
     _provider_from_admin_profile,
     _ui_crm_to_config,
     get_integration_settings,
+    get_source_root_info,
     save_integration_settings,
     test_crm_connection,
 )
