@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 const installPath = path.resolve(__dirname, "../src/install.html");
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const installerPath = path.resolve(__dirname, "../src/installer.js");
 
 function loadInstallScript() {
   const html = fs.readFileSync(installPath, "utf8");
@@ -83,19 +84,21 @@ test("startup loading page resolves to dashboard or setup page", () => {
 
 test("retry route leaves loading for setup page on backend failure", () => {
   const main = fs.readFileSync(mainPath, "utf8");
+  const installer = fs.readFileSync(installerPath, "utf8");
 
+  assert.match(main, /ipcMain\.handle\("desktop:retry"[\s\S]+installer\.retry\(\)/);
   assert.match(
-    main,
-    /ipcMain\.handle\("desktop:retry"[\s\S]+loadLocalPage\("loading\.html"\);[\s\S]+const ready = await ensureBackend\(\);[\s\S]+if \(ready\) \{[\s\S]+loadAppPath\(START_PATH\);[\s\S]+return \{ ok: true \};[\s\S]+loadLocalPage\("install\.html"\);[\s\S]+return \{ ok: false \};/s,
+    installer,
+    /loadLocalPage\("loading\.html"\);[\s\S]+const ready = await ensureBackend\(\);[\s\S]+if \(ready\) \{[\s\S]+loadAppPath\(startPath\);[\s\S]+return \{ ok: true \};[\s\S]+loadLocalPage\("install\.html"\);[\s\S]+return \{ ok: false \};/s,
   );
 });
 
 test("installer exit success reloads setup page when backend is still unavailable", () => {
-  const main = fs.readFileSync(mainPath, "utf8");
+  const installer = fs.readFileSync(installerPath, "utf8");
 
   assert.match(
-    main,
-    /if \(ready\) \{\s*loadAppPath\(START_PATH\);\s*return;\s*}\s*loadLocalPage\("install\.html"\);/s,
+    installer,
+    /if \(ready\) \{\s*loadAppPath\(startPath\);\s*return;\s*}\s*loadLocalPage\("install\.html"\);/s,
   );
 });
 
