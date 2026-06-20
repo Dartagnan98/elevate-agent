@@ -116,6 +116,18 @@ from elevate_cli.web_session_activity import (
     platform_chat_sources as _platform_chat_sources_impl,
     session_list_payload as _session_list_payload_impl,
 )
+from elevate_cli.web_session_store import (
+    _FS_SCAN_CACHE,
+    _FS_SCAN_CACHE_LOCK,
+    _SESSION_DB_SINGLETON,
+    _SESSION_DB_SINGLETON_LOCK,
+    _SharedSessionDB,
+    _account_key_safe,
+    _fs_cache_get,
+    _fs_cache_invalidate,
+    _fs_cache_put,
+    _get_session_db,
+)
 from elevate_cli.web_telegram_aliases import (
     _AGENT_TELEGRAM_BOT_TOKEN_RE,
     _EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY,
@@ -143,114 +155,6 @@ except ImportError:
 
 WEB_DIST = Path(os.environ["ELEVATE_WEB_DIST"]) if "ELEVATE_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
 _log = logging.getLogger(__name__)
-
-# ── Shared SessionDB ──────────────────────────────────────────────────
-# SessionDB was previously constructed per request at ~15 call sites; each
-# construction opens a fresh SQLite connection and runs _init_schema(). The
-# class is safe to share across the uvicorn threadpool (check_same_thread=False
-# + an internal lock serializing every op — see elevate_state.SessionDB.__init__),
-# so we cache one instance process-wide. If the first open fails we leave the
-# singleton unset so the next call retries (matches the old per-request retry).
-_SESSION_DB_SINGLETON = None
-_SESSION_DB_SINGLETON_LOCK = threading.Lock()
-
-
-class _SharedSessionDB:
-    """Per-request handle over the process-wide SessionDB.
-
-    The ~15 call sites construct a SessionDB then ``db.close()`` it in a
-    ``finally`` block. Against a shared instance that close would tear down the
-    connection for every other request, so this proxy makes ``close()`` a no-op
-    and forwards everything else to the real shared instance (which has its own
-    lock + check_same_thread=False, so concurrent use is safe).
-    """
-
-    __slots__ = ("_db",)
-
-    def __init__(self, db):
-        object.__setattr__(self, "_db", db)
-
-    def close(self):  # shared instance lives for the process — do not close
-        return None
-
-    def __getattr__(self, name):
-        return getattr(object.__getattribute__(self, "_db"), name)
-
-    def __setattr__(self, name, value):
-        setattr(object.__getattribute__(self, "_db"), name, value)
-
-
-def _get_session_db():
-    """Return a handle over the process-wide shared SessionDB.
-
-    Built once and reused. The state.db path (elevate_state.DEFAULT_DB_PATH) is
-    fixed at import in production, so the singleton is stable there; but if it
-    ever changes (tests patch it per-case, and a future runtime relocation would
-    too) we rebuild against the new path rather than serve a stale handle.
-    """
-    global _SESSION_DB_SINGLETON
-    from elevate_state import SessionDB
-    import elevate_state as _es
-    target_path = _es.DEFAULT_DB_PATH
-    db = _SESSION_DB_SINGLETON
-    if db is None or getattr(db, "db_path", None) != target_path:
-        with _SESSION_DB_SINGLETON_LOCK:
-            db = _SESSION_DB_SINGLETON
-            if db is None or getattr(db, "db_path", None) != target_path:
-                if db is not None:
-                    try:
-                        db.close()
-                    except Exception:
-                        pass
-                _SESSION_DB_SINGLETON = SessionDB()
-            db = _SESSION_DB_SINGLETON
-    return _SharedSessionDB(db)
-
-
-# ── Account-scoped TTL cache for filesystem-scan endpoints ────────────
-# Some read endpoints (activity feed, heartbeat surfaces) walk the account
-# data dir and parse dozens of JSON files on every request. Cache the computed
-# result per account for a short TTL so rapid polling collapses to one scan.
-# Keyed on the account key so one account never serves another's data. The TTL
-# is short (seconds) and acts as a backstop: even a mutation we forget to
-# invalidate self-heals within the TTL.
-import time as _time  # noqa: E402
-
-_FS_SCAN_CACHE: dict = {}
-_FS_SCAN_CACHE_LOCK = threading.Lock()
-
-
-def _account_key_safe() -> str:
-    try:
-        from elevate_constants import get_account_key
-
-        return get_account_key()
-    except Exception:
-        return "_default"
-
-
-def _fs_cache_get(name: str):
-    """Return cached value for (current account, name) if still fresh, else None."""
-    key = (_account_key_safe(), name)
-    with _FS_SCAN_CACHE_LOCK:
-        ent = _FS_SCAN_CACHE.get(key)
-        if ent is not None and ent[0] > _time.monotonic():
-            return ent[1]
-    return None
-
-
-def _fs_cache_put(name: str, value, ttl_seconds: float) -> None:
-    key = (_account_key_safe(), name)
-    with _FS_SCAN_CACHE_LOCK:
-        _FS_SCAN_CACHE[key] = (_time.monotonic() + ttl_seconds, value)
-
-
-def _fs_cache_invalidate(name: str) -> None:
-    """Drop the current account's cached entry for ``name`` (call after a mutation)."""
-    key = (_account_key_safe(), name)
-    with _FS_SCAN_CACHE_LOCK:
-        _FS_SCAN_CACHE.pop(key, None)
-
 
 app = FastAPI(
     title="Elevate",
