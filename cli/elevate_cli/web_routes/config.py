@@ -1,4 +1,4 @@
-"""Read-only configuration and model metadata routes."""
+"""Configuration and model metadata routes."""
 
 import logging
 from typing import Any, Dict
@@ -22,6 +22,10 @@ _EMPTY_MODEL_INFO: dict = {
 
 class TierMappingBody(BaseModel):
     mapping: Dict[str, Any]
+
+
+class ConfigUpdate(BaseModel):
+    config: dict
 
 
 class RawConfigUpdate(BaseModel):
@@ -50,10 +54,51 @@ def create_config_router(
             config["model_context_length"] = 0
         return config
 
+    def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
+        config = dict(config)
+        config.pop("_model_meta", None)
+
+        ctx_override = config.pop("model_context_length", 0)
+        if not isinstance(ctx_override, int):
+            try:
+                ctx_override = int(ctx_override)
+            except (TypeError, ValueError):
+                ctx_override = 0
+
+        model_val = config.get("model")
+        if isinstance(model_val, str) and model_val:
+            try:
+                disk_config = load_config()
+                disk_model = disk_config.get("model")
+                if isinstance(disk_model, dict):
+                    disk_model["default"] = model_val
+                    if ctx_override > 0:
+                        disk_model["context_length"] = ctx_override
+                    else:
+                        disk_model.pop("context_length", None)
+                    config["model"] = disk_model
+                elif ctx_override > 0:
+                    config["model"] = {
+                        "default": model_val,
+                        "context_length": ctx_override,
+                    }
+            except Exception:
+                pass
+        return config
+
     @router.get("/api/config")
     async def get_config():
         config = _normalize_config_for_web(load_config())
         return {k: v for k, v in config.items() if not k.startswith("_")}
+
+    @router.put("/api/config")
+    async def update_config(body: ConfigUpdate):
+        try:
+            save_config(_denormalize_config_from_web(body.config))
+            return {"ok": True}
+        except Exception:
+            _log.exception("PUT /api/config failed")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.get("/api/config/defaults")
     async def get_defaults():

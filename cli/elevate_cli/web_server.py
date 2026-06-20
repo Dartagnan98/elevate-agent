@@ -946,10 +946,6 @@ for _k, _v in CONFIG_SCHEMA.items():
 CONFIG_SCHEMA = _ordered_schema
 
 
-class ConfigUpdate(BaseModel):
-    config: dict
-
-
 class EnvVarUpdate(BaseModel):
     key: str
     value: str
@@ -1614,69 +1610,6 @@ async def search_sessions(q: str = "", limit: int = 20):
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
-
-
-def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Reverse _normalize_config_for_web before saving.
-
-    Reconstructs ``model`` as a dict by reading the current on-disk config
-    to recover model subkeys (provider, base_url, api_mode, etc.) that were
-    stripped from the GET response.  The frontend only sees model as a flat
-    string; the rest is preserved transparently.
-
-    Also handles ``model_context_length`` — writes it back into the model dict
-    as ``context_length``.  A value of 0 or absent means "auto-detect" (omitted
-    from the dict so get_model_context_length() uses its normal resolution).
-    """
-    config = dict(config)
-    # Remove any _model_meta that might have leaked in (shouldn't happen
-    # with the stripped GET response, but be defensive)
-    config.pop("_model_meta", None)
-
-    # Extract and remove model_context_length before processing model
-    ctx_override = config.pop("model_context_length", 0)
-    if not isinstance(ctx_override, int):
-        try:
-            ctx_override = int(ctx_override)
-        except (TypeError, ValueError):
-            ctx_override = 0
-
-    model_val = config.get("model")
-    if isinstance(model_val, str) and model_val:
-        # Read the current disk config to recover model subkeys
-        try:
-            disk_config = load_config()
-            disk_model = disk_config.get("model")
-            if isinstance(disk_model, dict):
-                # Preserve all subkeys, update default with the new value
-                disk_model["default"] = model_val
-                # Write context_length into the model dict (0 = remove/auto)
-                if ctx_override > 0:
-                    disk_model["context_length"] = ctx_override
-                else:
-                    disk_model.pop("context_length", None)
-                config["model"] = disk_model
-            else:
-                # Model was previously a bare string — upgrade to dict if
-                # user is setting a context_length override
-                if ctx_override > 0:
-                    config["model"] = {
-                        "default": model_val,
-                        "context_length": ctx_override,
-                    }
-        except Exception:
-            pass  # can't read disk config — just use the string form
-    return config
-
-
-@app.put("/api/config")
-async def update_config(body: ConfigUpdate):
-    try:
-        save_config(_denormalize_config_from_web(body.config))
-        return {"ok": True}
-    except Exception as e:
-        _log.exception("PUT /api/config failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/env")
