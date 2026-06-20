@@ -1031,6 +1031,7 @@ def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.analytics import create_analytics_router
+from elevate_cli.web_routes.ayrshare import create_ayrshare_router
 from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.cron import create_cron_router
@@ -2911,6 +2912,8 @@ app.include_router(
 )
 
 app.include_router(create_analytics_router(get_session_db=_get_session_db, log=_log))
+
+app.include_router(create_ayrshare_router(log=_log))
 
 app.include_router(
     create_channels_router(
@@ -7839,90 +7842,6 @@ async def composio_inbound_pull():
     except Exception as exc:
         _log.exception("POST /api/composio/inbound/pull failed")
         raise HTTPException(status_code=500, detail=f"Composio inbound pull failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# Ayrshare publisher routes
-# ---------------------------------------------------------------------------
-
-
-class AyrshareKeyBody(BaseModel):
-    apiKey: str
-
-
-@app.get("/api/ayrshare/status")
-async def ayrshare_status():
-    try:
-        from elevate_cli import ayrshare_client
-
-        return ayrshare_client.get_status()
-    except Exception as exc:
-        _log.exception("GET /api/ayrshare/status failed")
-        raise HTTPException(status_code=500, detail=f"Ayrshare status failed: {exc}")
-
-
-@app.post("/api/ayrshare/key")
-async def ayrshare_set_key(body: AyrshareKeyBody):
-    try:
-        from elevate_cli import ayrshare_client
-
-        result = ayrshare_client.set_api_key(body.apiKey)
-        if not result.get("ok"):
-            raise HTTPException(status_code=400, detail=result.get("error", "Invalid key"))
-        return ayrshare_client.get_status()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("POST /api/ayrshare/key failed")
-        raise HTTPException(status_code=500, detail=f"Set Ayrshare key failed: {exc}")
-
-
-@app.delete("/api/ayrshare/key")
-async def ayrshare_clear_key():
-    try:
-        from elevate_cli import ayrshare_client
-
-        ayrshare_client.clear_api_key()
-        return ayrshare_client.get_status()
-    except Exception as exc:
-        _log.exception("DELETE /api/ayrshare/key failed")
-        raise HTTPException(status_code=500, detail=f"Clear Ayrshare key failed: {exc}")
-
-
-@app.get("/api/ayrshare/profiles")
-async def ayrshare_profiles():
-    """List connected social profiles (which platforms have OAuth tokens stored in Ayrshare)."""
-    try:
-        from elevate_cli import ayrshare_client
-
-        return ayrshare_client.profiles()
-    except Exception as exc:
-        _log.exception("GET /api/ayrshare/profiles failed")
-        raise HTTPException(status_code=500, detail=f"Ayrshare profiles failed: {exc}")
-
-
-@app.get("/api/ayrshare/scheduled")
-async def ayrshare_scheduled():
-    """List currently scheduled (not yet posted) posts."""
-    try:
-        from elevate_cli import ayrshare_client
-
-        return ayrshare_client.list_scheduled()
-    except Exception as exc:
-        _log.exception("GET /api/ayrshare/scheduled failed")
-        raise HTTPException(status_code=500, detail=f"Ayrshare scheduled failed: {exc}")
-
-
-@app.get("/api/ayrshare/history")
-async def ayrshare_history(last_records: int = 100, last_days: Optional[int] = None):
-    """List past posts with engagement metrics."""
-    try:
-        from elevate_cli import ayrshare_client
-
-        return ayrshare_client.history(last_records=last_records, last_days=last_days)
-    except Exception as exc:
-        _log.exception("GET /api/ayrshare/history failed")
-        raise HTTPException(status_code=500, detail=f"Ayrshare history failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
