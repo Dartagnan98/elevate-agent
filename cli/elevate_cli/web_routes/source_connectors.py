@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_cli.web_routes.source_sender import register_sender_routes
+
 
 class SourceConnectorAction(BaseModel):
     action: str
@@ -520,28 +522,6 @@ def create_source_connectors_router(*, log: logging.Logger | None = None) -> API
             raise HTTPException(status_code=500, detail=f"Sent list failed: {exc}")
 
 
-    @router.post("/api/sender/tick")
-    async def post_sender_tick(batch: int = 10):
-        """Manual sender tick — useful for tests/admin. Cron calls this on schedule."""
-        try:
-            from elevate_cli import sender
-
-            return sender.tick(batch=max(1, min(100, batch)))
-        except Exception as exc:
-            _log.exception("POST /api/sender/tick failed")
-            raise HTTPException(status_code=500, detail=f"Sender tick failed: {exc}")
-
-
-    @router.get("/api/sender/stats")
-    async def get_sender_stats():
-        try:
-            from elevate_cli import outreach_db
-
-            return {"queue": outreach_db.send_queue_stats()}
-        except Exception as exc:
-            _log.exception("GET /api/sender/stats failed")
-            raise HTTPException(status_code=500, detail=f"Sender stats failed: {exc}")
-
-
+    register_sender_routes(router, log=_log)
 
     return router
