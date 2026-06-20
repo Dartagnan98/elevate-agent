@@ -78,3 +78,28 @@ async def stop_cloud_skill_heartbeat(application) -> None:
             await task
         except (asyncio.CancelledError, Exception):
             pass
+
+
+def install_cloud_skill_lifecycle(
+    application,
+    *,
+    log: logging.Logger,
+    interval_s: int = _CLOUD_SKILL_SYNC_INTERVAL_S,
+) -> None:
+    def sync_once(reason: str) -> None:
+        _cloud_skill_sync_once(reason, log=log)
+
+    async def heartbeat() -> None:
+        await _cloud_skill_heartbeat(interval_s=interval_s, sync_once=sync_once)
+
+    @application.on_event("startup")
+    async def _kickoff_cloud_skill_sync() -> None:
+        await kickoff_cloud_skill_sync(
+            application,
+            sync_once=sync_once,
+            heartbeat=heartbeat,
+        )
+
+    @application.on_event("shutdown")
+    async def _stop_cloud_skill_heartbeat() -> None:
+        await stop_cloud_skill_heartbeat(application)

@@ -70,13 +70,7 @@ from elevate_cli.web_server_start import run_dashboard_server
 from elevate_cli.web_agent_admin_routes import register_agent_admin_routes
 from elevate_cli.web_session_system_routes import register_session_system_routes
 from elevate_cli.web_business_routes import register_business_routes
-from elevate_cli.web_cloud_skills import (
-    _CLOUD_SKILL_SYNC_INTERVAL_S,
-    _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
-    _cloud_skill_sync_once as _cloud_skill_sync_once_impl,
-    kickoff_cloud_skill_sync,
-    stop_cloud_skill_heartbeat,
-)
+from elevate_cli.web_cloud_skills import install_cloud_skill_lifecycle
 from elevate_cli.web_action_helpers import (
     open_in_file_manager as _open_in_file_manager_impl,
     session_reveal_target as _session_reveal_target_impl,
@@ -545,30 +539,7 @@ mount_dashboard_plugin_api_routes(app, project_root=PROJECT_ROOT, log=_log)
 
 mount_spa(app)
 
-
-def _cloud_skill_sync_once(reason: str) -> None:
-    _cloud_skill_sync_once_impl(reason, log=_log)
-
-
-async def _cloud_skill_heartbeat() -> None:
-    await _cloud_skill_heartbeat_impl(
-        interval_s=_CLOUD_SKILL_SYNC_INTERVAL_S,
-        sync_once=_cloud_skill_sync_once,
-    )
-
-
-@app.on_event("startup")
-async def _kickoff_cloud_skill_sync() -> None:
-    await kickoff_cloud_skill_sync(
-        app,
-        sync_once=_cloud_skill_sync_once,
-        heartbeat=_cloud_skill_heartbeat,
-    )
-
-
-@app.on_event("shutdown")
-async def _stop_cloud_skill_heartbeat() -> None:
-    await stop_cloud_skill_heartbeat(app)
+install_cloud_skill_lifecycle(app, log=_log)
 
 
 def start_server(
