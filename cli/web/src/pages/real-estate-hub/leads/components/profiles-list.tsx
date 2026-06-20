@@ -6,6 +6,8 @@ import { StatusPill } from "./profile-status";
 
 export { StatusPill } from "./profile-status";
 
+const PROFILE_PAGE = 50;
+
 function ProfileRow({
   profile, onOpen, onStatusChange, onFavoriteChange, favoriteBusy,
 }: {
@@ -95,6 +97,8 @@ export function ProfilesList({
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
 }) {
   const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "unverified" | "potential" | "favorites">("all");
+  const [page, setPage] = useState(0);
+  const [showAll, setShowAll] = useState(false);
   const [favoriteBusy, setFavoriteBusy] = useState<Record<string, boolean>>({});
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
 
@@ -112,11 +116,17 @@ export function ProfilesList({
     return [...list].sort((a, b) => Number(Boolean(b.favorite)) - Number(Boolean(a.favorite)));
   }, [profiles, sourceFilter, statusFilter]);
 
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PROFILE_PAGE));
+  const safePage = Math.min(page, totalPages - 1);
+  const visibleProfiles = showAll ? filtered : filtered.slice(safePage * PROFILE_PAGE, safePage * PROFILE_PAGE + PROFILE_PAGE);
+  const rangeStart = filtered.length === 0 ? 0 : safePage * PROFILE_PAGE + 1;
+  const rangeEnd = Math.min(filtered.length, safePage * PROFILE_PAGE + PROFILE_PAGE);
+
   const grouped = useMemo(() => {
     const g: Record<"active" | "verified" | "unverified", LeadsProfile[]> = { active: [], verified: [], unverified: [] };
-    for (const p of filtered) g[p.group].push(p);
+    for (const p of visibleProfiles) g[p.group].push(p);
     return g;
-  }, [filtered]);
+  }, [visibleProfiles]);
 
   const verifiedCount = profiles.filter(p => p.verified).length;
   const potentialCount = profiles.filter(p => !p.verified).length;
@@ -153,7 +163,7 @@ export function ProfilesList({
           <button
             type="button"
             className={"lb-pbadge" + (statusFilter === "all" ? " active" : "")}
-            onClick={() => setStatusFilter("all")}
+            onClick={() => { setStatusFilter("all"); setPage(0); setShowAll(false); }}
           >
             <span className="lb-pbadge-num mono">{profiles.length}</span>
             <span>total</span>
@@ -161,7 +171,7 @@ export function ProfilesList({
           <button
             type="button"
             className={"lb-pbadge favorite" + (statusFilter === "favorites" ? " active" : "")}
-            onClick={() => setStatusFilter(s => s === "favorites" ? "all" : "favorites")}
+            onClick={() => { setStatusFilter(s => s === "favorites" ? "all" : "favorites"); setPage(0); setShowAll(false); }}
           >
             <span className="lb-pbadge-num mono">{favoriteCount}</span>
             <span>favorites</span>
@@ -169,7 +179,7 @@ export function ProfilesList({
           <button
             type="button"
             className={"lb-pbadge verified" + (statusFilter === "verified" ? " active" : "")}
-            onClick={() => setStatusFilter(s => s === "verified" ? "all" : "verified")}
+            onClick={() => { setStatusFilter(s => s === "verified" ? "all" : "verified"); setPage(0); setShowAll(false); }}
           >
             <span className="lb-pbadge-num mono">{verifiedCount}</span>
             <span>verified</span>
@@ -177,7 +187,7 @@ export function ProfilesList({
           <button
             type="button"
             className={"lb-pbadge potential" + (statusFilter === "potential" ? " active" : "")}
-            onClick={() => setStatusFilter(s => s === "potential" ? "all" : "potential")}
+            onClick={() => { setStatusFilter(s => s === "potential" ? "all" : "potential"); setPage(0); setShowAll(false); }}
           >
             <span className="lb-pbadge-num mono">{potentialCount}</span>
             <span>potential leads</span>
@@ -229,6 +239,42 @@ export function ProfilesList({
 
       {filtered.length === 0 && (
         <div className="lb-replies-empty">No profiles match this filter.</div>
+      )}
+
+      {filtered.length > PROFILE_PAGE && (
+        <footer className="ab-inbox-foot">
+          <span className="ab-inbox-range mono">
+            {showAll ? `Showing all ${filtered.length}` : `${rangeStart}–${rangeEnd} of ${filtered.length}`}
+          </span>
+          <div className="ab-inbox-pager">
+            {!showAll && (
+              <>
+                <button
+                  type="button"
+                  className="ab-inbox-page-btn"
+                  onClick={() => setPage(p => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  aria-label="Previous profiles"
+                >‹</button>
+                <span className="ab-inbox-page-num mono">{safePage + 1} / {totalPages}</span>
+                <button
+                  type="button"
+                  className="ab-inbox-page-btn"
+                  onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                  disabled={safePage === totalPages - 1}
+                  aria-label="Next profiles"
+                >›</button>
+              </>
+            )}
+            <button
+              type="button"
+              className="ab-inbox-page-toggle"
+              onClick={() => { setShowAll(s => !s); setPage(0); }}
+            >
+              {showAll ? "Paginate" : "Show all"}
+            </button>
+          </div>
+        </footer>
       )}
     </section>
   );
