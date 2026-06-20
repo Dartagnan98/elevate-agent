@@ -5,8 +5,19 @@ on:
     inputs:
       dmg_url:
         description: "HTTPS URL for the arm64 DMG built from the commit under test"
-        required: true
+        required: false
+        default: ""
         type: string
+      app_zip_url:
+        description: "HTTPS URL for a zipped Elevate.app built from the commit under test; dev fallback when no DMG is available"
+        required: false
+        default: ""
+        type: string
+      allow_unnotarized:
+        description: "Allow a signed but unnotarized dev app artifact; keeps ENV-03 partial until a notarized DMG passes"
+        required: false
+        default: false
+        type: boolean
       expected_app_version:
         description: "Expected app version; blank uses desktop/package.json"
         required: false
@@ -48,19 +59,33 @@ jobs:
         run: |
           set -euo pipefail
           dmg="$RUNNER_TEMP/Elevate-env03-arm64.dmg"
+          zip="$RUNNER_TEMP/Elevate-env03-arm64.zip"
           mount_dir="$RUNNER_TEMP/elevate-dmg"
           app_path="$RUNNER_TEMP/Elevate.app"
           mkdir -p "$mount_dir"
-          curl --fail --location --show-error --output "$dmg" "${{ inputs.dmg_url }}"
-          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
-          trap 'hdiutil detach "$mount_dir" || true' EXIT
-          cp -R "$mount_dir/Elevate.app" "$app_path"
-          hdiutil detach "$mount_dir"
-          trap - EXIT
+          if [ -n "${{ inputs.dmg_url }}" ]; then
+            curl --fail --location --show-error --output "$dmg" "${{ inputs.dmg_url }}"
+            hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg"
+            trap 'hdiutil detach "$mount_dir" || true' EXIT
+            cp -R "$mount_dir/Elevate.app" "$app_path"
+            hdiutil detach "$mount_dir"
+            trap - EXIT
+          elif [ -n "${{ inputs.app_zip_url }}" ]; then
+            curl --fail --location --show-error --output "$zip" "${{ inputs.app_zip_url }}"
+            ditto -x -k "$zip" "$RUNNER_TEMP"
+            test -d "$app_path"
+          else
+            echo "Provide either dmg_url or app_zip_url" >&2
+            exit 1
+          fi
           file "$app_path/Contents/MacOS/Elevate" | tee "$RUNNER_TEMP/elevate-binary-file.txt"
           grep -q "arm64" "$RUNNER_TEMP/elevate-binary-file.txt"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          spctl --assess --type execute --verbose=4 "$app_path"
+          if [ "${{ inputs.allow_unnotarized }}" = "true" ]; then
+            echo "Skipping spctl for signed but unnotarized dev artifact"
+          else
+            spctl --assess --type execute --verbose=4 "$app_path"
+          fi
 
       - name: Seed licensed disposable home
         run: |
