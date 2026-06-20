@@ -22,58 +22,29 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from elevate_cli.web_runtime import (
+    ensure_project_root_on_path,
+    init_workspace_root as _init_workspace_root_impl,
+    is_packaged_desktop_runtime as _is_packaged_desktop_runtime_impl,
+    probe_gateway_health as _probe_gateway_health_impl,
+)
+
+ensure_project_root_on_path(PROJECT_ROOT)
 
 
 def _init_workspace_root() -> Path:
-    """The user folder the agent works out of and that the workspace panel
-    opens / shows status for.
-
-    Defaults to PROJECT_ROOT (a dev checkout, which is itself a git repo). The
-    desktop app sets ELEVATE_WORKSPACE to a dedicated folder (e.g. ~/Elevation)
-    so the packaged agent never treats its own read-only bundled code as the
-    workspace. We git-init the folder so the workspace panel / Review / Create
-    PR work instead of throwing a raw git error on a plain directory.
-    """
-    raw = os.environ.get("ELEVATE_WORKSPACE", "").strip()
-    if not raw:
-        return PROJECT_ROOT
-    try:
-        root = Path(raw).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        if not (root / ".git").exists():
-            subprocess.run(
-                ["git", "init"],
-                cwd=str(root),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=15,
-                check=False,
-            )
-        return root
-    except Exception:
-        return PROJECT_ROOT
+    return _init_workspace_root_impl(project_root=PROJECT_ROOT)
 
 
 WORKSPACE_ROOT = _init_workspace_root()
 
 
 def _is_packaged_desktop_runtime() -> bool:
-    """True when this API is running from the immutable Electron app bundle."""
-    if os.environ.get("ELEVATE_DESKTOP_APP") == "1":
-        return True
-    parts = PROJECT_ROOT.parts
-    return (
-        any(part.endswith(".app") for part in parts)
-        and "Contents" in parts
-        and "Resources" in parts
-    )
+    return _is_packaged_desktop_runtime_impl(project_root=PROJECT_ROOT)
 
 from elevate_cli import __version__, __release_date__
 from elevate_cli.config import (
@@ -225,26 +196,10 @@ except (ValueError, TypeError):
 
 
 def _probe_gateway_health() -> tuple[bool, dict | None]:
-    """Probe the gateway via its HTTP health endpoint."""
-    if not _GATEWAY_HEALTH_URL:
-        return False, None
-
-    base = _GATEWAY_HEALTH_URL.rstrip("/")
-    if base.endswith("/health/detailed"):
-        base = base[: -len("/health/detailed")]
-    elif base.endswith("/health"):
-        base = base[: -len("/health")]
-
-    for path in (f"{base}/health/detailed", f"{base}/health"):
-        try:
-            req = urllib.request.Request(path, method="GET")
-            with urllib.request.urlopen(req, timeout=_GATEWAY_HEALTH_TIMEOUT) as resp:
-                if resp.status == 200:
-                    body = json.loads(resp.read())
-                    return True, body
-        except Exception:
-            continue
-    return False, None
+    return _probe_gateway_health_impl(
+        gateway_health_url=_GATEWAY_HEALTH_URL,
+        gateway_health_timeout=_GATEWAY_HEALTH_TIMEOUT,
+    )
 
 
 # ---------------------------------------------------------------------------
