@@ -69,6 +69,7 @@ from elevate_cli.web_middleware import install_dashboard_middlewares
 from elevate_cli.web_server_start import run_dashboard_server
 from elevate_cli.web_agent_admin_routes import register_agent_admin_routes
 from elevate_cli.web_session_system_routes import register_session_system_routes
+from elevate_cli.web_business_routes import register_business_routes
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -316,16 +317,11 @@ install_dashboard_middlewares(
 )
 
 
-from elevate_cli.web_routes.analytics import create_analytics_router
-from elevate_cli.web_routes.admin_actions import create_admin_actions_router
-from elevate_cli.web_routes.admin_deals import create_admin_deals_router
 from elevate_cli.web_routes.admin_setup import (
     admin_jurisdiction_config as _admin_jurisdiction_config,
     require_admin_setup_ready_for_launch as _require_admin_setup_ready_for_launch,
 )
-from elevate_cli.web_routes.admin_templates import create_admin_templates_router
-from elevate_cli.web_routes.ayrshare import create_ayrshare_router
-from elevate_cli.web_routes.channels import _elevate_repo_root, create_channels_router
+from elevate_cli.web_routes.channels import _elevate_repo_root
 from elevate_cli.web_routes.chat_websockets import (
     default_resolve_chat_argv,
 )
@@ -334,26 +330,15 @@ from elevate_cli.web_routes.composio import (
     _COMPOSIO_SWR_LOCK,
     _COMPOSIO_TOOLKITS_CACHE,
     _prewarm_composio_toolkits_in_background,
-    create_composio_router,
 )
 from elevate_cli.web_routes.config import (
     _denormalize_config_from_web,
     _normalize_config_for_web,
-    create_config_router,
 )
 from elevate_cli.web_routes import dashboard as _dashboard_routes
-from elevate_cli.web_routes.dashboard import create_dashboard_router, mount_dashboard_plugin_api_routes
-from elevate_cli.web_routes.env import create_env_router
+from elevate_cli.web_routes.dashboard import mount_dashboard_plugin_api_routes
 from elevate_cli.web_routes.files import _UPLOAD_MAX_PER_FILE
-from elevate_cli.web_routes.integrations import create_integrations_router
-from elevate_cli.web_routes.lanes import create_lanes_router
-from elevate_cli.web_routes.outreach_templates import create_outreach_templates_router
-from elevate_cli.web_routes.skills import create_skills_router
-from elevate_cli.web_routes.social import _load_social_fetcher, create_social_router
-from elevate_cli.web_routes.source_connectors import create_source_connectors_router
-from elevate_cli.web_routes.surface_tasks import create_surface_tasks_router
-from elevate_cli.web_routes.threads import create_threads_router
-from elevate_cli.web_routes.today import create_today_router
+from elevate_cli.web_routes.social import _load_social_fetcher
 from elevate_cli.web_routes.workspace import git_value as _git_value
 from elevate_cli.web_spa import mount_spa as _mount_spa
 from elevate_cli.web_static import ImmutableStaticFiles
@@ -490,92 +475,28 @@ register_session_system_routes(
     fs_cache_put=_fs_cache_put,
 )
 
-app.include_router(
-    create_admin_actions_router(
-        require_admin_setup_ready_for_launch=lambda: _require_admin_setup_ready_for_launch(),
-        web_actor="human:web",
-        log=_log,
-    )
+register_business_routes(
+    app,
+    log=_log,
+    web_actor="human:web",
+    require_admin_setup_ready_for_launch=lambda: _require_admin_setup_ready_for_launch(),
+    admin_jurisdiction_config=lambda: _admin_jurisdiction_config(),
+    default_config=DEFAULT_CONFIG,
+    config_schema=CONFIG_SCHEMA,
+    category_order=_CATEGORY_ORDER,
+    load_config_func=lambda: load_config(),
+    save_config_func=lambda config: save_config(config),
+    require_token=_require_token,
+    looks_like_telegram_bot_token=_looks_like_telegram_bot_token,
+    reject_shared_agent_token=_reject_shared_agent_token,
+    sync_executive_telegram_aliases=_sync_executive_telegram_aliases,
+    get_session_db=_get_session_db,
+    spawn_elevate_action=_spawn_elevate_action,
+    elevate_repo_root_func=lambda: _elevate_repo_root(),
+    prewarm_composio_toolkits_func=lambda log: _prewarm_composio_toolkits_in_background(log),
+    project_root=PROJECT_ROOT,
+    load_social_fetcher_func=lambda module_name: _load_social_fetcher(module_name),
 )
-
-app.include_router(
-    create_admin_deals_router(
-        require_admin_setup_ready_for_launch=lambda: _require_admin_setup_ready_for_launch(),
-        admin_jurisdiction_config=lambda: _admin_jurisdiction_config(),
-        web_actor="human:web",
-        log=_log,
-    )
-)
-
-app.include_router(create_admin_templates_router(web_actor="human:web", log=_log))
-
-app.include_router(
-    create_config_router(
-        default_config=DEFAULT_CONFIG,
-        config_schema=CONFIG_SCHEMA,
-        category_order=_CATEGORY_ORDER,
-        load_config_func=lambda: load_config(),
-        save_config_func=lambda config: save_config(config),
-        log=_log,
-    )
-)
-
-app.include_router(
-    create_env_router(
-        require_token=_require_token,
-        looks_like_telegram_bot_token=_looks_like_telegram_bot_token,
-        reject_shared_agent_token=_reject_shared_agent_token,
-        sync_executive_telegram_aliases=_sync_executive_telegram_aliases,
-        log=_log,
-    )
-)
-
-app.include_router(create_analytics_router(get_session_db=_get_session_db, log=_log))
-
-app.include_router(create_ayrshare_router(log=_log))
-
-app.include_router(
-    create_channels_router(
-        log=_log,
-        require_token=_require_token,
-        spawn_elevate_action=_spawn_elevate_action,
-        looks_like_telegram_bot_token=_looks_like_telegram_bot_token,
-        sync_executive_telegram_aliases=_sync_executive_telegram_aliases,
-        elevate_repo_root_func=lambda: _elevate_repo_root(),
-    )
-)
-
-app.include_router(create_source_connectors_router(log=_log))
-
-app.include_router(create_integrations_router(log=_log))
-
-app.include_router(
-    create_composio_router(
-        prewarm_composio_toolkits_func=lambda log: _prewarm_composio_toolkits_in_background(log),
-        log=_log,
-    )
-)
-
-app.include_router(create_dashboard_router(project_root=PROJECT_ROOT, log=_log))
-
-app.include_router(create_lanes_router(log=_log))
-
-app.include_router(create_outreach_templates_router(log=_log))
-
-app.include_router(create_skills_router())
-
-app.include_router(
-    create_social_router(
-        load_social_fetcher_func=lambda module_name: _load_social_fetcher(module_name),
-        log=_log,
-    )
-)
-
-app.include_router(create_surface_tasks_router(log=_log))
-
-app.include_router(create_threads_router(log=_log))
-
-app.include_router(create_today_router(log=_log))
 
 _WEB_ACTOR = "human:web"
 
