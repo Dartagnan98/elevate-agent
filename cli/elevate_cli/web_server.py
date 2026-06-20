@@ -67,6 +67,7 @@ from elevate_cli.web_auth import (
 )
 from elevate_cli.web_middleware import install_dashboard_middlewares
 from elevate_cli.web_server_start import run_dashboard_server
+from elevate_cli.web_agent_admin_routes import register_agent_admin_routes
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -314,25 +315,19 @@ install_dashboard_middlewares(
 )
 
 
-from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.activity_comms import create_activity_comms_router
 from elevate_cli.web_routes.analytics import create_analytics_router
 from elevate_cli.web_routes.admin_actions import create_admin_actions_router
-from elevate_cli.web_routes.admin_contacts import create_admin_contacts_router
 from elevate_cli.web_routes.admin_deals import create_admin_deals_router
-from elevate_cli.web_routes.admin_onboarding import create_admin_onboarding_router
-from elevate_cli.web_routes.admin_pack import create_admin_pack_router
 from elevate_cli.web_routes.admin_setup import (
     admin_jurisdiction_config as _admin_jurisdiction_config,
-    create_admin_setup_router,
     require_admin_setup_ready_for_launch as _require_admin_setup_ready_for_launch,
 )
 from elevate_cli.web_routes.admin_templates import create_admin_templates_router
 from elevate_cli.web_routes.ayrshare import create_ayrshare_router
 from elevate_cli.web_routes.channels import _elevate_repo_root, create_channels_router
 from elevate_cli.web_routes.chat_websockets import (
-    create_chat_websocket_router,
     default_resolve_chat_argv,
 )
 from elevate_cli.web_routes.composio import (
@@ -352,7 +347,6 @@ from elevate_cli.web_routes import dashboard as _dashboard_routes
 from elevate_cli.web_routes.dashboard import create_dashboard_router, mount_dashboard_plugin_api_routes
 from elevate_cli.web_routes.env import create_env_router
 from elevate_cli.web_routes.files import _UPLOAD_MAX_PER_FILE, create_files_router
-from elevate_cli.web_routes.heartbeats import create_heartbeats_router
 from elevate_cli.web_routes.integrations import create_integrations_router
 from elevate_cli.web_routes.lanes import create_lanes_router
 from elevate_cli.web_routes.license import create_license_router
@@ -650,41 +644,25 @@ def _resolve_chat_argv(
     return default_resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
 
 
-app.include_router(
-    create_agent_hub_router(
-        require_admin_setup_ready_for_launch=_require_admin_setup_ready_for_launch,
-        log=_log,
-    )
-)
-
-app.include_router(create_admin_contacts_router(web_actor=_WEB_ACTOR, log=_log))
-app.include_router(create_admin_setup_router(web_actor=_WEB_ACTOR, log=_log))
-app.include_router(create_admin_onboarding_router(log=_log))
-app.include_router(create_admin_pack_router(web_actor=_WEB_ACTOR, log=_log))
-app.include_router(
-    create_heartbeats_router(
-        fs_cache_get=_fs_cache_get,
-        fs_cache_put=_fs_cache_put,
-        fs_cache_invalidate=_fs_cache_invalidate,
-        log=_log,
-    )
-)
-
-app.include_router(
-    create_chat_websocket_router(
-        embedded_chat_enabled=lambda: _DASHBOARD_EMBEDDED_CHAT_ENABLED,
-        session_token=lambda: _SESSION_TOKEN,
-        bound_host=lambda: getattr(app.state, "bound_host", None),
-        bound_port=lambda: getattr(app.state, "bound_port", None),
-        license_signed_in=_license_signed_in,
-        resolve_chat_argv=lambda resume=None, sidecar_url=None: _resolve_chat_argv(
-            resume=resume,
-            sidecar_url=sidecar_url,
-        ),
-        pty_bridge_class=lambda: PtyBridge,
-        pty_unavailable_error_class=lambda: PtyUnavailableError,
-        log=_log,
-    )
+register_agent_admin_routes(
+    app,
+    web_actor=_WEB_ACTOR,
+    log=_log,
+    require_admin_setup_ready_for_launch=_require_admin_setup_ready_for_launch,
+    fs_cache_get=_fs_cache_get,
+    fs_cache_put=_fs_cache_put,
+    fs_cache_invalidate=_fs_cache_invalidate,
+    embedded_chat_enabled=lambda: _DASHBOARD_EMBEDDED_CHAT_ENABLED,
+    session_token=lambda: _SESSION_TOKEN,
+    bound_host=lambda: getattr(app.state, "bound_host", None),
+    bound_port=lambda: getattr(app.state, "bound_port", None),
+    license_signed_in=_license_signed_in,
+    resolve_chat_argv=lambda resume=None, sidecar_url=None: _resolve_chat_argv(
+        resume=resume,
+        sidecar_url=sidecar_url,
+    ),
+    pty_bridge_class=lambda: PtyBridge,
+    pty_unavailable_error_class=lambda: PtyUnavailableError,
 )
 
 
