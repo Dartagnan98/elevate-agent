@@ -10,13 +10,11 @@ Usage:
 """
 
 import hashlib
-import hmac
 import json
 import logging
 import mimetypes
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -24,7 +22,6 @@ import tempfile
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -87,6 +84,18 @@ from elevate_cli.config import (
     save_config,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from elevate_cli.web_auth import (
+    _LOOPBACK_HOST_VALUES,
+    has_valid_run_token as _has_valid_run_token_impl,
+    has_valid_session_token as _has_valid_session_token_impl,
+    is_accepted_host as _is_accepted_host_impl,
+    license_signed_in as _license_signed_in_impl,
+    load_session_token as _load_session_token_impl,
+    request_id_for_log as _request_id_for_log_impl,
+    require_session_token as _require_session_token_impl,
+    safe_log_token as _safe_log_token_impl,
+    session_id_for_log as _session_id_for_log_impl,
+)
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -187,23 +196,7 @@ class ImmutableStaticFiles(StaticFiles):
 # ELEVATE_DASHBOARD_SESSION_TOKEN.
 # ---------------------------------------------------------------------------
 def _load_session_token() -> str:
-    env = os.environ.get("ELEVATE_DASHBOARD_SESSION_TOKEN")
-    if env:
-        return env.strip()
-    try:
-        path = os.path.join(os.path.expanduser("~"), ".elevate", "dashboard-session-token")
-        if os.path.exists(path):
-            existing = open(path, encoding="utf-8").read().strip()
-            if existing:
-                return existing
-        token = secrets.token_urlsafe(32)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(token)
-        os.chmod(path, 0o600)
-        return token
-    except Exception:
-        return secrets.token_urlsafe(32)
+    return _load_session_token_impl()
 
 
 _SESSION_TOKEN = _load_session_token()
@@ -271,20 +264,7 @@ _SIGN_IN_URL = (
 
 
 def _license_signed_in() -> bool:
-    """Return True iff a license.json with an unexpired access token exists."""
-    try:
-        with _LICENSE_PATH.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    token = data.get("access_token")
-    expires_at = data.get("expires_at")
-    if not token or not isinstance(expires_at, (int, float)):
-        return False
-    # 30s of slack so we don't flap right at the boundary; the desktop and CLI
-    # both refresh well before this triggers in practice.
-    return float(expires_at) > (time.time() + 30)
+    return _license_signed_in_impl(license_path=_LICENSE_PATH)
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -325,64 +305,26 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
 
 
 def _has_valid_session_token(request: Request) -> bool:
-    """True if the request carries a valid dashboard session token.
-
-    The dedicated session header avoids collisions with reverse proxies that
-    already use ``Authorization`` (for example Caddy ``basic_auth``). We still
-    accept the legacy Bearer path for backward compatibility with older
-    dashboard bundles.
-    """
-    session_header = request.headers.get(_SESSION_HEADER_NAME, "")
-    if session_header and hmac.compare_digest(
-        session_header.encode(),
-        _SESSION_TOKEN.encode(),
-    ):
-        return True
-
-    # Cookie path: set when serving the SPA, so the browser auto-sends it with
-    # every same-origin /api request regardless of JS-token-injection timing.
-    cookie_tok = request.cookies.get("elevate_session", "")
-    if cookie_tok and hmac.compare_digest(
-        cookie_tok.encode(),
-        _SESSION_TOKEN.encode(),
-    ):
-        return True
-
-    auth = request.headers.get("authorization", "")
-    expected = f"Bearer {_SESSION_TOKEN}"
-    return hmac.compare_digest(auth.encode(), expected.encode())
+    return _has_valid_session_token_impl(
+        request,
+        session_header_name=_SESSION_HEADER_NAME,
+        session_token=_SESSION_TOKEN,
+    )
 
 
 def _has_valid_run_token(request: Request) -> bool:
-    match = _RUN_RESULT_PATH_RE.match(request.url.path)
-    if not match:
-        return False
-    deal_id, run_id = match.groups()
-    token = request.headers.get(_RUN_TOKEN_HEADER_NAME, "").strip()
-    if not token:
-        auth = request.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            token = auth[7:].strip()
-    if not token:
-        return False
-    try:
-        from elevate_cli.data import connect, verify_action_run_token
-
-        with connect() as conn:
-            return verify_action_run_token(
-                conn,
-                deal_id=deal_id,
-                run_id=run_id,
-                token=token,
-            )
-    except Exception:
-        return False
+    return _has_valid_run_token_impl(
+        request,
+        run_result_path_re=_RUN_RESULT_PATH_RE,
+        run_token_header_name=_RUN_TOKEN_HEADER_NAME,
+    )
 
 
 def _require_token(request: Request) -> None:
-    """Validate the ephemeral session token.  Raises 401 on mismatch."""
-    if not _has_valid_session_token(request):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _require_session_token_impl(
+        request,
+        has_valid_session_token_func=_has_valid_session_token,
+    )
 
 
 # Accepted Host header values for loopback binds. DNS rebinding attacks
@@ -391,76 +333,29 @@ def _require_token(request: Request) -> None:
 # checks because the browser now considers evil.test and our dashboard
 # "same origin". Validating the Host header at the app layer rejects any
 # request whose Host isn't one we bound for. See GHSA-ppp5-vxwm-4cf7.
-_LOOPBACK_HOST_VALUES: frozenset = frozenset({
-    "localhost", "127.0.0.1", "::1",
-})
-
-
 def _is_accepted_host(host_header: str, bound_host: str) -> bool:
-    """True if the Host header targets the interface we bound to.
-
-    Accepts:
-    - Exact bound host (with or without port suffix)
-    - Loopback aliases when bound to loopback
-    - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
-      no protection possible at this layer)
-    """
-    if not host_header:
-        return False
-    # Strip port suffix. IPv6 addresses use bracket notation:
-    #   [::1]         — no port
-    #   [::1]:9119    — with port
-    # Plain hosts/v4:
-    #   localhost:9119
-    #   127.0.0.1:9119
-    h = host_header.strip()
-    if h.startswith("["):
-        # IPv6 bracketed — port (if any) follows "]:"
-        close = h.find("]")
-        if close != -1:
-            host_only = h[1:close]  # strip brackets
-        else:
-            host_only = h.strip("[]")
-    else:
-        host_only = h.rsplit(":", 1)[0] if ":" in h else h
-    host_only = host_only.lower()
-
-    # 0.0.0.0 bind means operator explicitly opted into all-interfaces
-    # (requires --insecure per web_server.start_server). No Host-layer
-    # defence can protect that mode; rely on operator network controls.
-    if bound_host in ("0.0.0.0", "::"):
-        return True
-
-    # Loopback bind: accept the loopback names
-    bound_lc = bound_host.lower()
-    if bound_lc in _LOOPBACK_HOST_VALUES:
-        return host_only in _LOOPBACK_HOST_VALUES
-
-    # Explicit non-loopback bind: require exact host match
-    return host_only == bound_lc
+    return _is_accepted_host_impl(host_header, bound_host)
 
 
 def _safe_log_token(value: object, *, max_len: int = 96) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "-"
-    return _LOG_TOKEN_RE.sub("_", text)[:max_len] or "-"
+    return _safe_log_token_impl(value, max_len=max_len, log_token_re=_LOG_TOKEN_RE)
 
 
 def _request_id_for_log(request: Request) -> str:
-    incoming = _safe_log_token(request.headers.get(_REQUEST_ID_HEADER_NAME), max_len=96)
-    return incoming if incoming != "-" else secrets.token_hex(8)
+    return _request_id_for_log_impl(
+        request,
+        request_id_header_name=_REQUEST_ID_HEADER_NAME,
+        safe_log_token_func=_safe_log_token,
+    )
 
 
 def _session_id_for_log(request: Request) -> str:
-    for header in _SESSION_ID_HEADER_NAMES:
-        candidate = _safe_log_token(request.headers.get(header), max_len=140)
-        if candidate != "-":
-            return candidate
-    match = _REQUEST_SESSION_PATH_RE.match(request.url.path)
-    if match:
-        return _safe_log_token(urllib.parse.unquote(match.group(1)), max_len=140)
-    return "-"
+    return _session_id_for_log_impl(
+        request,
+        session_id_header_names=_SESSION_ID_HEADER_NAMES,
+        request_session_path_re=_REQUEST_SESSION_PATH_RE,
+        safe_log_token_func=_safe_log_token,
+    )
 
 
 @app.middleware("http")
