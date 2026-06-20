@@ -17,6 +17,7 @@ const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
 const backendHttp = require("./backend-http");
+const { createBackendPortController } = require("./backend-port");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDesktopAuth } = require("./desktop-auth");
@@ -129,6 +130,21 @@ const launcherTools = createLauncherTools({
   path,
   process,
   repoRoot,
+});
+const backendPorts = createBackendPortController({
+  backendBundleMatches,
+  backendIsReady,
+  dashboardChatEnabled,
+  embeddedChat: EMBEDDED_CHAT,
+  execFileSync,
+  getBackendPort: () => backendPort,
+  log,
+  preferredPort: PREFERRED_PORT,
+  setBackendPort: (port) => {
+    backendPort = port;
+    backendUrl = `http://${HOST}:${backendPort}`;
+  },
+  setTimeout,
 });
 const gatewaySelfHeal = createGatewaySelfHeal({
   app,
@@ -438,97 +454,23 @@ async function backendBundleMatches(port = backendPort) {
 // to the port via lsof, so it never touches the gateway (different port) or
 // unrelated processes. Best-effort.
 function killProcessOnPort(port) {
-  try {
-    const out = execFileSync(
-      "/usr/sbin/lsof",
-      ["-ti", `tcp:${port}`, "-sTCP:LISTEN"],
-      { encoding: "utf8", timeout: 4000 },
-    );
-    const pids = out.split(/\s+/).map((s) => s.trim()).filter(Boolean);
-    for (const pid of pids) {
-      try {
-        execFileSync("/bin/kill", ["-TERM", pid], { timeout: 2000 });
-        log.info(`[elevate-backend] killed stale dashboard pid ${pid} on port ${port}`);
-      } catch (e) {
-        log.warn(`[elevate-backend] failed to kill pid ${pid}: ${e}`);
-      }
-    }
-    return pids.length > 0;
-  } catch {
-    return false; // lsof found nothing / not available
-  }
+  return backendPorts.killProcessOnPort(port);
 }
 
 async function backendMatchesDesktopMode(port = backendPort) {
-  if (!(await backendIsReady(port))) return false;
-  if (!(await backendBundleMatches(port))) return false;
-  if (!EMBEDDED_CHAT) return true;
-  return dashboardChatEnabled(port);
+  return backendPorts.backendMatchesDesktopMode(port);
 }
 
 async function waitForBackend(timeoutMs = 180000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await backendMatchesDesktopMode()) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return false;
+  return backendPorts.waitForBackend(timeoutMs);
 }
 
 async function backendProbeSummary(port = backendPort) {
-  const [statusReady, bundleMatch, chatEnabled] = await Promise.allSettled([
-    backendIsReady(port),
-    backendBundleMatches(port),
-    dashboardChatEnabled(port),
-  ]);
-  const value = (result) => result.status === "fulfilled" ? String(result.value) : `error:${result.reason}`;
-  return `port=${port} status=${value(statusReady)} bundle=${value(bundleMatch)} chat=${value(chatEnabled)}`;
+  return backendPorts.backendProbeSummary(port);
 }
 
 async function chooseBackendPort() {
-  if (await backendMatchesDesktopMode(PREFERRED_PORT)) {
-    backendPort = PREFERRED_PORT;
-    backendUrl = `http://${HOST}:${backendPort}`;
-    return;
-  }
-
-  // A ready-but-WRONG-VERSION backend on the preferred port = a stale
-  // dashboard the pre-update app left running. Adopting a higher port would
-  // leave it serving the old bundle on the preferred port AND confuse anything
-  // that probes the default port. Evict it so the fresh spawn binds cleanly.
-  if (
-    (await backendIsReady(PREFERRED_PORT)) &&
-    !(await backendBundleMatches(PREFERRED_PORT))
-  ) {
-    log.info("[elevate-backend] stale-bundle dashboard on preferred port — evicting");
-    killProcessOnPort(PREFERRED_PORT);
-    // Give the socket a moment to free up before the caller spawns fresh.
-    for (let i = 0; i < 20; i += 1) {
-      if (!(await backendIsReady(PREFERRED_PORT))) break;
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    backendPort = PREFERRED_PORT;
-    backendUrl = `http://${HOST}:${backendPort}`;
-    return;
-  }
-
-  for (let port = PREFERRED_PORT + 1; port <= PREFERRED_PORT + 10; port += 1) {
-    if (await backendMatchesDesktopMode(port)) {
-      backendPort = port;
-      backendUrl = `http://${HOST}:${backendPort}`;
-      return;
-    }
-    if (!(await backendIsReady(port))) {
-      backendPort = port;
-      backendUrl = `http://${HOST}:${backendPort}`;
-      return;
-    }
-  }
-
-  backendPort = PREFERRED_PORT;
-  backendUrl = `http://${HOST}:${backendPort}`;
+  return backendPorts.chooseBackendPort();
 }
 
 function appendBackendLog(data) {
