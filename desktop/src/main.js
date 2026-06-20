@@ -15,6 +15,7 @@ const os = require("os");
 const path = require("path");
 const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
+const { createAppLifecycle } = require("./app-lifecycle");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
 const { registerAuthIpc } = require("./auth-ipc");
 const backendHttp = require("./backend-http");
@@ -238,33 +239,29 @@ const mainWindowController = createMainWindowController({
   shell,
   trimLogMessage,
 });
+const appLifecycle = createAppLifecycle({
+  app,
+  backendProcess: () => backendProcess,
+  backendReady: () => backendReady,
+  computerUseOverlay,
+  createMenu,
+  createWindow,
+  deepLinks,
+  kickoffUpdates,
+  loadAppPath,
+  log,
+  mainWindow: () => mainWindow,
+  markStartup,
+  ownsBackend: () => ownsBackend,
+  process,
+  startDesktop,
+  startPath: START_PATH,
+  startSmsOutboxWatcher,
+});
 
 app.setName("Elevate");
 
-// Single-instance lock. A second launch (Finder double-open, or an elevate://
-// link that macOS/Windows tries to open in a fresh process) must hand off to
-// the already-running app rather than spin up a duplicate window + a second
-// backend on the next port. The primary instance receives the second one's
-// argv via `second-instance` and replays any deep link from it.
-const isPrimaryInstance = app.requestSingleInstanceLock();
-if (!isPrimaryInstance) {
-  app.quit();
-} else {
-  app.on("second-instance", (_event, argv) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
-    app.focus({ steal: true });
-    // Windows/Linux deliver elevate:// URLs as an argv entry (macOS uses the
-    // open-url event instead). Replay it through the shared handler.
-    const deepLink = argv.find(
-      (a) => typeof a === "string" && a.startsWith("elevate://"),
-    );
-    if (deepLink) deepLinks.handleDeepLink(deepLink);
-  });
-}
+const isPrimaryInstance = appLifecycle.registerSingleInstance();
 
 function markStartup(name, detail = "") {
   startupTracker.markStartup(name, detail);
@@ -740,61 +737,4 @@ function startSmsOutboxWatcher() {
   smsOutbox.startSmsOutboxWatcher();
 }
 
-app.whenReady().then(async () => {
-  // Secondary instance already handed off to the primary and is quitting.
-  if (!isPrimaryInstance) return;
-  markStartup("electron:ready");
-  // A ShipIt-relaunched instance (post-update) can spawn without normal
-  // LaunchServices activation: the app runs with no Dock tile and doesn't
-  // show as a live app. Force regular-app registration + focus on every
-  // launch — a no-op for a normal Finder/Dock launch.
-  if (process.platform === "darwin" && app.dock) {
-    // Fire-and-forget: dock.show()'s promise can take SECONDS to resolve
-    // (it waits on macOS activation) — awaiting it here held window
-    // creation hostage for ~11s of blank app on every launch. The Dock
-    // tile registration doesn't need to precede anything.
-    Promise.resolve(app.dock.show())
-      .then(() => app.focus({ steal: false }))
-      .catch((err) =>
-        log.warn(`[startup] dock registration failed: ${err && err.message ? err.message : err}`),
-      );
-  }
-  await startDesktop();
-  startSmsOutboxWatcher();
-  kickoffUpdates();
-  deepLinks.replayPending();
-});
-
-app.on("activate", () => {
-  // Track the main window explicitly. The computer-use overlay is lazy and may
-  // be absent during idle, so BrowserWindow.getAllWindows() is not the app
-  // lifecycle source of truth.
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-    return;
-  }
-  // Backend is already up from the first launch: skip the loading screen
-  // and health check and just bring the UI straight back.
-  if (backendReady) {
-    createWindow();
-    createMenu();
-    loadAppPath(START_PATH);
-    return;
-  }
-  startDesktop();
-});
-
-app.on("before-quit", () => {
-  computerUseOverlay.dispose();
-  if (ownsBackend && backendProcess) {
-    backendProcess.kill();
-  }
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
+appLifecycle.registerAppEvents(isPrimaryInstance);
