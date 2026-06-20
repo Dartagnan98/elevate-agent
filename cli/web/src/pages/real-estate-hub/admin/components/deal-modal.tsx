@@ -38,6 +38,18 @@ function isPersistedDealId(id: string): boolean {
   return /^[a-f0-9]{32}$/i.test(id);
 }
 
+const MONTHS_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function fmtMoney(value: number): string {
+  return "$" + Math.round(value).toLocaleString();
+}
+
+function fmtShortDate(value: string | null | undefined): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value || "");
+  if (!match) return value || "";
+  return MONTHS_ABBR[parseInt(match[2], 10) - 1] + " " + parseInt(match[3], 10);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -149,6 +161,15 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
   const conditions = ctx?.conditions ?? {};
   // Current checklist completion bag (free-form toggles), keyed per item.
   const checklistState = ctx?.checklist ?? {};
+  const contextDeal = ctx?.deal ?? null;
+  const showMoneyStrip = Boolean(
+    contextDeal &&
+      (contextDeal.listPrice != null ||
+        contextDeal.offerPrice != null ||
+        contextDeal.depositAmount != null ||
+        contextDeal.commissionPct != null ||
+        contextDeal.completionDate),
+  );
 
   // Inline add-form drafts (ported from the legacy AdminDealContextSection).
   const [fieldDraft, setFieldDraft] = useState({
@@ -288,7 +309,71 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
               <span className="dim">&mdash;</span>
             </span>
           </div>
+          {contextDeal && showMoneyStrip && (
+            <div className="abm-money" aria-label="Deal money summary">
+              {contextDeal.listPrice != null && (
+                <div className="abm-money-cell">
+                  <span className="k mono">List</span>
+                  <span className="v">{fmtMoney(contextDeal.listPrice)}</span>
+                </div>
+              )}
+              {contextDeal.offerPrice != null && (
+                <div className="abm-money-cell">
+                  <span className="k mono">Accepted offer</span>
+                  <span className="v o">{fmtMoney(contextDeal.offerPrice)}</span>
+                  {contextDeal.listPrice ? (
+                    <span className="n">{Math.round((contextDeal.offerPrice / contextDeal.listPrice) * 100)}% of ask</span>
+                  ) : null}
+                </div>
+              )}
+              {contextDeal.depositAmount != null && (
+                <div className="abm-money-cell">
+                  <span className="k mono">Deposit</span>
+                  <span className="v b">{fmtMoney(contextDeal.depositAmount)}</span>
+                </div>
+              )}
+              {contextDeal.commissionPct != null && (
+                <div className="abm-money-cell">
+                  <span className="k mono">Commission</span>
+                  <span className="v">{contextDeal.commissionPct}%</span>
+                </div>
+              )}
+              {contextDeal.completionDate && (
+                <div className="abm-money-cell">
+                  <span className="k mono">Completion</span>
+                  <span className="v">{fmtShortDate(contextDeal.completionDate)}</span>
+                  {contextDeal.possessionDate ? (
+                    <span className="n">poss. {fmtShortDate(contextDeal.possessionDate)}</span>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          )}
         </header>
+
+        <div className="abm-actionbar" aria-label="Deal actions">
+          <button
+            className="abm-btn primary"
+            type="button"
+            disabled={!persisted || busy}
+            onClick={() => void handleAdvance(false)}
+          >
+            {busy ? "Working..." : "Advance phase"}
+          </button>
+          <button
+            className="abm-btn ghost"
+            type="button"
+            disabled={!persisted || busy}
+            onClick={() => void handleAdvance(true)}
+          >
+            Force advance
+          </button>
+          {actionError && (
+            <span className="abm-actionbar-error" role="status">
+              {actionError}
+            </span>
+          )}
+        </div>
 
         <div className="ab-modal-scroll">
           <div className="abm-cols">
@@ -350,29 +435,6 @@ export default function DealDetailModal({ deal, onClose }: DealDetailModalProps)
                       <span>CMA date requested</span>
                     </li>
                   </ul>
-                  <div className="abm-actions">
-                    <button
-                      className="abm-btn primary"
-                      type="button"
-                      disabled={!persisted || busy}
-                      onClick={() => void handleAdvance(false)}
-                    >
-                      {busy ? "Working..." : "Advance phase"}
-                    </button>
-                    <button
-                      className="abm-btn ghost"
-                      type="button"
-                      disabled={!persisted || busy}
-                      onClick={() => void handleAdvance(true)}
-                    >
-                      Force advance
-                    </button>
-                  </div>
-                  {actionError && (
-                    <div className="abm-tag warn" style={{ display: "block", marginTop: 8, padding: "6px 8px" }}>
-                      {actionError}
-                    </div>
-                  )}
                 </div>
 
                 {/* Background automations */}

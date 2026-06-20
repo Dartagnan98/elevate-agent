@@ -23,6 +23,9 @@
   --fg-faint:      #8A8A8A;
   --fg-dim:        #8A8A8A;
 
+  --elev-navy:     #182848;
+  --elev-orange:   #C46340;
+
   --accent:        #B0B0B0;
   --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-ring:   color-mix(in srgb, var(--accent) 28%, transparent);
@@ -2497,4 +2500,149 @@
   border-radius: 2px;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border-soft);
+}
+
+/* ───────── Deal score-card shell extraction ───────── */
+.ab-modal-backdrop,
+.ab-modal,
+.ab-modal * {
+  -webkit-app-region: no-drag !important;
+}
+
+.abm-head {
+  background:
+    linear-gradient(
+      118deg,
+      color-mix(in srgb, var(--elev-navy) 92%, #0f0f0f) 0%,
+      color-mix(in srgb, var(--elev-navy) 72%, #2f59a4) 52%,
+      color-mix(in srgb, var(--elev-navy) 50%, #5e8ad0) 100%
+    );
+  border-bottom: 1px solid color-mix(in srgb, #5e8ad0 24%, transparent);
+}
+
+.abm-head .abm-crumbs,
+.abm-head .abm-meta,
+.abm-head .abm-meta-row svg {
+  color: color-mix(in srgb, var(--fg) 72%, transparent);
+}
+
+.abm-head .abm-crumbs .stage {
+  color: color-mix(in srgb, var(--elev-orange) 80%, #fff);
+}
+
+.abm-money {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 0;
+  margin-top: 14px;
+  border: 1px solid color-mix(in srgb, #5e8ad0 28%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--elev-navy) 42%, var(--bg));
+}
+
+.abm-money-cell {
+  min-width: 0;
+  padding: 9px 14px;
+  border-right: 1px solid color-mix(in srgb, #5e8ad0 22%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.abm-money-cell:last-child {
+  border-right: 0;
+}
+
+.abm-money-cell .k {
+  color: color-mix(in srgb, var(--fg) 58%, transparent);
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.abm-money-cell .v {
+  color: var(--fg);
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.abm-money-cell .v.o {
+  color: color-mix(in srgb, var(--elev-orange) 88%, #fff);
+}
+
+.abm-money-cell .v.b {
+  color: #9dbde8;
+}
+
+.abm-money-cell .n {
+  color: #9dbde8;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.abm-actionbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 22px;
+  background: color-mix(in srgb, var(--elev-navy) 20%, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
+
+.abm-actionbar .abm-btn.primary {
+  background: var(--elev-orange);
+  border: 1px solid var(--elev-orange);
+  color: #fff;
+}
+
+.abm-actionbar .abm-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--elev-orange) 86%, #fff);
+}
+
+.abm-actionbar-error {
+  color: var(--status-warn);
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--status-warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-warn) 26%, transparent);
+}
+
+.abm-tag.current,
+.abm-phase.current .abm-phase-sub {
+  color: var(--elev-orange);
+}
+
+.abm-phase.current {
+  border-color: color-mix(in srgb, var(--elev-orange) 50%, transparent);
+}
+
+.abm-phase-radio[data-state="current"] {
+  background: var(--elev-orange);
+  border-color: var(--elev-orange);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--elev-orange) 22%, transparent);
+}
+
+@media (max-width: 720px) {
+  .abm-money {
+    grid-template-columns: 1fr;
+  }
+
+  .abm-money-cell {
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, #5e8ad0 22%, transparent);
+  }
+
+  .abm-money-cell:last-child {
+    border-bottom: 0;
+  }
+
+  .abm-actionbar {
+    padding: 10px 14px;
+  }
 }
