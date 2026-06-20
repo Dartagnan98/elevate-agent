@@ -237,11 +237,19 @@ _BC: dict[str, Any] = {
                 fields=[
                     ("offerDate", "Offer received date"),
                     ("offerAcceptedAt", "Accepted offer date"),
+                    ("offerPrice", "Accepted offer price"),
+                    _wf("Buyer name(s)", "Buyer Names"),
+                    _wf("Cooperating agent", "Cooperating Agent"),
+                    _wf("Cooperating brokerage", "Cooperating Brokerage"),
                     _wf("Title charges ordered date", "Title Charges Ordered Date"),
                     ("depositInTrustAt", "Deposit ROF received date"),
                     ("completionDate", "Completion date"),
                 ],
-                docs=[("offer_pdf", "Offer PDF")],
+                docs=[
+                    ("offer_pdf", "Offer PDF"),
+                    ("disclosure_expected_remuneration", "Disclosure to Sellers of Expected Remuneration"),
+                    ("deal_sheet", "Deal sheet"),
+                ],
                 triggers=[("offer-review", "Review accepted-offer package", "offer-review")],
             ),
             _stage(
@@ -258,7 +266,7 @@ _BC: dict[str, Any] = {
                     ("subjectRemovalDate", "Subject removal date"),
                     _wf("Order sold rider date", "Order Sold Rider Date"),
                 ],
-                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt")],
+                docs=[("subject_removal_form", "Condition removal / waiver"), ("deposit_receipt", "Deposit receipt"), ("order_to_lawyer", "Order to lawyer"), ("sales_report", "Sales report")],
                 triggers=[
                     ("subject-removal", "Run condition-removal admin check", "subject-removal"),
                     ("subject-removal-docs", "Sync condition-removal signing", "signing-package"),
@@ -285,10 +293,11 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Offer Prep", "Comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("accepted-offer-checklist", "Accepted-offer checklist run"), ("doc-list", "Doc list built")], docs=[("cps_draft", "CPS draft")]),
-            _stage("Accepted", "Lender + docs", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked")], fields=[("subjectRemovalDate", "Subject removal date")]),
-            _stage("Conditions", "Inspection + strata", [("deposit-due", "Deposit due date tracked"), ("lawyer-info", "Lawyer / conveyancer info captured")], fields=[("depositDueDate", "Deposit due date")]),
-            _stage("Subjects Off", "Deposit + dates", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")]),
+            _stage("Hot Leads (Top 25)", "Watchlist of active buyers", [("pre-approval", "Pre-approval confirmed"), ("search-active", "Active search / showings"), ("buyer-agency", "Buyer agency signed (BAEC)")], fields=[("preApprovalAmount", "Pre-approval amount")]),
+            _stage("Offer Prep", "Decided to write - comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("doc-list", "Doc list built"), ("cps-drafted", "CPS drafted")], docs=[("cps_draft", "CPS draft")]),
+            _stage("Accepted Offer", "Accepted - subjects pending", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked"), ("deposit-due", "Deposit due date tracked")], fields=[("subjectRemovalDate", "Subject removal date"), ("depositDueDate", "Deposit due date")], docs=[("cps_signed", "Fully-signed CPS")]),
+            _stage("Condition Removal", "Subjects off + firm", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("lawyer-info", "Lawyer / conveyancer info captured"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")], docs=[("subject_removal_form", "Fully-signed condition removal")]),
+            _stage("Closed", "Funded + keys", [("funds-received", "Funds received"), ("keys-released", "Keys released")]),
         ],
     },
 }

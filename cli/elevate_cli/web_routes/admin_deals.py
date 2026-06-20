@@ -1,9 +1,11 @@
 """Admin deal workflow routes."""
 
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from elevate_cli.data.deals import DealPhaseGateBlocked
@@ -339,6 +341,37 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("POST /api/admin/deals/%s/toggle failed", deal_id)
             raise HTTPException(status_code=500, detail=f"Toggle deal failed: {exc}")
+
+    @router.get("/api/admin/deals/{deal_id}/cma-pdf")
+    def get_admin_deal_cma_pdf(deal_id: str):
+        # Auth is enforced by the dashboard middleware (Bearer header or, for
+        # window.open() new-tab loads, the ?token= query param — see web_auth).
+        try:
+            from elevate_cli.data import connect, list_deal_attachments
+
+            with connect() as conn:
+                rows = list_deal_attachments(conn, deal_id, kind="cma_report", limit=1)
+            if not rows:
+                raise HTTPException(status_code=404, detail="no final CMA on file")
+            file_path = rows[0].get("filePath")
+            if not file_path or not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail="CMA file missing")
+            return FileResponse(
+                file_path,
+                media_type="application/pdf",
+                filename=os.path.basename(file_path),
+            )
+        except HTTPException:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("GET /api/admin/deals/%s/cma-pdf failed", deal_id)
+            raise HTTPException(status_code=500, detail=f"CMA PDF failed: {exc}")
 
     @router.get("/api/deals/{deal_id}/context")
     def get_deal_source_context(deal_id: str):

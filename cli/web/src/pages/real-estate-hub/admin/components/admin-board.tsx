@@ -420,13 +420,13 @@ function Top25Deals({
       const stage = order.indexOf(d.phase);
       return (d.blocked ? 1000 : 0) + stage * 10 + (d.primary ? 5 : 0);
     };
-    return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);
+    // Top 25 = hot leads Skyleigh explicitly pinned (d.primary), not all active deals.
+    const pinnedDeals = deals.filter(d => d.primary);
+    return [...pinnedDeals].sort((a, b) => score(b) - score(a)).slice(0, 25);
   }, [deals, mode]);
 
   const label = mode === "buyer" ? "Top 25 buyers" : "Top 25 sellers";
-  const subEmpty = mode === "buyer"
-    ? "No buyer-side deals tracked yet. Buyer deals show here when you start working a buyer."
-    : "No seller-side deals yet.";
+  const subEmpty = "No hot leads pinned yet — open a card and tap 'Add to Top 25'.";
 
   return (
     <section className="ab-top25">
@@ -1130,7 +1130,13 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           </div>
         </section>
       </div>
-      {activeDeal && <DealDetailModal deal={activeDeal} onClose={() => setActiveDeal(null)} />}
+      {activeDeal && (
+        <DealDetailModal
+          deal={activeDeal}
+          onClose={() => setActiveDeal(null)}
+          onChanged={onRefresh}
+        />
+      )}
       {showNewDeal && (
         <NewDealModal
           onClose={() => setShowNewDeal(false)}

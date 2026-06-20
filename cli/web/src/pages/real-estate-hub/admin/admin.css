@@ -23,18 +23,18 @@
   --fg-faint:      #8A8A8A;
   --fg-dim:        #8A8A8A;
 
+  /* Elevation Real Estate brand: navy + orange, no green */
   --elev-navy:     #182848;
   --elev-orange:   #C46340;
-
-  --accent:        #B0B0B0;
+  --accent:        #5E8AD0;
   --accent-soft:   color-mix(in srgb, var(--accent) 14%, transparent);
   --accent-ring:   color-mix(in srgb, var(--accent) 28%, transparent);
   --accent-glow:   color-mix(in srgb, var(--accent) 40%, transparent);
-  --accent-fg:     #0F0F0F;
-  --accent-vivid:  #888888;
+  --accent-fg:     #0A1426;
+  --accent-vivid:  #3E6DB5;
 
-  --status-done:   #4FC38A;
-  --status-work:   var(--accent);
+  --status-done:   #5E8AD0;
+  --status-work:   var(--elev-orange);
   --status-warn:   #E0B257;
   --status-error:  #E07570;
   --status-idle:   #4F4F4F;
@@ -2502,107 +2502,150 @@
   border: 1px solid var(--border-soft);
 }
 
-/* ───────── Deal score-card shell extraction ───────── */
-.ab-modal-backdrop,
-.ab-modal,
-.ab-modal * {
-  -webkit-app-region: no-drag !important;
-}
-
-.abm-head {
-  background:
-    linear-gradient(
-      118deg,
-      color-mix(in srgb, var(--elev-navy) 92%, #0f0f0f) 0%,
-      color-mix(in srgb, var(--elev-navy) 72%, #2f59a4) 52%,
-      color-mix(in srgb, var(--elev-navy) 50%, #5e8ad0) 100%
-    );
-  border-bottom: 1px solid color-mix(in srgb, #5e8ad0 24%, transparent);
-}
-
-.abm-head .abm-crumbs,
-.abm-head .abm-meta,
-.abm-head .abm-meta-row svg {
-  color: color-mix(in srgb, var(--fg) 72%, transparent);
-}
-
-.abm-head .abm-crumbs .stage {
-  color: color-mix(in srgb, var(--elev-orange) 80%, #fff);
-}
-
-.abm-money {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
-  gap: 0;
-  margin-top: 14px;
-  border: 1px solid color-mix(in srgb, #5e8ad0 28%, transparent);
-  border-radius: 8px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--elev-navy) 42%, var(--bg));
-}
-
-.abm-money-cell {
-  min-width: 0;
-  padding: 9px 14px;
-  border-right: 1px solid color-mix(in srgb, #5e8ad0 22%, transparent);
+/* ═══════════ Score-card redesign (ported from June-20 handoff) ═══════════ */
+.abm-info-stack {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-soft);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 10px;
 }
-
-.abm-money-cell:last-child {
-  border-right: 0;
+.abm-info-section {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 2%, transparent);
+  overflow: hidden;
 }
-
-.abm-money-cell .k {
-  color: color-mix(in srgb, var(--fg) 58%, transparent);
-  font-size: 9px;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-.abm-money-cell .v {
-  color: var(--fg);
-  font-size: 17px;
-  font-weight: 800;
-  line-height: 1.15;
-  overflow-wrap: anywhere;
-}
-
-.abm-money-cell .v.o {
-  color: color-mix(in srgb, var(--elev-orange) 88%, #fff);
-}
-
-.abm-money-cell .v.b {
-  color: #9dbde8;
-}
-
-.abm-money-cell .n {
-  color: #9dbde8;
-  font-size: 10px;
-  line-height: 1.2;
-}
-
-.abm-actionbar {
-  display: flex;
-  flex-wrap: wrap;
+.abm-info-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 12px 22px;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.abm-info-title { font: 600 13px/1.2 "Geist", sans-serif; color: var(--fg); }
+.abm-info-sub { margin-top: 4px; font-size: 11.5px; line-height: 1.35; color: var(--fg-muted); }
+.abm-info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+.abm-info-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.abm-info-field > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 10px/1 "Geist Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.abm-info-field em { font-style: normal; color: var(--status-warn); letter-spacing: 0; text-transform: lowercase; }
+.abm-info-field input,
+.abm-info-field select {
+  width: 100%;
+  min-height: 31px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 7px 8px;
+  font: 500 12.5px/1.2 "Geist", sans-serif;
+}
+.abm-info-field input::placeholder { color: var(--fg-faint); }
+.abm-info-field input:focus,
+.abm-info-field select:focus {
+  outline: 0;
+  border-color: color-mix(in srgb, var(--status-warn) 55%, var(--border-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-warn) 12%, transparent);
+}
+.abm-info-placeholder {
+  padding: 8px 10px;
+  border: 1px dashed var(--border-soft);
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* Elevation: new card action buttons */
+.abm-btn.collapse-sale {
+  background: transparent;
+  color: var(--elev-orange);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 45%, transparent);
+}
+.abm-btn.collapse-sale:hover { background: color-mix(in srgb, var(--elev-orange) 12%, transparent); }
+.abm-btn.landing {
+  background: var(--elev-navy);
+  color: #9DBDE8;
+  border: 1px solid #2E4670;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.abm-btn.landing.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; }
+.abm-btn.cma-pdf {
+  background: var(--elev-navy);
+  color: #9DBDE8;
+  border: 1px solid #2E4670;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.abm-btn.cma-pdf.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; cursor: default; }
+
+/* Elevation: master document tray */
+.abm-doctray-prog { color: var(--accent); font-size: 11px; }
+.abm-doctray-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin: 8px 0 10px; }
+.abm-doctray-fill { display: block; height: 100%; background: var(--accent); }
+.abm-doctray-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 10px; }
+.abm-doc-chip { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--fg-muted); }
+.abm-doc-chip .abm-doc-box { width: 14px; height: 14px; border-radius: 4px; flex-shrink: 0; border: 1.5px solid var(--border-strong); }
+.abm-doc-chip.have .abm-doc-box { background: var(--accent); border-color: var(--accent); position: relative; }
+.abm-doc-chip.have .abm-doc-box::after { content: "✓"; position: absolute; top: -2px; left: 2px; font-size: 10px; font-weight: 800; color: var(--accent-fg); }
+.abm-doc-chip.missing { color: var(--elev-orange); }
+.abm-doc-chip.missing .abm-doc-box { border-color: var(--elev-orange); border-style: dashed; }
+
+/* Elevation: money strip in modal header */
+.abm-money { display: flex; gap: 0; margin-top: 14px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--elev-navy) 30%, var(--bg, #0F0F0F)); }
+.abm-money-cell { flex: 1; padding: 9px 14px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
+.abm-money-cell:last-child { border-right: none; }
+.abm-money-cell .k { font-size: 9px; letter-spacing: .7px; text-transform: uppercase; color: var(--fg-faint); }
+.abm-money-cell .v { font-size: 17px; font-weight: 800; color: var(--fg); }
+.abm-money-cell .v.o { color: var(--elev-orange); }
+.abm-money-cell .v.b { color: var(--accent); }
+.abm-money-cell .n { font-size: 10px; color: var(--accent); }
+
+/* ── Mockup-match: gradient header + visible action bar (2026-06-20) ── */
+.abm-head {
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--elev-navy) 95%, #3a5a8f) 0%,
+    color-mix(in srgb, var(--elev-navy) 72%, #3a5a8f) 55%,
+    color-mix(in srgb, var(--elev-navy) 52%, #4774b5) 100%);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.abm-actionbar {
+  display: flex; gap: 8px; align-items: center;
+  padding: 12px 28px;
   background: color-mix(in srgb, var(--elev-navy) 20%, var(--bg));
   border-bottom: 1px solid var(--border);
 }
-
+.abm-actionbar .abm-btn.landing { margin-left: auto; }
 .abm-actionbar .abm-btn.primary {
-  background: var(--elev-orange);
-  border: 1px solid var(--elev-orange);
-  color: #fff;
+  background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
 }
-
-.abm-actionbar .abm-btn.primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--elev-orange) 86%, #fff);
-}
-
+.abm-actionbar .abm-btn.primary:hover { background: var(--accent-vivid); }
 .abm-actionbar-error {
   color: var(--status-warn);
   font-size: 12px;
@@ -2613,36 +2656,59 @@
   border: 1px solid color-mix(in srgb, var(--status-warn) 26%, transparent);
 }
 
-.abm-tag.current,
-.abm-phase.current .abm-phase-sub {
-  color: var(--elev-orange);
+/* ── Round 2 (2026-06-20): visible gradient + orange brand on the current stage ── */
+.abm-head {
+  background: linear-gradient(118deg, #12223d 0%, #203c70 50%, #2f59a4 100%) !important;
 }
-
+/* current pipeline stage = orange brand (was greyed out by later rules) — applies in EVERY stage */
+.abm-tag.current {
+  color: var(--elev-orange) !important;
+  background: color-mix(in srgb, var(--elev-orange) 16%, transparent) !important;
+}
 .abm-phase.current {
-  border-color: color-mix(in srgb, var(--elev-orange) 50%, transparent);
+  border-color: color-mix(in srgb, var(--elev-orange) 50%, transparent) !important;
 }
-
+.abm-phase.current .abm-phase-sub { color: var(--elev-orange) !important; }
 .abm-phase-radio[data-state="current"] {
-  background: var(--elev-orange);
-  border-color: var(--elev-orange);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--elev-orange) 22%, transparent);
+  background: var(--elev-orange) !important;
+  border-color: var(--elev-orange) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--elev-orange) 22%, transparent) !important;
 }
 
-@media (max-width: 720px) {
-  .abm-money {
-    grid-template-columns: 1fr;
-  }
+/* round 4: close button always on top + clickable; action bar wraps instead of clipping */
+.ab-modal-close { z-index: 100 !important; pointer-events: auto !important; }
+.abm-actionbar { flex-wrap: wrap; }
 
-  .abm-money-cell {
-    border-right: 0;
-    border-bottom: 1px solid color-mix(in srgb, #5e8ad0 22%, transparent);
-  }
-
-  .abm-money-cell:last-child {
-    border-bottom: 0;
-  }
-
-  .abm-actionbar {
-    padding: 10px 14px;
-  }
+/* ── Round 5 (2026-06-20): Electron close-button fix + Cancel/Relist button ── */
+/* Electron treats -webkit-app-region:drag areas as window-drag and eats clicks.
+   Force the whole modal to no-drag so the X (and every button) is clickable. */
+.ab-modal-backdrop, .ab-modal, .ab-modal * { -webkit-app-region: no-drag !important; }
+.abm-btn.cancel-relist {
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
 }
+.abm-btn.cancel-relist:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* ── Board card highlight: brand orange+BLUE (was orange+yellow) 2026-06-20 ── */
+/* var(--accent) resolves to grey in this build, so use explicit brand blue. */
+.ab-deal.blocked, .ab-top25-card.blocked {
+  border-color: #5E8AD0 !important;
+}
+.ab-deal.blocked {
+  box-shadow: 0 0 0 1px rgba(94,138,208,0.35) !important;
+}
+
+/* ── Add to Top 25 toggle on the deal modal (brand blue) 2026-06-20 ── */
+.abm-btn.top25-toggle {
+  color: #5E8AD0;
+  border: 1px solid #5E8AD0;
+  background: transparent;
+}
+.abm-btn.top25-toggle:hover { background: rgba(94,138,208,0.12); }
+.abm-btn.top25-toggle.active {
+  background: #5E8AD0;
+  border-color: #5E8AD0;
+  color: #fff;
+}
+.abm-btn.top25-toggle.active:hover { background: #4f7bc0; }
