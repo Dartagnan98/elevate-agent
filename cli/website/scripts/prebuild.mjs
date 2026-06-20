@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const websiteDir = resolve(scriptDir, "..");
+const generateDocsScript = join(scriptDir, "generate-skill-docs.py");
 const extractScript = join(scriptDir, "extract-skills.py");
 const outputFile = join(websiteDir, "src", "data", "skills.json");
 
@@ -32,6 +33,20 @@ function writeEmptyFallback(reason) {
 if (!existsSync(extractScript)) {
   writeEmptyFallback("extract script missing");
   process.exit(0);
+}
+
+if (existsSync(generateDocsScript)) {
+  const docsResult = spawnSync("python3", [generateDocsScript], {
+    stdio: "inherit",
+    cwd: websiteDir,
+  });
+  if (docsResult.error || docsResult.status !== 0) {
+    const reason = docsResult.error?.code === "ENOENT"
+      ? "python3 not found"
+      : `generate-skill-docs.py exited with status ${docsResult.status}`;
+    console.error(`[prebuild] ${reason}`);
+    process.exit(1);
+  }
 }
 
 const result = spawnSync("python3", [extractScript], {

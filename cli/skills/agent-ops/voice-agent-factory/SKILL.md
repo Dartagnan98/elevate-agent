@@ -104,10 +104,13 @@ verified one. `resources/GAPS.md` has the server-tool webhook schema + pricing.
     gateway hits in the audit log. Use it for persona/flow checks only. Real
     verification = text-only WebSocket session (lesson 12).
 12. **Real headless E2E = text-only WS session on the signed URL.** Mint
-    `/api/signed-url`, connect a WebSocket client, send
-    `{"type":"conversation_initiation_client_data","conversation_config_override":
-    {"conversation":{"text_only":true}}}`, then `{"type":"user_message","text":...}`;
-    answer `ping` events with `{"type":"pong","event_id":...}`. Watch for
+    `/api/signed-url`, connect a WebSocket client, send:
+    ```json
+    {"type":"conversation_initiation_client_data","conversation_config_override":{"conversation":{"text_only":true}}}
+    {"type":"user_message","text":"..."}
+    {"type":"pong","event_id":"..."}
+    ```
+    Answer `ping` events with the pong message. Watch for
     `agent_tool_response` events AND assert the gateway audit log recorded each
     call with real args. Spoken numbers must match the live data exactly.
 13. **Targets may already have a voice scaffold — coexist, never clobber.** Check

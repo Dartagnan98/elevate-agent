@@ -162,7 +162,7 @@ If you intentionally want to experiment with local Node tooling later:
 
 ```bash
 pkg install nodejs-lts
-npm install
+npm --prefix ui-tui install
 ```
 
 Treat browser / WhatsApp tooling on Android as experimental until documented otherwise.

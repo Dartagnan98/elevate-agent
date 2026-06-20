@@ -10,8 +10,9 @@
   },
   "scripts": {
     "start": "electron .",
-    "pack:mac": "electron-builder --mac dir",
-    "build:mac": "export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; electron-builder --mac dmg zip --x64 --publish never && electron-builder --mac dmg zip --arm64 --publish never && npm run merge:mac-feed",
+    "build:web": "npm --prefix ../cli/web run build",
+    "pack:mac": "npm run build:web && electron-builder --mac dir",
+    "build:mac": "npm run build:web && export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; electron-builder --mac dmg zip --x64 --publish never && electron-builder --mac dmg zip --arm64 --publish never && npm run merge:mac-feed",
     "preflight:apple": "node scripts/preflight-apple-release.js",
     "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
@@ -89,14 +90,6 @@
           "**/*",
           "!node_modules/**",
           "!node_modules",
-          "!**/.DS_Store"
-        ]
-      },
-      {
-        "from": "../cli/scripts/whatsapp-bridge/node_modules",
-        "to": "cli/scripts/whatsapp-bridge/node_modules",
-        "filter": [
-          "**/*",
           "!**/.DS_Store"
         ]
       }

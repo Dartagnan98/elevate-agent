@@ -393,17 +393,15 @@ def run_installed_whatsapp_bridge(
     installed_cli: Path,
     result: SmokeResult,
 ) -> None:
-    """Verify packaged WhatsApp bridge files that /api/status can report on."""
+    """Verify packaged WhatsApp bridge source; dependencies install lazily."""
 
     bridge_dir = installed_cli / "scripts/whatsapp-bridge"
     bridge_script = bridge_dir / "bridge.js"
     package_json = bridge_dir / "package.json"
-    node_modules = bridge_dir / "node_modules"
     package_lock = bridge_dir / "package-lock.json"
     status = {
         "bridge_js": bridge_script.exists(),
         "package_json": package_json.exists(),
-        "node_modules": node_modules.exists(),
         "package_lock": package_lock.exists(),
     }
     result.installed_whatsapp_bridge = status
@@ -413,7 +411,7 @@ def run_installed_whatsapp_bridge(
             "installed WhatsApp bridge incomplete: " + ", ".join(sorted(missing))
         )
         return
-    result.pass_check("installed WhatsApp bridge present with dependencies")
+    result.pass_check("installed WhatsApp bridge present for lazy install")
 
 
 def _file_size(path: Path) -> int:

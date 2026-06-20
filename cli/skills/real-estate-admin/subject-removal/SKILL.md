@@ -1,6 +1,6 @@
 ---
 name: subject-removal
-description: Handle subject-removal admin work: docs, deposit receipt, lawyer info, sold rider/sign tasks, title charge checks, and human confirmation before phase completion.
+description: "Handle subject-removal admin work: docs, deposit receipt, lawyer info, sold rider/sign tasks, title charge checks, and human confirmation before phase completion."
 metadata:
   elevate:
     tags: [real-estate, subjects, closing]

@@ -51,10 +51,6 @@ export function sourceInboxProfileStatusForLabel(label: string): SourceInboxProf
   return undefined;
 }
 
-export function loadedListOrUndefined<T>(items: T[] | undefined): T[] | undefined {
-  return items;
-}
-
 export function LeadsDesignShell() {
   const data = useRealEstateHubData();
   const inbox = data.sourceInbox;
@@ -240,13 +236,13 @@ export function LeadsDesignShell() {
         </div>
       ) : (
         <LeadsBoard
-          sources={loadedListOrUndefined(sources)}
-          drafts={loadedListOrUndefined(drafts)}
-          profiles={loadedListOrUndefined(profiles)}
+          sources={sources}
+          drafts={drafts}
+          profiles={profiles}
           pipeline={pipeline}
           kpis={kpis}
-          templates={loadedListOrUndefined(templates)}
-          sent={loadedListOrUndefined(sent)}
+          templates={templates}
+          sent={sent}
           debugNote={sourceInboxDebugNote(inbox)}
           onDraftAction={handleDraftAction}
           onProfileFavoriteChange={handleProfileFavoriteChange}

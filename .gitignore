@@ -21,12 +21,16 @@ build/
 
 # CLI runtime
 /cli/.elevate-dev/
-# NOTE: the built dashboard lives at cli/elevate_cli/web_dist/ and is
-# intentionally committed (it's bundled into the desktop app). Do NOT ignore
-# it. The old /cli/web_dist/ path is stale (Vite outputs to elevate_cli now).
+/cli/elevate_cli/web_dist/
 /cli/tsconfig.tsbuildinfo
 /cli/webforms/
 /temp_vision_images/
+
+# Generated website docs
+/cli/website/docs/user-guide/skills/bundled/
+/cli/website/docs/user-guide/skills/optional/
+/cli/website/docs/reference/skills-catalog.md
+/cli/website/docs/reference/optional-skills-catalog.md
 
 # Backend build artifacts
 /backend/tsconfig.tsbuildinfo

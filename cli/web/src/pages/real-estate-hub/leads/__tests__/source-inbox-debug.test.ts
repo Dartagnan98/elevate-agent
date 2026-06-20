@@ -6,7 +6,7 @@ import type {
   SourceInboxSentItem,
   SourceInboxThread,
 } from "@/lib/api-types";
-import { loadedListOrUndefined, sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
+import { sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
 import { matchesLeadsSourceFilter, nextDraftQueueSelection } from "../components/leads-board";
 import { mapLeadsPipeline, mapLeadsSent } from "../compute-leads-data";
 
@@ -69,13 +69,6 @@ describe("source inbox profile status labels", () => {
     expect(sourceInboxProfileStatusForLabel("Follow up")).toBe("follow_up");
     expect(sourceInboxProfileStatusForLabel("Closed Seller")).toBe("closed_seller");
     expect(sourceInboxProfileStatusForLabel("not a menu item")).toBeUndefined();
-  });
-});
-
-describe("source inbox live data props", () => {
-  it("passes loaded empty arrays through instead of falling back to demo rows", () => {
-    expect(loadedListOrUndefined([])).toEqual([]);
-    expect(loadedListOrUndefined(undefined)).toBeUndefined();
   });
 });
 

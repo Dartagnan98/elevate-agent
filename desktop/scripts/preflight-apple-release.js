@@ -181,11 +181,11 @@ record("electron-builder notarization enabled", packageJson.build?.mac?.notarize
 record("macOS minimum version pinned", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion === "12.0", packageJson.build?.mac?.extendInfo?.LSMinimumSystemVersion || "missing");
 record("Developer ID targets configured", JSON.stringify(packageJson.build?.mac?.target || []).includes("dmg"));
 record("app icon present", exists("desktop/assets/icon.icns"));
-record("web dashboard bundle present", exists("cli/elevate_cli/web_dist/index.html"));
+record("web dashboard source present", exists("cli/web/package.json"));
 record("arm64 bundled Python present", isExecutable("desktop/runtime/arm64/python/bin/python3.12"));
 record("x64 bundled Python present", isExecutable("desktop/runtime/x64/python/bin/python3.12"));
 record("WhatsApp bridge script present", exists("cli/scripts/whatsapp-bridge/bridge.js"));
-record("WhatsApp bridge dependencies present", exists("cli/scripts/whatsapp-bridge/node_modules"));
+record("WhatsApp bridge package present", exists("cli/scripts/whatsapp-bridge/package.json"));
 
 const runtimeDsStore = hasDsStore("desktop/runtime");
 record("bundled runtime has no .DS_Store files", !runtimeDsStore, runtimeDsStore || "clean");
