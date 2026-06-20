@@ -24,6 +24,7 @@ const backendHttp = require("./backend-http");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDesktopAuth } = require("./desktop-auth");
+const { createGatewaySelfHeal } = require("./gateway-self-heal");
 const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
 const startupLog = require("./startup-log");
@@ -116,6 +117,17 @@ let dashboardLoadRetryCount = 0;
 let dashboardLoadRetryTimer = null;
 let lastDashboardPath = START_PATH;
 const startupTracker = startupLog.createStartupLogger(log);
+const gatewaySelfHeal = createGatewaySelfHeal({
+  app,
+  appendBackendLog,
+  envWithPath,
+  fileExists,
+  fs,
+  os,
+  path,
+  process,
+  spawnSync,
+});
 const updater = createUpdaterController({
   app,
   autoUpdater,
@@ -396,64 +408,25 @@ function resolveElevateLauncher() {
 // the dashboard (just swap the "dashboard" subcommand for "gateway"). Returns the
 // spawnSync result (status/stdout/stderr captured).
 function runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs = 90000 } = {}) {
-  const idx = launcher.args.indexOf("dashboard");
-  const prefix = idx >= 0 ? launcher.args.slice(0, idx) : [];
-  const args = [...prefix, "gateway", ...gwArgs];
-  return spawnSync(launcher.command, args, {
-    cwd: launcher.cwd,
-    env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
-    timeout: timeoutMs,
-    encoding: "utf8",
-  });
+  return gatewaySelfHeal.runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs });
 }
 
 // Records which app version the gateway last (re)started on. Lets us restart it
 // exactly once after an update instead of on every launch.
 function gatewayVersionMarkerPath() {
-  return path.join(os.homedir(), ".elevate", ".gateway_version");
+  return gatewaySelfHeal.gatewayVersionMarkerPath();
 }
 
 function readGatewayVersionMarker() {
-  try {
-    return fs.readFileSync(gatewayVersionMarkerPath(), "utf8").trim();
-  } catch (e) {
-    return "";
-  }
+  return gatewaySelfHeal.readGatewayVersionMarker();
 }
 
 function writeGatewayVersionMarker(version) {
-  try {
-    fs.mkdirSync(path.join(os.homedir(), ".elevate"), { recursive: true });
-    fs.writeFileSync(gatewayVersionMarkerPath(), `${version}\n`, "utf8");
-  } catch (e) {
-    appendBackendLog(`[gateway] version marker write failed: ${e}\n`);
-  }
+  gatewaySelfHeal.writeGatewayVersionMarker(version);
 }
 
 function existingGatewayMissingResource() {
-  try {
-    const statusPath = path.join(os.homedir(), ".elevate", "gateway_state.json");
-    const payload = JSON.parse(fs.readFileSync(statusPath, "utf8"));
-    const platforms = payload && typeof payload === "object" ? payload.platforms : null;
-    if (!platforms || typeof platforms !== "object") return "";
-
-    for (const [name, state] of Object.entries(platforms)) {
-      if (!state || typeof state !== "object") continue;
-      const code = String(state.error_code || "");
-      if (!code.endsWith("_missing")) continue;
-      const message = String(state.error_message || "");
-      const marker = " missing at ";
-      const idx = message.indexOf(marker);
-      if (idx < 0) continue;
-      const candidate = message.slice(idx + marker.length).trim().replace(/\.$/, "");
-      if (candidate && fileExists(candidate)) {
-        return `${name}:${code}:${candidate}`;
-      }
-    }
-  } catch {
-    // no status yet, malformed JSON, or unreadable file: not a recovery signal
-  }
-  return "";
+  return gatewaySelfHeal.existingGatewayMissingResource();
 }
 
 // Restart the loaded gateway so it re-execs the freshly-bundled CLI code. A
@@ -464,14 +437,7 @@ function existingGatewayMissingResource() {
 // Without this, every updated customer is stuck on their old roster until
 // someone restarts the gateway by hand. macOS only.
 function kickstartGateway(uid) {
-  const res = spawnSync(
-    "launchctl",
-    ["kickstart", "-k", `gui/${uid}/ai.elevate.gateway`],
-    { encoding: "utf8", timeout: 15000 },
-  );
-  const out = String(res.stdout || res.stderr || "").trim().slice(-300);
-  appendBackendLog(`[gateway] kickstart rc=${res.status}\n${out}\n`);
-  return res.status === 0;
+  return gatewaySelfHeal.kickstartGateway(uid);
 }
 
 // Probe launchd for the gateway job. Distinguishes:
@@ -482,20 +448,7 @@ function kickstartGateway(uid) {
 // job ended up booted out of the gui domain entirely, so KeepAlive could never
 // revive it and Telegram/cron stayed dead until a manual `launchctl bootstrap`.
 function probeGateway(uid) {
-  try {
-    const probe = spawnSync(
-      "launchctl",
-      ["print", `gui/${uid}/ai.elevate.gateway`],
-      { encoding: "utf8", timeout: 8000 },
-    );
-    const out = String(probe.stdout || "");
-    const loaded = probe.status === 0;
-    const running =
-      loaded && (/\bpid = \d+/.test(out) || /state = running/.test(out));
-    return { loaded, running };
-  } catch (e) {
-    return { loaded: false, running: false };
-  }
+  return gatewaySelfHeal.probeGateway(uid);
 }
 
 // Last-resort revival that does NOT depend on the Python CLI working: load the
@@ -504,16 +457,7 @@ function probeGateway(uid) {
 // plist survived in ~/Library/LaunchAgents. bootstrap of an already-loaded
 // job fails (EALREADY) — fine, the kickstart then starts a loaded-but-dead one.
 function bootstrapGatewayDirect(uid, plist) {
-  const bs = spawnSync(
-    "launchctl",
-    ["bootstrap", `gui/${uid}`, plist],
-    { encoding: "utf8", timeout: 15000 },
-  );
-  appendBackendLog(
-    `[gateway] direct bootstrap rc=${bs.status} ${String(bs.stdout || bs.stderr || "").trim().slice(-200)}\n`,
-  );
-  if (!probeGateway(uid).running) kickstartGateway(uid);
-  return probeGateway(uid).running;
+  return gatewaySelfHeal.bootstrapGatewayDirect(uid, plist);
 }
 
 // Self-heal the gateway launchd service. The gateway runs the cron ticker that
@@ -525,97 +469,7 @@ function bootstrapGatewayDirect(uid, plist) {
 // update) is restarted ONCE so the new bundled code seeds the current fleet +
 // migrations. Best-effort, non-blocking, logged. macOS only.
 function ensureGatewayInstalled(launcher, baseEnv) {
-  if (process.platform !== "darwin") return;
-  try {
-    const plist = path.join(
-      os.homedir(),
-      "Library",
-      "LaunchAgents",
-      "ai.elevate.gateway.plist",
-    );
-    const uid = typeof process.getuid === "function" ? process.getuid() : "";
-    const { loaded, running } = probeGateway(uid);
-    const appVersion = app.getVersion();
-    if (fileExists(plist) && loaded && !running) {
-      // Loaded but dead (no pid): e.g. a stale pre-KeepAlive plist whose
-      // process was SIGTERM'd and never revived. kickstart restarts it in
-      // place; if that fails fall through to the full install path below.
-      appendBackendLog(
-        "[gateway] self-heal: loaded but NOT running -> kickstart\n",
-      );
-      if (kickstartGateway(uid) && probeGateway(uid).running) return;
-    } else if (fileExists(plist) && loaded) {
-      const lastVersion = readGatewayVersionMarker();
-      if (lastVersion !== appVersion) {
-        appendBackendLog(
-          `[gateway] version change ${lastVersion || "(none)"} -> ${appVersion}; reinstalling to load new code + refresh plist env\n`,
-        );
-        // Run `gateway install` (not a bare kickstart) so a STALE plist is
-        // rewritten + bootout/bootstrapped. Critical: older plists lack
-        // PYTHONPYCACHEPREFIX, so the launchd gateway wrote .pyc INTO the signed
-        // bundle and broke the codesign seal ("Elevate is damaged"). install →
-        // refresh_launchd_plist_if_needed applies the new env; a bare kickstart
-        // would just restart under the old (broken) plist. Falls back to
-        // kickstart if install fails.
-        const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
-        const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
-        appendBackendLog(`[gateway] version-change reinstall rc=${reinstall.status}\n${rout}\n`);
-        if (reinstall.status === 0) {
-          if (kickstartGateway(uid)) {
-            writeGatewayVersionMarker(appVersion);
-          }
-        } else if (kickstartGateway(uid)) {
-          writeGatewayVersionMarker(appVersion);
-        }
-      } else {
-        const missingResource = existingGatewayMissingResource();
-        if (missingResource) {
-          appendBackendLog(
-            `[gateway] self-heal: packaged resource recovered (${missingResource}); reinstalling gateway\n`,
-          );
-          const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
-          const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
-          appendBackendLog(`[gateway] recovered-resource reinstall rc=${reinstall.status}\n${rout}\n`);
-          if (reinstall.status === 0) {
-            if (kickstartGateway(uid)) {
-              writeGatewayVersionMarker(appVersion);
-            }
-          } else if (kickstartGateway(uid)) {
-            writeGatewayVersionMarker(appVersion);
-          }
-        } else {
-          appendBackendLog(
-            "[gateway] self-heal: healthy (plist present + loaded, version current)\n",
-          );
-        }
-      }
-      return;
-    }
-    appendBackendLog(
-      `[gateway] self-heal: plist=${fileExists(plist)} loaded=${loaded} running=${running} -> installing\n`,
-    );
-    // `gateway install` is now load-aware on the CLI side: with a current
-    // plist but an unloaded job it re-bootstraps + kickstarts + verifies
-    // (instead of the old "Service already installed" no-op).
-    const res = runGatewayCommand(launcher, baseEnv, ["install"]);
-    const out = String(res.stdout || res.stderr || "").trim().slice(-400);
-    appendBackendLog(`[gateway] self-heal install rc=${res.status}\n${out}\n`);
-    if (res.status === 0) writeGatewayVersionMarker(appVersion);
-    // Belt-and-suspenders: verify the job actually came back. If `gateway
-    // install` could not (broken/missing CLI mid-update) but a plist file
-    // exists on disk, load it directly — no Python required.
-    if (!probeGateway(uid).running && fileExists(plist)) {
-      appendBackendLog(
-        "[gateway] self-heal: install did not yield a running job; direct launchctl bootstrap fallback\n",
-      );
-      const revived = bootstrapGatewayDirect(uid, plist);
-      appendBackendLog(
-        `[gateway] self-heal: direct bootstrap ${revived ? "revived the gateway" : "FAILED — gateway still down"}\n`,
-      );
-    }
-  } catch (e) {
-    appendBackendLog(`[gateway] self-heal error: ${e}\n`);
-  }
+  gatewaySelfHeal.ensureGatewayInstalled(launcher, baseEnv);
 }
 
 function request(pathname, timeoutMs = 2000, port = backendPort) {

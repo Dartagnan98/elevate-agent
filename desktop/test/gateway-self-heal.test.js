@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const mainPath = path.resolve(__dirname, "../src/main.js");
+const gatewayPath = path.resolve(__dirname, "../src/gateway-self-heal.js");
 
 function readMain() {
   return fs.readFileSync(mainPath, "utf8");
@@ -17,8 +18,8 @@ function functionBlock(source, name) {
 }
 
 test("gateway probe detects loaded and running launchd states", () => {
-  const main = readMain();
-  const block = functionBlock(main, "probeGateway");
+  const gateway = fs.readFileSync(gatewayPath, "utf8");
+  const block = functionBlock(gateway, "probeGateway");
 
   assert.match(block, /"launchctl",\s*\[\s*"print",\s*`gui\/\$\{uid\}\/ai\.elevate\.gateway`\s*\]/s);
   assert.match(block, /const loaded = probe\.status === 0/);
@@ -28,8 +29,8 @@ test("gateway probe detects loaded and running launchd states", () => {
 });
 
 test("gateway self-heal kickstarts a loaded but dead service", () => {
-  const main = readMain();
-  const block = functionBlock(main, "ensureGatewayInstalled");
+  const gateway = fs.readFileSync(gatewayPath, "utf8");
+  const block = functionBlock(gateway, "ensureGatewayInstalled");
 
   assert.match(block, /if \(fileExists\(plist\) && loaded && !running\)/);
   assert.match(block, /loaded but NOT running -> kickstart/);
@@ -37,8 +38,8 @@ test("gateway self-heal kickstarts a loaded but dead service", () => {
 });
 
 test("gateway self-heal installs missing service and direct-bootstraps as fallback", () => {
-  const main = readMain();
-  const block = functionBlock(main, "ensureGatewayInstalled");
+  const gateway = fs.readFileSync(gatewayPath, "utf8");
+  const block = functionBlock(gateway, "ensureGatewayInstalled");
 
   assert.match(block, /-> installing/);
   assert.match(block, /runGatewayCommand\(launcher, baseEnv, \["install"\]\)/);
