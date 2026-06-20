@@ -16,15 +16,12 @@ const path = require("path");
 const { autoUpdater } = require("electron-updater");
 const log = require("electron-log");
 const { isTrustedNavigationUrl } = require("./navigation-guard");
-const {
-  isAllowedAudioPermission,
-  requestPermissionOrigin,
-} = require("./permission-guard");
 const backendHttp = require("./backend-http");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDesktopAuth } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
+const { installDesktopPermissions } = require("./permissions");
 const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
 const startupLog = require("./startup-log");
@@ -959,69 +956,8 @@ function loadAppPath(pathname = START_PATH, options = {}) {
   });
 }
 
-// Grant microphone access to the in-app voice-input feature. Without an
-// explicit handler some Electron builds deny `media` requests, which makes
-// getUserMedia (used by the chat composer's voice button) fail silently.
-// macOS still gates the device behind its own TCC prompt — backed by the
-// NSMicrophoneUsageDescription string Electron ships in Info.plist.
 function setupPermissions() {
-  const ses = session.defaultSession;
-  if (!ses) return;
-  ses.setPermissionRequestHandler((_webContents, permission, callback, details = {}) => {
-    callback(
-      isAllowedAudioPermission(
-        permission,
-        requestPermissionOrigin(details),
-        details,
-        backendUrl,
-      ),
-    );
-  });
-  // Only auto-pass the getUserMedia pre-flight; deny every other permission
-  // check (geolocation, clipboard-read, MIDI, notifications, …) instead of the
-  // previous blanket allow.
-  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details = {}) => {
-    return isAllowedAudioPermission(
-      permission,
-      requestingOrigin || details.securityOrigin || details.requestingUrl,
-      details,
-      backendUrl,
-    );
-  });
-  // Defense-in-depth CSP for the local dashboard origin: a renderer XSS has no
-  // 'self' backstop without this. The dashboard already serves only its own
-  // bundled assets, so script-src 'self' is safe.
-  ses.webRequest.onHeadersReceived((details, callback) => {
-    const isFilePreview = (() => {
-      try {
-        return new URL(details.url).pathname === "/api/files/preview";
-      } catch {
-        return false;
-      }
-    })();
-    const frameAncestors = isFilePreview ? "'self'" : "'none'";
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        // Permissive on passive resources (styles/fonts/images — the app loads
-        // Google Fonts + data/blob) so this can't break rendering; strict where
-        // it matters: no plugins/embeds, no external framing, scripts only
-        // from self + localhost (+ inline, which the bundled app needs).
-        // File previews are the one same-origin frame: PDF artifacts need the
-        // local inline viewer to load /api/files/preview directly.
-        "Content-Security-Policy": [
-          "default-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; " +
-            "script-src 'self' 'unsafe-inline' http://127.0.0.1:* http://localhost:*; " +
-            "style-src 'self' 'unsafe-inline' https: data:; " +
-            "font-src 'self' https: data:; " +
-            "img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; " +
-            "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:* https:; " +
-            "frame-src 'self' blob: http://127.0.0.1:* http://localhost:*; " +
-            `object-src 'none'; frame-ancestors ${frameAncestors}`,
-        ],
-      },
-    });
-  });
+  installDesktopPermissions({ session, dashboardOrigin: backendUrl });
 }
 
 async function startDesktop() {

@@ -8,7 +8,7 @@ const { isTrustedNavigationUrl } = require("../src/navigation-guard");
 
 const appRoot = path.join(__dirname, "..", "src");
 const backendUrl = "http://127.0.0.1:9119";
-const mainPath = path.join(appRoot, "main.js");
+const permissionsPath = path.join(appRoot, "permissions.js");
 
 test("navigation guard allows dashboard and app-owned files", () => {
   assert.equal(isTrustedNavigationUrl(`${backendUrl}/chat`, { backendUrl, appRoot }), true);
@@ -36,12 +36,12 @@ test("navigation guard blocks arbitrary file and external schemes", () => {
 });
 
 test("desktop CSP blocks embeds and external scripts by default", () => {
-  const main = fs.readFileSync(mainPath, "utf8");
-  const start = main.indexOf('"Content-Security-Policy"');
-  const end = main.indexOf("],", start);
-  const cspBlock = main.slice(start, end);
+  const permissions = fs.readFileSync(permissionsPath, "utf8");
+  const start = permissions.indexOf('"Content-Security-Policy"');
+  const end = permissions.indexOf("],", start);
+  const cspBlock = permissions.slice(start, end);
 
-  assert.match(main, /const frameAncestors = isFilePreview \? "'self'" : "'none'"/);
+  assert.match(permissions, /const frameAncestors = isFilePreview \? "'self'" : "'none'"/);
   assert.match(cspBlock, /script-src 'self' 'unsafe-inline' http:\/\/127\.0\.0\.1:\* http:\/\/localhost:\*/);
   assert.doesNotMatch(cspBlock, /script-src[^;]+https:/);
   assert.match(cspBlock, /object-src 'none'/);
