@@ -23,6 +23,7 @@ const {
 } = require("./permission-guard");
 const backendHttp = require("./backend-http");
 const dashboardBundle = require("./dashboard-bundle");
+const desktopMenu = require("./menu");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -952,102 +953,18 @@ async function ensureBackend() {
 }
 
 function createMenu() {
-  const template = [
-    {
-      label: "Elevate",
-      submenu: [
-        { role: "about" },
-        { type: "separator" },
-        {
-          label: "Sign In...",
-          accelerator: "CmdOrCtrl+L",
-          click: () => openLoginWindow(),
-        },
-        {
-          label: "Account...",
-          click: () => shell.openExternal(`${HQ_BASE_URL}/account`),
-        },
-        {
-          label: "Sign Out",
-          click: () => {
-            clearLicense();
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              // Reload so the chat WebSocket reconnects and now sees no
-              // license — the sign-in banner will render in the chat pane.
-              loadAppPath(START_PATH);
-            }
-          },
-        },
-        { type: "separator" },
-        {
-          label: "Quit Elevate",
-          accelerator: "CmdOrCtrl+Q",
-          click: () => app.quit(),
-        },
-      ],
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "pasteAndMatchStyle" },
-        { role: "delete" },
-        { role: "selectAll" },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        // Without these, Cmd+R does nothing and the renderer never picks up a
-        // freshly deployed bundle (you'd have to fully quit + reopen).
-        { role: "reload", accelerator: "CmdOrCtrl+R" },
-        { role: "forceReload", accelerator: "Shift+CmdOrCtrl+R" },
-        { type: "separator" },
-        { role: "resetZoom", accelerator: "CmdOrCtrl+0" },
-        { role: "zoomIn", accelerator: "CmdOrCtrl+Plus" },
-        { role: "zoomOut", accelerator: "CmdOrCtrl+-" },
-      ],
-    },
-    {
-      label: "Navigate",
-      submenu: [
-        { label: "Chat", accelerator: "CmdOrCtrl+1", click: () => loadAppPath("/chat") },
-        { label: "Agent Hub", accelerator: "CmdOrCtrl+2", click: () => loadAppPath("/hub") },
-        { label: "Setup", accelerator: "CmdOrCtrl+3", click: () => loadAppPath("/desktop-setup") },
-        { label: "Tasks", accelerator: "CmdOrCtrl+4", click: () => loadAppPath("/tasks") },
-        { label: "Memory", accelerator: "CmdOrCtrl+5", click: () => loadAppPath("/memory") },
-      ],
-    },
-    {
-      label: "Window",
-      submenu: [
-        { role: "minimize", accelerator: "CmdOrCtrl+M" },
-        { role: "zoom" },
-        { type: "separator" },
-        { role: "togglefullscreen" },
-      ],
-    },
-    {
-      label: "Help",
-      submenu: [
-        {
-          label: "Open Dashboard In Browser",
-          click: () => shell.openExternal(backendUrl),
-        },
-        {
-          label: "Toggle Developer Tools",
-          accelerator: "Alt+CmdOrCtrl+I",
-          click: () => mainWindow?.webContents.toggleDevTools(),
-        },
-      ],
-    },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  desktopMenu.createMenu({
+    app,
+    backendUrl: () => backendUrl,
+    clearLicense,
+    hqBaseUrl: HQ_BASE_URL,
+    loadAppPath,
+    mainWindow: () => mainWindow,
+    Menu,
+    openLoginWindow,
+    shell,
+    startPath: START_PATH,
+  });
 }
 
 function createWindow() {
