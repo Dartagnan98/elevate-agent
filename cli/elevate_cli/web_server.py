@@ -1225,6 +1225,7 @@ async def get_status():
 
 
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
+from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.analytics import create_analytics_router
 from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.config import create_config_router
@@ -1311,26 +1312,6 @@ def _tail_lines(path: Path, n: int) -> List[str]:
         return []
     lines = text.splitlines()
     return lines[-n:] if n > 0 else lines
-
-
-@app.post("/api/elevate/update")
-async def update_elevate():
-    """Kick off ``elevate update`` in the background."""
-    if _is_packaged_desktop_runtime():
-        raise HTTPException(
-            status_code=400,
-            detail="Desktop app updates are managed by the built-in app updater.",
-        )
-    try:
-        proc = _spawn_elevate_action(["update"], "elevate-update")
-    except Exception as exc:
-        _log.exception("Failed to spawn elevate update")
-        raise HTTPException(status_code=500, detail=f"Failed to start update: {exc}")
-    return {
-        "ok": True,
-        "pid": proc.pid,
-        "name": "elevate-update",
-    }
 
 
 def _git_value(
@@ -1895,121 +1876,6 @@ async def open_workspace(payload: dict[str, Any] | None = Body(default=None)):
     target = _workspace_display_dir(repo_dir, requested)
     _open_in_file_manager(target)
     return {"ok": True, "path": str(target)}
-
-
-@app.get("/api/elevate/update/status")
-async def get_elevate_update_status(refresh: bool = False):
-    """Return whether this checkout is behind the release branch.
-
-    The source of truth is the install's ``origin/main``. When the developer
-    pushes commits to that branch, installed dashboards can show "updates
-    available" before the user runs ``elevate update``.
-    """
-    try:
-        if _is_packaged_desktop_runtime():
-            return {
-                "available": False,
-                "behind": None,
-                "ahead": 0,
-                "branch": None,
-                "checked_at": time.time(),
-                "command": "desktop updater",
-                "local": None,
-                "origin_url": None,
-                "repo_dir": str(PROJECT_ROOT),
-                "upstream": None,
-                "error": "desktop_app_managed_update",
-            }
-
-        from elevate_cli.banner import (
-            _resolve_repo_dir,
-            check_for_updates,
-            get_git_banner_state,
-        )
-        from elevate_cli.config import recommended_update_command
-
-        repo_dir = _resolve_repo_dir()
-        if repo_dir is None:
-            return {
-                "available": False,
-                "behind": None,
-                "ahead": 0,
-                "branch": None,
-                "checked_at": time.time(),
-                "command": recommended_update_command(),
-                "local": None,
-                "origin_url": None,
-                "repo_dir": None,
-                "upstream": None,
-                "error": "not_git_install",
-            }
-
-        loop = asyncio.get_running_loop()
-        behind = await loop.run_in_executor(
-            None,
-            lambda: check_for_updates(force=refresh, cache_seconds=5 * 60),
-        )
-        git_state = get_git_banner_state(repo_dir) or {}
-        branch = _git_value(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
-        origin_url = _git_value(repo_dir, "remote", "get-url", "origin")
-        available = bool(behind and behind > 0)
-        return {
-            "available": available,
-            "behind": behind,
-            "ahead": int(git_state.get("ahead") or 0),
-            "branch": branch,
-            "checked_at": time.time(),
-            "command": recommended_update_command(),
-            "local": git_state.get("local"),
-            "origin_url": origin_url,
-            "repo_dir": str(repo_dir),
-            "upstream": git_state.get("upstream"),
-            "error": None,
-        }
-    except Exception as exc:
-        _log.exception("GET /api/elevate/update/status failed")
-        return {
-            "available": False,
-            "behind": None,
-            "ahead": 0,
-            "branch": None,
-            "checked_at": time.time(),
-            "command": "elevate update",
-            "local": None,
-            "origin_url": None,
-            "repo_dir": None,
-            "upstream": None,
-            "error": str(exc),
-        }
-
-
-@app.get("/api/actions/{name}/status")
-async def get_action_status(name: str, lines: int = 200):
-    """Tail an action log and report whether the process is still running."""
-    log_file_name = _ACTION_LOG_FILES.get(name)
-    if log_file_name is None:
-        raise HTTPException(status_code=404, detail=f"Unknown action: {name}")
-
-    log_path = _ACTION_LOG_DIR / log_file_name
-    tail = _tail_lines(log_path, min(max(lines, 1), 2000))
-
-    proc = _ACTION_PROCS.get(name)
-    if proc is None:
-        running = False
-        exit_code: Optional[int] = None
-        pid: Optional[int] = None
-    else:
-        exit_code = proc.poll()
-        running = exit_code is None
-        pid = proc.pid
-
-    return {
-        "name": name,
-        "running": running,
-        "exit_code": exit_code,
-        "pid": pid,
-        "lines": tail,
-    }
 
 
 def _session_reveal_target(session_id: str) -> Path:
@@ -4059,6 +3925,20 @@ app.include_router(create_license_router(require_token=_require_token))
 app.include_router(create_files_router(project_root=PROJECT_ROOT, log=_log))
 
 app.include_router(create_logs_router())
+
+app.include_router(
+    create_actions_router(
+        project_root=PROJECT_ROOT,
+        action_log_dir=_ACTION_LOG_DIR,
+        action_log_files=_ACTION_LOG_FILES,
+        action_procs=_ACTION_PROCS,
+        spawn_elevate_action=_spawn_elevate_action,
+        tail_lines=_tail_lines,
+        is_packaged_desktop_runtime=_is_packaged_desktop_runtime,
+        git_value=_git_value,
+        log=_log,
+    )
+)
 
 app.include_router(
     create_config_router(
