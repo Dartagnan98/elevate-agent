@@ -23,6 +23,9 @@ describe("onboarding UI recovery wiring", () => {
   it("keeps leads onboarding load, connector, save, and complete recovery paths visible", () => {
     const page = source("../../RealEstateHubPages.tsx");
     const onboarding = source("../../real-estate-hub/leads/onboarding.tsx");
+    const onboardingState = source("../../real-estate-hub/leads/onboarding-state.ts");
+    const onboardingWizard = source("../../real-estate-hub/leads/onboarding-wizard.tsx");
+    const onboardingConnectorStep = source("../../real-estate-hub/leads/onboarding-connector-step.tsx");
     const api = source("../../../lib/api.ts");
 
     expect(page).toContain("Could not load leads setup");
@@ -30,13 +33,13 @@ describe("onboarding UI recovery wiring", () => {
     expect(page).toMatch(/>\s*Retry\s*</);
     expect(onboarding).toContain("api.getSourceConnectors()");
     expect(onboarding).toContain("// best-effort — leave previous list in place");
-    expect(onboarding).toContain('errorMessage(err, "Could not load leads setup")');
+    expect(onboardingState).toContain('errorMessage(err, "Could not load leads setup")');
     expect(onboarding).toContain('errorMessage(err, "Save failed")');
     expect(onboarding).toContain('errorMessage(err, "Could not complete setup")');
-    expect(onboarding).toContain("const [copyStatus");
-    expect(onboarding).toContain("await navigator.clipboard.writeText(prompt)");
-    expect(onboarding).toContain("Could not copy prompt.");
-    expect(onboarding).toContain("{copyStatus[connector.id].message}");
+    expect(onboardingWizard).toContain("const [copyStatus");
+    expect(onboardingWizard).toContain("await navigator.clipboard.writeText(prompt)");
+    expect(onboardingWizard).toContain("Could not copy prompt.");
+    expect(onboardingConnectorStep).toContain("{copyStatus[connector.id].message}");
     expect(api).toContain("resetLeadsSetup");
   });
 });
