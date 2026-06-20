@@ -22,6 +22,7 @@ const { createBackendPortController } = require("./backend-port");
 const { createBackendRunner } = require("./backend-runner");
 const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
+const { createDashboardNavigation } = require("./dashboard-navigation");
 const { createDeepLinks } = require("./deep-links");
 const { createDesktopAuth } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
@@ -113,9 +114,6 @@ let ownsBackend = false;
 let backendReady = false;
 let backendPort = PREFERRED_PORT;
 let backendUrl = `http://${HOST}:${backendPort}`;
-let dashboardLoadRetryCount = 0;
-let dashboardLoadRetryTimer = null;
-let lastDashboardPath = START_PATH;
 const startupTracker = startupLog.createStartupLogger(log);
 const launcherTools = createLauncherTools({
   app,
@@ -206,6 +204,20 @@ const deepLinks = createDeepLinks({
   mainWindow: () => mainWindow,
   openLoginWindow,
 });
+const dashboardNavigation = createDashboardNavigation({
+  appRoot: __dirname,
+  backendMatchesDesktopMode,
+  backendUrl: () => backendUrl,
+  delayMs: DASHBOARD_LOAD_RETRY_DELAY_MS,
+  limit: DASHBOARD_LOAD_RETRY_LIMIT,
+  log,
+  mainWindow: () => mainWindow,
+  markStartup,
+  path,
+  setTimeout,
+  startPath: START_PATH,
+  trimLogMessage,
+});
 const mainWindowController = createMainWindowController({
   BrowserWindow,
   Menu,
@@ -218,10 +230,7 @@ const mainWindowController = createMainWindowController({
   markStartup,
   path,
   process,
-  resetDashboardLoadRetry: () => {
-    clearDashboardLoadRetryTimer();
-    dashboardLoadRetryCount = 0;
-  },
+  resetDashboardLoadRetry,
   scheduleDashboardLoadRetry,
   setMainWindow: (win) => {
     mainWindow = win;
@@ -567,43 +576,19 @@ function startOverlayWatcher() {
 }
 
 function loadLocalPage(fileName) {
-  if (!mainWindow) return;
-  markStartup("window:load-local", fileName);
-  mainWindow.loadFile(path.join(__dirname, fileName));
+  dashboardNavigation.loadLocalPage(fileName);
 }
 
 function clearDashboardLoadRetryTimer() {
-  if (!dashboardLoadRetryTimer) return;
-  clearTimeout(dashboardLoadRetryTimer);
-  dashboardLoadRetryTimer = null;
+  dashboardNavigation.clearDashboardLoadRetryTimer();
+}
+
+function resetDashboardLoadRetry() {
+  dashboardNavigation.resetDashboardLoadRetry();
 }
 
 function scheduleDashboardLoadRetry(reason) {
-  if (!mainWindow || mainWindow.isDestroyed() || dashboardLoadRetryTimer) return;
-  if (dashboardLoadRetryCount >= DASHBOARD_LOAD_RETRY_LIMIT) {
-    markStartup("window:dashboard-retry-exhausted", reason);
-    loadLocalPage("install.html");
-    return;
-  }
-
-  dashboardLoadRetryCount += 1;
-  const attempt = dashboardLoadRetryCount;
-  const pathname = lastDashboardPath || START_PATH;
-  markStartup("window:dashboard-retry", `${attempt}:${reason}`);
-  loadLocalPage("loading.html");
-
-  dashboardLoadRetryTimer = setTimeout(async () => {
-    dashboardLoadRetryTimer = null;
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (!(await backendMatchesDesktopMode())) {
-      scheduleDashboardLoadRetry("backend-not-ready");
-      return;
-    }
-    loadAppPath(pathname, { retry: true });
-  }, DASHBOARD_LOAD_RETRY_DELAY_MS);
-  if (typeof dashboardLoadRetryTimer.unref === "function") {
-    dashboardLoadRetryTimer.unref();
-  }
+  dashboardNavigation.scheduleDashboardLoadRetry(reason);
 }
 
 // The dashboard renders a full-screen <LoginCard /> whenever there's no valid
@@ -613,36 +598,11 @@ function scheduleDashboardLoadRetry(reason) {
 // other. This just brings the dashboard forward and nudges it to re-check
 // license state so the in-app card renders.
 function openLoginWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.focus();
-  const currentUrl = mainWindow.webContents.getURL();
-  if (!currentUrl.startsWith(backendUrl)) {
-    // Drifted off the dashboard origin (e.g. sitting on a local page) — load
-    // it so the in-app login screen can render.
-    loadAppPath(START_PATH);
-  } else {
-    mainWindow.webContents
-      .executeJavaScript(
-        "window.dispatchEvent(new Event('elevate:auth-changed'));",
-        true,
-      )
-      .catch(() => {});
-  }
+  dashboardNavigation.openLoginWindow();
 }
 
 function loadAppPath(pathname = START_PATH, options = {}) {
-  if (!mainWindow) return;
-  lastDashboardPath = pathname || START_PATH;
-  if (!options.retry) {
-    dashboardLoadRetryCount = 0;
-    clearDashboardLoadRetryTimer();
-  }
-  markStartup("window:load-dashboard", pathname);
-  mainWindow.loadURL(`${backendUrl}${pathname}`).catch((err) => {
-    if (String(err && err.message ? err.message : err).includes("ERR_ABORTED")) return;
-    log.warn(`[renderer:loadURL] ${trimLogMessage(err && err.message ? err.message : err, 500)}`);
-    scheduleDashboardLoadRetry("loadURL-rejected");
-  });
+  dashboardNavigation.loadAppPath(pathname, options);
 }
 
 function setupPermissions() {
