@@ -281,12 +281,22 @@ export function ActionQueue({
                 />
               ))
         )}
-        {tab === "hot" && (
+        {(tab === "hot" || tab === "followups") && (
           visible.length === 0
-            ? <div className="lb-replies-empty">No hot leads right now.</div>
+            ? (
+                <div className="lb-replies-empty">
+                  {tab === "hot" ? "No hot leads right now." : "No follow-ups queued."}
+                  {tab === "followups" && (
+                    <>
+                      <br />
+                      <span className="lb-replies-hint-2">Threads that go cold 7+ days re-enter this queue automatically.</span>
+                    </>
+                  )}
+                </div>
+              )
             : (visible as LeadsHotEntry[]).map(p => (
                 <div key={p.id} className="lb-q-row">
-                  <span className="lb-heat-dot"></span>
+                  <span className={tab === "hot" ? "lb-heat-dot" : "lb-q-mute-dot"}></span>
                   <div className="lb-q-body">
                     <div className="lb-q-name">{p.name}</div>
                     <div className="lb-q-meta">{p.signal} · {p.age}</div>
@@ -295,12 +305,6 @@ export function ActionQueue({
                   <button type="button" className="lb-btn ghost sm" disabled={!onOpenHotLead} onClick={() => onOpenHotLead?.(p)}>Open thread</button>
                 </div>
               ))
-        )}
-        {tab === "followups" && (
-          <div className="lb-replies-empty">
-            No follow-ups queued.<br />
-            <span className="lb-replies-hint-2">Threads that go cold 7+ days re-enter this queue automatically.</span>
-          </div>
         )}
         {tab === "skipped" && (
           visible.length === 0
