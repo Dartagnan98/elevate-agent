@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import type { LeadsSentMessage } from "../leads-data";
+import { SentMessageRow } from "./sent-message-row";
 
 export function SentView({
   messages, onRefresh,
@@ -67,21 +68,7 @@ export function SentView({
           <span className="lb-sent-h mono">Message</span>
           <span className="lb-sent-h mono">Status</span>
         </div>
-        {visible.map(m => (
-          <div key={m.id} className="lb-sent-row">
-            <span className="lb-sent-when mono">{m.when}</span>
-            <span className="lb-sent-recipient">{m.recipient}</span>
-            <span className="lb-sent-source">
-              <div>{m.source}</div>
-              <div className="lb-sent-transport mono">{m.transport}</div>
-            </span>
-            <span className="lb-sent-msg">
-              <div>{m.message}</div>
-              <div className="lb-sent-msg-id mono">id: {m.msgId}</div>
-            </span>
-            <span className={"lb-sent-status " + (m.status === "sent" ? "sent" : m.status === "failed" ? "failed" : "queued")}>{(m.status || "sent").toUpperCase()}</span>
-          </div>
-        ))}
+        {visible.map(m => <SentMessageRow key={m.id} message={m} />)}
       </div>
     </section>
   );
