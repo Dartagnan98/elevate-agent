@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 
-import { ListSkeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import type { ThreadContextResponse } from "@/lib/api-types";
 import type { LeadsProfile } from "../leads-data";
-import { StatusPill } from "./profiles-list";
+import { ProfileDrawerThread, type ProfileDrawerMessage } from "./profile-drawer-thread";
+import { StatusPill } from "./profile-status";
 
 export function ProfileDrawer({
   profile, onClose, onStatusChange,
@@ -75,7 +75,7 @@ export function ProfileDrawer({
     summary: a.summary,
   }));
 
-  const messages = (context?.messages || []).map((m) => ({
+  const messages: ProfileDrawerMessage[] = (context?.messages || []).map((m) => ({
     id: m.id,
     direction: m.direction === "outbound" ? "out" : "in",
     from: m.direction === "outbound" ? "You" : (m.sender || profile.name),
@@ -113,22 +113,7 @@ export function ProfileDrawer({
         </header>
 
         <div className="lb-drawer-body">
-          <div className="lb-drawer-thread">
-            {loadingCtx ? (
-              <ListSkeleton rows={4} />
-            ) : ctxError ? (
-              <div className="lb-drawer-empty">{ctxError}</div>
-            ) : messages.length === 0 ? (
-              <div className="lb-drawer-empty">No messages on file yet.</div>
-            ) : (
-              messages.map(m => (
-                <div key={m.id} className={"lb-drawer-msg " + m.direction}>
-                  <div className="lb-drawer-msg-head mono">{m.from} · {m.time}</div>
-                  <div className="lb-drawer-msg-text">{m.text}</div>
-                </div>
-              ))
-            )}
-          </div>
+          <ProfileDrawerThread loading={loadingCtx} error={ctxError} messages={messages} />
 
           <aside className="lb-drawer-side">
             <section className="lb-drawer-section">
