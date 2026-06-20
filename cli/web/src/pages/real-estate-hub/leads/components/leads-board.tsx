@@ -44,7 +44,6 @@ import { ProfilesList } from "./profiles-list";
 import { SentView } from "./sent-view";
 import { TemplatesView, type TemplateMutations } from "./templates-view";
 
-export { matchesLeadsSourceFilter, nextDraftQueueSelection } from "./action-queue";
 export type { TemplateMutations } from "./templates-view";
 
 // ─────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
 
 import type { LeadsProfile } from "../leads-data";
-import { matchesLeadsSourceFilter } from "./action-queue";
+import { matchesLeadsSourceFilter } from "./action-queue-helpers";
 import { StatusPill } from "./profile-status";
 
 export { StatusPill } from "./profile-status";

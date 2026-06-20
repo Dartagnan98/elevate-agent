@@ -7,7 +7,7 @@ import type {
   SourceInboxThread,
 } from "@/lib/api-types";
 import { sourceInboxDebugNote, sourceInboxProfileStatusForLabel } from "../LeadsDesignShell";
-import { matchesLeadsSourceFilter, nextDraftQueueSelection } from "../components/leads-board";
+import { matchesLeadsSourceFilter, nextDraftQueueSelection } from "../components/action-queue-helpers";
 import { mapLeadsPipeline, mapLeadsSent } from "../compute-leads-data";
 
 type SourceInboxDebugCounts = NonNullable<SourceInboxResponse["debug"]>["counts"];
