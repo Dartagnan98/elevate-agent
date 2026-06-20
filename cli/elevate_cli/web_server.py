@@ -89,8 +89,6 @@ from elevate_cli.config import (
     save_config,
     save_env_value,
 )
-from elevate_cli.data.deals import DealPhaseGateBlocked
-
 try:
     from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
@@ -1030,6 +1028,7 @@ from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.activity_comms import create_activity_comms_router
 from elevate_cli.web_routes.analytics import create_analytics_router
 from elevate_cli.web_routes.admin_actions import create_admin_actions_router
+from elevate_cli.web_routes.admin_deals import create_admin_deals_router
 from elevate_cli.web_routes.admin_templates import create_admin_templates_router
 from elevate_cli.web_routes.ayrshare import create_ayrshare_router
 from elevate_cli.web_routes.channels import create_channels_router
@@ -1373,6 +1372,15 @@ app.include_router(
     )
 )
 
+app.include_router(
+    create_admin_deals_router(
+        require_admin_setup_ready_for_launch=lambda: _require_admin_setup_ready_for_launch(),
+        admin_jurisdiction_config=lambda: _admin_jurisdiction_config(),
+        web_actor="human:web",
+        log=_log,
+    )
+)
+
 app.include_router(create_admin_templates_router(web_actor="human:web", log=_log))
 
 app.include_router(
@@ -1465,40 +1473,6 @@ class _SignalGraduateBody(BaseModel):
     contactId: str
 
 
-class _DealCreateBody(BaseModel):
-    title: str
-    side: str
-    # Optional package selectors. If omitted, the configured deal-flow defaults are used.
-    province: Optional[str] = None
-    board: Optional[str] = None
-    market: Optional[str] = None
-    currentStage: int = 0
-    primaryContactId: Optional[str] = None
-    loftyContactId: Optional[str] = None
-    listingAddress: Optional[str] = None
-    fields: Optional[Dict[str, Any]] = None
-    dispatchInitialStage: bool = True
-    suppressInitialDispatch: bool = False
-
-
-class _ProfilePromotionBody(BaseModel):
-    profileId: str
-    side: str
-    displayName: Optional[str] = None
-    primaryContactId: Optional[str] = None
-    listingAddress: Optional[str] = None
-    workflow: Optional[str] = None
-    # Optional package selectors. If omitted, the configured deal-flow defaults are used.
-    province: Optional[str] = None
-    board: Optional[str] = None
-    market: Optional[str] = None
-    currentStage: int = 0
-    profileContext: Dict[str, Any] = Field(default_factory=dict)
-    verifiers: List[Dict[str, Any]] = Field(default_factory=list)
-    fields: Dict[str, Any] = Field(default_factory=dict)
-    dispatchInitialStage: bool = True
-
-
 class _AdminJurisdictionBody(BaseModel):
     country: Optional[str] = None
     province: Optional[str] = None
@@ -1568,61 +1542,6 @@ class _OnboardingChatBody(BaseModel):
 class _OnboardingBrowserUseBody(BaseModel):
     portalKey: str  # mls | compliance | showing
     taskHint: Optional[str] = None
-
-
-class _DealMoveBody(BaseModel):
-    toStage: int
-    force: bool = False
-
-
-class _DealToggleBody(BaseModel):
-    field: str
-    value: Any
-
-
-class _DealContactBody(BaseModel):
-    role: str
-    contactId: str
-    notes: Optional[str] = None
-
-
-class _DealAttachmentBody(BaseModel):
-    kind: str
-    filePath: str
-    summary: Optional[str] = None
-    sourceRunId: Optional[str] = None
-    sourceSnapshotId: Optional[str] = None
-
-
-class _DealFieldsBody(BaseModel):
-    fields: Dict[str, Any]
-
-
-class _RunResultArtifact(BaseModel):
-    kind: str
-    file_path: Optional[str] = None
-    filePath: Optional[str] = None
-    summary: Optional[str] = None
-    source_snapshot_id: Optional[str] = None
-    sourceSnapshotId: Optional[str] = None
-
-
-class _RunResultBody(BaseModel):
-    status: str
-    idempotency_key: Optional[str] = None
-    idempotencyKey: Optional[str] = None
-    artifacts: List[_RunResultArtifact] = []
-    next_tasks: List[Dict[str, Any]] = []
-    nextTasks: List[Dict[str, Any]] = []
-    checklist_updates: List[Dict[str, Any]] = []
-    checklistUpdates: List[Dict[str, Any]] = []
-    human_prompt: Optional[Dict[str, Any]] = None
-    humanPrompt: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-
-class _DealAdvanceBody(BaseModel):
-    force: bool = False
 
 
 class _ProvinceGuideImportBody(BaseModel):
@@ -2909,73 +2828,6 @@ def post_admin_province_guides_import(body: Optional[_ProvinceGuideImportBody] =
         _log.exception("POST /api/admin/province-guides/import failed")
         raise HTTPException(status_code=500, detail=f"Province guide import failed: {exc}")
 
-
-@app.get("/api/admin/deals")
-def get_admin_deals(
-    side: Optional[str] = None,
-    current_stage: Optional[int] = None,
-    status: Optional[str] = "active",
-    province: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0,
-):
-    """Return Admin Hub deals for the configured jurisdiction."""
-    try:
-        from elevate_cli.data import connect, list_deals
-        from elevate_cli.data.deals import deal_card_gate
-
-        with connect() as conn:
-            rows = list_deals(
-                conn,
-                side=side or None,
-                current_stage=current_stage,
-                status=status or None,
-                province=province.strip().upper() if province and province.strip() else None,
-                limit=limit,
-                offset=offset,
-            )
-            # Enrich each card with its live scorecard (checklist progress +
-            # gate state) so the board shows it without opening the modal.
-            for row in rows:
-                try:
-                    scorecard = deal_card_gate(conn, row)
-                    row["scorecard"] = scorecard
-                    # Feed the existing DealCard `progress` render path with live data.
-                    if scorecard.get("progress"):
-                        row["progress"] = scorecard["progress"]
-                except Exception:
-                    _log.debug("deal_card_gate failed for deal %s", row.get("id"), exc_info=True)
-            return {"items": rows, "count": len(rows), "jurisdiction": _admin_jurisdiction_config()}
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("GET /api/admin/deals failed")
-        raise HTTPException(status_code=500, detail=f"Admin deals failed: {exc}")
-
-
-@app.get("/api/admin/upcoming-events")
-def get_admin_upcoming_events(days: int = 21):
-    """Return merged Admin calendar feed: Google Calendar + deal milestone dates."""
-    try:
-        from elevate_cli.data import connect
-        from elevate_cli.data.admin_calendar import list_upcoming_admin_events
-
-        safe_days = max(1, min(int(days or 21), 90))
-        with connect() as conn:
-            return list_upcoming_admin_events(conn, days=safe_days)
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("GET /api/admin/upcoming-events failed")
-        raise HTTPException(status_code=500, detail=f"Admin upcoming events failed: {exc}")
 
 
 @app.get("/api/heartbeats/surfaces")
@@ -4353,377 +4205,6 @@ def set_heartbeat_automation_enabled(job_id: str, body: _HeartbeatAutomationEnab
     except Exception as exc:
         _log.exception("POST /api/heartbeats/automations/%s/enabled failed", job_id)
         raise HTTPException(status_code=500, detail=f"Automation toggle failed: {exc}")
-
-
-@app.post("/api/admin/deals")
-def post_admin_deal(body: _DealCreateBody):
-    """Create one Admin Hub deal card."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, create_deal, get_admin_setup
-
-        jurisdiction = _admin_jurisdiction_config()
-        with connect() as conn:
-            setup_profile = (get_admin_setup(conn).get("profile") or {})
-            province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
-            market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
-            return create_deal(
-                conn,
-                title=body.title,
-                side=body.side,
-                actor=_WEB_ACTOR,
-                province=(province or "").strip().upper(),
-                board=(body.board or "").strip() or None,
-                market=(market or "").strip() or None,
-                current_stage=body.currentStage,
-                primary_contact_id=body.primaryContactId,
-                lofty_contact_id=body.loftyContactId,
-                listing_address=body.listingAddress,
-                fields=body.fields,
-                dispatch_initial_stage=body.dispatchInitialStage and not body.suppressInitialDispatch,
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/deals failed")
-        raise HTTPException(status_code=500, detail=f"Create deal failed: {exc}")
-
-
-@app.post("/api/admin/profile-promotions")
-def post_admin_profile_promotion(body: _ProfilePromotionBody):
-    """Create or update an Admin Hub deal from a verified lead profile."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, get_admin_setup, promote_profile_to_admin_deal
-
-        jurisdiction = _admin_jurisdiction_config()
-        with connect() as conn:
-            setup_profile = (get_admin_setup(conn).get("profile") or {})
-            province = body.province if body.province is not None else (jurisdiction["province"] or setup_profile.get("province"))
-            market = body.market if body.market is not None else (jurisdiction["market"] or setup_profile.get("market"))
-            return promote_profile_to_admin_deal(
-                conn,
-                profile_id=body.profileId,
-                side=body.side,
-                actor=_WEB_ACTOR,
-                province=(province or "").strip().upper(),
-                board=(body.board or "").strip() or None,
-                market=(market or "").strip() or None,
-                current_stage=body.currentStage,
-                display_name=body.displayName,
-                primary_contact_id=body.primaryContactId,
-                listing_address=body.listingAddress,
-                workflow=body.workflow,
-                profile_context=body.profileContext,
-                verifiers=body.verifiers,
-                fields=body.fields,
-                dispatch_initial_stage=body.dispatchInitialStage,
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/profile-promotions failed")
-        raise HTTPException(status_code=500, detail=f"Promote profile failed: {exc}")
-
-
-@app.post("/api/admin/deals/{deal_id}/move")
-def post_admin_deal_move(deal_id: str, body: _DealMoveBody):
-    """Move one Admin Hub deal card to another stage."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, move_deal_stage
-
-        with connect() as conn:
-            return move_deal_stage(
-                conn,
-                deal_id,
-                to_stage=body.toStage,
-                actor=_WEB_ACTOR,
-                force=body.force,
-            )
-    except HTTPException:
-        raise
-    except DealPhaseGateBlocked as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": str(exc),
-                "gate": exc.gate,
-            },
-        )
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/deals/%s/move failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Move deal failed: {exc}")
-
-
-@app.get("/api/admin/deals/deadlines")
-def get_admin_deal_deadlines(near_subject_days: int = 21, near_close_days: int = 30):
-    """Deals with an upcoming subject-removal or completion deadline.
-
-    Powers the admin "Coming up" strip so the realtor sees what needs prepping
-    (subject removal / amendment / closing) before it lands. Reuses the existing
-    deals_overview soon-lists; no new data, just surfaced.
-    """
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, deals_overview
-
-        with connect() as conn:
-            ov = deals_overview(
-                conn,
-                near_subject_days=near_subject_days,
-                near_close_days=near_close_days,
-            )
-        return {
-            "subjectsSoon": ov.get("subjectsSoon", []),
-            "closingsSoon": ov.get("closingsSoon", []),
-            "staleStages": ov.get("staleStages", []),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("GET /api/admin/deals/deadlines failed")
-        raise HTTPException(status_code=500, detail=f"Deadlines failed: {exc}")
-
-
-@app.post("/api/admin/deals/{deal_id}/toggle")
-def post_admin_deal_toggle(deal_id: str, body: _DealToggleBody):
-    """Update one checklist, toggle, or enum field on an Admin Hub deal."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, set_deal_toggle
-
-        with connect() as conn:
-            return set_deal_toggle(
-                conn,
-                deal_id,
-                field=body.field,
-                value=body.value,
-                actor=_WEB_ACTOR,
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/deals/%s/toggle failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Toggle deal failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# /api/deals — source-of-truth deal context + skill callback spine
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/deals/{deal_id}/context")
-def get_deal_source_context(deal_id: str):
-    """Return the single source-of-truth blob every admin skill starts from."""
-    try:
-        from elevate_cli.data import connect, get_deal_context
-
-        with connect() as conn:
-            return get_deal_context(conn, deal_id)
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("GET /api/deals/%s/context failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Deal context failed: {exc}")
-
-
-@app.post("/api/deals/{deal_id}/fields")
-def post_deal_fields(deal_id: str, body: _DealFieldsBody):
-    """Patch durable date/money/property fields on the deal source of truth."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, set_deal_fields
-
-        with connect() as conn:
-            return set_deal_fields(conn, deal_id, actor=_WEB_ACTOR, fields=body.fields)
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/deals/%s/fields failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Deal field update failed: {exc}")
-
-
-@app.post("/api/deals/{deal_id}/advance")
-def post_deal_advance(deal_id: str, body: _DealAdvanceBody):
-    """Advance a deal to the next package phase when its gate is clear."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import connect, get_deal_context, move_deal_stage
-
-        with connect() as conn:
-            context = get_deal_context(conn, deal_id)
-            gate = ((context.get("dealFlow") or {}).get("gate") or {})
-            next_stage = gate.get("nextStage")
-            if next_stage is None:
-                raise HTTPException(status_code=400, detail="deal is already at the final stage")
-            if not body.force and not gate.get("canAdvance"):
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "message": "deal phase gate is blocked",
-                        "gate": gate,
-                    },
-                )
-            move_deal_stage(
-                conn,
-                deal_id,
-                to_stage=int(next_stage),
-                actor=_WEB_ACTOR,
-                force=body.force,
-                gate_checked=not body.force,
-            )
-            return get_deal_context(conn, deal_id)
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/deals/%s/advance failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Deal advance failed: {exc}")
-
-
-@app.post("/api/deals/{deal_id}/contacts")
-def post_deal_contact(deal_id: str, body: _DealContactBody):
-    """Attach a co-contact role (lawyer/lender/inspector/etc.) to a deal."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import add_deal_contact, connect
-
-        with connect() as conn:
-            return add_deal_contact(
-                conn,
-                deal_id,
-                role=body.role,
-                contact_id=body.contactId,
-                notes=body.notes,
-                actor=_WEB_ACTOR,
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/deals/%s/contacts failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Deal contact link failed: {exc}")
-
-
-@app.post("/api/deals/{deal_id}/attachments")
-def post_deal_attachment(deal_id: str, body: _DealAttachmentBody):
-    """Attach an artifact/file to the deal source of truth."""
-    try:
-        _require_admin_setup_ready_for_launch()
-        from elevate_cli.data import add_deal_attachment, connect
-
-        with connect() as conn:
-            return add_deal_attachment(
-                conn,
-                deal_id,
-                kind=body.kind,
-                file_path=body.filePath,
-                summary=body.summary,
-                source_run_id=body.sourceRunId,
-                source_snapshot_id=body.sourceSnapshotId,
-                actor=_WEB_ACTOR,
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/deals/%s/attachments failed", deal_id)
-        raise HTTPException(status_code=500, detail=f"Deal attachment failed: {exc}")
-
-
-@app.post("/api/deals/{deal_id}/runs/{run_id}/result")
-def post_deal_run_result(deal_id: str, run_id: str, body: _RunResultBody):
-    """Standard callback for admin skills to close action_runs and attach outputs."""
-    try:
-        from elevate_cli.data import connect, record_run_result
-
-        artifacts = [item.model_dump(exclude_none=True) for item in body.artifacts]
-        next_tasks = body.next_tasks or body.nextTasks
-        checklist_updates = body.checklist_updates or body.checklistUpdates
-        human_prompt = body.human_prompt or body.humanPrompt
-        idempotency_key = body.idempotency_key or body.idempotencyKey
-        with connect() as conn:
-            return record_run_result(
-                conn,
-                deal_id,
-                run_id,
-                status=body.status,
-                idempotency_key=idempotency_key,
-                artifacts=artifacts,
-                next_tasks=next_tasks,
-                checklist_updates=checklist_updates,
-                human_prompt=human_prompt,
-                error=body.error,
-                actor="skill:web-callback",
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/deals/%s/runs/%s/result failed", deal_id, run_id)
-        raise HTTPException(status_code=500, detail=f"Deal run result failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# /admin/actions — stage-action registry + run log
-# ---------------------------------------------------------------------------
 
 
 
