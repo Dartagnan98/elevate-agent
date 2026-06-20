@@ -9,7 +9,6 @@ Usage:
     python -m elevate_cli.main web --port 8080
 """
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -91,6 +90,13 @@ from elevate_cli.config import (
     save_env_value,
 )
 from gateway.status import get_running_pid, read_runtime_status
+from elevate_cli.web_cloud_skills import (
+    _CLOUD_SKILL_SYNC_INTERVAL_S,
+    _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
+    _cloud_skill_sync_once as _cloud_skill_sync_once_impl,
+    kickoff_cloud_skill_sync,
+    stop_cloud_skill_heartbeat,
+)
 from elevate_cli.web_config_schema import (
     CONFIG_SCHEMA,
     _CATEGORY_MERGE,
@@ -1245,82 +1251,29 @@ mount_dashboard_plugin_api_routes(app, project_root=PROJECT_ROOT, log=_log)
 mount_spa(app)
 
 
-# ---------------------------------------------------------------------------
-# Cloud-skill sync — startup + hourly heartbeat.
-#
-# Skills live server-side, gated by tier + entitlements. The CLI keeps a local
-# mirror at ~/.elevate/cloud-skills/. We sync:
-#   - on every gateway boot (so server-side version bumps land after restart)
-#   - every hour while running (so entitlement flips on HQ propagate without
-#     forcing the user to re-activate or restart the app)
-# Both paths swallow errors so a flaky network never blocks the gateway.
-# ---------------------------------------------------------------------------
-
-_CLOUD_SKILL_SYNC_INTERVAL_S = int(os.environ.get("ELEVATE_CLOUD_SKILL_SYNC_INTERVAL_S", "3600"))
-
-
 def _cloud_skill_sync_once(reason: str) -> None:
-    try:
-        from elevate_cli import license as lic_mod
-        from elevate_cli import cloud_skills
-    except Exception as exc:
-        _log.debug("cloud-skill sync (%s): import failed: %s", reason, exc)
-        return
-
-    lic = lic_mod.load()
-    if not lic:
-        _log.debug("cloud-skill sync (%s): no license, skipping", reason)
-        return
-
-    try:
-        if lic.is_expired():
-            lic = lic_mod.refresh(lic)
-    except Exception as exc:
-        _log.info("cloud-skill sync (%s): license refresh failed: %s", reason, exc)
-        return
-
-    try:
-        result = cloud_skills.sync_all()
-    except Exception as exc:
-        _log.info("cloud-skill sync (%s): sync failed: %s", reason, exc)
-        return
-
-    _log.info(
-        "cloud-skill sync (%s): %d skills, %d removed, %d errors",
-        reason,
-        result.get("skill_count", 0),
-        len(result.get("removed", []) or []),
-        len(result.get("errors", []) or []),
-    )
+    _cloud_skill_sync_once_impl(reason, log=_log)
 
 
 async def _cloud_skill_heartbeat() -> None:
-    while True:
-        try:
-            await asyncio.sleep(_CLOUD_SKILL_SYNC_INTERVAL_S)
-        except asyncio.CancelledError:
-            return
-        await asyncio.get_running_loop().run_in_executor(None, _cloud_skill_sync_once, "heartbeat")
+    await _cloud_skill_heartbeat_impl(
+        interval_s=_CLOUD_SKILL_SYNC_INTERVAL_S,
+        sync_once=_cloud_skill_sync_once,
+    )
 
 
 @app.on_event("startup")
 async def _kickoff_cloud_skill_sync() -> None:
-    loop = asyncio.get_running_loop()
-    # Run the first sync off the event loop so a slow network doesn't delay
-    # the gateway accepting connections.
-    loop.run_in_executor(None, _cloud_skill_sync_once, "startup")
-    app.state.cloud_skill_heartbeat_task = loop.create_task(_cloud_skill_heartbeat())
+    await kickoff_cloud_skill_sync(
+        app,
+        sync_once=_cloud_skill_sync_once,
+        heartbeat=_cloud_skill_heartbeat,
+    )
 
 
 @app.on_event("shutdown")
 async def _stop_cloud_skill_heartbeat() -> None:
-    task = getattr(app.state, "cloud_skill_heartbeat_task", None)
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+    await stop_cloud_skill_heartbeat(app)
 
 
 def start_server(
