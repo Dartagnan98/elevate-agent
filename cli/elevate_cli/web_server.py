@@ -2478,53 +2478,6 @@ def get_models_by_provider(provider: str = ""):
         return {"provider": prov, "models": []}
 
 
-@app.post("/api/channels/slack/test")
-def post_slack_test(payload: dict[str, Any] | None = Body(default=None)):
-    """Send a one-shot test message to a Slack incoming webhook.
-
-    Powers the wizard's "Send test" button so the operator can confirm their
-    webhook URL is live before saving. Accepts ``{"webhook_url": "...",
-    "channel": "...", "text": "..."}``. If ``webhook_url`` is omitted, falls
-    back to ``$SLACK_WEBHOOK_URL`` in env. Returns ``{"ok": bool,
-    "status": int, "detail": str}``.
-
-    Used by the wizard. The actual runtime "agent posts to Slack" plumbing
-    lives in the outbound sender — this endpoint exists so the wizard can
-    validate creds without needing the full agent loop to fire.
-    """
-    import os
-    import httpx
-
-    body = payload or {}
-    webhook = str(body.get("webhook_url") or "").strip()
-    if not webhook:
-        try:
-            from elevate_cli.config import load_env as _load_env
-
-            file_env = _load_env() or {}
-        except Exception:
-            file_env = {}
-        webhook = (os.environ.get("SLACK_WEBHOOK_URL") or file_env.get("SLACK_WEBHOOK_URL") or "").strip()
-    if not webhook:
-        return {"ok": False, "status": 0, "detail": "No webhook URL provided and SLACK_WEBHOOK_URL is not set."}
-
-    text = str(body.get("text") or "").strip() or "elevate · test message from onboarding wizard"
-    channel = str(body.get("channel") or "").strip()
-    msg: dict[str, Any] = {"text": text}
-    if channel:
-        msg["channel"] = channel if channel.startswith("#") or channel.startswith("@") else f"#{channel}"
-    try:
-        resp = httpx.post(webhook, json=msg, timeout=10)
-    except httpx.HTTPError as exc:
-        return {"ok": False, "status": 0, "detail": f"{type(exc).__name__}: {exc}"}
-    body_text = (resp.text or "").strip()
-    return {
-        "ok": resp.is_success and body_text.lower() in ("ok", ""),
-        "status": resp.status_code,
-        "detail": body_text or "delivered",
-    }
-
-
 @app.get("/api/agents/peers")
 def get_agent_peers():
     """Return the list of Cortex OS-style peer agents on this Mac.
