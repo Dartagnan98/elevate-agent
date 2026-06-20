@@ -24,6 +24,7 @@ const {
 const backendHttp = require("./backend-http");
 const dashboardBundle = require("./dashboard-bundle");
 const desktopMenu = require("./menu");
+const startupLog = require("./startup-log");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -97,9 +98,7 @@ let backendUrl = `http://${HOST}:${backendPort}`;
 let dashboardLoadRetryCount = 0;
 let dashboardLoadRetryTimer = null;
 let lastDashboardPath = START_PATH;
-const startupStartedAt = Date.now();
-const startupEvents = [];
-let startupSummaryLogged = false;
+const startupTracker = startupLog.createStartupLogger(log);
 
 app.setName("Elevate");
 
@@ -129,20 +128,11 @@ if (!isPrimaryInstance) {
 }
 
 function markStartup(name, detail = "") {
-  const ms = Date.now() - startupStartedAt;
-  const event = { ms, name, detail };
-  startupEvents.push(event);
-  log.info(`[startup] ${ms}ms ${name}${detail ? ` ${detail}` : ""}`);
+  startupTracker.markStartup(name, detail);
 }
 
 function finishStartup(reason) {
-  if (startupSummaryLogged) return;
-  startupSummaryLogged = true;
-  const total = Date.now() - startupStartedAt;
-  const timeline = startupEvents
-    .map((event) => `${event.ms}ms:${event.name}${event.detail ? `(${event.detail})` : ""}`)
-    .join(" | ");
-  log.info(`[startup-summary] ${reason} ${total}ms ${timeline}`);
+  startupTracker.finishStartup(reason);
 }
 
 function currentMainWindowUrl() {
@@ -155,29 +145,15 @@ function currentMainWindowUrl() {
 }
 
 function trimLogMessage(value, max = 1200) {
-  const text = String(value ?? "");
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  return startupLog.trimLogMessage(value, max);
 }
 
 function formatCrashForLog(reason) {
-  if (reason && reason.stack) return trimLogMessage(reason.stack, 4000);
-  if (reason && reason.message) return trimLogMessage(reason.message, 4000);
-  return trimLogMessage(reason, 4000);
+  return startupLog.formatCrashForLog(reason);
 }
 
 function installMainCrashCapture() {
-  process.on("uncaughtException", (err) => {
-    log.error(`[main:uncaughtException] ${formatCrashForLog(err)}`);
-    try {
-      app.exit(1);
-    } catch {
-      process.exit(1);
-    }
-  });
-
-  process.on("unhandledRejection", (reason) => {
-    log.error(`[main:unhandledRejection] ${formatCrashForLog(reason)}`);
-  });
+  startupLog.installMainCrashCapture({ app, log, formatCrashForLog });
 }
 
 installMainCrashCapture();
