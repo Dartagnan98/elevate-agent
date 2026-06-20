@@ -9,7 +9,18 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+
+from elevate_cli.web_routes.heartbeats_models import (
+    AgentHeartbeatMdBody as _AgentHeartbeatMdBody,
+    HeartbeatAutomationEnabledBody as _HeartbeatAutomationEnabledBody,
+    HeartbeatConfigPatchBody as _HeartbeatConfigPatchBody,
+    HeartbeatCycleCreateBody as _HeartbeatCycleCreateBody,
+    HeartbeatCyclePatchBody as _HeartbeatCyclePatchBody,
+    HeartbeatGoalsPatchBody as _HeartbeatGoalsPatchBody,
+    HeartbeatRouteBody as _HeartbeatRouteBody,
+    HeartbeatSurfaceCreateBody as _HeartbeatSurfaceCreateBody,
+    HeartbeatSurfaceEnabledBody as _HeartbeatSurfaceEnabledBody,
+)
 
 
 FsCacheGet = Callable[[str], Any]
@@ -310,16 +321,6 @@ def create_heartbeats_router(
         except Exception as exc:
             _log.exception("GET /api/heartbeats/surfaces failed")
             raise HTTPException(status_code=500, detail=f"Heartbeat surfaces failed: {exc}")
-
-
-    class _HeartbeatSurfaceCreateBody(BaseModel):
-        surface: str
-        title: Optional[str] = None
-        name: Optional[str] = None
-        schedule: Optional[str] = None
-        goal: Optional[str] = None
-        experiment: Optional[Dict[str, Any]] = None
-        config: Optional[Dict[str, Any]] = None
 
 
     @router.post("/api/heartbeats/surfaces")
@@ -750,10 +751,6 @@ def create_heartbeats_router(
         return None
 
 
-    class _AgentHeartbeatMdBody(BaseModel):
-        content: str
-
-
     @router.get("/api/agents/{agent_id}/heartbeat-md")
     def get_agent_heartbeat_md(agent_id: str):
         """Read an agent's HEARTBEAT.md (the 10-step beat it runs each cycle) plus its
@@ -814,19 +811,6 @@ def create_heartbeats_router(
             raise HTTPException(status_code=500, detail=f"List cycles failed: {exc}")
 
 
-    class _HeartbeatCycleCreateBody(BaseModel):
-        name: str
-        metric: str
-        metric_type: str
-        direction: str
-        window: str
-        every_n_runs: Optional[int] = None
-        measurement: Optional[str] = None
-        approval_required: Optional[bool] = None
-        surface: Optional[str] = None
-        created_by: Optional[str] = None
-
-
     @router.post("/api/heartbeats/surfaces/{surface}/cycles")
     def create_heartbeat_cycle(surface: str, body: _HeartbeatCycleCreateBody):
         """Create a new agent-creatable experiment cycle on a surface."""
@@ -844,17 +828,6 @@ def create_heartbeats_router(
         except Exception as exc:
             _log.exception("POST /api/heartbeats/surfaces/%s/cycles failed", surface)
             raise HTTPException(status_code=500, detail=f"Create cycle failed: {exc}")
-
-
-    class _HeartbeatCyclePatchBody(BaseModel):
-        metric_type: Optional[str] = None
-        direction: Optional[str] = None
-        window: Optional[str] = None
-        loop_interval: Optional[str] = None
-        every_n_runs: Optional[int] = None
-        surface: Optional[str] = None
-        measurement: Optional[str] = None
-        enabled: Optional[bool] = None
 
 
     @router.patch("/api/heartbeats/surfaces/{surface}/cycles/{name}")
@@ -968,10 +941,6 @@ def create_heartbeats_router(
             raise HTTPException(status_code=500, detail=f"Get route failed: {exc}")
 
 
-    class _HeartbeatRouteBody(BaseModel):
-        deliver: str
-
-
     @router.post("/api/heartbeats/surfaces/{surface}/route")
     def set_heartbeat_surface_route(surface: str, body: _HeartbeatRouteBody):
         """Route a surface's heartbeat output to a channel/bot (or 'local' = in-app).
@@ -1015,10 +984,6 @@ def create_heartbeats_router(
             _log.exception("POST /api/heartbeats/surfaces/%s/route failed", surface)
             raise HTTPException(status_code=500, detail=f"Set route failed: {exc}")
 
-
-
-    class _HeartbeatSurfaceEnabledBody(BaseModel):
-        enabled: bool
 
 
     @router.post("/api/heartbeats/surfaces/{surface}/enabled")
@@ -1143,22 +1108,6 @@ def create_heartbeats_router(
         except Exception as exc:
             _log.exception("GET /api/heartbeats/surfaces/%s/config failed", surface)
             raise HTTPException(status_code=500, detail=f"Get surface config failed: {exc}")
-
-
-    class _HeartbeatConfigPatchBody(BaseModel):
-        goal: Optional[str] = None
-        cadence: Optional[str] = None
-        agent: Optional[str] = None
-        model: Optional[str] = None
-        timezone: Optional[str] = None
-        day_mode_start: Optional[str] = None
-        day_mode_end: Optional[str] = None
-        communication_style: Optional[str] = None
-        approval_rules: Optional[Dict[str, Any]] = None
-        max_session_seconds: Optional[int] = None
-        heartbeat_report_mode: Optional[str] = None
-        report_mode: Optional[str] = None
-        notification_mode: Optional[str] = None
 
 
     @router.patch("/api/heartbeats/surfaces/{surface}/config")
@@ -1289,19 +1238,6 @@ def create_heartbeats_router(
             raise HTTPException(status_code=500, detail=f"Get goals failed: {exc}")
 
 
-    class _HeartbeatGoalItem(BaseModel):
-        id: Optional[str] = None
-        title: str
-        progress: Optional[int] = None
-        order: Optional[int] = None
-
-
-    class _HeartbeatGoalsPatchBody(BaseModel):
-        bottleneck: Optional[str] = None
-        daily_focus: Optional[str] = None
-        goals: Optional[List[_HeartbeatGoalItem]] = None
-
-
     @router.patch("/api/heartbeats/surfaces/{surface}/goals")
     def patch_heartbeat_surface_goals(surface: str, body: _HeartbeatGoalsPatchBody):
         """Replace goals[] / set bottleneck / set daily_focus. Validates title length,
@@ -1352,10 +1288,6 @@ def create_heartbeats_router(
             _log.exception("PATCH /api/heartbeats/surfaces/%s/goals failed", surface)
             raise HTTPException(status_code=500, detail=f"Update goals failed: {exc}")
 
-
-
-    class _HeartbeatAutomationEnabledBody(BaseModel):
-        enabled: bool
 
 
     @router.post("/api/heartbeats/automations/{job_id}/enabled")
