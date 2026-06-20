@@ -1029,6 +1029,7 @@ from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.actions import create_actions_router
 from elevate_cli.web_routes.activity_comms import create_activity_comms_router
 from elevate_cli.web_routes.analytics import create_analytics_router
+from elevate_cli.web_routes.admin_templates import create_admin_templates_router
 from elevate_cli.web_routes.ayrshare import create_ayrshare_router
 from elevate_cli.web_routes.channels import create_channels_router
 from elevate_cli.web_routes.composio import create_composio_router
@@ -1363,6 +1364,8 @@ app.include_router(
     )
 )
 
+app.include_router(create_admin_templates_router(web_actor="human:web", log=_log))
+
 app.include_router(
     create_config_router(
         default_config=DEFAULT_CONFIG,
@@ -1451,14 +1454,6 @@ class _ConflictResolveBody(BaseModel):
 
 class _SignalGraduateBody(BaseModel):
     contactId: str
-
-
-class _TemplateRejectBody(BaseModel):
-    reason: str
-
-
-class _TemplateEditBody(BaseModel):
-    body: str
 
 
 class _DealCreateBody(BaseModel):
@@ -1670,9 +1665,6 @@ class _AdminActionUpdateBody(BaseModel):
     enabled: Optional[bool] = None
     priority: Optional[int] = None
     approvalRequired: Optional[bool] = None
-
-
-_ADMIN_TEMPLATES_TABS = {"live", "proposed", "retired"}
 
 
 def _clean_admin_jurisdiction_value(value: Any, default: str = "") -> str:
@@ -5039,145 +5031,6 @@ def post_admin_task_run(body: _AdminTaskRunBody):
     except Exception as exc:
         _log.exception("POST /api/admin/tasks/run failed")
         raise HTTPException(status_code=500, detail=f"Run admin task failed: {exc}")
-
-
-# ---------------------------------------------------------------------------
-# /admin/templates — template library (Live / Proposed / Retired tabs)
-# ---------------------------------------------------------------------------
-
-
-@app.get("/api/admin/templates")
-def get_admin_templates(
-    tab: str = "live",
-    lane: Optional[str] = None,
-    channel: Optional[str] = None,
-):
-    """Return the template library for one of three tabs.
-
-    * ``tab=live`` (default) — leaderboard view, split into authoritative
-      (uses ≥ 50 OR age > 30d) and trial buckets. Versions roll up by
-      lineage so an edit doesn't reset the apparent stats.
-    * ``tab=proposed`` — agent-proposed templates awaiting human approval.
-    * ``tab=retired`` — historical, read-only.
-    """
-    tab_norm = tab.lower()
-    if tab_norm not in _ADMIN_TEMPLATES_TABS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"unknown tab {tab!r} (expected one of {sorted(_ADMIN_TEMPLATES_TABS)})",
-        )
-    try:
-        from elevate_cli.data import (
-            connect,
-            list_proposed_templates,
-            list_templates,
-            template_leaderboard,
-        )
-
-        with connect() as conn:
-            if tab_norm == "live":
-                board = template_leaderboard(conn, lane=lane, channel=channel)
-                return {
-                    "tab": "live",
-                    "authoritative": board["authoritative"],
-                    "trial": board["trial"],
-                    "count": len(board["authoritative"]) + len(board["trial"]),
-                }
-            if tab_norm == "proposed":
-                rows = list_proposed_templates(conn)
-                return {"tab": "proposed", "items": rows, "count": len(rows)}
-            # retired
-            rows = list_templates(conn, status="retired", lane=lane)
-            return {"tab": "retired", "items": rows, "count": len(rows)}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("GET /api/admin/templates failed")
-        raise HTTPException(status_code=500, detail=f"Admin templates failed: {exc}")
-
-
-@app.post("/api/admin/templates/{template_id}/approve")
-def post_admin_template_approve(template_id: str):
-    """Flip a proposed template to status='live'. Records audit fields."""
-    try:
-        from elevate_cli.data import approve_template, connect, get_template
-
-        with connect() as conn:
-            if get_template(conn, template_id) is None:
-                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
-            return approve_template(conn, template_id, actor=_WEB_ACTOR)
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except (ValueError, LookupError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/templates/%s/approve failed", template_id)
-        raise HTTPException(status_code=500, detail=f"Approve template failed: {exc}")
-
-
-@app.post("/api/admin/templates/{template_id}/reject")
-def post_admin_template_reject(template_id: str, body: _TemplateRejectBody):
-    """Mark a proposed template ``status='retired'`` with a reason note."""
-    if not body.reason or not body.reason.strip():
-        raise HTTPException(status_code=400, detail="reason is required")
-    try:
-        from elevate_cli.data import connect, get_template, reject_template
-
-        with connect() as conn:
-            if get_template(conn, template_id) is None:
-                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
-            return reject_template(
-                conn, template_id, body.reason.strip(), actor=_WEB_ACTOR
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("POST /api/admin/templates/%s/reject failed", template_id)
-        raise HTTPException(status_code=500, detail=f"Reject template failed: {exc}")
-
-
-@app.post("/api/admin/templates/{template_id}/edit")
-def post_admin_template_edit(template_id: str, body: _TemplateEditBody):
-    """Bump version: parent → ``superseded``, new live row with ``version+1``."""
-    if not body.body or not body.body.strip():
-        raise HTTPException(status_code=400, detail="body is required")
-    try:
-        from elevate_cli.data import connect, edit_template, get_template
-
-        with connect() as conn:
-            if get_template(conn, template_id) is None:
-                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
-            return edit_template(
-                conn, template_id, new_body=body.body, actor=_WEB_ACTOR
-            )
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
-    except (ValueError, LookupError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/admin/templates/%s/edit failed", template_id)
-        raise HTTPException(status_code=500, detail=f"Edit template failed: {exc}")
-
-
-@app.post("/api/admin/templates/{template_id}/retire")
-def post_admin_template_retire(template_id: str):
-    """Soft-deprecate a live template. Counters stay queryable."""
-    try:
-        from elevate_cli.data import connect, get_template, retire_template
-
-        with connect() as conn:
-            if get_template(conn, template_id) is None:
-                raise HTTPException(status_code=404, detail=f"template {template_id!r} not found")
-            return retire_template(conn, template_id, actor=_WEB_ACTOR)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        _log.exception("POST /api/admin/templates/%s/retire failed", template_id)
-        raise HTTPException(status_code=500, detail=f"Retire template failed: {exc}")
 
 
 
