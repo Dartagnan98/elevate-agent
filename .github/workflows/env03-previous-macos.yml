@@ -45,6 +45,7 @@ jobs:
     env:
       ELEVATE_DESKTOP_PORT: "9143"
       ELEVATE_LICENSE_JSON_B64: ${{ secrets.ELEVATE_LICENSE_JSON_B64 }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
     steps:
       - name: Check out repository
@@ -121,6 +122,19 @@ jobs:
           LICENSE_PATH="$home/.elevate/license.json" \
             python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["LICENSE_PATH"]).write_bytes(base64.b64decode(os.environ["ELEVATE_LICENSE_JSON_B64"]))'
           chmod 600 "$home/.elevate/license.json"
+          if [ -n "${GEMINI_API_KEY:-}" ]; then
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > "$home/.elevate/.env"
+            chmod 600 "$home/.elevate/.env"
+            cat > "$home/.elevate/config.yaml" <<'YAML'
+          _config_version: 25
+          model:
+            provider: gemini
+            default: gemini-2.5-flash
+          YAML
+          elif [ "${{ inputs.skip_sidecar }}" != "true" ]; then
+            echo "Full sidecar smoke requires the GEMINI_API_KEY secret or skip_sidecar=true" >&2
+            exit 1
+          fi
 
       - name: Launch app and run installed smoke
         run: |
