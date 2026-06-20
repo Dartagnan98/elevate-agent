@@ -426,6 +426,54 @@
   }
   .ab-btn.primary:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
 
+  @media (max-width: 760px) {
+    .ab-top {
+      height: auto;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 14px 20px 8px;
+    }
+    .ab-crumb {
+      flex: 1 1 100%;
+      flex-wrap: wrap;
+      gap: 6px;
+      line-height: 1.2;
+    }
+    .ab-crumb .sep {
+      display: none;
+    }
+    .ab-live {
+      min-width: 0;
+      white-space: normal;
+      line-height: 1.2;
+    }
+    .ab-top-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      width: 100%;
+      margin-left: 0;
+      overflow: visible;
+      padding-bottom: 2px;
+      scrollbar-width: none;
+    }
+    .ab-top-actions::-webkit-scrollbar {
+      display: none;
+    }
+    .ab-btn {
+      min-height: 36px;
+      min-width: 0;
+      justify-content: center;
+      padding: 7px 10px;
+    }
+    .ab-btn span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
   .ab-scroll {
     flex: 1; min-height: 0; overflow-y: auto;
     padding: 8px 20px 32px;
@@ -2351,6 +2399,26 @@
   .lb-health-chev { color: var(--fg-faint); font-size: 10px; transition: transform 160ms var(--ease-out); }
   .lb-health-chev.open { transform: rotate(180deg); }
 
+  @media (max-width: 760px) {
+    .ab-top-actions .lb-health-wrap {
+      grid-column: 1 / -1;
+      min-width: 0;
+      width: 100%;
+    }
+    .ab-top-actions .lb-health {
+      justify-content: center;
+      width: 100%;
+      min-height: 36px;
+      min-width: 0;
+    }
+    .ab-top-actions .lb-health-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
   .lb-health-drawer {
     position: absolute;
     top: calc(100% + 6px);
@@ -3555,6 +3623,33 @@
     text-decoration: none;
   }
   .lb-alert-action:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); }
+
+  @media (max-width: 760px) {
+    .lb-alert {
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 0;
+      padding: 10px 12px;
+    }
+    .lb-alert-icon {
+      margin-top: 1px;
+    }
+    .lb-alert-label {
+      flex: 1 1 calc(100% - 26px);
+      min-width: 0;
+    }
+    .lb-alert-detail {
+      flex: 1 1 100%;
+      white-space: normal;
+      line-height: 1.35;
+    }
+    .lb-alert-action {
+      justify-content: center;
+      width: 100%;
+      min-height: 36px;
+    }
+  }
 
   /* Approve replies + Pipeline split */
   .lb-split {

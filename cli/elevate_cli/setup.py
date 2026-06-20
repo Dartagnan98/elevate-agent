@@ -1812,7 +1812,7 @@ def _memory_quick_setup_needed(config: dict) -> bool:
 
 
 def _initialize_memory_store(config: dict) -> None:
-    """Create/open the configured local memory SQLite store once."""
+    """Create/open the configured local memory store once."""
     memory_store = _holographic_memory_config(config)
     db_path = str(memory_store.get("db_path") or "$ELEVATE_HOME/memory_store.db")
     elevate_home = str(get_elevate_home())
@@ -1826,7 +1826,7 @@ def _initialize_memory_store(config: dict) -> None:
             store.close()
         except Exception:
             pass
-        print_success(f"Local memory database ready: {db_path}")
+        print_success("Local memory store ready in embedded Postgres.")
     except Exception as exc:
         print_warning(f"Could not initialize memory database now: {exc}")
 
@@ -1835,7 +1835,7 @@ def setup_memory(config: dict, first_install: bool = False):
     """Configure local memory, graph recall, and optional semantic embeddings."""
     print_header("Memory & Embeddings")
     print_info("Elevate can keep local long-term memory, graph recall, and semantic")
-    print_info("embeddings in SQLite under ~/.elevate.")
+    print_info("embeddings in embedded Postgres under ~/.elevate/pgdata.")
     print()
 
     mem_config = config.setdefault("memory", {})
@@ -2042,11 +2042,11 @@ def _admin_quick_setup_needed() -> bool:
 
 
 def setup_admin(config: dict, quick: bool = False):
-    """Configure realtor/admin onboarding in the SQLite source of truth."""
+    """Configure realtor/admin onboarding in the local source of truth."""
     del config
     print_header("Realtor Admin Setup")
     print_info("This saves province docs, provider choices, portal playbooks, and")
-    print_info("approval defaults into SQLite. Agents read the generated Admin memory")
+    print_info("approval defaults into embedded Postgres. Agents read the generated Admin memory")
     print_info("so they do not keep asking for the same setup details.")
     print_info("Do not paste passwords here; use credential references like 1Password item names.")
     print()
@@ -2352,7 +2352,7 @@ def setup_admin(config: dict, quick: bool = False):
         )
 
     print()
-    print_success("Admin setup saved to SQLite and synced to agent memory.")
+    print_success("Admin setup saved to embedded Postgres and synced to agent memory.")
     memory = snapshot.get("memory") or {}
     if memory.get("path"):
         print_info(f"Admin memory: {memory['path']}")

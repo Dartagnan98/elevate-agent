@@ -13,8 +13,9 @@ Paid real estate skill packs unlock through Elevation Real Estate HQ.
   and social media.
 - Local dashboard with Agent Hub, leads, admin board, listings, tasks,
   automations, memory, and approvals.
-- SQLite source of truth under `~/.elevate` for sessions, memory, deal files,
-  admin action runs, handoffs, and local workflow state.
+- Local source-of-truth data under `~/.elevate`: SQLite for session/chat state
+  and embedded Postgres for memory, deal files, admin action runs, handoffs,
+  and local workflow state.
 - Per-agent Telegram lanes so the Executive Assistant and focused agents can be
   configured separately.
 - Real estate skill packs for CMA, seller packages, listing admin, marketing,
@@ -32,15 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/Dartagnan98/elevate-agent/main/cli/
 
 The installer downloads Elevate, creates the Python environment, links the
 `elevate` command, syncs base bundled skills, creates `~/.elevate`, and
-initializes the local SQLite stores. Git is optional: if it is available the
+initializes the local stores. Git is optional: if it is available the
 installer uses a normal checkout, and if it is not available the installer
 downloads the source archive automatically.
 
 - `~/.elevate/state.db` for sessions, messages, usage, and chat history.
-- `~/.elevate/data/operational.db` for leads, profiles, deal files, admin
-  runs, phase gates, handoffs, tasks, and workflow state.
-- `~/.elevate/memory_store.db` for local memory, graph recall, and embeddings
-  metadata.
+- `~/.elevate/pgdata` for embedded Postgres operational data: leads, profiles,
+  deal files, admin runs, phase gates, handoffs, tasks, workflow state, memory,
+  graph recall, and embeddings metadata.
 
 No hosted database project is required for the local runtime.
 
@@ -91,8 +91,8 @@ elevate                 # start the agent
 elevate dashboard       # open the local dashboard
 ```
 
-`elevate setup admin` writes to the local SQLite Admin setup profile and syncs
-the generated Admin onboarding memory. Use it to choose the province docs
+`elevate setup admin` writes to the local embedded Postgres Admin setup profile
+and syncs the generated Admin onboarding memory. Use it to choose the province docs
 package, realtor profile, CRM, forms/signing, MLS, compliance, showing, photo
 workflow, and human approval lane without pasting passwords into chat.
 
@@ -114,9 +114,9 @@ on separate bot tokens when they need separate conversations.
 
 ## Memory And LightRAG-Style Recall
 
-Elevate ships with a local SQLite memory store using durable facts, FTS5 search,
-entity graph recall, trust scoring, journal organization, and optional semantic
-embeddings. The built-in holographic memory provider includes LightRAG-style
+Elevate ships with local memory in embedded Postgres using durable facts,
+full-text search, entity graph recall, trust scoring, journal organization, and
+optional semantic embeddings. The built-in holographic memory provider includes LightRAG-style
 local, global, hybrid, naive, mix, and prompt/context modes without requiring an
 external LightRAG server.
 
@@ -185,7 +185,8 @@ Harness card.
 - Python CLI runs the agent loop locally.
 - Local FastAPI dashboard/API serves Agent Hub, chat, admin, leads, memory, and
   automation views.
-- SQLite under `~/.elevate` is the local source of truth.
+- `~/.elevate/state.db` and embedded Postgres under `~/.elevate/pgdata` are the
+  local source of truth.
 - Gateway runs background agents, Telegram/Discord lanes, cron jobs, and
   handoff drains.
 - Elevation Real Estate HQ validates paid access and serves entitlement-gated

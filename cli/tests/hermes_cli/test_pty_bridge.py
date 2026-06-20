@@ -97,14 +97,18 @@ class TestPtyBridgeIO:
 class TestPtyBridgeResize:
     def test_resize_updates_child_winsize(self):
         # tput reads COLUMNS/LINES from the TTY ioctl (TIOCGWINSZ).
-        # Spawn a shell, resize, then ask tput for the dimensions.
+        # Gate the child on stdin so slow parallel workers cannot run tput
+        # before the resize call lands.
+        env = {k: v for k, v in os.environ.items() if k not in {"COLUMNS", "LINES"}}
         bridge = PtyBridge.spawn(
-            ["/bin/sh", "-c", "sleep 0.1; tput cols; tput lines"],
+            ["/bin/sh", "-c", "read _ready; tput cols; tput lines"],
             cols=80,
             rows=24,
+            env=env,
         )
         try:
             bridge.resize(cols=123, rows=45)
+            bridge.write(b"go\n")
             output = _read_until(bridge, b"45", timeout=5.0)
             # tput prints just the numbers, one per line
             assert b"123" in output

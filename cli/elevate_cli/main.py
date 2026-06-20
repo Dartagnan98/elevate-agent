@@ -101,6 +101,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------------------------
 def _apply_profile_override() -> None:
     """Pre-parse --profile/-p and set ELEVATE_HOME before module imports."""
+    # This module is imported by pytest-based unit tests. Pytest also uses `-p`
+    # for plugin selection (for example `-p no:cacheprovider`); treating that as
+    # Elevate's profile flag makes ordinary test imports exit the process.
+    if "pytest" in sys.modules:
+        return
+
     argv = sys.argv[1:]
     profile_name = None
     consume = 0
@@ -4570,7 +4576,7 @@ def cmd_doctor(args):
 
 
 def cmd_db(args):
-    """Initialize or inspect local Elevate SQLite databases."""
+    """Initialize or inspect local Elevate databases."""
     from elevate_cli.local_databases import cmd_db as _cmd_db
 
     return _cmd_db(args)
@@ -8200,21 +8206,21 @@ For more help on a command:
     # local database bootstrap
     db_parser = subparsers.add_parser(
         "db",
-        help="Initialize local SQLite databases",
+        help="Initialize local databases",
         description=(
-            "Create and migrate Elevate's local SQLite stores under ~/.elevate. "
+            "Create and migrate Elevate's local stores under ~/.elevate. "
             "No cloud database is required."
         ),
     )
     db_subparsers = db_parser.add_subparsers(dest="db_action")
     db_init_parser = db_subparsers.add_parser(
         "init",
-        help="Create state.db, operational.db, and memory_store.db",
+        help="Create state.db and embedded Postgres stores",
     )
     db_init_parser.add_argument(
         "--no-memory",
         action="store_true",
-        help="Skip memory_store.db initialization",
+        help="Skip memory schema initialization",
     )
     db_init_parser.add_argument(
         "--quiet",

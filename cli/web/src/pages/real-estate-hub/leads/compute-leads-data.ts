@@ -237,6 +237,12 @@ function sectionQueueEntries(
   return out.slice(0, 8);
 }
 
+function skippedTime(d: SourceInboxDraft): number {
+  const value = d.skippedAt || d.latestAt;
+  const time = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
 export function mapLeadsPipeline(
   drafts: SourceInboxDraft[],
   skipped: SourceInboxDraft[],
@@ -259,13 +265,15 @@ export function mapLeadsPipeline(
     "Follow-up cadence",
   );
 
-  const skippedOut: LeadsSkippedEntry[] = skipped.map((d) => ({
-    id: d.id,
-    name: d.personName || "Unknown",
-    reason: d.scoreReason || "Skipped",
-    sourceId: d.sourceId,
-    taskId: d.taskId,
-  }));
+  const skippedOut: LeadsSkippedEntry[] = [...skipped]
+    .sort((a, b) => skippedTime(b) - skippedTime(a))
+    .map((d) => ({
+      id: d.id,
+      name: d.personName || "Unknown",
+      reason: d.scoreReason || "Skipped",
+      sourceId: d.sourceId,
+      taskId: d.taskId,
+    }));
 
   return {
     hot,

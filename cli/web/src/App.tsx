@@ -1,4 +1,5 @@
 import {
+  Component,
   Suspense,
   lazy,
   useCallback,
@@ -7,6 +8,7 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type ErrorInfo,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -320,6 +322,59 @@ function AccessLoadingPage() {
 function RouteBundleFallback() {
   const location = useLocation();
   return <RouteSkeleton path={location.pathname} />;
+}
+
+function isRouteBundleLoadError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /dynamically imported module|Failed to fetch|Loading chunk|Importing a module script failed|modulepreload/i.test(message);
+}
+
+class RouteErrorBoundary extends Component<
+  { children: ReactNode; resetKey: string },
+  { error: Error | null }
+> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidUpdate(prevProps: { resetKey: string }) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null });
+    }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("route render failed", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    const chunkLoad = isRouteBundleLoadError(this.state.error);
+    return (
+      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-midground">
+        <div className="rounded-full border border-border-muted bg-surface-muted px-3 py-1 text-xs uppercase tracking-[0.18em] text-muted">
+          Dashboard route failed
+        </div>
+        <h2 className="text-xl font-semibold text-midground">
+          {chunkLoad ? "Dashboard updated while this tab was open" : "This view crashed"}
+        </h2>
+        <p className="max-w-md text-sm leading-6 text-muted">
+          {chunkLoad
+            ? "Reload to fetch the current dashboard bundle. This usually happens when a release replaces old route assets."
+            : "The app caught this route error instead of leaving a blank page. Reload and try the route again."}
+        </p>
+        <button
+          type="button"
+          className="rounded-md border border-border-muted bg-surface px-4 py-2 text-sm font-medium text-midground shadow-sm hover:bg-surface-muted"
+          onClick={() => window.location.reload()}
+        >
+          Reload dashboard
+        </button>
+      </div>
+    );
+  }
 }
 
 // Soft-locked page shown when a user lands on a route whose skill pack
@@ -1019,24 +1074,26 @@ export default function App() {
                     !isChatRoute && !isConfigRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "elevate-route-transition",
                   )}
                 >
-                  <Suspense
-                    fallback={<RouteBundleFallback />}
-                  >
-                    <Routes>
-                      {routes.map(({ key, path, element }) => (
-                        <Route key={key} path={path} element={element} />
-                      ))}
-                      <Route
-                        path="*"
-                        element={
-                          <Navigate
-                            to={realEstateDashboard ? "/today" : "/hub"}
-                            replace
-                          />
-                        }
-                      />
-                    </Routes>
-                  </Suspense>
+                  <RouteErrorBoundary resetKey={normalizedPath}>
+                    <Suspense
+                      fallback={<RouteBundleFallback />}
+                    >
+                      <Routes>
+                        {routes.map(({ key, path, element }) => (
+                          <Route key={key} path={path} element={element} />
+                        ))}
+                        <Route
+                          path="*"
+                          element={
+                            <Navigate
+                              to={realEstateDashboard ? "/today" : "/hub"}
+                              replace
+                            />
+                          }
+                        />
+                      </Routes>
+                    </Suspense>
+                  </RouteErrorBoundary>
                 </div>
               </div>
               <PluginSlot name="post-main" />

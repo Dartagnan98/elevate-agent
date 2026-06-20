@@ -13,6 +13,26 @@ from run_agent import AIAgent
 _summarize = AIAgent._summarize_background_review_actions
 
 
+def test_background_review_allowed_for_normal_task(monkeypatch):
+    monkeypatch.setattr("tools.approval.get_permission_mode", lambda: "default")
+
+    assert AIAgent._allows_background_review("Please fix the bug and update tests")
+
+
+def test_background_review_blocked_for_explicit_read_only(monkeypatch):
+    monkeypatch.setattr("tools.approval.get_permission_mode", lambda: "default")
+
+    assert not AIAgent._allows_background_review(
+        "Do a long read-only production audit. Do not edit files."
+    )
+
+
+def test_background_review_blocked_in_plan_mode(monkeypatch):
+    monkeypatch.setattr("tools.approval.get_permission_mode", lambda: "plan")
+
+    assert not AIAgent._allows_background_review("Please fix the bug")
+
+
 def _tool_msg(tool_call_id, payload):
     return {
         "role": "tool",

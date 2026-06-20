@@ -440,7 +440,7 @@ def _open_persistent_pg():
 
 
 class MemoryStore:
-    """SQLite-backed fact store with entity resolution and trust scoring."""
+    """Postgres-backed fact store with entity resolution and trust scoring."""
 
     def __init__(
         self,

@@ -50,6 +50,7 @@ import {
   blankTrace,
   dropForeignMessages,
   hasPendingTurn,
+  isBlankTraceEnabled,
   isRawToolPayload,
   markStreamingTurnsInterrupted,
   mergeServerWithCache,
@@ -295,6 +296,7 @@ interface QueuedInput {
   routedText: string;
   status: "queued" | "error" | "steering";
   text: string;
+  userMessageId?: string;
 }
 
 interface HeldSteer {
@@ -1051,6 +1053,9 @@ function shouldCacheTranscriptMessage(message: ChatMessage): boolean {
 const SKILL_INVOCATION_RE =
   /^\[SYSTEM: (?:The user (?:has invoked|launched this CLI session with) the "([^"]+)" skill|The "([^"]+)" skill is auto-loaded)/;
 
+const TOOL_ONLY_NO_RESPONSE_TEXT =
+  "The run stopped after tool activity before producing a final response. Ask me to continue from here or retry the request.";
+
 function collapseSkillInvocation(role: ChatRole, content: string): string {
   if (role !== "user") return content;
   const match = content.match(SKILL_INVOCATION_RE);
@@ -1207,20 +1212,41 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     out.push(chat);
   });
 
-  // Trailing tool calls with no assistant turn after them → attach to the last
-  // assistant message so they aren't lost.
+  // Trailing tool calls with no assistant turn after them mean a turn stopped
+  // before producing final text. Keep that visible as an interrupted assistant
+  // after the user, instead of silently attaching the tools to an older answer.
   if (pendingTools.length) {
-    for (let i = out.length - 1; i >= 0; i -= 1) {
-      if (out[i].role === "assistant") {
-        const mid = out[i].id;
-        out[i] = {
-          ...out[i],
-          tools: [
-            ...(out[i].tools ?? []),
-            ...pendingTools.map((t) => ({ ...t, messageId: mid })),
-          ],
-        };
-        break;
+    const last = out[out.length - 1];
+    if (last?.role === "user") {
+      const messageId = stableHydrateId(null, `stored-tool-only-${total}`);
+      out.push({
+        content: TOOL_ONLY_NO_RESPONSE_TEXT,
+        completedAt:
+          pendingTools[pendingTools.length - 1]?.completedAt ?? last.createdAt,
+        createdAt:
+          pendingTools[0]?.startedAt ??
+          pendingTools[0]?.completedAt ??
+          last.createdAt,
+        id: messageId,
+        role: "assistant",
+        status: "interrupted",
+        tools: pendingTools.map((t) => ({ ...t, messageId })),
+        warning:
+          "The saved transcript ended after tool activity, so this turn was restored as interrupted.",
+      });
+    } else {
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        if (out[i].role === "assistant") {
+          const mid = out[i].id;
+          out[i] = {
+            ...out[i],
+            tools: [
+              ...(out[i].tools ?? []),
+              ...pendingTools.map((t) => ({ ...t, messageId: mid })),
+            ],
+          };
+          break;
+        }
       }
     }
   }
@@ -1307,11 +1333,16 @@ export const __chatPageTestables = {
   messageRowPropsEqual,
   mergeActiveTurnSnapshot,
   mergeServerWithCache,
+  normalizeStoredQueue,
   repairOutOfOrderUserTurns,
+  isBlankTraceEnabled,
   normalizeStoredTranscript,
+  queuedInputExistingUserMessageId,
   resolveActivityDigestVisibility,
   routePromptForAgent,
+  hasUnfinishedVisibleTurn,
   shouldClearUsageForStatus,
+  shouldAcceptGatewayEventSession,
   shouldClearUsageForStatusUpdate,
   shouldHandlePreviewShortcut,
   shouldKeepTranscriptMessage,
@@ -1862,9 +1893,18 @@ function normalizeStoredQueue(value: unknown): QueuedInput[] {
       routedText,
       status: e.status === "error" ? "error" : "queued",
       text,
+      userMessageId:
+        typeof e.userMessageId === "string" && e.userMessageId
+          ? e.userMessageId
+          : undefined,
     });
   });
   return out.slice(-5);
+}
+
+function queuedInputExistingUserMessageId(item: QueuedInput): string | undefined {
+  const value = item.userMessageId?.trim();
+  return value || undefined;
 }
 
 function restoreQueue(sessionId: string | null | undefined): QueuedInput[] {
@@ -2877,7 +2917,36 @@ function shouldClearUsageForStatusUpdate(
   kind: string | undefined,
   text: string,
 ): boolean {
-  return kind === "compacting_context" || shouldClearUsageForStatus(text);
+  return (
+    kind === "compacting_context" ||
+    ((kind == null || kind === "status") && shouldClearUsageForStatus(text))
+  );
+}
+
+function shouldAcceptGatewayEventSession(
+  eventSessionId: string | null | undefined,
+  activeSessionId: string | null | undefined,
+  ownedSessionIds: Set<string>,
+): boolean {
+  const eventId = (eventSessionId ?? "").trim();
+  if (!eventId) return false;
+  const activeId = (activeSessionId ?? "").trim();
+  return eventId === activeId || ownedSessionIds.has(eventId);
+}
+
+function hasUnfinishedVisibleTurn(
+  messages: ChatMessage[],
+  ownedSessionIds: Set<string>,
+): boolean {
+  const ownMessages = dropForeignMessages(messages, ownedSessionIds);
+  for (let i = ownMessages.length - 1; i >= 0; i -= 1) {
+    const message = ownMessages[i];
+    if (message.role === "user") return true;
+    if (message.role === "assistant") {
+      return message.status === "streaming";
+    }
+  }
+  return false;
 }
 
 function contextRingTitle(usage: UsageInfo | null): string {
@@ -2896,14 +2965,16 @@ function contextRingTitle(usage: UsageInfo | null): string {
 }
 
 function isOpenPreviewIntent(text: string): boolean {
-  const lower = text.toLowerCase();
-  const asksToOpen =
-    /\b(open|show|preview|view|display)\b/.test(lower) ||
-    /\b(pull|bring|pop)\s+(it|this|that|up)\b/.test(lower);
-  if (!asksToOpen) return false;
-
-  return /\b(it|this|that|pdf|document|doc|file|artifact|report|output|result|local|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub)\b/.test(
-    lower,
+  const lower = text.toLowerCase().trim();
+  const target =
+    String.raw`(?:it|this|that|(?:the\s+)?(?:pdf|document|doc|file|artifact|report|output|result|local|screenshot|image|picture|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub))`;
+  return (
+    new RegExp(String.raw`\b(?:open|show|preview|view|display)\s+(?:me\s+)?(?:up\s+)?${target}\b`).test(
+      lower,
+    ) ||
+    new RegExp(String.raw`\b(?:pull|bring|pop)\s+(?:${target}\s+up|up\s+${target})\b`).test(
+      lower,
+    )
   );
 }
 
@@ -3227,6 +3298,8 @@ export default function ChatPage() {
     [storeMessages],
   );
   const messages = TRANSCRIPT_STORE_ENABLED ? storeMessagesAsChat : messagesRaw;
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
 
   useEffect(() => {
     const current = currentAssistantRef.current;
@@ -4499,6 +4572,7 @@ export default function ChatPage() {
   useEffect(() => {
     const prev = prevMessagesForTraceRef.current;
     prevMessagesForTraceRef.current = messages;
+    if (!isBlankTraceEnabled()) return;
     try {
       // Content fingerprint: an id remap (cache `stored-N` id -> server id for
       // the SAME answer, which happens on every resume) must NOT count as a
@@ -4949,10 +5023,15 @@ export default function ChatPage() {
         typeof ev.session_id === "string" && ev.session_id.trim()
           ? ev.session_id
           : null;
-      // A draft/new chat intentionally has no session yet. Treat that as
-      // "accept none" for session events, not "accept everything"; otherwise
-      // a still-streaming old chat can paint into the fresh view.
-      return Boolean(active && eventSessionId && eventSessionId === active);
+      // A draft/new chat intentionally owns no session ids yet, so this still
+      // accepts none. Once resumed, accept every id the server reported for the
+      // chat (gateway, persisted, lineage) so compaction/reconnect id drift
+      // doesn't make the live turn go deaf.
+      return shouldAcceptGatewayEventSession(
+        eventSessionId,
+        active,
+        ownedSessionIdsRef.current,
+      );
     };
 
     const trackTool = (ev: GatewayEvent) => {
@@ -7027,8 +7106,17 @@ export default function ChatPage() {
   }, [gw, messages, sessionId, state]);
 
   const removeQueuedInput = useCallback((queuedId: string) => {
+    const item = queuedInputs.find((queued) => queued.id === queuedId);
     setQueuedInputs((prev) => prev.filter((item) => item.id !== queuedId));
-  }, []);
+    const visibleUserMessageId = item
+      ? queuedInputExistingUserMessageId(item)
+      : undefined;
+    if (visibleUserMessageId) {
+      setMessages((prev) =>
+        prev.filter((message) => message.id !== visibleUserMessageId),
+      );
+    }
+  }, [queuedInputs, setMessages]);
 
   // A steer was APPLIED — this is the insertion point. The run itself never
   // changes (same header, status, timer). Three things happen here, in
@@ -7215,11 +7303,16 @@ export default function ChatPage() {
 
     queueDispatchRef.current = true;
     setQueuedInputs((prev) => prev.filter((item) => item.id !== next.id));
+    const visibleUserMessageId = queuedInputExistingUserMessageId(next);
+    const reuseVisibleUserMessage = Boolean(visibleUserMessageId);
     void submitGatewayPrompt(
       next.text,
       next.routedText,
       next.agentId,
       "Sending queued follow-up...",
+      undefined,
+      reuseVisibleUserMessage,
+      visibleUserMessageId,
     ).finally(() => {
       queueDispatchRef.current = false;
     });
@@ -7240,6 +7333,20 @@ export default function ChatPage() {
     if (!sid) return;
     let misses = 0;
     let cancelled = false;
+    const settleMissingRun = () => {
+      const unfinished = hasUnfinishedVisibleTurn(
+        messagesRef.current,
+        ownedSessionIdsRef.current,
+      );
+      setMessages((prev) => markStreamingTurnsInterrupted(prev));
+      currentAssistantRef.current = null;
+      liveGatewayMsgIdRef.current = null;
+      setTools([]);
+      setActivityTrace([]);
+      setCompacting(false);
+      setBusy(false);
+      setStatusText(unfinished ? "Interrupted before response was saved" : "Ready");
+    };
     const iv = window.setInterval(() => {
       void gw
         .request<{ running?: boolean }>("session.running", { session_id: sid })
@@ -7248,8 +7355,7 @@ export default function ChatPage() {
           if (res && res.running === false) {
             misses += 1;
             if (misses >= 2) {
-              setBusy(false);
-              setStatusText("Ready");
+              settleMissingRun();
             }
           } else {
             misses = 0;
@@ -7265,8 +7371,7 @@ export default function ChatPage() {
           if (/session not found/i.test(message)) {
             misses += 1;
             if (misses >= 2) {
-              setBusy(false);
-              setStatusText("Ready");
+              settleMissingRun();
             }
           }
           /* other errors: transient (gateway busy/race) — keep polling */
@@ -7276,7 +7381,7 @@ export default function ChatPage() {
       cancelled = true;
       window.clearInterval(iv);
     };
-  }, [busy, state, gw]);
+  }, [busy, state, gw, setMessages]);
 
   // Stalled-turn self-hydrate (main chats). A reconnect/draft-mint race can
   // bind the view to one live session while the turn streams on another —
@@ -7647,18 +7752,16 @@ export default function ChatPage() {
       if (!targetSessionId || (state !== "open" && !draftChat)) {
         if (showedUserMessage) {
           setBusy(false);
-          // The optimistic bubble + thinking stub were already painted, and
-          // the queued chip below renders the SAME text — remove the bubble
-          // so the message isn't shown twice (the drain re-appends it when
-          // it actually sends). This was the bubble+chip double-render after
-          // a websocket drop.
+          // The optimistic bubble already painted. Keep it visible while the
+          // transport reconnects; the queued item below remembers its id and
+          // reuses it when the submit actually reaches the gateway. Only remove
+          // the empty assistant stub, otherwise the chat looks like it swallowed
+          // the user's message during the reconnect flash.
           const stubId = currentAssistantRef.current;
           currentAssistantRef.current = null;
           setMessages((prev) =>
             prev.filter(
-              (m) =>
-                m.id !== optimisticUserMessageId &&
-                (stubId ? m.id !== stubId : true),
+              (m) => (stubId ? m.id !== stubId : true),
             ),
           );
         }
@@ -7669,6 +7772,7 @@ export default function ChatPage() {
           routedText,
           status: "queued",
           text: trimmed,
+          userMessageId: showedUserMessage ? optimisticUserMessageId : undefined,
         };
         setQueuedInputs((prev) => [...prev, queued].slice(-5));
         setStatusText("Queued until connected");
@@ -11196,13 +11300,12 @@ function useRotatingVerb(busy: boolean): string {
 function defaultActivityDigestOpen({
   busy,
   hasErroredStep,
-  hasSteps,
 }: {
   busy: boolean;
   hasErroredStep: boolean;
   hasSteps: boolean;
 }): boolean {
-  return hasErroredStep || hasSteps || busy;
+  return hasErroredStep || busy;
 }
 
 function resolveActivityDigestVisibility({
@@ -11227,11 +11330,31 @@ function resolveActivityDigestVisibility({
   };
 }
 
+function activityTraceStepCount(
+  activityTrace: ActivityTrace[],
+  showReasoning: boolean,
+): number {
+  return activityTrace.reduce((count, trace) => {
+    if (
+      trace.kind === "marker" ||
+      trace.kind === "steer" ||
+      trace.kind === "interim"
+    ) {
+      return count + 1;
+    }
+    if (trace.kind !== "reasoning" && trace.kind !== "thinking") return count;
+    if (!showReasoning) return count;
+    if (!trace.text.trim() || isTransientStatus(trace.text)) return count;
+    return count + 1;
+  }, 0);
+}
+
 // Working/worked digest. While a turn streams, the header is the live
 // meter: pulsing accent mark + a cycling thinking verb + elapsed + running
 // token count, and the breakdown is expanded by default so reasoning (grey)
 // and tool calls scroll in chronologically as they happen. Once the turn
-// completes, the same full breakdown stays open unless the user closes it.
+// completes, the summary stays visible and the full breakdown is lazy until
+// opened; long sessions otherwise repaint hundreds of historical step rows.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -11273,9 +11396,18 @@ function ChatActivityDigest({
     return () => window.clearInterval(timer);
   }, [busy]);
 
-  const steps = useMemo(
-    () => buildBreakdownSteps(tools, activityTrace, { showReasoning }),
-    [tools, activityTrace, showReasoning],
+  const visibleToolStepCount = useMemo(
+    () => tools.filter((tool) => tool.name.toLowerCase() !== "memory").length,
+    [tools],
+  );
+  const visibleTraceStepCount = useMemo(
+    () => activityTraceStepCount(activityTrace, showReasoning),
+    [activityTrace, showReasoning],
+  );
+  const estimatedStepCount = visibleToolStepCount + visibleTraceStepCount;
+  const hasErroredStep = useMemo(
+    () => tools.some((tool) => tool.status === "error"),
+    [tools],
   );
   const memoryTools = useMemo(
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
@@ -11290,15 +11422,17 @@ function ChatActivityDigest({
   // is actually producing — no faked level. Mirrors Claude Code's
   // "still thinking with high effort" tail on the status line.
   const reasoningTokens = useMemo(
-    () =>
-      activityTrace.reduce(
+    () => {
+      if (!busy) return 0;
+      return activityTrace.reduce(
         (sum, trace) =>
           trace.kind === "reasoning" || trace.kind === "thinking"
             ? sum + estimateTokens(trace.text)
             : sum,
         0,
-      ),
-    [activityTrace],
+      );
+    },
+    [activityTrace, busy],
   );
   const effortDescriptor =
     busy && reasoningTokens > 0
@@ -11314,23 +11448,28 @@ function ChatActivityDigest({
     tools.length > 0 ||
     activityTrace.length > 0 ||
     typeof tokenCount === "number";
+  const visibility = resolveActivityDigestVisibility({
+    busy,
+    hasErroredStep,
+    hasSteps: estimatedStepCount > 0,
+    userOpen: open,
+  });
+  const { expanded } = visibility;
+  const steps = useMemo(
+    () =>
+      visibility.showSteps
+        ? buildBreakdownSteps(tools, activityTrace, { showReasoning })
+        : [],
+    [activityTrace, showReasoning, tools, visibility.showSteps],
+  );
+  const displayedStepCount = visibility.showSteps
+    ? steps.length
+    : estimatedStepCount;
   if (!show) return null;
 
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
-  const hasErroredStep = steps.some((step) =>
-    step.type === "tool"
-      ? step.status === "error"
-      : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
-  );
-  const visibility = resolveActivityDigestVisibility({
-    busy,
-    hasErroredStep,
-    hasSteps: steps.length > 0,
-    userOpen: open,
-  });
-  const { expanded } = visibility;
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -11428,10 +11567,10 @@ function ChatActivityDigest({
               <span className="num">{duration}</span>
             </>
           )}
-          {!busy && steps.length > 0 && (
+          {!busy && displayedStepCount > 0 && (
             <>
               <span className="dot-sep">·</span>
-              <span className="num">{plural(steps.length, "step")}</span>
+              <span className="num">{plural(displayedStepCount, "step")}</span>
             </>
           )}
           {busy && childSteps > 0 && (
@@ -11470,7 +11609,7 @@ function ChatActivityDigest({
             </>
           )}
         </span>
-        {(busy || steps.length > 0) && (
+        {(busy || displayedStepCount > 0) && (
           <ChevronDown
             className={cn(
               "processing-chev shrink-0",

@@ -236,5 +236,9 @@ class TestFlushPromptStructure:
         flush_prompt = tmp_agent.run_conversation.call_args.kwargs.get("user_message", "")
         assert "automatically reset" in flush_prompt
         assert "Save any important facts" in flush_prompt
-        assert "consider saving it as a skill" in flush_prompt
+        assert "consider saving it as a skill" not in flush_prompt
+        assert "skill_manage" not in flush_prompt
         assert "Do NOT respond to the user" in flush_prompt
+
+        fake_ai_agent = sys.modules["run_agent"].AIAgent
+        assert fake_ai_agent.call_args.kwargs["enabled_toolsets"] == ["memory"]

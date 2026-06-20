@@ -273,7 +273,12 @@ function HandoffComposer({
             Run now
           </label>
         </div>
-        <Button size="sm" onClick={submit} disabled={busy || !task.trim() || fromAgentId === toAgentId}>
+        <Button
+          size="sm"
+          onClick={submit}
+          disabled={busy || !task.trim() || fromAgentId === toAgentId}
+          title={busy ? "Creating handoff" : !task.trim() ? "Enter task details to create a handoff" : fromAgentId === toAgentId ? "Choose different source and target agents" : "Create handoff"}
+        >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
           Create handoff
         </Button>

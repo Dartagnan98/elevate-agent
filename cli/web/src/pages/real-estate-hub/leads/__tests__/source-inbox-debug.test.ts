@@ -141,6 +141,64 @@ describe("leads pipeline sections", () => {
     expect(mapLeadsPipeline([], skipped, []).skipped).toHaveLength(25);
   });
 
+  it("sorts skipped drafts newest-first using skippedAt before falling back to latestAt", () => {
+    const skipped = [
+      {
+        id: "older",
+        sourceId: "email",
+        sourceLabel: "Email",
+        taskId: "task-older",
+        threadId: "thread-older",
+        personName: "Older Lead",
+        channel: "sms",
+        latestAt: "2026-06-19T10:00:00+00:00",
+        skippedAt: "2026-06-19T10:00:00+00:00",
+        latestText: "",
+        draftText: "",
+        context: "",
+        title: "",
+        status: "skipped",
+      },
+      {
+        id: "newest",
+        sourceId: "email",
+        sourceLabel: "Email",
+        taskId: "task-newest",
+        threadId: "thread-newest",
+        personName: "Newest Lead",
+        channel: "sms",
+        latestAt: "2026-06-19T09:00:00+00:00",
+        skippedAt: "2026-06-20T10:00:00+00:00",
+        latestText: "",
+        draftText: "",
+        context: "",
+        title: "",
+        status: "skipped",
+      },
+      {
+        id: "middle-fallback",
+        sourceId: "email",
+        sourceLabel: "Email",
+        taskId: "task-middle",
+        threadId: "thread-middle",
+        personName: "Middle Lead",
+        channel: "sms",
+        latestAt: "2026-06-20T09:00:00+00:00",
+        latestText: "",
+        draftText: "",
+        context: "",
+        title: "",
+        status: "skipped",
+      },
+    ];
+
+    expect(mapLeadsPipeline([], skipped, []).skipped.map((entry) => entry.id)).toEqual([
+      "newest",
+      "middle-fallback",
+      "older",
+    ]);
+  });
+
   it("uses backend leadSections when hot/follow-up rows are not draft-backed", () => {
     const pipeline = mapLeadsPipeline(
       [],

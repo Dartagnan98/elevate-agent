@@ -3435,6 +3435,50 @@ class AIAgent:
         "If nothing stands out, just say 'Nothing to save.' and stop."
     )
 
+    _BACKGROUND_REVIEW_READ_ONLY_MARKERS = (
+        "read-only",
+        "read only",
+        "readonly",
+        "do not edit",
+        "don't edit",
+        "dont edit",
+        "do not change files",
+        "do not change code",
+        "don't change files",
+        "don't change code",
+        "dont change files",
+        "dont change code",
+        "do not modify files",
+        "do not modify code",
+        "don't modify files",
+        "don't modify code",
+        "dont modify files",
+        "dont modify code",
+        "do not write files",
+        "don't write files",
+        "dont write files",
+        "no file changes",
+        "no code changes",
+        "without changing files",
+        "without changing code",
+        "without editing files",
+        "without editing code",
+        "do not change anything",
+        "don't change anything",
+        "dont change anything",
+    )
+
+    @classmethod
+    def _allows_background_review(cls, user_message: str) -> bool:
+        text = " ".join(str(user_message or "").lower().split())
+        if any(marker in text for marker in cls._BACKGROUND_REVIEW_READ_ONLY_MARKERS):
+            return False
+        try:
+            from tools.approval import get_permission_mode
+            return get_permission_mode() != "plan"
+        except Exception:
+            return True
+
     # Correction signals: phrases a user uses when the agent did something
     # wrong or not as desired. Matching one forces a skill review this turn,
     # regardless of the tool-iteration nudge counter — corrections are exactly
@@ -14653,7 +14697,12 @@ class AIAgent:
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
-        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+        if (
+            final_response
+            and not interrupted
+            and (_should_review_memory or _should_review_skills)
+            and self._allows_background_review(original_user_message)
+        ):
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),

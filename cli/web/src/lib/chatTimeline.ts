@@ -14,6 +14,20 @@ export interface ChatTimelineMessage {
   sessionKey?: string;
 }
 
+export function isBlankTraceEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const globalFlag = (window as unknown as { __ELEVATE_BLANK_TRACE__?: unknown })
+      .__ELEVATE_BLANK_TRACE__;
+    return (
+      globalFlag === true ||
+      window.localStorage?.getItem("elevate.debug.blankTrace") === "1"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function parseObjectPayload(text: string): Record<string, unknown> | null {
   const clean = text.trim();
   if (!clean || (!clean.startsWith("{") && !clean.startsWith("["))) return null;
@@ -368,6 +382,7 @@ export function dropForeignMessages<T extends ChatTimelineMessage>(
 }
 
 export function blankTrace(message: string, data: Record<string, unknown>): void {
+  if (!isBlankTraceEnabled()) return;
   try {
     // eslint-disable-next-line no-console
     console.error("[BLANK-TRACE]", message, data);
@@ -385,6 +400,7 @@ function blankTraceIfDropped(
   fp: (m: ChatTimelineMessage) => string,
   serverLen: number,
 ): void {
+  if (!isBlankTraceEnabled()) return;
   try {
     const big = (m: ChatTimelineMessage) =>
       m.role === "assistant" && (m.content ?? "").replace(/\s+/g, "").length > 80;

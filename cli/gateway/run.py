@@ -1946,7 +1946,7 @@ class GatewayRunner:
                 max_iterations=8,
                 quiet_mode=True,
                 skip_memory=True,  # Flush agent — no memory provider
-                enabled_toolsets=["memory", "skills"],
+                enabled_toolsets=["memory"],
                 session_id=old_session_id,
             )
             try:
@@ -1988,9 +1988,7 @@ class GatewayRunner:
                     "Review the conversation above and:\n"
                     "1. Save any important facts, preferences, or decisions to memory "
                     "(user profile or your notes) that would be useful in future sessions.\n"
-                    "2. If you discovered a reusable workflow or solved a non-trivial "
-                    "problem, consider saving it as a skill.\n"
-                    "3. If nothing is worth saving, that's fine — just skip.\n\n"
+                    "2. If nothing is worth saving, that's fine — just skip.\n\n"
                 )
 
                 if _current_memory:
@@ -2005,8 +2003,8 @@ class GatewayRunner:
                     )
 
                 flush_prompt += (
-                    "Do NOT respond to the user. Just use the memory and skill_manage "
-                    "tools if needed, then stop.]"
+                    "Do NOT respond to the user. Just use the memory tool if needed, "
+                    "then stop.]"
                 )
 
                 tmp_agent.run_conversation(

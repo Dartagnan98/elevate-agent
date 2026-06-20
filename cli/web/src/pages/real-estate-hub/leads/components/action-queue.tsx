@@ -36,16 +36,18 @@ export function ActionQueue({
     action: LeadsDraftAction,
     draft: LeadsDraft,
     options: { notifyComplete?: boolean } = {},
-  ) => {
-    if (!onDraftAction) return;
+  ): Promise<boolean> => {
+    if (!onDraftAction) return false;
     const notifyComplete = options.notifyComplete ?? true;
     setActionError(null);
     setBusy((b) => { const n = new Set(b); n.add(draft.id); return n; });
     try {
       await onDraftAction(action, draft);
       if (notifyComplete) await onDraftActionComplete?.(action);
+      return true;
     } catch (err) {
       setActionError(err instanceof Error ? err.message : `Could not ${action} draft.`);
+      return false;
     } finally {
       setBusy((b) => { const n = new Set(b); n.delete(draft.id); return n; });
     }
@@ -55,10 +57,19 @@ export function ActionQueue({
     if (!onDraftAction) return;
     const targets = filteredDrafts.filter((d) => selected.has(d.id));
     setSelected(new Set());
+    let failed = 0;
     for (const draft of targets) {
-      await handleDraftAction(action, draft, { notifyComplete: false });
+      const ok = await handleDraftAction(action, draft, { notifyComplete: false });
+      if (!ok) failed += 1;
     }
     await onDraftActionComplete?.(action);
+    if (failed > 0) {
+      setActionError(
+        `Could not ${action} ${failed} of ${targets.length} drafts. Retry the remaining draft${failed === 1 ? "" : "s"}.`,
+      );
+    } else {
+      setActionError(null);
+    }
   };
 
   useEffect(() => { setPage(0); setSelected(new Set()); setExpanded(null); }, [tab, sourceFilter]);
