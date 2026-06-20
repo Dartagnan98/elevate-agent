@@ -2311,53 +2311,6 @@ async def search_sessions(q: str = "", limit: int = 20):
         raise HTTPException(status_code=500, detail="Search failed")
 
 
-@app.get("/api/config/tiers")
-def get_config_tiers():
-    """Return the persisted tier->model mapping plus current resolved tiers.
-
-    Resolved values reflect what ``resolve_tier`` would return *right now*
-    given the persisted mapping + harness fallbacks, so the UI can show
-    "configured" vs "auto-resolved" in one trip.
-    """
-    try:
-        from elevate_cli.tier_resolver import (
-            VALID_TIERS,
-            load_tier_config,
-            resolve_tier_with_provider,
-        )
-        mapping = load_tier_config()
-        resolved = {}
-        for tier_id in VALID_TIERS:
-            model_id, provider = resolve_tier_with_provider(tier_id)
-            resolved[tier_id] = {"model": model_id, "provider": provider}
-        return {
-            "tiers": list(VALID_TIERS),
-            "mapping": mapping,
-            "resolved": resolved,
-        }
-    except Exception:
-        _log.exception("GET /api/config/tiers failed")
-        return {"tiers": [], "mapping": {}, "resolved": {}}
-
-
-class _TierMappingBody(BaseModel):
-    mapping: Dict[str, Any]
-
-
-@app.put("/api/config/tiers")
-def put_config_tiers(body: _TierMappingBody):
-    """Persist the tier->model mapping. Validates tier names + writes atomically."""
-    try:
-        from elevate_cli.tier_resolver import save_tier_config, load_tier_config
-        save_tier_config(body.mapping or {})
-        return {"ok": True, "mapping": load_tier_config()}
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("PUT /api/config/tiers failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     """Reverse _normalize_config_for_web before saving.
 

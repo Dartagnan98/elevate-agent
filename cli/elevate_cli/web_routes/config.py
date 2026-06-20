@@ -3,7 +3,8 @@
 import logging
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from elevate_cli.config import load_config
 
@@ -16,6 +17,10 @@ _EMPTY_MODEL_INFO: dict = {
     "effective_context_length": 0,
     "capabilities": {},
 }
+
+
+class TierMappingBody(BaseModel):
+    mapping: Dict[str, Any]
 
 
 def create_config_router(
@@ -144,5 +149,41 @@ def create_config_router(
         except Exception:
             _log.exception("GET /api/models/by-provider failed for provider=%s", prov)
             return {"provider": prov, "models": []}
+
+    @router.get("/api/config/tiers")
+    def get_config_tiers():
+        try:
+            from elevate_cli.tier_resolver import (
+                VALID_TIERS,
+                load_tier_config,
+                resolve_tier_with_provider,
+            )
+
+            mapping = load_tier_config()
+            resolved = {}
+            for tier_id in VALID_TIERS:
+                model_id, provider = resolve_tier_with_provider(tier_id)
+                resolved[tier_id] = {"model": model_id, "provider": provider}
+            return {
+                "tiers": list(VALID_TIERS),
+                "mapping": mapping,
+                "resolved": resolved,
+            }
+        except Exception:
+            _log.exception("GET /api/config/tiers failed")
+            return {"tiers": [], "mapping": {}, "resolved": {}}
+
+    @router.put("/api/config/tiers")
+    def put_config_tiers(body: TierMappingBody):
+        try:
+            from elevate_cli.tier_resolver import load_tier_config, save_tier_config
+
+            save_tier_config(body.mapping or {})
+            return {"ok": True, "mapping": load_tier_config()}
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("PUT /api/config/tiers failed")
+            raise HTTPException(status_code=500, detail=str(exc))
 
     return router
