@@ -67,6 +67,7 @@ from elevate_cli.web_auth import (
     safe_log_token as _safe_log_token_impl,
     session_id_for_log as _session_id_for_log_impl,
 )
+from elevate_cli.web_middleware import install_dashboard_middlewares
 from elevate_cli.web_cloud_skills import (
     _CLOUD_SKILL_SYNC_INTERVAL_S,
     _cloud_skill_heartbeat as _cloud_skill_heartbeat_impl,
@@ -124,7 +125,6 @@ try:
     from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.middleware.gzip import GZipMiddleware
-    from fastapi.responses import JSONResponse
 except ImportError:
     raise SystemExit(
         "Web UI requires fastapi and uvicorn.\n"
@@ -302,79 +302,17 @@ def _session_id_for_log(request: Request) -> str:
     )
 
 
-@app.middleware("http")
-async def host_header_middleware(request: Request, call_next):
-    """Reject requests whose Host header doesn't match the bound interface.
-
-    Defends against DNS rebinding: a victim browser on a localhost
-    dashboard is tricked into fetching from an attacker hostname that
-    TTL-flips to 127.0.0.1. CORS and same-origin checks don't help —
-    the browser now treats the attacker origin as same-origin with the
-    dashboard. Host-header validation at the app layer catches it.
-
-    See GHSA-ppp5-vxwm-4cf7.
-    """
-    # Store the bound host on app.state so this middleware can read it —
-    # set by start_server() at listen time.
-    bound_host = getattr(app.state, "bound_host", None)
-    if bound_host:
-        host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "detail": (
-                        "Invalid Host header. Dashboard requests must use "
-                        "the hostname the server was bound to."
-                    ),
-                },
-            )
-    return await call_next(request)
-
-
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    """Require the session token on all /api/ routes except the public list."""
-    path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
-        if not (_has_valid_session_token(request) or _has_valid_run_token(request)):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
-            )
-    return await call_next(request)
-
-
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    request_id = _request_id_for_log(request)
-    session_id = _session_id_for_log(request)
-    started = time.perf_counter()
-    try:
-        response = await call_next(request)
-    except Exception:
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        _log.exception(
-            "request failed request_id=%s session_id=%s method=%s path=%s elapsed_ms=%.1f",
-            request_id,
-            session_id,
-            request.method,
-            request.url.path,
-            elapsed_ms,
-        )
-        raise
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    response.headers[_REQUEST_ID_HEADER_NAME] = request_id
-    _log.info(
-        "request complete request_id=%s session_id=%s method=%s path=%s status=%s elapsed_ms=%.1f",
-        request_id,
-        session_id,
-        request.method,
-        request.url.path,
-        response.status_code,
-        elapsed_ms,
-    )
-    return response
+install_dashboard_middlewares(
+    app,
+    public_api_paths=_PUBLIC_API_PATHS,
+    is_accepted_host=_is_accepted_host,
+    has_valid_session_token=_has_valid_session_token,
+    has_valid_run_token=_has_valid_run_token,
+    request_id_for_log=_request_id_for_log,
+    session_id_for_log=_session_id_for_log,
+    request_id_header_name=_REQUEST_ID_HEADER_NAME,
+    log=_log,
+)
 
 
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
