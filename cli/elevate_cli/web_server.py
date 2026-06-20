@@ -1226,6 +1226,7 @@ async def get_status():
 
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.channels import create_channels_router
+from elevate_cli.web_routes.config import create_config_router
 from elevate_cli.web_routes.cron import create_cron_router
 from elevate_cli.web_routes.files import create_files_router
 from elevate_cli.web_routes.license import create_license_router
@@ -2308,174 +2309,6 @@ async def search_sessions(q: str = "", limit: int = 20):
     except Exception:
         _log.exception("GET /api/sessions/search failed")
         raise HTTPException(status_code=500, detail="Search failed")
-
-
-def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize config for the web UI.
-
-    Elevate supports ``model`` as either a bare string (``"anthropic/claude-sonnet-4"``)
-    or a dict (``{default: ..., provider: ..., base_url: ...}``).  The schema is built
-    from DEFAULT_CONFIG where ``model`` is a string, but user configs often have the
-    dict form.  Normalize to the string form so the frontend schema matches.
-
-    Also surfaces ``model_context_length`` as a top-level field so the web UI can
-    display and edit it.  A value of 0 means "auto-detect".
-    """
-    config = dict(config)  # shallow copy
-    model_val = config.get("model")
-    if isinstance(model_val, dict):
-        # Extract context_length before flattening the dict
-        ctx_len = model_val.get("context_length", 0)
-        config["model"] = model_val.get("default", model_val.get("name", ""))
-        config["model_context_length"] = ctx_len if isinstance(ctx_len, int) else 0
-    else:
-        config["model_context_length"] = 0
-    return config
-
-
-@app.get("/api/config")
-async def get_config():
-    config = _normalize_config_for_web(load_config())
-    # Strip internal keys that the frontend shouldn't see or send back
-    return {k: v for k, v in config.items() if not k.startswith("_")}
-
-
-@app.get("/api/config/defaults")
-async def get_defaults():
-    return DEFAULT_CONFIG
-
-
-@app.get("/api/config/schema")
-async def get_schema():
-    return {"fields": CONFIG_SCHEMA, "category_order": _CATEGORY_ORDER}
-
-
-_EMPTY_MODEL_INFO: dict = {
-    "model": "",
-    "provider": "",
-    "auto_context_length": 0,
-    "config_context_length": 0,
-    "effective_context_length": 0,
-    "capabilities": {},
-}
-
-
-@app.get("/api/model/info")
-def get_model_info():
-    """Return resolved model metadata for the currently configured model.
-
-    Calls the same context-length resolution chain the agent uses, so the
-    frontend can display "Auto-detected: 200K" alongside the override field.
-    Also returns model capabilities (vision, reasoning, tools) when available.
-    """
-    try:
-        cfg = load_config()
-        model_cfg = cfg.get("model", "")
-
-        # Extract model name and provider from the config
-        if isinstance(model_cfg, dict):
-            model_name = model_cfg.get("default", model_cfg.get("name", ""))
-            provider = model_cfg.get("provider", "")
-            base_url = model_cfg.get("base_url", "")
-            config_ctx = model_cfg.get("context_length")
-        else:
-            model_name = str(model_cfg) if model_cfg else ""
-            provider = ""
-            base_url = ""
-            config_ctx = None
-
-        if not model_name:
-            return dict(_EMPTY_MODEL_INFO, provider=provider)
-
-        # Resolve auto-detected context length (pass config_ctx=None to get
-        # purely auto-detected value, then separately report the override)
-        try:
-            from agent.model_metadata import get_model_context_length
-            auto_ctx = get_model_context_length(
-                model=model_name,
-                base_url=base_url,
-                provider=provider,
-                config_context_length=None,  # ignore override — we want auto value
-            )
-        except Exception:
-            auto_ctx = 0
-
-        config_ctx_int = 0
-        if isinstance(config_ctx, int) and config_ctx > 0:
-            config_ctx_int = config_ctx
-
-        # Effective is what the agent actually uses
-        effective_ctx = config_ctx_int if config_ctx_int > 0 else auto_ctx
-
-        # Try to get model capabilities from models.dev
-        caps = {}
-        try:
-            from agent.models_dev import get_model_capabilities
-            mc = get_model_capabilities(provider=provider, model=model_name)
-            if mc is not None:
-                caps = {
-                    "supports_tools": mc.supports_tools,
-                    "supports_vision": mc.supports_vision,
-                    "supports_reasoning": mc.supports_reasoning,
-                    "context_window": mc.context_window,
-                    "max_output_tokens": mc.max_output_tokens,
-                    "model_family": mc.model_family,
-                }
-        except Exception:
-            pass
-
-        return {
-            "model": model_name,
-            "provider": provider,
-            "auto_context_length": auto_ctx,
-            "config_context_length": config_ctx_int,
-            "effective_context_length": effective_ctx,
-            "capabilities": caps,
-        }
-    except Exception:
-        _log.exception("GET /api/model/info failed")
-        return dict(_EMPTY_MODEL_INFO)
-
-
-@app.get("/api/models/available")
-def get_models_available():
-    """Return harness-available models for tier-mapping UI.
-
-    Wraps :func:`elevate_cli.tier_resolver.list_available_models`. Only
-    authenticated providers are listed because un-authed providers cannot be
-    called by the runtime — listing them would let the user trap themselves.
-    """
-    try:
-        from elevate_cli.tier_resolver import list_available_models
-        return list_available_models()
-    except Exception:
-        _log.exception("GET /api/models/available failed")
-        return {"models": [], "default": ""}
-
-
-@app.get("/api/models/by-provider")
-def get_models_by_provider(provider: str = ""):
-    """Return the full model catalog for a specific provider.
-
-    Powers the onboarding wizard's "Pick the brain" dropdown — given a
-    provider id like ``anthropic`` / ``openai-codex`` / ``nous``, returns
-    every model id we know the provider has, refreshed live from the
-    provider's API when possible (codex, nous, anthropic, copilot, …) and
-    falling back to the static curated list otherwise. The caller passes
-    the *concrete* provider id, not the wizard's grouped label — e.g.
-    pass ``openai-codex`` for "OpenAI · connected via Codex".
-    """
-    prov = str(provider or "").strip()
-    if not prov:
-        return {"provider": "", "models": []}
-    try:
-        from elevate_cli.models import provider_model_ids, normalize_provider
-        normalized = normalize_provider(prov)
-        models = provider_model_ids(normalized) or []
-        return {"provider": normalized, "models": list(models)}
-    except Exception:
-        _log.exception("GET /api/models/by-provider failed for provider=%s", prov)
-        return {"provider": prov, "models": []}
 
 
 @app.get("/api/config/tiers")
@@ -4332,6 +4165,15 @@ app.include_router(create_cron_router(log=_log))
 app.include_router(create_license_router(require_token=_require_token))
 
 app.include_router(create_files_router(project_root=PROJECT_ROOT, log=_log))
+
+app.include_router(
+    create_config_router(
+        default_config=DEFAULT_CONFIG,
+        config_schema=CONFIG_SCHEMA,
+        category_order=_CATEGORY_ORDER,
+        log=_log,
+    )
+)
 
 app.include_router(
     create_channels_router(
