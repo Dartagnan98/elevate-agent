@@ -16,6 +16,7 @@ import type {
   AdminProfilePromotionRequest,
   AdminProfilePromotionResponse,
   AdminDeal,
+  AdminDealCollapseResponse,
   DealContactCreateRequest,
   DealContact,
   DealAttachmentCreateRequest,
@@ -1862,6 +1863,12 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ toStage }),
+    }),
+  collapseAdminDeal: (dealId: string, side: AdminDealSide) =>
+    fetchJSON<AdminDealCollapseResponse>(`/api/admin/deals/${encodeURIComponent(dealId)}/collapse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ side }),
     }),
   setAdminDealToggle: (dealId: string, field: string, value: AdminDealToggleValue) =>
     fetchJSON<AdminDeal>(`/api/admin/deals/${encodeURIComponent(dealId)}/toggle`, {

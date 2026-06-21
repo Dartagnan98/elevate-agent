@@ -1,8 +1,6 @@
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
-// The modal is portaled to <body> and can be opened outside AdminDesignShell.
-import "../admin.css";
 import {
   Home,
   Clock,
@@ -19,16 +17,13 @@ import {
 import { api } from "@/lib/api";
 import type { DealContext } from "@/lib/api-types";
 
-function isPersistedDealId(id: string): boolean {
-  return /^[a-f0-9]{32}$/i.test(id);
-}
-
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface Deal {
   id: string;
+  stage?: number;
   phase: string;
   addr: string;
   line2: string;
@@ -188,14 +183,8 @@ function stringValue(value: unknown): string {
   return "";
 }
 
-const MONTHS_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtMoney(n: number): string {
   return "$" + Math.round(n).toLocaleString();
-}
-function fmtShortDate(s: string | null | undefined): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || "");
-  if (!m) return s || "";
-  return MONTHS_ABBR[parseInt(m[2], 10) - 1] + " " + parseInt(m[3], 10);
 }
 
 function joinValues(values: Array<string | null | undefined>): string {
@@ -244,9 +233,7 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
   // reconcile against the authoritative extraToggles once the deal context loads.
   const [pinnedTop25, setPinnedTop25] = useState<boolean>(Boolean(deal.primary));
   const [savingPin, setSavingPin] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const persisted = isPersistedDealId(deal.id);
+  const [savingCollapse, setSavingCollapse] = useState(false);
 
   // Real per-deal context from the backend (province guide, per-stage province
   // documents, conditional docs). Falls back to seed data when a deal has no
@@ -268,34 +255,6 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
     };
   }, [deal.id]);
 
-  const refetch = useCallback(async () => {
-    if (!deal.id) return;
-    const next = await api.getDealContext(deal.id);
-    setCtx(next);
-  }, [deal.id]);
-
-  const runAction = useCallback(
-    async (fn: () => Promise<unknown>) => {
-      if (!persisted || busy) return;
-      setBusy(true);
-      setActionError(null);
-      try {
-        await fn();
-        await refetch();
-      } catch (err) {
-        setActionError(err instanceof Error ? err.message : "Action failed");
-      } finally {
-        setBusy(false);
-      }
-    },
-    [persisted, busy, refetch],
-  );
-
-  const handleAdvance = useCallback(
-    (force = false) => runAction(() => api.advanceDeal(deal.id, force)),
-    [runAction, deal.id],
-  );
-
   const guide = ctx?.provinceGuide ?? null;
   const provinceLabel =
     guide?.provinceLabel || (ctx?.deal?.province ?? "").toUpperCase() || "VANCOUVER";
@@ -306,6 +265,7 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
   };
 
   const contextDeal = ctx?.deal;
+  const modalHomePrice = contextDeal?.listPrice ?? contextDeal?.homePrice ?? null;
   const extra = contextDeal?.extraToggles ?? {};
   const addressParts = splitAddress(
     contextDeal?.listingAddress || deal.line2 || deal.addr || "",
@@ -396,14 +356,11 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
   const landingUrl = (infoFieldValue("mlc.landingPageUrl") || infoFieldValue("core.landingPageUrl") || "").trim();
   const hasCmaReport = (ctx?.attachments ?? []).some((a) => a.kind === "cma_report");
   const openCmaPdf = () => {
-    const sessionWindow = window as Window & { __ELEVATE_SESSION_TOKEN__?: string };
-    const token = sessionWindow.__ELEVATE_SESSION_TOKEN__ || "";
-    const opened = window.open(
+    const token = (window as any).__ELEVATE_SESSION_TOKEN__ || "";
+    window.open(
       "/api/admin/deals/" + deal.id + "/cma-pdf?token=" + encodeURIComponent(token),
       "_blank",
-      "noopener,noreferrer",
     );
-    if (opened) opened.opener = null;
   };
   // Master document tray: what we HAVE (attachments, deduped by kind) + what's MISSING at the current stage
   const humanizeKind = (k: string) =>
@@ -462,6 +419,32 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
 
   const currentPhase = pipeline.find((p) => p.id === deal.phase) || pipeline[0];
   const currentIdx   = pipeline.indexOf(currentPhase);
+  const modalListPriceLabel = modalHomePrice != null ? fmtMoney(modalHomePrice) : deal.price || "—";
+  const modalCommissionLabel = contextDeal?.commissionPct != null
+    ? `${contextDeal.commissionPct}%`
+    : autoInfoValue("mlc.commissionTerms") || "—";
+  const currentStageNumber = contextDeal?.currentStage ?? deal.stage ?? currentIdx;
+  const collapseEligible = isBuyer
+    ? currentStageNumber >= 1 && currentStageNumber <= 3
+    : currentStageNumber === 6 || currentStageNumber === 7;
+  const collapseSale = async () => {
+    if (savingCollapse || !collapseEligible) return;
+    const side: "listing" | "buyer" = isBuyer ? "buyer" : "listing";
+    const target = side === "buyer"
+      ? "Top 25 and clear the property details"
+      : "Listing Live and clear the buyer memory";
+    if (!window.confirm(`Mark ${deal.addr} as collapsed? This will move it back to ${target}.`)) return;
+    setSavingCollapse(true);
+    try {
+      await api.collapseAdminDeal(deal.id, side);
+      onChanged?.();
+      onClose();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Could not collapse deal.");
+    } finally {
+      setSavingCollapse(false);
+    }
+  };
   const itemKey = (phaseId: string, item: string, idx: number) => `${phaseId}:${idx}:${item}`;
 
   useEffect(() => {
@@ -524,65 +507,21 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
               <span className="dim">&mdash;</span>
             </span>
           </div>
-          {contextDeal && (contextDeal.listPrice != null || contextDeal.offerPrice != null || contextDeal.depositAmount != null || contextDeal.commissionPct != null || contextDeal.completionDate) && (
-            <div className="abm-money">
-              {contextDeal.listPrice != null && (
-                <div className="abm-money-cell">
-                  <span className="k mono">List</span>
-                  <span className="v">{fmtMoney(contextDeal.listPrice)}</span>
-                </div>
-              )}
-              {contextDeal.offerPrice != null && (
-                <div className="abm-money-cell">
-                  <span className="k mono">Accepted Offer</span>
-                  <span className="v o">{fmtMoney(contextDeal.offerPrice)}</span>
-                  {contextDeal.listPrice ? (
-                    <span className="n">{Math.round((contextDeal.offerPrice / contextDeal.listPrice) * 100)}% of ask</span>
-                  ) : null}
-                </div>
-              )}
-              {contextDeal.depositAmount != null && (
-                <div className="abm-money-cell">
-                  <span className="k mono">Deposit</span>
-                  <span className="v b">{fmtMoney(contextDeal.depositAmount)}</span>
-                </div>
-              )}
-              {contextDeal.commissionPct != null && (
-                <div className="abm-money-cell">
-                  <span className="k mono">Commission</span>
-                  <span className="v">{contextDeal.commissionPct}%</span>
-                </div>
-              )}
-              {contextDeal.completionDate && (
-                <div className="abm-money-cell">
-                  <span className="k mono">Completion</span>
-                  <span className="v">{fmtShortDate(contextDeal.completionDate)}</span>
-                  {contextDeal.possessionDate ? (
-                    <span className="n">poss. {fmtShortDate(contextDeal.possessionDate)}</span>
-                  ) : null}
-                </div>
-              )}
+          <div className="abm-money">
+            <div className="abm-money-cell">
+              <span className="k mono">List</span>
+              <span className="v">{modalListPriceLabel}</span>
             </div>
-          )}
+            <div className="abm-money-cell">
+              <span className="k mono">Commission</span>
+              <span className="v">{modalCommissionLabel}</span>
+            </div>
+          </div>
         </header>
 
         <div className="abm-actionbar">
-          <button
-            className="abm-btn primary"
-            type="button"
-            disabled={!persisted || busy}
-            onClick={() => void handleAdvance(false)}
-          >
-            {busy ? "Working..." : "Advance phase"}
-          </button>
-          <button
-            className="abm-btn ghost"
-            type="button"
-            disabled={!persisted || busy}
-            onClick={() => void handleAdvance(true)}
-          >
-            Force advance
-          </button>
+          <button className="abm-btn primary" type="button">Advance phase</button>
+          <button className="abm-btn ghost" type="button">Force advance</button>
           <button
             className={"abm-btn top25-toggle" + (pinnedTop25 ? " active" : "")}
             type="button"
@@ -591,13 +530,15 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
           >
             {pinnedTop25 ? "✓ In Top 25" : "+ Top 25"}
           </button>
-          <button className="abm-btn collapse-sale" type="button" disabled title="Collapse wiring is not ported yet">
+          <button
+            className="abm-btn collapse-sale"
+            type="button"
+            onClick={collapseSale}
+          >
             Collapse Sale
           </button>
           {!isBuyer && (
-            <button className="abm-btn cancel-relist" type="button" disabled title="Relist wiring is not ported yet">
-              Cancel / Relist
-            </button>
+            <button className="abm-btn cancel-relist" type="button">Cancel / Relist</button>
           )}
           {!isBuyer && (
             <a
@@ -618,11 +559,6 @@ export default function DealDetailModal({ deal, onClose, onChanged }: DealDetail
             >
               {hasCmaReport ? "CMA PDF ↗" : "CMA PDF — pending"}
             </button>
-          )}
-          {actionError && (
-            <span className="abm-actionbar-error" role="status">
-              {actionError}
-            </span>
           )}
         </div>
 

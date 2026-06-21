@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from elevate_cli.data import (
+    add_deal_contact,
     add_deal_attachment,
     complete_admin_setup,
     connect,
@@ -645,6 +646,125 @@ def test_force_move_deal_endpoint_persists_stage_and_audits_override(client):
     assert events[0]["fromStage"] == 1
     assert events[0]["toStage"] == 3
     assert events[0]["payload"]["force"] is True
+
+
+def test_collapse_listing_deal_resets_offer_state_and_buyer_memory(client):
+    with connect() as conn:
+        buyer = upsert_contact(
+            conn,
+            display_name="Ava Buyer",
+            primary_email="ava@example.com",
+            type="buyer",
+            stage="active",
+        )
+        deal = create_deal(
+            conn,
+            title="Accepted seller deal",
+            side="listing",
+            current_stage=6,
+            actor="human:test",
+            listing_address="700 Collingwood Drive",
+            fields={
+                "offerPrice": 650000,
+                "depositAmount": 20000,
+                "offerAcceptedAt": "2026-06-01",
+                "completionDate": "2026-07-15",
+                "buyer_memory_note": "Clear this after collapse",
+                "accepted_offer_summary": "Clear this too",
+            },
+            dispatch_initial_stage=False,
+        )
+        add_deal_contact(conn, deal["id"], role="buyer", contact_id=buyer["id"], actor="human:test")
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/collapse",
+        json={"side": "listing"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["targetStage"] == 5
+    assert body["removedBuyerContacts"] == 1
+    assert set(body["removedExtraKeys"]) == {"accepted_offer_summary", "buyer_memory_note"}
+    collapsed = body["deal"]
+    assert collapsed["currentStage"] == 5
+    assert collapsed["offerPrice"] is None
+    assert collapsed["depositAmount"] is None
+    assert collapsed["offerAcceptedAt"] is None
+    assert collapsed["completionDate"] is None
+    assert collapsed["extraToggles"]["deal_collapsed"] is True
+    assert collapsed["extraToggles"]["collapsed_reset_target_stage"] == 5
+    assert "buyer_memory_note" not in collapsed["extraToggles"]
+
+    with connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM deal_contacts WHERE deal_id=?", (deal["id"],)).fetchone()[0] == 0
+        events = list_deal_events(conn, deal["id"])
+    assert any(
+        event["kind"] == "stage_transition"
+        and event["fromStage"] == 6
+        and event["toStage"] == 5
+        for event in events
+    )
+    assert any(
+        event["kind"] == "toggle_change"
+        and event["fieldName"] == "deal_collapsed_reset"
+        and event["payload"]["removedBuyerContacts"]
+        for event in events
+    )
+
+
+def test_collapse_buyer_deal_resets_property_state_to_top_25(client):
+    with connect() as conn:
+        buyer = upsert_contact(
+            conn,
+            display_name="Liam Buyer",
+            primary_email="liam@example.com",
+            type="buyer",
+            stage="active",
+        )
+        deal = create_deal(
+            conn,
+            title="Buyer accepted offer",
+            side="buyer",
+            current_stage=2,
+            actor="human:test",
+            listing_address="742 Mockingbird Lane",
+            source_row_id="mls-row-1",
+            fields={
+                "mlsNumber": "10300001",
+                "legalDescription": "Lot 1 Plan TEST",
+                "listPrice": 700000,
+                "offerPrice": 690000,
+                "subjectRemovalDate": "2026-06-10",
+                "property_notes": "Clear property-specific memory",
+            },
+            dispatch_initial_stage=False,
+        )
+        add_deal_contact(conn, deal["id"], role="buyer", contact_id=buyer["id"], actor="human:test")
+
+    resp = client.post(
+        f"/api/admin/deals/{deal['id']}/collapse",
+        json={"side": "buyer"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["targetStage"] == 0
+    assert body["newTitle"] == "Buyer: Liam Buyer"
+    assert body["removedBuyerContacts"] == 0
+    assert body["removedExtraKeys"] == ["property_notes"]
+    collapsed = body["deal"]
+    assert collapsed["title"] == "Buyer: Liam Buyer"
+    assert collapsed["currentStage"] == 0
+    assert collapsed["listingAddress"] is None
+    assert collapsed["sourceRowId"] is None
+    assert collapsed["mlsNumber"] is None
+    assert collapsed["legalDescription"] is None
+    assert collapsed["listPrice"] is None
+    assert collapsed["offerPrice"] is None
+    assert collapsed["subjectRemovalDate"] is None
+    assert collapsed["extraToggles"]["collapsed_reset_target_stage"] == 0
+    assert "property_notes" not in collapsed["extraToggles"]
 
 
 def test_current_workflow_stage_complete_toggle_does_not_bypass_gate(client):

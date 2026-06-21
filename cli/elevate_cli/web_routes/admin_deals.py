@@ -2,6 +2,8 @@
 
 import logging
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -50,6 +52,10 @@ class _ProfilePromotionBody(BaseModel):
 class _DealMoveBody(BaseModel):
     toStage: int
     force: bool = False
+
+
+class _DealCollapseBody(BaseModel):
+    side: Optional[str] = None
 
 
 class _DealToggleBody(BaseModel):
@@ -107,6 +113,186 @@ def _model_dump(model: BaseModel) -> dict:
     if callable(dump):
         return dump(exclude_none=True)
     return model.dict(exclude_none=True)
+
+
+_COLLAPSE_ACTOR = "dashboard:deal-collapsed-button"
+_LISTING_RESET_STAGE = 5
+_BUYER_RESET_STAGE = 0
+_LISTING_CLEAR_FIELDS: Dict[str, Any] = {
+    "offerDate": None,
+    "subjectRemovalDate": None,
+    "depositDueDate": None,
+    "completionDate": None,
+    "possessionDate": None,
+    "offerPrice": None,
+    "depositAmount": None,
+    "offerAcceptedAt": None,
+    "subjectsRemovedAt": None,
+    "completedAt": None,
+    "depositInTrustAt": None,
+}
+_BUYER_CLEAR_FIELDS: Dict[str, Any] = {
+    **_LISTING_CLEAR_FIELDS,
+    "mlsNumber": None,
+    "legalDescription": None,
+    "lotSizeSqft": None,
+    "yearBuilt": None,
+    "listPrice": None,
+    "listingDate": None,
+    "listingPublishedAt": None,
+}
+_LISTING_EXTRA_RE = re.compile(
+    r"(buyer|purchaser|offer|accepted|deposit|subject|completion|possession|adjustment)",
+    re.I,
+)
+_BUYER_EXTRA_RE = re.compile(
+    r"(property|listing|address|mls|legal|pid|strata|offer|accepted|deposit|subject|completion|possession|adjustment)",
+    re.I,
+)
+_BUYER_ROLE_RE = re.compile(r"(buyer|purchaser|tenant)", re.I)
+
+
+def _collapse_contact_name(item: Dict[str, Any]) -> str | None:
+    contact = item.get("contact") or {}
+    if not isinstance(contact, dict):
+        return None
+    for key in ("displayName", "display_name", "name", "fullName", "primaryEmail", "primary_email"):
+        value = contact.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _scrub_extra_toggles(conn: Any, deal_id: str, pattern: re.Pattern[str]) -> Dict[str, Any]:
+    from elevate_cli.data.deals import _decode_json, _encode_json
+
+    row = conn.execute("SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)).fetchone()
+    extra = _decode_json(row["extra_toggles_json"]) if row and row["extra_toggles_json"] else {}
+    if not isinstance(extra, dict):
+        extra = {}
+    removed = {key: extra[key] for key in list(extra.keys()) if pattern.search(str(key))}
+    if removed:
+        for key in removed:
+            extra.pop(key, None)
+        conn.execute(
+            "UPDATE deals SET extra_toggles_json=?, updated_at=? WHERE id=?",
+            (
+                _encode_json(extra),
+                datetime.now(timezone.utc).isoformat(),
+                deal_id,
+            ),
+        )
+    return removed
+
+
+def _remove_listing_buyers(conn: Any, deal_id: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT id, role, contact_id, notes FROM deal_contacts WHERE deal_id=?",
+        (deal_id,),
+    ).fetchall()
+    removed: List[Dict[str, Any]] = []
+    for row in rows:
+        role = str(row["role"] or "")
+        if _BUYER_ROLE_RE.search(role):
+            removed.append(
+                {
+                    "id": row["id"],
+                    "role": role,
+                    "contactId": row["contact_id"],
+                    "notes": row["notes"],
+                }
+            )
+            conn.execute("DELETE FROM deal_contacts WHERE id=?", (row["id"],))
+    return removed
+
+
+def _maybe_rename_buyer_card(conn: Any, deal_id: str) -> str | None:
+    from elevate_cli.data import list_deal_contacts
+
+    contacts = list_deal_contacts(conn, deal_id)
+    buyer_names: List[str] = []
+    for item in contacts:
+        role = str(item.get("role") or "")
+        if _BUYER_ROLE_RE.search(role) or role.lower() in {"client", "primary"}:
+            name = _collapse_contact_name(item)
+            if name and name not in buyer_names:
+                buyer_names.append(name)
+    if not buyer_names:
+        return None
+    new_title = "Buyer: " + " & ".join(buyer_names[:2])
+    conn.execute(
+        "UPDATE deals SET title=?, updated_at=? WHERE id=?",
+        (
+            new_title,
+            datetime.now(timezone.utc).isoformat(),
+            deal_id,
+        ),
+    )
+    return new_title
+
+
+def _collapse_admin_deal(conn: Any, deal_id: str, requested_side: str | None) -> Dict[str, Any]:
+    from elevate_cli.data import get_deal, move_deal_stage, set_deal_fields, set_deal_toggle
+    from elevate_cli.data.deals import _insert_deal_event
+
+    deal = get_deal(conn, deal_id)
+    if deal is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    side = requested_side or deal.get("side")
+    if side not in {"listing", "buyer"}:
+        raise ValueError(f"unsupported deal side {side!r}")
+    current_stage = int(deal.get("currentStage") or 0)
+    if side == "listing" and current_stage not in {6, 7}:
+        raise ValueError("listing deal collapse is only available from Accepted Offer or Condition Removal")
+    if side == "buyer" and current_stage not in {1, 2, 3}:
+        raise ValueError("buyer deal collapse is only available from accepted-offer buyer stages")
+
+    target_stage = _LISTING_RESET_STAGE if side == "listing" else _BUYER_RESET_STAGE
+    clear_fields = _LISTING_CLEAR_FIELDS if side == "listing" else _BUYER_CLEAR_FIELDS
+    removed_contacts = _remove_listing_buyers(conn, deal_id) if side == "listing" else []
+    removed_extra = _scrub_extra_toggles(conn, deal_id, _LISTING_EXTRA_RE if side == "listing" else _BUYER_EXTRA_RE)
+    new_title = None
+
+    set_deal_fields(conn, deal_id, actor=_COLLAPSE_ACTOR, fields=clear_fields)
+    if side == "buyer":
+        conn.execute(
+            "UPDATE deals SET listing_address=NULL, source_row_id=NULL, updated_at=? WHERE id=?",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                deal_id,
+            ),
+        )
+        new_title = _maybe_rename_buyer_card(conn, deal_id)
+    set_deal_toggle(conn, deal_id, field="deal_collapsed", value=True, actor=_COLLAPSE_ACTOR)
+    set_deal_toggle(conn, deal_id, field="collapsed_reset_target_stage", value=target_stage, actor=_COLLAPSE_ACTOR)
+    set_deal_toggle(conn, deal_id, field="collapsed_reset_side", value=side, actor=_COLLAPSE_ACTOR)
+    moved = move_deal_stage(conn, deal_id, to_stage=target_stage, actor=_COLLAPSE_ACTOR, force=True)
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="toggle_change",
+        actor=_COLLAPSE_ACTOR,
+        field_name="deal_collapsed_reset",
+        old_value={"stage": current_stage, "side": side},
+        new_value={"stage": target_stage, "side": side},
+        payload={
+            "reason": "deal_collapsed_button",
+            "listingBehavior": "move_to_listing_live_and_clear_previous_buyers",
+            "buyerBehavior": "move_to_top_25_and_clear_property_information",
+            "clearedFields": sorted(clear_fields.keys()),
+            "removedBuyerContacts": removed_contacts,
+            "removedExtraKeys": sorted(removed_extra.keys()),
+            "newTitle": new_title,
+        },
+    )
+    return {
+        "success": True,
+        "deal": moved,
+        "targetStage": target_stage,
+        "removedBuyerContacts": len(removed_contacts),
+        "removedExtraKeys": sorted(removed_extra.keys()),
+        "newTitle": new_title,
+    }
 
 
 def create_admin_deals_router(
@@ -292,6 +478,29 @@ def create_admin_deals_router(
         except Exception as exc:
             _log.exception("POST /api/admin/deals/%s/move failed", deal_id)
             raise HTTPException(status_code=500, detail=f"Move deal failed: {exc}")
+
+    @router.post("/api/admin/deals/{deal_id}/collapse")
+    def post_admin_deal_collapse(deal_id: str, body: _DealCollapseBody):
+        try:
+            require_admin_setup_ready_for_launch()
+            requested_side = body.side if body.side in {"listing", "buyer", None} else None
+            from elevate_cli.data import connect
+
+            with connect() as conn:
+                result = _collapse_admin_deal(conn, deal_id, requested_side)
+                conn.commit()
+                return result
+        except HTTPException:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            _log.exception("POST /api/admin/deals/%s/collapse failed", deal_id)
+            raise HTTPException(status_code=500, detail=f"Collapse deal failed: {exc}")
 
     @router.get("/api/admin/deals/deadlines")
     def get_admin_deal_deadlines(near_subject_days: int = 21, near_close_days: int = 30):

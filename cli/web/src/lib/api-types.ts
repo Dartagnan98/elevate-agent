@@ -363,6 +363,15 @@ export interface AdminProfilePromotionResponse {
   deal: AdminDeal;
 }
 
+export interface AdminDealCollapseResponse {
+  success: boolean;
+  deal: AdminDeal;
+  targetStage: number;
+  removedBuyerContacts: number;
+  removedExtraKeys: string[];
+  newTitle?: string | null;
+}
+
 export interface AdminDealScorecard {
   progress: string | null;
   completedChecklist: number;
