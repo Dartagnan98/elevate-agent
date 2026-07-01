@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from elevate_constants import get_elevate_home
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -66,7 +67,7 @@ def register_whatsapp_routes(
         bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         has_node_modules = (bridge_dir / "node_modules").exists()
         bridge_present = (bridge_dir / "bridge.js").exists()
-        session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+        session_dir = get_elevate_home() / "whatsapp" / "session"
         paired = (session_dir / "creds.json").exists()
 
         return {
@@ -121,7 +122,7 @@ def register_whatsapp_routes(
     async def whatsapp_status():
         """Lightweight status: is bridge installed, has session been paired."""
         bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
-        session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+        session_dir = get_elevate_home() / "whatsapp" / "session"
         return {
             "bridgePresent": (bridge_dir / "bridge.js").exists(),
             "bridgeInstalled": (bridge_dir / "node_modules").exists(),
@@ -148,7 +149,7 @@ def register_whatsapp_routes(
         if not node:
             raise HTTPException(status_code=400, detail="node not on PATH")
 
-        session_dir = Path(os.path.expanduser("~/.elevate/whatsapp/session"))
+        session_dir = get_elevate_home() / "whatsapp" / "session"
         session_dir.mkdir(parents=True, exist_ok=True)
         # Re-pairing: clear stale session so Baileys emits a fresh QR.
         creds = session_dir / "creds.json"

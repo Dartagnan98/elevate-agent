@@ -436,6 +436,7 @@ interface UsageInfo {
   cache_write?: number;
   context_max?: number;
   context_percent?: number;
+  context_trigger?: number;
   context_used?: number;
   input?: number;
   model?: string;
@@ -2354,6 +2355,7 @@ function normalizeUsage(raw: unknown): UsageInfo | null {
     cache_write: toNumber("cache_write"),
     context_max: toNumber("context_max"),
     context_percent: toNumber("context_percent"),
+    context_trigger: toNumber("context_trigger"),
     context_used: toNumber("context_used"),
     input: toNumber("input"),
     model: typeof item.model === "string" ? item.model : undefined,
@@ -2709,9 +2711,10 @@ function contextRingTitle(usage: UsageInfo | null): string {
 
   const used = Math.max(0, Math.min(100, usage.context_percent));
   const left = Math.max(0, 100 - used);
+  const denom = usage.context_trigger ?? usage.context_max;
   const detail =
-    usage.context_used !== undefined && usage.context_max !== undefined
-      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(usage.context_max).toLocaleString()} tokens used`
+    usage.context_used !== undefined && denom !== undefined
+      ? `${Math.round(usage.context_used).toLocaleString()} / ${Math.round(denom).toLocaleString()} tokens until auto-compact`
       : "Token counts pending";
 
   return `Context left: ${Math.round(left)}%. ${Math.round(used)}% used. ${detail}`;

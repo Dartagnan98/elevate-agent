@@ -1701,6 +1701,17 @@ def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any
             continue
         if key not in section or _agent_value_missing(section.get(key)):
             section[key] = copy.deepcopy(default_value)
+            continue
+        # Extended-default upgrade: when we APPEND to a shipped default (e.g.
+        # the 'Done means written' invariant on core_truths), a stored value
+        # that is exactly the old default is a strict prefix of the new one.
+        # Adopt the extension — the user never edited it. Real user edits are
+        # not prefixes of the new default and stay untouched.
+        stored = section.get(key)
+        if isinstance(stored, str) and isinstance(default_value, str):
+            s, d = stored.strip(), default_value.strip()
+            if s and d and s != d and d.startswith(s):
+                section[key] = default_value
     raw[field] = section
 
 
@@ -2117,16 +2128,41 @@ def agent_soul_lines(agent: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def agent_routing_lines(agent: dict[str, Any] | None) -> list[str]:
+    """Owned areas / handoffs / escalation + the outside-specialization rule.
+
+    Shared by every agent-context builder (cron runs, live lane overlay,
+    delegated specialists) so live lanes carry the same routing guidance as
+    background runs — asymmetric context taught models to prefer one surface
+    over another.
+    """
+    if not isinstance(agent, dict):
+        return []
+    routing = agent.get("routing") if isinstance(agent.get("routing"), dict) else {}
+    owns = _as_list(routing.get("owns"))
+    handoff_targets = _as_list(routing.get("handoff_targets"))
+    escalation = str(routing.get("escalation_target") or "executive-assistant").strip()
+    lines: list[str] = []
+    if owns:
+        lines.append(f"Owned work areas: {', '.join(owns)}.")
+    if handoff_targets:
+        lines.append(f"Handoff targets: {', '.join(handoff_targets)}.")
+    if escalation:
+        lines.append(f"Escalation/default coordinator: {escalation}.")
+    lines.append(
+        "Default behavior: if the task is outside this agent's specialization, "
+        "create or recommend an Elevate-native handoff/task for the best owning "
+        "agent instead of trying to silently own that specialist work."
+    )
+    return lines
+
+
 def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> str:
     """Build a concise Agent Hub context block for scheduled agent runs."""
     agent = get_agent_def(agent_id, config=config)
     if not isinstance(agent, dict):
         return ""
     clean_id = _slug(str(agent.get("id") or agent_id or ""))
-    routing = agent.get("routing") if isinstance(agent.get("routing"), dict) else {}
-    owns = _as_list(routing.get("owns"))
-    handoff_targets = _as_list(routing.get("handoff_targets"))
-    escalation = str(routing.get("escalation_target") or "executive-assistant").strip()
     artifact_skills = [skill for skill in AGENT_ARTIFACT_SKILLS if skill in _as_list(agent.get("skills"))]
 
     lines = [
@@ -2140,18 +2176,8 @@ def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> st
         lines.append(f"Role: {role}.")
     if description:
         lines.append(f"Specialization: {description}")
-    if owns:
-        lines.append(f"Owned work areas: {', '.join(owns)}.")
-    if handoff_targets:
-        lines.append(f"Handoff targets: {', '.join(handoff_targets)}.")
-    if escalation:
-        lines.append(f"Escalation/default coordinator: {escalation}.")
+    lines.extend(agent_routing_lines(agent))
     lines.extend(agent_soul_lines(agent))
-    lines.append(
-        "Default behavior: if the task is outside this agent's specialization, "
-        "create or recommend an Elevate-native handoff/task for the best owning "
-        "agent instead of trying to silently own that specialist work."
-    )
     if artifact_skills:
         lines.append(
             "Shared artifact capability: this agent may produce or coordinate "

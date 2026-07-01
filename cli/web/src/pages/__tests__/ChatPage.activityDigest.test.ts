@@ -228,7 +228,7 @@ describe("manual /compact activity", () => {
         context_percent: 11,
         context_used: 29310,
       }),
-    ).toBe("Context left: 89%. 11% used. 29,310 / 272,000 tokens used");
+    ).toBe("Context left: 89%. 11% used. 29,310 / 272,000 tokens until auto-compact");
   });
 });
 

@@ -191,3 +191,36 @@ def test_reconcile_agent_hub_defaults_repairs_persisted_rows_without_overwriting
     assert "surface-heartbeat" in admin["skills"]
     assert "custom admin lane" in admin["routing"]["owns"]
     assert "deal files" in admin["routing"]["owns"]
+
+
+def test_reconcile_upgrades_unedited_soul_prefix_but_keeps_user_edits(monkeypatch):
+    from elevate_cli.agent_hub import DEFAULT_AGENT_DEFS
+
+    admin_default = next(d for d in DEFAULT_AGENT_DEFS if d["id"] == "admin")
+    new_truths = admin_default["soul"]["core_truths"]
+    assert "Done means written" in new_truths
+    old_truths = new_truths.split(" Done means written:")[0].strip()
+
+    config = {
+        "agent_hub": {
+            "agents": [
+                # Stored soul frozen at the OLD default (pre-invariant): a
+                # strict prefix of the new default -> reconcile adopts it.
+                {"id": "admin", "soul": {"core_truths": old_truths}},
+                # A REAL user edit is not a prefix -> stays untouched.
+                {"id": "marketing", "soul": {"core_truths": "My custom truths."}},
+            ]
+        }
+    }
+    saved: dict = {}
+    monkeypatch.setattr("elevate_cli.agent_hub.load_config", lambda: copy.deepcopy(config))
+    monkeypatch.setattr("elevate_cli.config.save_config", lambda cfg: saved.update(copy.deepcopy(cfg)))
+
+    reconcile_agent_hub_defaults()
+
+    from elevate_cli.data import connect, surface_state
+
+    with connect() as conn:
+        rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
+    assert rows["admin"]["config"]["soul"]["core_truths"] == new_truths
+    assert rows["marketing"]["config"]["soul"]["core_truths"] == "My custom truths."

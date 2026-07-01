@@ -28,8 +28,14 @@ class _DealChatBody(BaseModel):
 
 
 # Where the per-deal transcripts live. One small JSON file per deal; no schema
-# change, survives restarts, isolated from the operational store.
-_CHAT_DIR = Path(os.path.expanduser("~/.elevate/deal-chats"))
+# change, survives restarts, isolated from the operational store. Resolved per
+# call (not at import) so ELEVATE_HOME is honored in tests/isolated homes.
+def _chat_dir() -> Path:
+    from elevate_constants import get_elevate_home
+
+    return get_elevate_home() / "deal-chats"
+
+
 _MAX_PERSISTED_TURNS = 60  # keep transcripts bounded
 _MAX_CONTEXT_TURNS = 14    # how much history we feed the model each turn
 
@@ -253,7 +259,7 @@ def _deal_chat_fallback(messages: List[Dict[str, str]], context: str, address: s
 
 def _chat_path(deal_id: str) -> Path:
     safe = "".join(ch for ch in str(deal_id) if ch.isalnum() or ch in ("-", "_")) or "deal"
-    return _CHAT_DIR / f"{safe}.json"
+    return _chat_dir() / f"{safe}.json"
 
 
 def _load_transcript(deal_id: str) -> List[Dict[str, str]]:
@@ -276,7 +282,7 @@ def _load_transcript(deal_id: str) -> List[Dict[str, str]]:
 
 def _save_transcript(deal_id: str, messages: List[Dict[str, str]]) -> None:
     try:
-        _CHAT_DIR.mkdir(parents=True, exist_ok=True)
+        _chat_dir().mkdir(parents=True, exist_ok=True)
         trimmed = messages[-_MAX_PERSISTED_TURNS:]
         tmp = _chat_path(deal_id).with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"dealId": deal_id, "messages": trimmed}, ensure_ascii=False), "utf-8")

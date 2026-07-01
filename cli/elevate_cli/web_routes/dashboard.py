@@ -328,10 +328,21 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
     @router.get("/api/dashboard/plugins")
     async def get_dashboard_plugins():
         plugins = _get_dashboard_plugins(project_root, _log)
-        return [
-            {k: v for k, v in p.items() if not k.startswith("_")}
-            for p in plugins
-        ]
+        # UI-facing list only: skip plugins whose JS bundle was never built
+        # (manifest present, dist/ missing) — advertising them makes the SPA
+        # inject <script>/<link> tags that 404 on every page load. Discovery
+        # itself stays untouched so plugin APIs keep mounting.
+        out = []
+        for p in plugins:
+            entry_file = Path(p["_dir"]) / str(p.get("entry") or "dist/index.js")
+            if not entry_file.is_file():
+                continue
+            item = {k: v for k, v in p.items() if not k.startswith("_")}
+            css = item.get("css")
+            if css and not (Path(p["_dir"]) / str(css)).is_file():
+                item["css"] = None
+            out.append(item)
+        return out
 
     @router.get("/api/dashboard/plugins/rescan")
     async def rescan_dashboard_plugins():

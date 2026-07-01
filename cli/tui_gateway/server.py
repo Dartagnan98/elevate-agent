@@ -1526,7 +1526,14 @@ def _get_usage(agent) -> dict:
         if ctx_max and ctx_used:
             usage["context_used"] = ctx_used
             usage["context_max"] = ctx_max
-            usage["context_percent"] = max(0, min(100, round(ctx_used / ctx_max * 100)))
+            # Honest percentage: measure against the EFFECTIVE compaction
+            # trigger (threshold_tokens — already clamped by the aux
+            # summarizer window), not the raw model window. Against the raw
+            # window the bar read ~61% at the moment compaction fired.
+            trigger = getattr(comp, "threshold_tokens", 0) or 0
+            denom = min(trigger, ctx_max) if trigger > 0 else ctx_max
+            usage["context_trigger"] = denom
+            usage["context_percent"] = max(0, min(100, round(ctx_used / denom * 100)))
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
     try:
         from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
@@ -2081,8 +2088,9 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
             if lane_prompt:
                 lines.append(lane_prompt)
             try:
-                from elevate_cli.agent_hub import agent_soul_lines
+                from elevate_cli.agent_hub import agent_routing_lines, agent_soul_lines
 
+                lines.extend(agent_routing_lines(adef))
                 lines.extend(agent_soul_lines(adef))
             except Exception:
                 logger.debug("agent lane %s: soul lines unavailable", wanted, exc_info=True)

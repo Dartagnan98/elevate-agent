@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from elevate_constants import get_elevate_home
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -1678,7 +1679,7 @@ def create_admin_deals_router(
                     if res.get("ok") and res.get("pdf") and os.path.exists(res["pdf"]):
                         prefilled.append({"form": key, "pdf": res["pdf"]})
                 if len(prefilled) == 3:
-                    pv_dir = os.path.expanduser("~/.elevate/uploads/onboarding-previews")
+                    pv_dir = str(get_elevate_home() / "uploads" / "onboarding-previews")
                     os.makedirs(pv_dir, exist_ok=True)
                     preview_path = f"{pv_dir}/{deal_id}-onboarding-preview.pdf"
                     merge_src = (

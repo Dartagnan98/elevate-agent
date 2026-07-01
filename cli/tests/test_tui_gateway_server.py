@@ -2450,3 +2450,22 @@ def test_slash_exec_compact_short_session_uses_compact_wording():
     out = resp.get("result", {}).get("output", "")
     assert "compact" in out.lower() and "compress" not in out.lower(), out
     assert "display" not in resp.get("result", {})
+
+
+def test_get_usage_context_percent_measures_against_effective_trigger():
+    """The context ring reads % of the compaction trigger, not the raw window."""
+
+    class _Comp:
+        last_prompt_tokens = 85_000
+        context_length = 200_000
+        threshold_tokens = 170_000  # 0.85 * window (aux clamp folds in here too)
+        compression_count = 0
+
+    class _Agent:
+        model = "test-model"
+        context_compressor = _Comp()
+
+    usage = server._get_usage(_Agent())
+    assert usage["context_trigger"] == 170_000
+    assert usage["context_percent"] == 50  # 85k of the 170k trigger, not 43% of window
+    assert usage["context_max"] == 200_000
