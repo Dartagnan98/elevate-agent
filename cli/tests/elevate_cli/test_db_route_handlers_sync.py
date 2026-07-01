@@ -25,7 +25,14 @@ def test_db_bound_route_handlers_do_not_block_event_loop():
         if ep is None:
             continue
         src_file = inspect.getsourcefile(ep) or ""
-        if "web_server.py" not in src_file:
+        # Routes migrated from the web_server.py monolith into web_routes/
+        # modules over time; matching only web_server.py left this guard
+        # counting zero handlers (a vacuous pass on the offenders check).
+        if not (
+            "web_server.py" in src_file
+            or "/web_routes/" in src_file
+            or "web_agent_admin_routes.py" in src_file
+        ):
             continue
         try:
             body = inspect.getsource(ep)

@@ -24,7 +24,7 @@ def register_agent_handoff_routes(
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/agent-handoffs")
-    async def get_agent_handoffs(
+    def get_agent_handoffs(
         to_agent_id: Optional[str] = None,
         from_agent_id: Optional[str] = None,
         status: Optional[str] = None,
@@ -55,7 +55,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoffs failed: {exc}")
 
     @router.get("/api/agent-handoffs/{handoff_id}")
-    async def get_agent_handoff_detail(handoff_id: str):
+    def get_agent_handoff_detail(handoff_id: str):
         try:
             from elevate_cli.data import connect, get_agent_handoff
 
@@ -71,7 +71,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoff failed: {exc}")
 
     @router.post("/api/agent-handoffs")
-    async def create_agent_handoff_endpoint(body: AgentHandoffCreate):
+    def create_agent_handoff_endpoint(body: AgentHandoffCreate):
         try:
             if body.toAgentId.strip().lower().replace("_", "-") == "admin":
                 require_admin_setup_ready_for_launch()
@@ -107,7 +107,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoff failed: {exc}")
 
     @router.post("/api/agent-handoffs/drain")
-    async def drain_agent_handoffs_endpoint(body: AgentHandoffDrain):
+    def drain_agent_handoffs_endpoint(body: AgentHandoffDrain):
         try:
             from elevate_cli.data import connect, drain_queued_agent_handoffs
 
@@ -126,7 +126,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoff drain failed: {exc}")
 
     @router.post("/api/agent-handoffs/{handoff_id}/messages")
-    async def create_agent_handoff_message_endpoint(handoff_id: str, body: AgentHandoffMessageCreate):
+    def create_agent_handoff_message_endpoint(handoff_id: str, body: AgentHandoffMessageCreate):
         try:
             from elevate_cli.data import connect, record_agent_handoff_message
 
@@ -149,7 +149,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoff message failed: {exc}")
 
     @router.post("/api/agent-handoffs/{handoff_id}/result")
-    async def record_agent_handoff_result_endpoint(handoff_id: str, body: AgentHandoffResultCreate):
+    def record_agent_handoff_result_endpoint(handoff_id: str, body: AgentHandoffResultCreate):
         try:
             from elevate_cli.data import connect, record_agent_handoff_result
 
@@ -173,7 +173,7 @@ def register_agent_handoff_routes(
             raise HTTPException(status_code=500, detail=f"Agent handoff result failed: {exc}")
 
     @router.post("/api/agent-handoffs/{handoff_id}/approve")
-    async def approve_agent_handoff_endpoint(handoff_id: str, body: AgentHandoffApproveCreate):
+    def approve_agent_handoff_endpoint(handoff_id: str, body: AgentHandoffApproveCreate):
         try:
             from elevate_cli.data import approve_agent_handoff, connect
 

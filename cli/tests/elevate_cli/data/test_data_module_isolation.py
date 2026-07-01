@@ -58,6 +58,12 @@ _ALLOWLIST: dict[str, str] = {
     # route through elevate_cli.data helpers in Sprint 2 after the
     # backfill in Sprint 1E proves out.
     "source_connectors.py": "legacy connector writes, refactored in Sprint 2",
+    # The source_connectors monolith split into source_connector_modules/;
+    # these carry the SAME sanctioned legacy outreach.db writes under the
+    # new paths (apple_messages REPLACE INTO conversations/contacts,
+    # source_actions UPDATE conversations). Same Sprint 2 phase-out.
+    "source_connector_modules/apple_messages.py": "legacy connector writes (split from source_connectors.py), refactored in Sprint 2",
+    "source_connector_modules/source_actions.py": "legacy connector writes (split from source_connectors.py), refactored in Sprint 2",
     # One-shot Apple Contacts backfill that seeds identities/contacts
     # from macOS AddressBook + chat.db. Routes through elevate_cli.data
     # helpers in Sprint 2 once apple-messages becomes a first-class

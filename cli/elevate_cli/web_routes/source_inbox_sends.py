@@ -67,7 +67,7 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
             raise HTTPException(status_code=500, detail=f"Not-sent list failed: {exc}")
 
     @router.post("/api/source-inbox/retry-send/{queue_id}")
-    async def retry_source_inbox_send(queue_id: str):
+    def retry_source_inbox_send(queue_id: str):
         """Re-queue a failed/skipped send: re-resolve the contact's CURRENT phone
         into the payload (it may have been blank/duplicate before), flip status
         back to queued, then tick the sender. Powers the 'Retry' button."""
