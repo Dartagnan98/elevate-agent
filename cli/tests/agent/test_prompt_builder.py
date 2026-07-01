@@ -267,7 +267,10 @@ class TestBuildSkillsSystemPrompt:
         assert "available_skills" in result
         assert "Skills (selective)" in result
         assert "status checks" in result
-        assert "Proceed without loading a skill" in result
+        # The load-before-acting rule: skilled external-system workflows must
+        # load the skill first; plain answers skip the round-trip.
+        assert "skill_view(name) BEFORE you act" in result
+        assert "never wasteful before a real skilled action" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))

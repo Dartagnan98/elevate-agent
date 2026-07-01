@@ -2091,6 +2091,32 @@ def agent_effective_skills(
     )
 
 
+def agent_soul_lines(agent: dict[str, Any] | None) -> list[str]:
+    """Render the behavioral soul/identity fields as prompt lines.
+
+    The soul (core_truths, work_style, autonomy_rules, communication_style) is
+    stored and UI-editable but was never injected into any prompt — dead config
+    the model never saw. Every agent-context builder (cron runs, live lane
+    overlay, delegated specialists) must include these lines or soul edits do
+    nothing at runtime.
+    """
+    if not isinstance(agent, dict):
+        return []
+    identity = agent.get("identity") if isinstance(agent.get("identity"), dict) else {}
+    soul = agent.get("soul") if isinstance(agent.get("soul"), dict) else {}
+    lines: list[str] = []
+    for label, value in (
+        ("Work style", identity.get("work_style")),
+        ("Core truths", soul.get("core_truths")),
+        ("Autonomy rules", soul.get("autonomy_rules")),
+        ("Communication style", soul.get("communication_style")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            lines.append(f"{label}: {text}")
+    return lines
+
+
 def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> str:
     """Build a concise Agent Hub context block for scheduled agent runs."""
     agent = get_agent_def(agent_id, config=config)
@@ -2120,6 +2146,7 @@ def agent_run_context(agent_id: str, config: dict[str, Any] | None = None) -> st
         lines.append(f"Handoff targets: {', '.join(handoff_targets)}.")
     if escalation:
         lines.append(f"Escalation/default coordinator: {escalation}.")
+    lines.extend(agent_soul_lines(agent))
     lines.append(
         "Default behavior: if the task is outside this agent's specialization, "
         "create or recommend an Elevate-native handoff/task for the best owning "

@@ -2080,6 +2080,12 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
                 lines.append(desc)
             if lane_prompt:
                 lines.append(lane_prompt)
+            try:
+                from elevate_cli.agent_hub import agent_soul_lines
+
+                lines.extend(agent_soul_lines(adef))
+            except Exception:
+                logger.debug("agent lane %s: soul lines unavailable", wanted, exc_info=True)
             overlay = "\n".join(lines).strip()
 
     if overlay:

@@ -91,6 +91,28 @@ def test_agent_run_context_names_specialization_handoff_and_artifacts():
     assert "PDFs, presentations, diagrams, and graphics" in context
 
 
+def test_agent_run_context_injects_soul_and_work_style():
+    # The soul was stored/UI-editable but never rendered into any prompt.
+    # Every context builder must carry it or soul edits do nothing at runtime.
+    update_agent_config("admin", {"enabled": True})
+    context = agent_run_context("admin", config={})
+
+    assert "Core truths:" in context
+    assert "Done means written" in context
+    assert "Work style:" in context
+
+
+def test_agent_lane_prompt_injects_soul():
+    from gateway.agent_lanes import agent_lane_prompt
+    from elevate_cli.agent_hub import get_agent_def
+
+    update_agent_config("admin", {"enabled": True})
+    persona = agent_lane_prompt(get_agent_def("admin", config={}))
+
+    assert "Core truths:" in persona
+    assert "Done means written" in persona
+
+
 def test_analyst_and_theta_wave_are_backend_defaults():
     update_agent_config("analyst", {"enabled": True})
     update_agent_config("theta-wave", {"enabled": True})

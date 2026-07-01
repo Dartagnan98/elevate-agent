@@ -250,5 +250,11 @@ def agent_lane_prompt(agent: Mapping[str, Any] | None) -> str:
         parts.append(f"Description: {description}.")
     if prompt:
         parts.append(f"Agent instructions: {prompt}")
+    try:
+        from elevate_cli.agent_hub import agent_soul_lines
+
+        parts.extend(agent_soul_lines(dict(agent)))
+    except Exception:
+        pass
     parts.append("]")
     return " ".join(parts)
