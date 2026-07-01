@@ -30,10 +30,10 @@ const LISTING_STAGE_BADGE: Record<number, string> = {
 };
 
 const BUYER_STAGE_TO_PHASE: Record<number, string> = {
-  0: "offer",
-  1: "accepted",
-  2: "conditions",
-  3: "removed",
+  0: "onboarding",
+  1: "offer",
+  2: "accepted",
+  3: "conditions",
   4: "removed",
   5: "removed",
   6: "removed",
@@ -44,10 +44,10 @@ const BUYER_STAGE_TO_PHASE: Record<number, string> = {
 };
 
 const BUYER_STAGE_BADGE: Record<number, string> = {
-  0: "Offer Prep",
-  1: "Accepted",
-  2: "Condition Removal",
-  3: "Subjects Off",
+  0: "Client Onboarding",
+  1: "Offer Prep",
+  2: "Accepted",
+  3: "Condition Removal",
   4: "Subjects Off",
   5: "Subjects Off",
   6: "Subjects Off",
@@ -72,10 +72,10 @@ const LISTING_STAGE_NEXT: Record<number, string> = {
 };
 
 const BUYER_STAGE_NEXT: Record<number, string> = {
-  0: "Offer package ready",
-  1: "Accepted-offer checked",
-  2: "Conditions tracked / removal pending",
-  3: "File archive / nurture",
+  0: "Agency + disclosures signed",
+  1: "Offer package ready",
+  2: "Accepted-offer checked",
+  3: "Conditions tracked / removal pending",
   4: "File archive / nurture",
   5: "File archive / nurture",
   6: "File archive / nurture",
@@ -110,6 +110,14 @@ function top25Note(d: AdminDeal): string | undefined {
     stringToggle(d.extraToggles?.lookingFor) ??
     stringToggle(d.extraToggles?.buyerCriteria) ??
     stringToggle(d.extraToggles?.profileCriteriaSummary)
+  );
+}
+
+function archivedNote(d: AdminDeal): string | undefined {
+  return (
+    stringToggle(d.extraToggles?.archivedNote) ??
+    stringToggle(d.extraToggles?.cancelNote) ??
+    stringToggle(d.extraToggles?.cancellationReason)
   );
 }
 
@@ -150,13 +158,16 @@ export function adminDealToDeal(d: AdminDeal): Deal {
     waitingHumanCount: d.scorecard?.waitingHumanCount ?? undefined,
     activeRunLabel: d.scorecard?.activeRunLabel ?? undefined,
     activeRunStatus: d.scorecard?.activeRunStatus ?? undefined,
+    status: d.status ?? undefined,
+    archivedNote: archivedNote(d),
+    archivedAt: d.closedAt ?? d.updatedAt ?? undefined,
   };
 }
 
 export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
   const stage = clampStage(d.currentStage ?? 0);
-  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "offer";
-  const badge = BUYER_STAGE_BADGE[stage] ?? "Offer Prep";
+  const phase = BUYER_STAGE_TO_PHASE[stage] ?? "onboarding";
+  const badge = BUYER_STAGE_BADGE[stage] ?? "Client Onboarding";
   const next = BUYER_STAGE_NEXT[stage] ?? "—";
   const title = d.title || "Buyer";
   const note = top25Note(d);
@@ -180,5 +191,8 @@ export function adminDealToBuyerDeal(d: AdminDeal): BuyerDeal {
     next,
     primary: d.extraToggles?.pinnedTop25 === true || d.extraToggles?.top25 === true,
     top25Note: note,
+    status: d.status ?? undefined,
+    archivedNote: archivedNote(d),
+    archivedAt: d.closedAt ?? d.updatedAt ?? undefined,
   };
 }

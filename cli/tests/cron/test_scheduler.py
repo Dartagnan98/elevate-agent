@@ -2024,11 +2024,16 @@ class TestRunJobSkillBacked:
         assert "AGENT HUB CONTEXT" in result
         assert "You are running as agent: Admin · Transaction Coordinator (admin)." in result
         assert "outside this agent's specialization" in result
-        assert "Instructions for tasks." in result
-        assert "Instructions for nano-pdf." in result
-        assert "Instructions for real-estate-admin/admin-agent." in result
+        # Only the job's explicit skill is inlined in full; the agent's baseline
+        # roster is surfaced as an on-demand index instead of full skill bodies.
         assert "Instructions for heartbeat-specific." in result
-        assert calls.index("tasks") < calls.index("real-estate-admin/admin-agent") < calls.index("heartbeat-specific")
+        assert calls == ["heartbeat-specific"]
+        assert "[ADDITIONAL SKILLS AVAILABLE ON DEMAND]" in result
+        assert "Instructions for tasks." not in result
+        assert "Instructions for nano-pdf." not in result
+        assert "- tasks" in result
+        assert "- nano-pdf" in result
+        assert "- admin-agent" in result
 
 
 class TestSilentDelivery:

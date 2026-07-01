@@ -80,7 +80,7 @@ elevate dashboard  # open the local dashboard
 ```
 
 Quick setup now walks through the local memory graph and semantic embeddings.
-It can also save realtor admin setup into embedded Postgres so Admin agents remember the
+It can also save realtor admin setup into SQLite so Admin agents remember the
 selected province package, connected providers, MLS/SkySlope/ShowingTime-style
 portal references, and approval policy. To configure a section directly:
 
@@ -138,7 +138,7 @@ installs and Git installs both use the same command.
 
 ```text
 elevate/
-├── cli/      # local agent runtime, dashboard, gateway, skills, and local data layer
+├── cli/      # local agent runtime, dashboard, gateway, skills, and SQLite data layer
 ├── backend/  # Elevation HQ licensing and paid skill-pack API
 └── db/       # HQ API database migrations
 ```

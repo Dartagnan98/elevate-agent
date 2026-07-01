@@ -17,15 +17,29 @@ export function DraftRow({
   expanded: boolean;
   onToggle: () => void;
   onExpand: () => void;
-  onAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void;
+  onAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void;
   busy?: boolean;
   onEditTemplate?: () => void;
 }) {
   const [editText, setEditText] = useState(draft.body);
+  // Approve & Schedule: when open, show a date/time picker; on confirm the
+  // chosen local time is sent to the backend as UTC so the send is held.
+  const [scheduling, setScheduling] = useState(false);
+  const [whenLocal, setWhenLocal] = useState("");
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   useEffect(() => {
     setEditText(draft.body);
   }, [draft.id, draft.body]);
+
+  // datetime-local default: tomorrow 9:00 AM local.
+  const defaultWhen = () => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
 
   const dirty = editText.trim() !== draft.body.trim();
   // Always act on the CURRENT edited text — approving with the original body was
@@ -94,30 +108,83 @@ export function DraftRow({
           </div>
         ) : null}
       </div>
-      <div className="lb-draft-actions">
-        <button
-          type="button"
-          className="lb-btn ghost sm"
-          disabled={busy || !onAction}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAction?.("skip", draft);
-          }}
-        >
-          {busy ? "…" : "Skip"}
-        </button>
-        <button
-          type="button"
-          className="lb-btn primary sm"
-          disabled={busy || !onAction}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAction?.("approve", editedDraft);
-          }}
-        >
-          {busy ? "…" : "Approve"}
-        </button>
-      </div>
+      {scheduling ? (
+        <div className="lb-draft-actions lb-draft-schedule" onClick={(e) => e.stopPropagation()}>
+          <input
+            type="datetime-local"
+            className="lb-schedule-input"
+            value={whenLocal}
+            min={defaultWhen().slice(0, 10) + "T00:00"}
+            onChange={(e) => setWhenLocal(e.target.value)}
+          />
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy}
+            onClick={(e) => { e.stopPropagation(); setScheduling(false); }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="lb-btn primary sm"
+            disabled={busy || !onAction || !whenLocal}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (!whenLocal) return;
+              const when = new Date(whenLocal);
+              if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+                setScheduleError("Pick a date and time in the future.");
+                return;
+              }
+              setScheduleError(null);
+              onAction?.("approve", editedDraft, when.toISOString());
+              setScheduling(false);
+            }}
+          >
+            {busy ? "…" : "Schedule"}
+          </button>
+          {scheduleError && <span className="lb-error" role="alert">{scheduleError}</span>}
+        </div>
+      ) : (
+        <div className="lb-draft-actions">
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAction?.("skip", draft);
+            }}
+          >
+            {busy ? "…" : "Skip"}
+          </button>
+          <button
+            type="button"
+            className="lb-btn ghost sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              setWhenLocal(defaultWhen());
+              setScheduling(true);
+            }}
+            title="Approve now but hold the send until a time you pick"
+          >
+            Approve &amp; Schedule
+          </button>
+          <button
+            type="button"
+            className="lb-btn primary sm"
+            disabled={busy || !onAction}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAction?.("approve", editedDraft);
+            }}
+          >
+            {busy ? "…" : "Approve"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

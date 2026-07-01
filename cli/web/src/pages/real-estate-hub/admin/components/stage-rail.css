@@ -1,0 +1,45 @@
+/* Stage jump rail (deal detail workflow column). Reuses admin.css :root tokens
+   only. done = blue tint, current = solid accent, todo = muted. */
+
+.abm-stage-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.abm-rail-chip {
+  font: 600 11px "Geist Mono", ui-monospace, monospace;
+  letter-spacing: 0.02em;
+  padding: 4px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg-faint);
+  transition: all 0.14s ease;
+}
+
+.abm-rail-chip:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.abm-rail-chip.done {
+  background: color-mix(in srgb, var(--status-done) 14%, transparent);
+  color: var(--status-done);
+  border-color: color-mix(in srgb, var(--status-done) 38%, transparent);
+}
+
+.abm-rail-chip.current {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.abm-rail-chip.todo {
+  color: var(--fg-faint);
+}

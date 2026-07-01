@@ -152,6 +152,7 @@ from elevate_cli.data.deals import (
     set_deal_dates,
     set_deal_fields,
     set_deal_money,
+    set_deal_status,
     set_deal_toggle,
 )
 from elevate_cli.data.admin_calendar import (
@@ -328,7 +329,7 @@ __all__ = [
     "list_deal_tasks", "list_deals", "move_deal_stage", "record_run_result",
     "record_deal_activity",
     "promote_profile_to_admin_deal", "set_deal_dates",
-    "set_deal_fields", "set_deal_money", "set_deal_toggle",
+    "set_deal_fields", "set_deal_money", "set_deal_status", "set_deal_toggle",
     # dispatch (admin action registry / runs / conditional docs)
     "approve_action_run", "create_action", "delete_action",
     "dispatch_action_run_to_cron", "drain_queued_action_runs",

@@ -924,7 +924,7 @@ function SkillRailRow({
         disabled={toggling}
         onCheckedChange={() => onToggleEnable()}
         aria-label={`${skill.enabled ? "Disable" : "Enable"} ${skill.name}`}
-        className="h-[36px] w-[56px] md:h-4 md:w-7 [&>span]:h-6 [&>span]:w-6 md:[&>span]:h-3 md:[&>span]:w-3"
+        className="h-4 w-7 [&>span]:h-3 [&>span]:w-3"
       />
     </div>
   );

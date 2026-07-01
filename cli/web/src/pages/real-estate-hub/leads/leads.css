@@ -426,54 +426,6 @@
   }
   .ab-btn.primary:hover { background: color-mix(in srgb, var(--fg) 18%, transparent); }
 
-  @media (max-width: 760px) {
-    .ab-top {
-      height: auto;
-      align-items: flex-start;
-      flex-wrap: wrap;
-      gap: 10px;
-      padding: 14px 20px 8px;
-    }
-    .ab-crumb {
-      flex: 1 1 100%;
-      flex-wrap: wrap;
-      gap: 6px;
-      line-height: 1.2;
-    }
-    .ab-crumb .sep {
-      display: none;
-    }
-    .ab-live {
-      min-width: 0;
-      white-space: normal;
-      line-height: 1.2;
-    }
-    .ab-top-actions {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      width: 100%;
-      margin-left: 0;
-      overflow: visible;
-      padding-bottom: 2px;
-      scrollbar-width: none;
-    }
-    .ab-top-actions::-webkit-scrollbar {
-      display: none;
-    }
-    .ab-btn {
-      min-height: 36px;
-      min-width: 0;
-      justify-content: center;
-      padding: 7px 10px;
-    }
-    .ab-btn span {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
-
   .ab-scroll {
     flex: 1; min-height: 0; overflow-y: auto;
     padding: 8px 20px 32px;
@@ -524,14 +476,13 @@
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
     background: var(--bg-2);
-    border: 1px solid transparent;
-    border-radius: 5px;
+    border: 1px solid var(--border-soft);
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 200ms var(--ease-out), transform 200ms var(--ease-out);
-    box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+    transition: border-color 200ms var(--ease-out);
   }
-  .ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
     font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
     color: var(--fg-faint);
@@ -662,14 +613,14 @@
   @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
   @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
   .ab-kpi {
-    background: var(--bg-1);
+    background: var(--bg-2);
     border: 1px solid var(--border-soft);
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 10px 12px;
     min-width: 0;
-    transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+    transition: border-color 140ms var(--ease-out);
   }
-  .ab-kpi:hover { border-color: var(--border); background: var(--bg-2); }
+  .ab-kpi:hover { border-color: var(--border); }
   .ab-kpi-label {
     font: 500 9.5px/1 "Geist Mono", monospace;
     color: var(--fg-faint);
@@ -847,7 +798,7 @@
     border-radius: 10px;
     box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 40px 80px -20px rgba(0,0,0,0.8);
     width: 100%;
-    max-width: 760px;
+    max-width: min(95vw, 1180px);
     max-height: calc(100vh - 64px);
     display: flex; flex-direction: column;
     position: relative;
@@ -863,13 +814,13 @@
     appearance: none; background: transparent; border: 0;
     width: 30px; height: 30px;
     border-radius: 999px;
-    color: var(--fg-muted);
+    color: rgba(255, 255, 255, 0.72);
     cursor: pointer;
     display: grid; place-items: center;
     transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
     z-index: 2;
   }
-  .ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+  .ab-modal-close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
   .ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
   .ab-modal-head {
@@ -1518,7 +1469,7 @@
   .abm-toggle-unset    { font-size: 10px; }
   .abm-modal-scroll, .ab-modal-scroll { padding-top: 0; padding-bottom: 22px; }
   .ab-modal-close      { top: 10px; right: 10px; width: 26px; height: 26px; }
-  .ab-modal            { max-width: 1140px; border-radius: 8px; }
+  .ab-modal            { max-width: min(95vw, 2000px); border-radius: 8px; }
 
   /* Two-column modal layout */
   .abm-cols {
@@ -2398,26 +2349,6 @@
   .lb-health-warn { color: var(--status-warn); }
   .lb-health-chev { color: var(--fg-faint); font-size: 10px; transition: transform 160ms var(--ease-out); }
   .lb-health-chev.open { transform: rotate(180deg); }
-
-  @media (max-width: 760px) {
-    .ab-top-actions .lb-health-wrap {
-      grid-column: 1 / -1;
-      min-width: 0;
-      width: 100%;
-    }
-    .ab-top-actions .lb-health {
-      justify-content: center;
-      width: 100%;
-      min-height: 36px;
-      min-width: 0;
-    }
-    .ab-top-actions .lb-health-text {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
 
   .lb-health-drawer {
     position: absolute;
@@ -3624,33 +3555,6 @@
   }
   .lb-alert-action:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg); }
 
-  @media (max-width: 760px) {
-    .lb-alert {
-      align-items: flex-start;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 8px 0 0;
-      padding: 10px 12px;
-    }
-    .lb-alert-icon {
-      margin-top: 1px;
-    }
-    .lb-alert-label {
-      flex: 1 1 calc(100% - 26px);
-      min-width: 0;
-    }
-    .lb-alert-detail {
-      flex: 1 1 100%;
-      white-space: normal;
-      line-height: 1.35;
-    }
-    .lb-alert-action {
-      justify-content: center;
-      width: 100%;
-      min-height: 36px;
-    }
-  }
-
   /* Approve replies + Pipeline split */
   .lb-split {
     display: grid;
@@ -4104,3 +4008,16 @@
   padding: 24px 32px 32px;
   background: var(--bg);
 }
+
+/* Approve & Schedule — inline date/time picker on a draft row. */
+.lb-draft-schedule { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.lb-schedule-input {
+  font: 400 13px/1.5 "Anthropic Sans Display", "Geist", sans-serif;
+  padding: 7px 10px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-soft);
+  color-scheme: light;
+}
+.lb-schedule-input:focus { outline: 1px solid var(--accent-ring); border-color: var(--border); }

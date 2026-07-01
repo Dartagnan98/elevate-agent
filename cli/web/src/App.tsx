@@ -1,5 +1,4 @@
 import {
-  Component,
   Suspense,
   lazy,
   useCallback,
@@ -8,7 +7,6 @@ import {
   useRef,
   useState,
   type ComponentType,
-  type ErrorInfo,
   type MouseEvent,
   type ReactNode,
 } from "react";
@@ -250,15 +248,9 @@ function scheduleRouteWarmup(paths: string[]): () => void {
 }
 
 function RootRedirect() {
-  // Start each launch on a fresh chat (mirrors the "New chat" button's
-  // ?new=&seed= params) when embedded chat is available; else fall back to /today.
-  const seed = useMemo(() => Date.now(), []);
-  return (
-    <Navigate
-      to={isDashboardEmbeddedChatEnabled() ? `/chat?new=${seed}&seed=${seed}` : "/today"}
-      replace
-    />
-  );
+  // Skyleigh's launch lands on Today, not a fresh chat (2026-06-22). She opens
+  // a new chat from the nav when she wants one.
+  return <Navigate to="/today" replace />;
 }
 
 function CoreRootRedirect() {
@@ -322,59 +314,6 @@ function AccessLoadingPage() {
 function RouteBundleFallback() {
   const location = useLocation();
   return <RouteSkeleton path={location.pathname} />;
-}
-
-function isRouteBundleLoadError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return /dynamically imported module|Failed to fetch|Loading chunk|Importing a module script failed|modulepreload/i.test(message);
-}
-
-class RouteErrorBoundary extends Component<
-  { children: ReactNode; resetKey: string },
-  { error: Error | null }
-> {
-  state = { error: null };
-
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-
-  componentDidUpdate(prevProps: { resetKey: string }) {
-    if (prevProps.resetKey !== this.props.resetKey && this.state.error) {
-      this.setState({ error: null });
-    }
-  }
-
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("route render failed", error, info.componentStack);
-  }
-
-  render() {
-    if (!this.state.error) return this.props.children;
-    const chunkLoad = isRouteBundleLoadError(this.state.error);
-    return (
-      <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 px-6 text-center text-midground">
-        <div className="rounded-full border border-border-muted bg-surface-muted px-3 py-1 text-xs uppercase tracking-[0.18em] text-muted">
-          Dashboard route failed
-        </div>
-        <h2 className="text-xl font-semibold text-midground">
-          {chunkLoad ? "Dashboard updated while this tab was open" : "This view crashed"}
-        </h2>
-        <p className="max-w-md text-sm leading-6 text-muted">
-          {chunkLoad
-            ? "Reload to fetch the current dashboard bundle. This usually happens when a release replaces old route assets."
-            : "The app caught this route error instead of leaving a blank page. Reload and try the route again."}
-        </p>
-        <button
-          type="button"
-          className="rounded-md border border-border-muted bg-surface px-4 py-2 text-sm font-medium text-midground shadow-sm hover:bg-surface-muted"
-          onClick={() => window.location.reload()}
-        >
-          Reload dashboard
-        </button>
-      </div>
-    );
-  }
 }
 
 // Soft-locked page shown when a user lands on a route whose skill pack
@@ -742,6 +681,20 @@ export default function App() {
   const [licenseChecked, setLicenseChecked] = useState(false);
   const startupReportedRef = useRef(false);
 
+  // Apply the global dashboard theme on mount so EVERY page (Today, Admin,
+  // Leads, Social, etc.) is skinned from first paint, before the Today route
+  // is ever visited. The Today header toggle keeps this attribute in sync.
+  // Token blocks live in src/index.css under :root[data-app-theme="X"].
+  useEffect(() => {
+    try {
+      const appTheme =
+        window.localStorage.getItem("elevate-today-theme") || "medium";
+      document.documentElement.setAttribute("data-app-theme", appTheme);
+    } catch {
+      document.documentElement.setAttribute("data-app-theme", "medium");
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     if (accessVersion === 0) markStartup("access:request");
@@ -1074,26 +1027,24 @@ export default function App() {
                     !isChatRoute && !isConfigRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "elevate-route-transition",
                   )}
                 >
-                  <RouteErrorBoundary resetKey={normalizedPath}>
-                    <Suspense
-                      fallback={<RouteBundleFallback />}
-                    >
-                      <Routes>
-                        {routes.map(({ key, path, element }) => (
-                          <Route key={key} path={path} element={element} />
-                        ))}
-                        <Route
-                          path="*"
-                          element={
-                            <Navigate
-                              to={realEstateDashboard ? "/today" : "/hub"}
-                              replace
-                            />
-                          }
-                        />
-                      </Routes>
-                    </Suspense>
-                  </RouteErrorBoundary>
+                  <Suspense
+                    fallback={<RouteBundleFallback />}
+                  >
+                    <Routes>
+                      {routes.map(({ key, path, element }) => (
+                        <Route key={key} path={path} element={element} />
+                      ))}
+                      <Route
+                        path="*"
+                        element={
+                          <Navigate
+                            to={realEstateDashboard ? "/today" : "/hub"}
+                            replace
+                          />
+                        }
+                      />
+                    </Routes>
+                  </Suspense>
                 </div>
               </div>
               <PluginSlot name="post-main" />
@@ -2158,11 +2109,14 @@ function DesktopSidebar({
       )}
       <div
         className="sidebar-top"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        style={{ WebkitAppRegion: "drag", marginTop: "6px", paddingTop: "10px" } as React.CSSProperties}
       >
-        {/* Logo removed per request — empty spacer keeps the row height and the
-            traffic-light clearance on the left. */}
-        <div className="h-7 w-[9.75rem] shrink-0" aria-hidden />
+        {/* Elevation Real Estate logo — global, top of every page via the sidebar.
+            Blue on light/medium themes, white on dark (swapped by data-app-theme). */}
+        <div className="flex items-center pl-[4.5rem]" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          <img src="/elevation-logo-blue.png" alt="Elevation Real Estate" className="elev-logo elev-logo-blue h-9 w-auto" />
+          <img src="/elevation-logo-white.png" alt="Elevation Real Estate" className="elev-logo elev-logo-white h-9 w-auto" />
+        </div>
 
         <button
           type="button"
@@ -2212,15 +2166,18 @@ function DesktopSidebar({
 
       <div className="sidebar-scroll overflow-x-hidden">
         <div className="space-y-0.5">
-          <button
-            type="button"
-            onClick={startNewChat}
-            className="new-chat"
-          >
-            <Plus />
-            <span className="truncate">New chat</span>
-            <span className="kbd">⌘N</span>
-          </button>
+          <div className="flex items-center gap-2 pl-3">
+            <img src="/octo-loader.png" alt="Elevation" aria-hidden="true" className="h-11 w-11 shrink-0 object-contain" />
+            <button
+              type="button"
+              onClick={startNewChat}
+              className="new-chat"
+            >
+              <Plus />
+              <span className="truncate">New chat</span>
+              <span className="kbd">⌘N</span>
+            </button>
+          </div>
           {searchOpen && (
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--sidebar-icon)]" />

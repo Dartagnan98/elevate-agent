@@ -1429,7 +1429,7 @@ export default function CronPage() {
       return;
     }
     setAfterTitle(
-      <span className="whitespace-nowrap text-xs text-muted-foreground">
+      <span className="whitespace-nowrap text-[13px] text-muted-foreground">
         {enabledCount}/{filteredJobs.length} active · {automationCount} automations ·{" "}
         {heartbeatCount} heartbeats
       </span>,
@@ -1447,7 +1447,7 @@ export default function CronPage() {
         <div className="relative w-40 min-w-0 sm:w-56">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <Input
-            className="h-8 w-full pl-8 pr-7 text-xs"
+            className="h-9 w-full pl-8 pr-7 text-[13px]"
             placeholder={t.common.search}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -1577,7 +1577,7 @@ export default function CronPage() {
     : null;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="cron-page flex flex-col gap-4">
       <Toast toast={toast} />
 
       <DeleteConfirmDialog
@@ -1667,7 +1667,7 @@ export default function CronPage() {
       )}
 
       {/* ============ Two-pane shell ============ */}
-      <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 gap-0 rounded-md border border-border bg-card md:grid-cols-[280px_minmax(0,1fr)]">
+      <div className="grid min-h-[calc(100vh-12rem)] grid-cols-1 gap-0 rounded-md border border-border bg-card md:grid-cols-[300px_minmax(0,1fr)]">
         {/* ---- Left rail ---- */}
         <aside
           aria-label={t.cron.scheduledJobs}

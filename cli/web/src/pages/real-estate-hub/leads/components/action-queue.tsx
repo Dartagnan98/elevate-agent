@@ -18,7 +18,7 @@ export function ActionQueue({
   drafts: LeadsDraft[];
   pipeline: LeadsPipeline;
   sourceFilter: string;
-  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onEditTemplate?: () => void;
   onOpenHotLead?: (entry: LeadsHotEntry) => void;
@@ -35,19 +35,17 @@ export function ActionQueue({
   const handleDraftAction = async (
     action: LeadsDraftAction,
     draft: LeadsDraft,
-    options: { notifyComplete?: boolean } = {},
-  ): Promise<boolean> => {
-    if (!onDraftAction) return false;
+    options: { notifyComplete?: boolean; scheduledAt?: string } = {},
+  ) => {
+    if (!onDraftAction) return;
     const notifyComplete = options.notifyComplete ?? true;
     setActionError(null);
     setBusy((b) => { const n = new Set(b); n.add(draft.id); return n; });
     try {
-      await onDraftAction(action, draft);
+      await onDraftAction(action, draft, options.scheduledAt);
       if (notifyComplete) await onDraftActionComplete?.(action);
-      return true;
     } catch (err) {
       setActionError(err instanceof Error ? err.message : `Could not ${action} draft.`);
-      return false;
     } finally {
       setBusy((b) => { const n = new Set(b); n.delete(draft.id); return n; });
     }
@@ -57,19 +55,10 @@ export function ActionQueue({
     if (!onDraftAction) return;
     const targets = filteredDrafts.filter((d) => selected.has(d.id));
     setSelected(new Set());
-    let failed = 0;
     for (const draft of targets) {
-      const ok = await handleDraftAction(action, draft, { notifyComplete: false });
-      if (!ok) failed += 1;
+      await handleDraftAction(action, draft, { notifyComplete: false });
     }
     await onDraftActionComplete?.(action);
-    if (failed > 0) {
-      setActionError(
-        `Could not ${action} ${failed} of ${targets.length} drafts. Retry the remaining draft${failed === 1 ? "" : "s"}.`,
-      );
-    } else {
-      setActionError(null);
-    }
   };
 
   useEffect(() => { setPage(0); setSelected(new Set()); setExpanded(null); }, [tab, sourceFilter]);
@@ -184,7 +173,7 @@ export function ActionQueue({
                   expanded={expanded === d.id}
                   onToggle={() => toggle(d.id)}
                   onExpand={() => setExpanded(e => e === d.id ? null : d.id)}
-                  onAction={onDraftAction ? handleDraftAction : undefined}
+                  onAction={onDraftAction ? (a, d2, scheduledAt) => handleDraftAction(a, d2, { scheduledAt }) : undefined}
                   busy={busy.has(d.id)}
                   onEditTemplate={onEditTemplate}
                 />

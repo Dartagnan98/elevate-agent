@@ -36,6 +36,9 @@ export type Deal = {
   activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
 };
 
 export type BuyerDeal = {
@@ -58,6 +61,9 @@ export type BuyerDeal = {
   activeRunStatus?: string | null;
   primary?: boolean;
   top25Note?: string;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
 };
 
 export type AdminAction = {
@@ -143,10 +149,11 @@ export const ADMIN_PIPELINE: PipelinePhase[] = [
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PIPELINE: PipelinePhase[] = [
-  { id: "offer",        stage: "S0",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
-  { id: "accepted",     stage: "S1",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
-  { id: "conditions",   stage: "S2",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
-  { id: "removed",      stage: "S3",  name: "Subjects Off",        motion: "manual", next: "Moves on file archived",                  hint: "Deposit + dates" },
+  { id: "onboarding",   stage: "S0",  name: "Client Onboarding",   motion: "manual", next: "Moves on agency + disclosures signed",    hint: "Agency, DORTS, PNC, FINTRAC, pre-approval" },
+  { id: "offer",        stage: "S1",  name: "Offer Prep",          motion: "manual", next: "Moves on offer package ready",            hint: "Comps + offer paperwork" },
+  { id: "accepted",     stage: "S2",  name: "Accepted",            motion: "manual", next: "Moves on accepted-offer checked",         hint: "Lender + docs" },
+  { id: "conditions",   stage: "S3",  name: "Condition Removal",   motion: "manual", next: "Moves on conditions removed",             hint: "Inspection + property review + deposit" },
+  { id: "removed",      stage: "S4",  name: "Subjects Off",        motion: "manual", next: "Moves on file archived",                  hint: "Deposit + dates" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -316,6 +323,13 @@ export const ADMIN_PHASE_DETAILS: Record<string, PhaseDetail> = {
 // ---------------------------------------------------------------------------
 
 export const ADMIN_BUYER_PHASE_DETAILS: Record<string, PhaseDetail> = {
+  "onboarding": {
+    motion: "manual",
+    movesOn: "agency agreement + disclosures signed",
+    gate: "confirm the client is set up to represent",
+    checklist: ["Buyer's Agency Agreement signed", "DORTS + PNC signed", "FINTRAC ID collected", "Pre-approval confirmed"],
+    documents: [["BAEC", "Buyer's Agency Agreement"], ["DORTS", "Disclosure of Representation"], ["PNC", "Privacy Notice & Consent"], ["FINTRAC", "Individual Identification"]],
+  },
   "intake": {
     motion: "manual",
     movesOn: "profile verified",

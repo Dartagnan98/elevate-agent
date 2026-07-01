@@ -19,7 +19,6 @@ import {
 } from "@/components/ChatSidePanels";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   api,
   type AgentHubAgent,
@@ -50,7 +49,6 @@ import {
   blankTrace,
   dropForeignMessages,
   hasPendingTurn,
-  isBlankTraceEnabled,
   isRawToolPayload,
   markStreamingTurnsInterrupted,
   mergeServerWithCache,
@@ -296,7 +294,6 @@ interface QueuedInput {
   routedText: string;
   status: "queued" | "error" | "steering";
   text: string;
-  userMessageId?: string;
 }
 
 interface HeldSteer {
@@ -1053,9 +1050,6 @@ function shouldCacheTranscriptMessage(message: ChatMessage): boolean {
 const SKILL_INVOCATION_RE =
   /^\[SYSTEM: (?:The user (?:has invoked|launched this CLI session with) the "([^"]+)" skill|The "([^"]+)" skill is auto-loaded)/;
 
-const TOOL_ONLY_NO_RESPONSE_TEXT =
-  "The run stopped after tool activity before producing a final response. Ask me to continue from here or retry the request.";
-
 function collapseSkillInvocation(role: ChatRole, content: string): string {
   if (role !== "user") return content;
   const match = content.match(SKILL_INVOCATION_RE);
@@ -1212,41 +1206,20 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     out.push(chat);
   });
 
-  // Trailing tool calls with no assistant turn after them mean a turn stopped
-  // before producing final text. Keep that visible as an interrupted assistant
-  // after the user, instead of silently attaching the tools to an older answer.
+  // Trailing tool calls with no assistant turn after them → attach to the last
+  // assistant message so they aren't lost.
   if (pendingTools.length) {
-    const last = out[out.length - 1];
-    if (last?.role === "user") {
-      const messageId = stableHydrateId(null, `stored-tool-only-${total}`);
-      out.push({
-        content: TOOL_ONLY_NO_RESPONSE_TEXT,
-        completedAt:
-          pendingTools[pendingTools.length - 1]?.completedAt ?? last.createdAt,
-        createdAt:
-          pendingTools[0]?.startedAt ??
-          pendingTools[0]?.completedAt ??
-          last.createdAt,
-        id: messageId,
-        role: "assistant",
-        status: "interrupted",
-        tools: pendingTools.map((t) => ({ ...t, messageId })),
-        warning:
-          "The saved transcript ended after tool activity, so this turn was restored as interrupted.",
-      });
-    } else {
-      for (let i = out.length - 1; i >= 0; i -= 1) {
-        if (out[i].role === "assistant") {
-          const mid = out[i].id;
-          out[i] = {
-            ...out[i],
-            tools: [
-              ...(out[i].tools ?? []),
-              ...pendingTools.map((t) => ({ ...t, messageId: mid })),
-            ],
-          };
-          break;
-        }
+    for (let i = out.length - 1; i >= 0; i -= 1) {
+      if (out[i].role === "assistant") {
+        const mid = out[i].id;
+        out[i] = {
+          ...out[i],
+          tools: [
+            ...(out[i].tools ?? []),
+            ...pendingTools.map((t) => ({ ...t, messageId: mid })),
+          ],
+        };
+        break;
       }
     }
   }
@@ -1333,16 +1306,11 @@ export const __chatPageTestables = {
   messageRowPropsEqual,
   mergeActiveTurnSnapshot,
   mergeServerWithCache,
-  normalizeStoredQueue,
   repairOutOfOrderUserTurns,
-  isBlankTraceEnabled,
   normalizeStoredTranscript,
-  queuedInputExistingUserMessageId,
   resolveActivityDigestVisibility,
   routePromptForAgent,
-  hasUnfinishedVisibleTurn,
   shouldClearUsageForStatus,
-  shouldAcceptGatewayEventSession,
   shouldClearUsageForStatusUpdate,
   shouldHandlePreviewShortcut,
   shouldKeepTranscriptMessage,
@@ -1893,18 +1861,9 @@ function normalizeStoredQueue(value: unknown): QueuedInput[] {
       routedText,
       status: e.status === "error" ? "error" : "queued",
       text,
-      userMessageId:
-        typeof e.userMessageId === "string" && e.userMessageId
-          ? e.userMessageId
-          : undefined,
     });
   });
   return out.slice(-5);
-}
-
-function queuedInputExistingUserMessageId(item: QueuedInput): string | undefined {
-  const value = item.userMessageId?.trim();
-  return value || undefined;
 }
 
 function restoreQueue(sessionId: string | null | undefined): QueuedInput[] {
@@ -2374,188 +2333,11 @@ function modelLabel(info: SessionInfo): string {
   return model.split("/").slice(-1)[0] || model;
 }
 
-function formatCompactNumber(value: number | null | undefined): string {
-  const n = Math.max(0, Number(value ?? 0));
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 10_000) return `${Math.round(n / 1_000)}K`;
-  return n.toLocaleString();
-}
-
 function formatPersonName(email: string | null | undefined): string {
   if (!email) return "there";
   const raw = email.split("@")[0]?.split(/[._-]/)[0] || "";
   if (!raw) return "there";
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-}
-
-function dayKey(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-const DAY_MS = 86_400_000;
-
-function parseAnalyticsDay(key: string): Date {
-  return new Date(`${key}T12:00:00`);
-}
-
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatAnalyticsDay(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function formatAnalyticsDayShort(key: string): string {
-  return parseAnalyticsDay(key).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function analyticsRangeLabel(range: StartAnalyticsRange): string {
-  if (range === "7d") return "Last 7 days";
-  if (range === "30d") return "Last 30 days";
-  return "All time";
-}
-
-function dailyTokenTotal(day: AnalyticsResponse["daily"][number]): number {
-  return Math.max(
-    0,
-    (day.input_tokens ?? 0) +
-      (day.output_tokens ?? 0) +
-      (day.cache_read_tokens ?? 0) +
-      (day.reasoning_tokens ?? 0),
-  );
-}
-
-function activeDayCount(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  return analytics.daily.filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0).length;
-}
-
-function longestActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let best = 0;
-  let current = 0;
-  for (const day of analytics.daily) {
-    if (active.has(day.day)) {
-      current += 1;
-      best = Math.max(best, current);
-    } else {
-      current = 0;
-    }
-  }
-  return best;
-}
-
-function currentActivityStreak(analytics: AnalyticsResponse | null): number {
-  if (!analytics) return 0;
-  const active = new Set(
-    analytics.daily
-      .filter((day) => day.sessions > 0 || day.input_tokens + day.output_tokens > 0)
-      .map((day) => day.day),
-  );
-  let count = 0;
-  const cursor = new Date();
-  for (let i = 0; i < 365; i += 1) {
-    const key = dayKey(cursor);
-    if (!active.has(key)) break;
-    count += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return count;
-}
-
-function favoriteModel(analytics: AnalyticsResponse | null): string {
-  const model = analytics?.by_model?.[0]?.model;
-  if (!model) return "pending";
-  return model.split("/").slice(-1)[0] || model;
-}
-
-function usageHeatmapDays(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-): Array<{
-  apiCalls: number;
-  key: string;
-  level: number;
-  sessions: number;
-  tip: string;
-  tokens: number;
-}> {
-  const byDay = new Map(
-    (analytics?.daily ?? []).map((day) => [day.day, day]),
-  );
-  const maxTokens = Math.max(1, ...Array.from(byDay.values()).map(dailyTokenTotal));
-  const days: Array<{
-    apiCalls: number;
-    key: string;
-    level: number;
-    sessions: number;
-    tip: string;
-    tokens: number;
-  }> = [];
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
-  const sortedDays = analytics?.daily ?? [];
-  let count = range === "7d" ? 7 : range === "30d" ? 30 : 30;
-  let cursor = addDays(today, -(count - 1));
-  if (range === "all" && sortedDays.length > 0) {
-    const first = parseAnalyticsDay(sortedDays[0].day);
-    const last = parseAnalyticsDay(sortedDays[sortedDays.length - 1].day);
-    const totalDays = Math.max(1, Math.round((last.getTime() - first.getTime()) / DAY_MS) + 1);
-    count = Math.min(91, totalDays);
-    cursor = addDays(last, -(count - 1));
-  }
-  const rangeText = analyticsRangeLabel(range).toLowerCase();
-  for (let i = 0; i < count; i += 1) {
-    const key = dayKey(cursor);
-    const entry = byDay.get(key);
-    const tokens = entry ? dailyTokenTotal(entry) : 0;
-    const sessions = entry?.sessions ?? 0;
-    const apiCalls = entry?.api_calls ?? 0;
-    const level = tokens === 0 ? 0 : Math.max(1, Math.min(5, Math.ceil((tokens / maxTokens) * 5)));
-    const tip = [
-      `${formatAnalyticsDay(key)} · ${rangeText}`,
-      `${formatCompactNumber(tokens)} tokens`,
-      `${formatCompactNumber(sessions)} sessions · ${formatCompactNumber(apiCalls)} calls`,
-    ].join("\n");
-    days.push({ apiCalls, key, level, sessions, tip, tokens });
-    cursor = addDays(cursor, 1);
-  }
-  return days;
-}
-
-function heatmapWindowLabel(
-  analytics: AnalyticsResponse | null,
-  range: StartAnalyticsRange,
-  days: Array<{ key: string }>,
-): string {
-  if (!analytics || days.length === 0) return `${analyticsRangeLabel(range)} · loading`;
-  const first = days[0].key;
-  const last = days[days.length - 1].key;
-  const visibleRange = `${formatAnalyticsDayShort(first)}-${formatAnalyticsDayShort(last)}`;
-  if (range !== "all") return `${analyticsRangeLabel(range)} · ${visibleRange}`;
-  const dataFirst = analytics.daily[0]?.day;
-  const dataLast = analytics.daily[analytics.daily.length - 1]?.day;
-  if (!dataFirst || !dataLast) return `All time · ${visibleRange}`;
-  if (dataFirst !== first) {
-    return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)} · heatmap recent ${days.length}d`;
-  }
-  return `All time · ${formatAnalyticsDayShort(dataFirst)}-${formatAnalyticsDayShort(dataLast)}`;
 }
 
 function normalizeUsage(raw: unknown): UsageInfo | null {
@@ -2917,36 +2699,7 @@ function shouldClearUsageForStatusUpdate(
   kind: string | undefined,
   text: string,
 ): boolean {
-  return (
-    kind === "compacting_context" ||
-    ((kind == null || kind === "status") && shouldClearUsageForStatus(text))
-  );
-}
-
-function shouldAcceptGatewayEventSession(
-  eventSessionId: string | null | undefined,
-  activeSessionId: string | null | undefined,
-  ownedSessionIds: Set<string>,
-): boolean {
-  const eventId = (eventSessionId ?? "").trim();
-  if (!eventId) return false;
-  const activeId = (activeSessionId ?? "").trim();
-  return eventId === activeId || ownedSessionIds.has(eventId);
-}
-
-function hasUnfinishedVisibleTurn(
-  messages: ChatMessage[],
-  ownedSessionIds: Set<string>,
-): boolean {
-  const ownMessages = dropForeignMessages(messages, ownedSessionIds);
-  for (let i = ownMessages.length - 1; i >= 0; i -= 1) {
-    const message = ownMessages[i];
-    if (message.role === "user") return true;
-    if (message.role === "assistant") {
-      return message.status === "streaming";
-    }
-  }
-  return false;
+  return kind === "compacting_context" || shouldClearUsageForStatus(text);
 }
 
 function contextRingTitle(usage: UsageInfo | null): string {
@@ -2965,16 +2718,14 @@ function contextRingTitle(usage: UsageInfo | null): string {
 }
 
 function isOpenPreviewIntent(text: string): boolean {
-  const lower = text.toLowerCase().trim();
-  const target =
-    String.raw`(?:it|this|that|(?:the\s+)?(?:pdf|document|doc|file|artifact|report|output|result|local|screenshot|image|picture|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub))`;
-  return (
-    new RegExp(String.raw`\b(?:open|show|preview|view|display)\s+(?:me\s+)?(?:up\s+)?${target}\b`).test(
-      lower,
-    ) ||
-    new RegExp(String.raw`\b(?:pull|bring|pop)\s+(?:${target}\s+up|up\s+${target})\b`).test(
-      lower,
-    )
+  const lower = text.toLowerCase();
+  const asksToOpen =
+    /\b(open|show|preview|view|display)\b/.test(lower) ||
+    /\b(pull|bring|pop)\s+(it|this|that|up)\b/.test(lower);
+  if (!asksToOpen) return false;
+
+  return /\b(it|this|that|pdf|document|doc|file|artifact|report|output|result|local|side\s*bar|sidebar|side\s*pane|right\s*side|preview\s*pane|hub)\b/.test(
+    lower,
   );
 }
 
@@ -3298,8 +3049,6 @@ export default function ChatPage() {
     [storeMessages],
   );
   const messages = TRANSCRIPT_STORE_ENABLED ? storeMessagesAsChat : messagesRaw;
-  const messagesRef = useRef<ChatMessage[]>(messages);
-  messagesRef.current = messages;
 
   useEffect(() => {
     const current = currentAssistantRef.current;
@@ -4572,7 +4321,6 @@ export default function ChatPage() {
   useEffect(() => {
     const prev = prevMessagesForTraceRef.current;
     prevMessagesForTraceRef.current = messages;
-    if (!isBlankTraceEnabled()) return;
     try {
       // Content fingerprint: an id remap (cache `stored-N` id -> server id for
       // the SAME answer, which happens on every resume) must NOT count as a
@@ -5023,15 +4771,10 @@ export default function ChatPage() {
         typeof ev.session_id === "string" && ev.session_id.trim()
           ? ev.session_id
           : null;
-      // A draft/new chat intentionally owns no session ids yet, so this still
-      // accepts none. Once resumed, accept every id the server reported for the
-      // chat (gateway, persisted, lineage) so compaction/reconnect id drift
-      // doesn't make the live turn go deaf.
-      return shouldAcceptGatewayEventSession(
-        eventSessionId,
-        active,
-        ownedSessionIdsRef.current,
-      );
+      // A draft/new chat intentionally has no session yet. Treat that as
+      // "accept none" for session events, not "accept everything"; otherwise
+      // a still-streaming old chat can paint into the fresh view.
+      return Boolean(active && eventSessionId && eventSessionId === active);
     };
 
     const trackTool = (ev: GatewayEvent) => {
@@ -7106,17 +6849,8 @@ export default function ChatPage() {
   }, [gw, messages, sessionId, state]);
 
   const removeQueuedInput = useCallback((queuedId: string) => {
-    const item = queuedInputs.find((queued) => queued.id === queuedId);
     setQueuedInputs((prev) => prev.filter((item) => item.id !== queuedId));
-    const visibleUserMessageId = item
-      ? queuedInputExistingUserMessageId(item)
-      : undefined;
-    if (visibleUserMessageId) {
-      setMessages((prev) =>
-        prev.filter((message) => message.id !== visibleUserMessageId),
-      );
-    }
-  }, [queuedInputs, setMessages]);
+  }, []);
 
   // A steer was APPLIED — this is the insertion point. The run itself never
   // changes (same header, status, timer). Three things happen here, in
@@ -7303,16 +7037,11 @@ export default function ChatPage() {
 
     queueDispatchRef.current = true;
     setQueuedInputs((prev) => prev.filter((item) => item.id !== next.id));
-    const visibleUserMessageId = queuedInputExistingUserMessageId(next);
-    const reuseVisibleUserMessage = Boolean(visibleUserMessageId);
     void submitGatewayPrompt(
       next.text,
       next.routedText,
       next.agentId,
       "Sending queued follow-up...",
-      undefined,
-      reuseVisibleUserMessage,
-      visibleUserMessageId,
     ).finally(() => {
       queueDispatchRef.current = false;
     });
@@ -7333,20 +7062,6 @@ export default function ChatPage() {
     if (!sid) return;
     let misses = 0;
     let cancelled = false;
-    const settleMissingRun = () => {
-      const unfinished = hasUnfinishedVisibleTurn(
-        messagesRef.current,
-        ownedSessionIdsRef.current,
-      );
-      setMessages((prev) => markStreamingTurnsInterrupted(prev));
-      currentAssistantRef.current = null;
-      liveGatewayMsgIdRef.current = null;
-      setTools([]);
-      setActivityTrace([]);
-      setCompacting(false);
-      setBusy(false);
-      setStatusText(unfinished ? "Interrupted before response was saved" : "Ready");
-    };
     const iv = window.setInterval(() => {
       void gw
         .request<{ running?: boolean }>("session.running", { session_id: sid })
@@ -7355,7 +7070,8 @@ export default function ChatPage() {
           if (res && res.running === false) {
             misses += 1;
             if (misses >= 2) {
-              settleMissingRun();
+              setBusy(false);
+              setStatusText("Ready");
             }
           } else {
             misses = 0;
@@ -7371,7 +7087,8 @@ export default function ChatPage() {
           if (/session not found/i.test(message)) {
             misses += 1;
             if (misses >= 2) {
-              settleMissingRun();
+              setBusy(false);
+              setStatusText("Ready");
             }
           }
           /* other errors: transient (gateway busy/race) — keep polling */
@@ -7381,7 +7098,7 @@ export default function ChatPage() {
       cancelled = true;
       window.clearInterval(iv);
     };
-  }, [busy, state, gw, setMessages]);
+  }, [busy, state, gw]);
 
   // Stalled-turn self-hydrate (main chats). A reconnect/draft-mint race can
   // bind the view to one live session while the turn streams on another —
@@ -7752,16 +7469,18 @@ export default function ChatPage() {
       if (!targetSessionId || (state !== "open" && !draftChat)) {
         if (showedUserMessage) {
           setBusy(false);
-          // The optimistic bubble already painted. Keep it visible while the
-          // transport reconnects; the queued item below remembers its id and
-          // reuses it when the submit actually reaches the gateway. Only remove
-          // the empty assistant stub, otherwise the chat looks like it swallowed
-          // the user's message during the reconnect flash.
+          // The optimistic bubble + thinking stub were already painted, and
+          // the queued chip below renders the SAME text — remove the bubble
+          // so the message isn't shown twice (the drain re-appends it when
+          // it actually sends). This was the bubble+chip double-render after
+          // a websocket drop.
           const stubId = currentAssistantRef.current;
           currentAssistantRef.current = null;
           setMessages((prev) =>
             prev.filter(
-              (m) => (stubId ? m.id !== stubId : true),
+              (m) =>
+                m.id !== optimisticUserMessageId &&
+                (stubId ? m.id !== stubId : true),
             ),
           );
         }
@@ -7772,7 +7491,6 @@ export default function ChatPage() {
           routedText,
           status: "queued",
           text: trimmed,
-          userMessageId: showedUserMessage ? optimisticUserMessageId : undefined,
         };
         setQueuedInputs((prev) => [...prev, queued].slice(-5));
         setStatusText("Queued until connected");
@@ -9173,6 +8891,7 @@ export default function ChatPage() {
                   onRefresh={() => void refreshWorkspaceStatus(false, true)}
                   onReview={reviewWorkspaceChanges}
                   status={workspaceStatus}
+                  thinking={busy}
                 />
               )}
 
@@ -9393,14 +9112,8 @@ export default function ChatPage() {
 }
 
 function EmptyState({
-  analytics,
-  loading,
-  onRangeChange,
-  onViewChange,
-  range,
   state,
   userName,
-  view,
 }: {
   analytics: AnalyticsResponse | null;
   loading: boolean;
@@ -9411,140 +9124,21 @@ function EmptyState({
   userName: string;
   view: "overview" | "models";
 }) {
-  const totalTokens =
-    (analytics?.totals.total_input ?? 0) +
-    (analytics?.totals.total_output ?? 0) +
-    (analytics?.totals.total_cache_read ?? 0) +
-    (analytics?.totals.total_reasoning ?? 0);
-  const mostActiveDay = (analytics?.daily ?? []).reduce<AnalyticsResponse["daily"][number] | null>(
-    (best, day) => {
-      const tokens = day.input_tokens + day.output_tokens + day.reasoning_tokens;
-      const bestTokens = best
-        ? best.input_tokens + best.output_tokens + best.reasoning_tokens
-        : -1;
-      return tokens > bestTokens ? day : best;
-    },
-    null,
-  );
-  const metrics = [
-    { label: "Sessions", value: formatCompactNumber(analytics?.totals.total_sessions) },
-    { label: "Calls", value: formatCompactNumber(analytics?.totals.total_api_calls) },
-    { label: "Total tokens", value: formatCompactNumber(totalTokens) },
-    { label: "Active days", value: formatCompactNumber(activeDayCount(analytics)) },
-    { label: "Current streak", value: `${currentActivityStreak(analytics)}d` },
-    { label: "Longest streak", value: `${longestActivityStreak(analytics)}d` },
-    {
-      label: "Peak day",
-      value: mostActiveDay
-        ? new Date(`${mostActiveDay.day}T12:00:00`).toLocaleDateString([], {
-            month: "short",
-            day: "numeric",
-          })
-        : "pending",
-    },
-    { label: "Favorite model", value: favoriteModel(analytics) },
-  ];
-  const heatmapDays = usageHeatmapDays(analytics, range);
-  const heatmapWindow = heatmapWindowLabel(analytics, range, heatmapDays);
-  const modelRows = analytics?.by_model?.slice(0, 6) ?? [];
-
+  const who = userName && userName.trim() ? `, ${userName.trim()}` : "";
   return (
     <div className="chat-start">
-      <div className="chat-start-title">
-        <span className="chat-start-mark" aria-hidden="true">
-          {state === "connecting" ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <Sparkles className="h-5 w-5" />
-          )}
-        </span>
-        <h2>{`What's up next, ${userName}?`}</h2>
-      </div>
-      <section className="chat-start-card" aria-label="Usage overview">
-        <div className="chat-start-toolbar">
-          <div className="chat-start-tabs" role="tablist" aria-label="Start view">
-            {(["overview", "models"] as const).map((item) => (
-              <button
-                key={item}
-                aria-pressed={view === item}
-                className={cn("chat-start-tab", view === item && "active")}
-                onClick={() => onViewChange(item)}
-                type="button"
-              >
-                {item === "overview" ? "Overview" : "Models"}
-              </button>
-            ))}
-          </div>
-          <div className="chat-start-tabs compact" aria-label="Usage range">
-            {([
-              ["all", "All"],
-              ["30d", "30d"],
-              ["7d", "7d"],
-            ] as const).map(([key, label]) => (
-              <button
-                key={key}
-                aria-pressed={range === key}
-                className={cn("chat-start-tab", range === key && "active")}
-                onClick={() => onRangeChange(key)}
-                type="button"
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+      <div className="ozzie-greeting">
+        <div className="ozzie-bubble">
+          <p className="ozzie-bubble-lead">Hi! I'm Ozzie, your executive assistant.</p>
+          <p>Need a hand? Or eight? What are we working on today{who}?</p>
         </div>
-        {view === "overview" ? (
-          <>
-            <div className="chat-start-window">{heatmapWindow}</div>
-            <div className="chat-start-metrics">
-              {metrics.map((metric) => (
-                <div className="chat-start-metric" key={metric.label}>
-                  <span>{metric.label}</span>
-                  {loading ? <Skeleton className="h-5 w-12" /> : <strong>{metric.value}</strong>}
-                </div>
-              ))}
-            </div>
-            <div className="chat-start-heatmap" aria-label="Recent activity">
-              {heatmapDays.map((day) => (
-                <span
-                  aria-label={day.tip.replace(/\n/g, ", ")}
-                  className={`chat-start-heat heat-${day.level}`}
-                  data-tip={day.tip}
-                  key={day.key}
-                  tabIndex={0}
-                  title={day.tip}
-                />
-              ))}
-            </div>
-            <div className="chat-start-note">
-              {loading ? (
-                <Skeleton className="h-4 w-48" />
-              ) : (
-                `${formatCompactNumber(totalTokens)} tokens in ${analyticsRangeLabel(range).toLowerCase()}.`
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="chat-start-models">
-            {modelRows.length ? (
-              modelRows.map((model) => {
-                const tokens = model.input_tokens + model.output_tokens;
-                return (
-                  <div className="chat-start-model" key={model.model}>
-                    <span className="model-name">{model.model.split("/").slice(-1)[0] || model.model}</span>
-                    <span>{formatCompactNumber(tokens)} tokens</span>
-                    <span>{formatCompactNumber(model.sessions)} sessions</span>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="chat-start-empty-models">
-                {loading ? <Skeleton className="h-5 w-40" /> : "No model activity yet"}
-              </div>
-            )}
-          </div>
-        )}
-      </section>
+        <img
+          className={cn("ozzie-img", state === "connecting" && "thinking")}
+          src="/octo-loader.png"
+          alt="Ozzie, your octopus executive assistant"
+          draggable={false}
+        />
+      </div>
     </div>
   );
 }
@@ -9558,6 +9152,7 @@ function ComposerStageBar({
   onRefresh,
   onReview,
   status,
+  thinking,
 }: {
   folderLabel?: string;
   info: SessionInfo;
@@ -9567,6 +9162,7 @@ function ComposerStageBar({
   onRefresh(): void;
   onReview(): void;
   status: WorkspaceGitStatus | null;
+  thinking: boolean;
 }) {
   const cwdLabel = info.cwd
     ?.replace(/\/+$/, "")
@@ -9602,6 +9198,7 @@ function ComposerStageBar({
 
   return (
     <div className="composer-stage">
+      <ComposerOzzieMascot thinking={thinking} />
       <button className="stage-link workspace" type="button" onClick={onOpenWorkspace} title={pathTitle}>
         <Folder aria-hidden="true" />
         <span className="repo">{workspace}</span>
@@ -9656,6 +9253,21 @@ function ComposerStageBar({
 }
 
 const MemoComposerStageBar = memo(ComposerStageBar);
+
+function ComposerOzzieMascot({ thinking }: { thinking: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn("composer-ozzie", thinking && "composer-ozzie--thinking")}
+    >
+      <img
+        alt=""
+        draggable={false}
+        src={thinking ? "/ozzie-loader/thinking/ozzie-thinking-64.webp" : "/ozzie/ozzie-head.png"}
+      />
+    </div>
+  );
+}
 
 function QueuedInputStrip({
   busy,
@@ -11300,12 +10912,13 @@ function useRotatingVerb(busy: boolean): string {
 function defaultActivityDigestOpen({
   busy,
   hasErroredStep,
+  hasSteps,
 }: {
   busy: boolean;
   hasErroredStep: boolean;
   hasSteps: boolean;
 }): boolean {
-  return hasErroredStep || busy;
+  return hasErroredStep || hasSteps || busy;
 }
 
 function resolveActivityDigestVisibility({
@@ -11330,31 +10943,11 @@ function resolveActivityDigestVisibility({
   };
 }
 
-function activityTraceStepCount(
-  activityTrace: ActivityTrace[],
-  showReasoning: boolean,
-): number {
-  return activityTrace.reduce((count, trace) => {
-    if (
-      trace.kind === "marker" ||
-      trace.kind === "steer" ||
-      trace.kind === "interim"
-    ) {
-      return count + 1;
-    }
-    if (trace.kind !== "reasoning" && trace.kind !== "thinking") return count;
-    if (!showReasoning) return count;
-    if (!trace.text.trim() || isTransientStatus(trace.text)) return count;
-    return count + 1;
-  }, 0);
-}
-
 // Working/worked digest. While a turn streams, the header is the live
 // meter: pulsing accent mark + a cycling thinking verb + elapsed + running
 // token count, and the breakdown is expanded by default so reasoning (grey)
 // and tool calls scroll in chronologically as they happen. Once the turn
-// completes, the summary stays visible and the full breakdown is lazy until
-// opened; long sessions otherwise repaint hundreds of historical step rows.
+// completes, the same full breakdown stays open unless the user closes it.
 function ChatActivityDigest({
   activityTrace,
   busy,
@@ -11396,18 +10989,9 @@ function ChatActivityDigest({
     return () => window.clearInterval(timer);
   }, [busy]);
 
-  const visibleToolStepCount = useMemo(
-    () => tools.filter((tool) => tool.name.toLowerCase() !== "memory").length,
-    [tools],
-  );
-  const visibleTraceStepCount = useMemo(
-    () => activityTraceStepCount(activityTrace, showReasoning),
-    [activityTrace, showReasoning],
-  );
-  const estimatedStepCount = visibleToolStepCount + visibleTraceStepCount;
-  const hasErroredStep = useMemo(
-    () => tools.some((tool) => tool.status === "error"),
-    [tools],
+  const steps = useMemo(
+    () => buildBreakdownSteps(tools, activityTrace, { showReasoning }),
+    [tools, activityTrace, showReasoning],
   );
   const memoryTools = useMemo(
     () => tools.filter((tool) => tool.name.toLowerCase() === "memory"),
@@ -11422,17 +11006,15 @@ function ChatActivityDigest({
   // is actually producing — no faked level. Mirrors Claude Code's
   // "still thinking with high effort" tail on the status line.
   const reasoningTokens = useMemo(
-    () => {
-      if (!busy) return 0;
-      return activityTrace.reduce(
+    () =>
+      activityTrace.reduce(
         (sum, trace) =>
           trace.kind === "reasoning" || trace.kind === "thinking"
             ? sum + estimateTokens(trace.text)
             : sum,
         0,
-      );
-    },
-    [activityTrace, busy],
+      ),
+    [activityTrace],
   );
   const effortDescriptor =
     busy && reasoningTokens > 0
@@ -11448,28 +11030,23 @@ function ChatActivityDigest({
     tools.length > 0 ||
     activityTrace.length > 0 ||
     typeof tokenCount === "number";
-  const visibility = resolveActivityDigestVisibility({
-    busy,
-    hasErroredStep,
-    hasSteps: estimatedStepCount > 0,
-    userOpen: open,
-  });
-  const { expanded } = visibility;
-  const steps = useMemo(
-    () =>
-      visibility.showSteps
-        ? buildBreakdownSteps(tools, activityTrace, { showReasoning })
-        : [],
-    [activityTrace, showReasoning, tools, visibility.showSteps],
-  );
-  const displayedStepCount = visibility.showSteps
-    ? steps.length
-    : estimatedStepCount;
   if (!show) return null;
 
   const start = startedAt ?? activityStartedAt(tools, activityTrace);
   const end = busy ? now : completedAt ?? activityFinishedAt(tools, start);
   const duration = formatDuration(Math.max(0, end - start));
+  const hasErroredStep = steps.some((step) =>
+    step.type === "tool"
+      ? step.status === "error"
+      : step.type === "group" && step.tools.some((tool) => tool.status === "error"),
+  );
+  const visibility = resolveActivityDigestVisibility({
+    busy,
+    hasErroredStep,
+    hasSteps: steps.length > 0,
+    userOpen: open,
+  });
+  const { expanded } = visibility;
   // While a delegation runs, the parent streams nothing — without folding in
   // the children's relayed activity the pill reads "Planning · 0 out" for the
   // whole wait and looks hung.
@@ -11567,10 +11144,10 @@ function ChatActivityDigest({
               <span className="num">{duration}</span>
             </>
           )}
-          {!busy && displayedStepCount > 0 && (
+          {!busy && steps.length > 0 && (
             <>
               <span className="dot-sep">·</span>
-              <span className="num">{plural(displayedStepCount, "step")}</span>
+              <span className="num">{plural(steps.length, "step")}</span>
             </>
           )}
           {busy && childSteps > 0 && (
@@ -11609,7 +11186,7 @@ function ChatActivityDigest({
             </>
           )}
         </span>
-        {(busy || displayedStepCount > 0) && (
+        {(busy || steps.length > 0) && (
           <ChevronDown
             className={cn(
               "processing-chev shrink-0",

@@ -952,24 +952,6 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         assert resp.json()["info"]["title"] == "Elevate"
 
-    def test_unmatched_api_route_returns_json_404_not_spa_html(self):
-        """Unknown /api/* paths must not be swallowed by the SPA fallback."""
-        from starlette.testclient import TestClient
-        from elevate_cli.web_server import WEB_DIST, _SESSION_HEADER_NAME, _SESSION_TOKEN, app
-
-        if not (WEB_DIST / "index.html").exists():
-            pytest.skip("frontend bundle not built")
-
-        resp = TestClient(app).get(
-            "/api/definitely-missing-route",
-            headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
-        )
-
-        assert resp.status_code == 404
-        assert resp.headers["content-type"].startswith("application/json")
-        assert resp.json() == {"error": "API route not found"}
-        assert "window.__ELEVATE_SESSION_TOKEN__" not in resp.text
-
     def test_file_preview_allows_temp_artifact(self):
         artifact = Path(tempfile.gettempdir()) / "elevate-preview-test.txt"
         artifact.write_text("preview ok", encoding="utf-8")

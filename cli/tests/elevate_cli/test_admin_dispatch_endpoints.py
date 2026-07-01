@@ -332,7 +332,7 @@ def test_admin_run_dispatch_waits_for_verified_admin_setup():
     assert "admin setup is required" in runs[0]["payload"]["dispatchBlocked"]["message"]
 
 
-def test_stale_running_action_runs_fail_with_visible_error():
+def test_stale_running_action_runs_requeue_then_fail_with_visible_error():
     stale_at = "2026-05-01T00:00:00+00:00"
     with connect() as conn:
         deal = create_deal(
@@ -374,9 +374,26 @@ def test_stale_running_action_runs_fail_with_visible_error():
         recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker")
 
     assert len(recovered) == 1
+    assert recovered[0]["status"] == "queued"
+    assert recovered[0]["payload"]["recovery"]["event"] == "stale_running_requeued"
+    assert recovered[0]["payload"]["recovery"]["attempts"] == 1
+
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE admin_action_runs
+            SET status='running', started_at=?, updated_at=?
+            WHERE id=?
+            """,
+            (stale_at, stale_at, run_id),
+        )
+        recovered = mark_stale_action_runs(conn, max_running_minutes=120, actor="test-worker", max_retries=1)
+
+    assert len(recovered) == 1
     assert recovered[0]["status"] == "failed"
     assert "120 minute" in recovered[0]["errorMessage"]
     assert recovered[0]["payload"]["recovery"]["event"] == "stale_running_failed"
+    assert recovered[0]["payload"]["recovery"]["attempts"] == 1
 
 
 def test_same_stage_move_does_not_create_duplicate_action_run():
@@ -503,7 +520,7 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert {
         "real-estate-admin/pre-cma-dashboard-setup",
         "real-estate-admin/lofty-crm-client-contacts",
-        "real-estate-admin/cma-generator",
+        "real-estate-admin/cma",
         "real-estate-admin/mlc",
         "real-estate-admin/deal-matcher",
         "real-estate-admin/skyslope-sync",
@@ -522,6 +539,8 @@ def test_seed_default_admin_actions_is_idempotent_and_keeps_cron_watchers_out(cl
     assert created_names["Pre-CMA: Verify CRM contact"]["toStage"] == 0
     # CMA generates at stage 1, MLC intake/documents land at Listing Intake (stage 2).
     assert created_names["CMA: Generate evaluation"]["toStage"] == 1
+    assert created_names["CMA: Generate evaluation"]["skill"] == "real-estate-admin/cma"
+    assert created_names["CMA: Generate evaluation"]["skillArgs"] == {"mode": "seller_evaluation"}
     assert created_names["Listing Intake: Collect MLC info"]["skillArgs"] == {"mode": "intake"}
     assert created_names["Listing Intake: Collect MLC info"]["toStage"] == 2
     assert created_names["Listing Intake: Prepare MLC documents"]["skillArgs"] == {"mode": "documents"}
@@ -635,7 +654,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     done = json.loads(_admin_deal_handler({
         "action": "complete_run",
         "deal_id": did,
-        "skill": "cma-generator",
+        "skill": "real-estate-admin/cma",
         "checklist_updates": [
             {"id": "cma_pdf_ready", "completed": True},
             {"id": "pricing_story_approved", "completed": True},
@@ -650,7 +669,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
 
     with connect() as conn:
         runs = list_action_runs(conn, deal_id=did)
-    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma-generator")
+    cma = next(r for r in runs if r["skill"] == "real-estate-admin/cma")
     assert cma["status"] in {"succeeded", "completed"}
 
 

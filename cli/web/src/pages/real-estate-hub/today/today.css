@@ -36,7 +36,7 @@
 
 /* Card primitive */
 .td-card {
-  background: var(--bg-1);
+  background: var(--bg-2);
   border: 1px solid var(--border-soft);
   border-radius: 7px;
   overflow: clip;
@@ -114,7 +114,7 @@
 @media (max-width: 760px)  { .td-pulse-grid { grid-template-columns: repeat(2, 1fr); } }
 
 .td-pulse-card {
-  background: var(--bg-1);
+  background: var(--bg-2);
   border: 1px solid var(--border-soft);
   border-radius: 6px;
   padding: 11px 12px 12px;
@@ -123,7 +123,7 @@
   position: relative;
   transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out);
 }
-.td-pulse-card:hover { border-color: var(--border); background: var(--bg-2); }
+.td-pulse-card:hover { border-color: var(--border); background: color-mix(in srgb, var(--fg) 4%, var(--bg-2)); }
 .td-pulse-card-top {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
@@ -878,6 +878,44 @@
 }
 
 
+/* ─────────────────────────────────────────────────────────────
+   THEME OVERRIDES — moved to src/index.css and re-scoped to
+   :root[data-app-theme="X"] so the 3 themes apply GLOBALLY across
+   every dashboard page (Today, Admin, Leads, Social, etc.), not just
+   the Today route. today.css only loads on Today, so the token blocks
+   can't live here anymore. The toggle UI below stays put.
+───────────────────────────────────────────────────────────── */
+
+/* ───────── Theme toggle (segmented control in the pulse header) ───────── */
+.td-theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.td-theme-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-faint);
+  font: 500 10px/1 "Geist Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 5px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+.td-theme-btn:hover { color: var(--fg-muted); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+.td-theme-btn.active {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
 /* ───────── Embedded-mode override (matches leads.css pattern) ───────── */
 .app.today-design-embedded {
   position: relative;
@@ -893,4 +931,121 @@
 .app.today-design-embedded .sidebar,
 .app.today-design-embedded .tweaks-panel {
   display: none;
+}
+
+/* ─── BoardLoader octopus styles (mirrored from admin/admin.css; keep in sync) ─── */
+/* ─────────────────────────────────────────────────────────────────
+   BoardLoader — cute on-brand loading state
+   Brand: navy #182848 · brand blue #5E8AD0 · brand orange #C46340
+   ───────────────────────────────────────────────────────────────── */
+
+.bl-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 260px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.bl-stage {
+  position: relative;
+  width: 108px;
+  height: 116px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.bl-octo {
+  position: relative;
+  z-index: 2;
+  width: 96px;
+  height: auto;
+  transform-origin: 50% 100%;
+  animation: bl-bounce 1s ease-in-out infinite;
+  filter: drop-shadow(0 4px 6px rgba(24, 40, 72, 0.16));
+}
+
+.bl-shadow {
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  width: 64px;
+  height: 12px;
+  margin-left: -32px;
+  border-radius: 50%;
+  background: rgba(24, 40, 72, 0.18);
+  filter: blur(1.5px);
+  transform-origin: 50% 50%;
+  animation: bl-shadow-scale 1s ease-in-out infinite;
+}
+
+.bl-caption {
+  font-size: 14px;
+  font-weight: 500;
+  color: #6b7280;
+  letter-spacing: 0.01em;
+}
+
+.bl-dots {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.bl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: bl-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.bl-dot-1 { background: #5E8AD0; animation-delay: 0s; }
+.bl-dot-2 { background: #C46340; animation-delay: 0.18s; }
+.bl-dot-3 { background: #5E8AD0; animation-delay: 0.36s; }
+
+.bl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes bl-bounce {
+  0%, 100% { transform: translateY(0) scaleX(1) scaleY(1); }
+  45%      { transform: translateY(-26px) scaleX(0.95) scaleY(1.05); }
+  55%      { transform: translateY(-26px) scaleX(0.95) scaleY(1.05); }
+  78%      { transform: translateY(0) scaleX(1.06) scaleY(0.94); }
+}
+
+@keyframes bl-shadow-scale {
+  0%, 100% { transform: scale(1); opacity: 0.18; }
+  50%      { transform: scale(0.6); opacity: 0.10; }
+}
+
+@keyframes bl-dot-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  40%      { opacity: 1; transform: scale(1.25); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bl-octo {
+    animation: bl-soft-pulse 1.6s ease-in-out infinite;
+  }
+  .bl-shadow { animation: none; opacity: 0.14; }
+  .bl-dot { animation: bl-soft-pulse 1.6s ease-in-out infinite; }
+}
+
+@keyframes bl-soft-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
 }

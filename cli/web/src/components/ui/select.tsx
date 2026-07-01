@@ -92,7 +92,7 @@ export function Select({
         onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={handleKeyDown}
         className={cn(
-          "flex h-9 w-full items-center justify-between rounded-sm border border-border bg-background px-3 py-1 font-sans text-sm text-left transition-colors",
+          "flex h-9 w-full items-center justify-between rounded-sm border border-input bg-field px-3 py-1 font-sans text-sm text-left text-foreground transition-colors",
           "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/70 focus-visible:border-ring/40",
           "disabled:cursor-not-allowed disabled:opacity-50",
           "cursor-pointer",

@@ -30,6 +30,7 @@ import {
   type LeadsDraftAction,
 } from "../leads-data";
 import { ActionQueue } from "./action-queue";
+import { matchesLeadsSourceFilter } from "./action-queue-helpers";
 import {
   ActivityTicker,
   AppleMessagesToggleBar,
@@ -42,6 +43,7 @@ import {
 import { ProfileDrawer } from "./profile-drawer";
 import { ProfilesList } from "./profiles-list";
 import { SentView } from "./sent-view";
+import { NotSentView } from "./not-sent-view";
 import { TemplatesView, type TemplateMutations } from "./templates-view";
 
 export type { TemplateMutations } from "./templates-view";
@@ -110,6 +112,8 @@ export function LeadsBoard(props: LeadsBoardProps) {
     : null;
 
   const sources = props.sources ?? DEFAULT_SOURCES;
+  // The Paid Ads tab is the Action board scoped to the paid-ad lead source.
+  const paidAdsSourceId = sources.find((s) => /paid\s*ads/i.test(s.label))?.id ?? "";
   const drafts = props.drafts ?? DEFAULT_DRAFTS;
   const channels = props.channels ?? DEFAULT_CHANNELS;
   const schedules = props.schedules ?? DEFAULT_SCHEDULES;
@@ -272,6 +276,23 @@ export function LeadsBoard(props: LeadsBoardProps) {
 
         {tab === "sent" && (
           <SentView messages={sent} onRefresh={props.onSentRefresh} />
+        )}
+        {tab === "didnt-send" && <NotSentView />}
+        {tab === "paid-ads" && (
+          <ActionQueue
+            drafts={drafts}
+            pipeline={{
+              ...pipeline,
+              hot: pipeline.hot.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
+              followups: pipeline.followups.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
+              skipped: pipeline.skipped.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
+            }}
+            sourceFilter={paidAdsSourceId}
+            onDraftAction={props.onDraftAction}
+            onDraftActionComplete={props.onDraftActionComplete}
+            onEditTemplate={() => setTab("templates")}
+            onOpenHotLead={openHotLead}
+          />
         )}
       </div>
 

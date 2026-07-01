@@ -901,6 +901,12 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
     monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
     monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+    import elevate_cli.agent_hub as agent_hub
+    monkeypatch.setattr(
+        agent_hub,
+        "agent_recent_activity_digest",
+        lambda _agent_id: "[RECENT AUTONOMOUS ACTIVITY]\nheartbeat ran\n[/RECENT AUTONOMOUS ACTIVITY]",
+    )
 
     server.handle_request(
         {
@@ -914,10 +920,9 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
         }
     )
 
-    assert captured == {
-        "prompt": "[hub context]\n\nUser request: open it",
-        "persist_user_message": "open it",
-    }
+    assert captured["prompt"].endswith("[hub context]\n\nUser request: open it")
+    assert "RECENT AUTONOMOUS ACTIVITY" in captured["prompt"]
+    assert captured["persist_user_message"] == "open it"
 
 
 def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
@@ -1386,25 +1391,6 @@ def test_session_compress_rejects_while_running(monkeypatch):
         server._sessions.pop("sid", None)
 
 
-def test_session_running_accepts_persisted_session_key():
-    server._sessions["live1234"] = _session(
-        running=True,
-        session_key="20260620_081450_33822d",
-    )
-    try:
-        resp = server.handle_request(
-            {
-                "id": "1",
-                "method": "session.running",
-                "params": {"session_id": "20260620_081450_33822d"},
-            }
-        )
-
-        assert resp["result"] == {"running": True}
-    finally:
-        server._sessions.pop("live1234", None)
-
-
 def test_rollback_restore_rejects_full_history_while_running(monkeypatch):
     """Full-history rollback must reject; file-scoped rollback still allowed."""
     server._sessions["sid"] = _session(running=True)
@@ -1539,79 +1525,6 @@ def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
         assert len(complete_calls) == 1
         _, _, payload = complete_calls[0]
         assert "warning" not in payload
-    finally:
-        server._sessions.pop("sid", None)
-
-
-def test_prompt_submit_tool_only_empty_response_marks_interrupted(monkeypatch):
-    """A turn that ends after tools but returns no final text must not look done."""
-
-    class _Agent:
-        def run_conversation(
-            self, prompt, conversation_history=None, stream_callback=None,
-            **kwargs,
-        ):
-            return {
-                "final_response": "",
-                "messages": [
-                    {"role": "user", "content": "run QA"},
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": "call-1",
-                                "function": {
-                                    "name": "browser_cdp",
-                                    "arguments": "{}",
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "role": "tool",
-                        "content": '{"success": true}',
-                        "tool_call_id": "call-1",
-                        "tool_name": "browser_cdp",
-                    },
-                ],
-            }
-
-    class _ImmediateThread:
-        def __init__(self, target=None, daemon=None):
-            self._target = target
-
-        def start(self):
-            self._target()
-
-    server._sessions["sid"] = _session(agent=_Agent())
-    emits: list[tuple] = []
-    try:
-        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
-        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
-        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
-        monkeypatch.setattr(server, "_emit", lambda *a: emits.append(a))
-
-        resp = server.handle_request(
-            {
-                "id": "1",
-                "method": "prompt.submit",
-                "params": {"session_id": "sid", "text": "run QA"},
-            }
-        )
-        assert resp.get("result")
-
-        complete_calls = [a for a in emits if a[0] == "message.complete"]
-        assert len(complete_calls) == 1
-        _, _, payload = complete_calls[0]
-        assert payload["status"] == "interrupted"
-        assert "stopped after tool activity" in payload["text"]
-        assert "warning" in payload
-
-        history = server._sessions["sid"]["history"]
-        assert history[-1]["role"] == "assistant"
-        assert "stopped after tool activity" in history[-1]["content"]
-        assert history[-1]["finish_reason"] == "interrupted"
     finally:
         server._sessions.pop("sid", None)
 

@@ -166,6 +166,126 @@
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ─────────────────────────────────────────────────────────────
+   GLOBAL THEME OVERRIDES — re-skin the WHOLE dashboard (every page,
+   from first paint) by redefining the design tokens scoped to the
+   document root. App.tsx sets data-app-theme={light|medium|dark} on
+   <html> on mount from localStorage (key "elevate-today-theme");
+   the Today header toggle rewrites it live. Default is "medium".
+   Canvas = --bg / --bg-1 (page background), card = --bg-2 (elevated).
+   Brand accents (terracotta + blue) are identical in all 3 themes.
+   These must live in index.css (always loaded), not today.css (only
+   loaded on the Today route), so non-Today pages theme correctly.
+───────────────────────────────────────────────────────────── */
+
+/* Light — "Warm Paper" */
+:root[data-app-theme="light"],
+html[data-app-theme="light"] {
+  --bg:            #F7F3EC;
+  --bg-1:          #F7F3EC;
+  --bg-2:          #FFFDF9;
+  --fg:            #182848;
+  --fg-muted:      #7A6F60;
+  --fg-faint:      #A99C88;
+  --fg-dim:        #A99C88;
+  --border:        #ECE3D4;
+  --border-soft:   #ECE3D4;
+  --bg-3:          #F2EFE9;
+  --bg-soft:       #EFEAE0;
+  --border-strong: #D8CEBC;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases that feed the shadcn @theme inline --color-* family
+     (chat + Social/Automations/Sessions/Skills surfaces). Overriding the
+     bases re-themes every color-mix()-derived --color-* token at runtime. */
+  --background-base: #F7F3EC;
+  --midground-base:  #182848;
+  --midground:       #182848;
+  /* Hardcoded --color-* tokens that don't derive from the bases — remap them. */
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: #7A6F60;
+}
+
+/* Medium — "Light Grey" (default) */
+:root[data-app-theme="medium"],
+html[data-app-theme="medium"] {
+  --bg:            #E8E9EC;
+  --bg-1:          #E8E9EC;
+  --bg-2:          #FFFFFF;
+  --fg:            #182848;
+  --fg-muted:      #697079;
+  --fg-faint:      #99A0A9;
+  --fg-dim:        #99A0A9;
+  --border:        #DBDEE3;
+  --border-soft:   #DBDEE3;
+  --bg-3:          #F1F3F6;
+  --bg-soft:       #DFE2E6;
+  --border-strong: #C7CCD3;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases feeding shadcn @theme inline --color-* (see light block). */
+  --background-base: #E8E9EC;
+  --midground-base:  #182848;
+  --midground:       #182848;
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: #697079;
+}
+
+/* Dark — "Charcoal" */
+:root[data-app-theme="dark"],
+html[data-app-theme="dark"] {
+  --bg:            #1E1E22;
+  --bg-1:          #1E1E22;
+  --bg-2:          #1B2236;
+  --fg:            #ECF0FA;
+  --fg-muted:      #94A0BC;
+  --fg-faint:      #65718E;
+  --fg-dim:        #65718E;
+  --border:        #2A3450;
+  --border-soft:   #2A3450;
+  --bg-3:          #232C44;
+  --bg-soft:       #161620;
+  --border-strong: #364260;
+  --status-error:  #C46340;
+  --status-warn:   #C46340;
+  --status-done:   #5E8AD0;
+  --status-info:   #5E8AD0;
+
+  /* Foundation bases feeding shadcn @theme inline --color-* (see light block).
+     Dark stays close to the original near-black defaults. */
+  --background-base: #1E1E22;
+  --midground-base:  #ECF0FA;
+  --midground:       color-mix(in srgb, #ECF0FA 100%, transparent);
+  --color-border:           var(--border);
+  --color-input:            var(--border);
+  --color-primary:          #5E8AD0;
+  --color-ring:             #5E8AD0;
+  --color-destructive:      #C46340;
+  --color-muted-foreground: var(--fg-muted);
+}
+
+/* Elevation Real Estate logo: blue on light/medium themes, white on dark. */
+.elev-logo-white { display: none; }
+.elev-logo-blue { display: block; }
+:root[data-app-theme="dark"] .elev-logo-blue,
+html[data-app-theme="dark"] .elev-logo-blue { display: none; }
+:root[data-app-theme="dark"] .elev-logo-white,
+html[data-app-theme="dark"] .elev-logo-white { display: block; }
+
 /* Theme tokens cascade into the document root so every descendant inherits
    the font stack, base size, and letter spacing without explicit calls. */
 html {
@@ -1604,6 +1724,62 @@ html .font-courier {
   color: var(--fg);
 }
 
+/* Ozzie greeting — friendly mascot that replaces the usage card on a new chat. */
+.ozzie-greeting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  padding-top: 18px;
+}
+.ozzie-bubble {
+  position: relative;
+  max-width: 430px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  padding: 16px 24px;
+  box-shadow: 0 8px 26px rgba(24, 40, 72, 0.12);
+  color: var(--fg);
+}
+.ozzie-bubble p { margin: 0; font-size: 15px; line-height: 1.55; }
+.ozzie-bubble-lead { font-weight: 650; margin-bottom: 4px !important; }
+.ozzie-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  transform: translateX(-50%) rotate(45deg);
+  width: 15px;
+  height: 15px;
+  background: var(--bg);
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  border-bottom-right-radius: 3px;
+}
+.ozzie-img {
+  width: 172px;
+  height: auto;
+  margin-top: 8px;
+  filter: drop-shadow(0 10px 18px rgba(24, 40, 72, 0.20));
+  animation: ozzie-float 4s ease-in-out infinite;
+}
+.ozzie-img.thinking {
+  animation: ozzie-bob 1s ease-in-out infinite;
+}
+@keyframes ozzie-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+@keyframes ozzie-bob {
+  0%, 100% { transform: translateY(0) rotate(-2.5deg); }
+  50% { transform: translateY(-5px) rotate(2.5deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ozzie-img, .ozzie-img.thinking { animation: none; }
+}
+
 .chat-start-title {
   display: flex;
   align-items: center;
@@ -1831,6 +2007,7 @@ html .font-courier {
 .composer-stage {
   /* Align with the message *content* box: the column is var wide but .chat-inner
      insets messages 24px each side, so subtract 48px to line the edges up. */
+  position: relative;
   max-width: calc(var(--chat-layout-width) - 48px);
   width: 100%;
   margin: 0 auto 8px;
@@ -1844,6 +2021,56 @@ html .font-courier {
   border: 1px solid var(--border);
   box-sizing: border-box;
   font-size: 12.5px;
+}
+
+.composer-ozzie {
+  position: absolute;
+  right: 20px;
+  top: -49px;
+  z-index: 5;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform-origin: 50% 88%;
+  filter: drop-shadow(0 7px 12px rgba(24, 40, 72, 0.22));
+  transition: opacity 180ms ease-out;
+}
+
+.composer-ozzie img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  transform: translate3d(0, 58px, 0);
+}
+
+.composer-ozzie--thinking {
+  right: 16px;
+  top: -54px;
+  width: 54px;
+  height: 54px;
+  opacity: 1;
+  filter: drop-shadow(0 9px 15px rgba(24, 40, 72, 0.26));
+}
+
+.composer-ozzie--thinking img {
+  animation: composer-ozzie-peek 9.25s ease-in-out infinite;
+}
+
+@keyframes composer-ozzie-peek {
+  0% { transform: translate3d(0, 58px, 0) rotate(0deg) scale(0.98); }
+  6% { transform: translate3d(0, -1px, 0) rotate(-0.8deg) scale(1); }
+  15% { transform: translate3d(0, 0, 0) rotate(0.6deg) scale(1); }
+  25%, 50% { transform: translate3d(0, 58px, 0) rotate(0deg) scale(0.98); }
+  59% { transform: translate3d(-1px, 18px, 0) rotate(-0.8deg) scale(0.99); }
+  68% { transform: translate3d(1px, 17px, 0) rotate(0.6deg) scale(0.99); }
+  78%, 100% { transform: translate3d(0, 58px, 0) rotate(0deg) scale(0.98); }
 }
 
 .composer-stage .repo {
@@ -2058,13 +2285,43 @@ html .font-courier {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .composer-ozzie,
+  .composer-ozzie--thinking,
+  .composer-ozzie img,
   .chat-side-panel-motion,
   .chat-side-panel-backdrop,
   .chat-side-panel-motion .stacked-work-panel {
     animation: none !important;
+    will-change: auto;
+  }
+
+  .composer-ozzie {
+    opacity: 0 !important;
+  }
+
+  .composer-ozzie img {
+    transform: translate3d(0, 58px, 0) !important;
+  }
+
+  .composer-ozzie--thinking {
+    opacity: 1 !important;
+  }
+
+  .composer-ozzie--thinking img {
+    transform: translate3d(0, 18px, 0) !important;
+  }
+
+  .chat-side-panel-motion,
+  .chat-side-panel-backdrop,
+  .chat-side-panel-motion .stacked-work-panel {
     opacity: 1 !important;
     transform: none !important;
-    will-change: auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .composer-ozzie {
+    display: none;
   }
 }
 
@@ -2676,7 +2933,7 @@ html .font-courier {
   border-color: var(--page-border);
 }
 
-.elevate-page-shell textarea {
+.elevate-page-shell textarea:not(.composer-input) {
   border-radius: 0.375rem;
   border-color: var(--page-border-strong);
   background: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
@@ -2711,6 +2968,38 @@ html .font-courier {
 .elevate-docs-shell iframe {
   border-radius: 0.5rem;
   border-color: var(--page-border-strong);
+}
+
+.cron-page {
+  font-size: 0.9375rem;
+}
+
+.cron-page .text-xs,
+.cron-page [class*="text-[11px]"],
+.cron-page [class*="text-[11.5px]"] {
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.cron-page .text-sm,
+.cron-page [class*="text-[12px]"],
+.cron-page [class*="text-[12.5px]"] {
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.cron-page [class*="text-[9px]"],
+.cron-page [class*="text-[9.5px]"],
+.cron-page [class*="text-[10px]"],
+.cron-page [class*="text-[10.5px]"] {
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.cron-page h2,
+.cron-page .text-base {
+  font-size: 1.0625rem;
+  line-height: 1.35;
 }
 
 /* Density: scale the shadcn spacing utilities via a multiplier. The DS
@@ -2756,8 +3045,11 @@ code { font-size: 0.875rem; }
   --color-destructive-foreground: var(--background-base);
   --color-success: #4FC38A;
   --color-warning: #E0B257;
-  --color-border: #2A2A2A;
-  --color-input: #2A2A2A;
+  --color-background: var(--background-base);
+  --color-background-base: var(--background-base);
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-field: color-mix(in srgb, var(--midground-base) 3%, var(--background-base));
   --color-ring: #B0B0B0;
   --color-popover: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
   --color-popover-foreground: var(--midground);
@@ -2766,6 +3058,46 @@ code { font-size: 0.875rem; }
   --radius-md: calc(var(--theme-radius) - 2px);
   --radius-lg: var(--theme-radius);
   --radius-xl: calc(var(--theme-radius) + 4px);
+}
+
+#root input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]),
+#root select,
+#root textarea:not(.composer-input) {
+  background-color: var(--color-field);
+  border-color: var(--color-border);
+  color: var(--midground);
+  caret-color: var(--midground);
+  color-scheme: light;
+}
+
+:root[data-app-theme="dark"] #root input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]),
+:root[data-app-theme="dark"] #root select,
+:root[data-app-theme="dark"] #root textarea:not(.composer-input),
+html[data-app-theme="dark"] #root input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]),
+html[data-app-theme="dark"] #root select,
+html[data-app-theme="dark"] #root textarea:not(.composer-input) {
+  color-scheme: dark;
+}
+
+#root input::placeholder,
+#root textarea:not(.composer-input)::placeholder {
+  color: color-mix(in srgb, var(--midground-base) 48%, transparent);
+  opacity: 1;
+}
+
+#root input:disabled,
+#root select:disabled,
+#root textarea:not(.composer-input):disabled {
+  background-color: color-mix(in srgb, var(--midground-base) 7%, var(--background-base));
+  color: color-mix(in srgb, var(--midground-base) 40%, transparent);
+}
+
+#root input:-webkit-autofill,
+#root textarea:not(.composer-input):-webkit-autofill,
+#root select:-webkit-autofill {
+  -webkit-text-fill-color: var(--midground);
+  box-shadow: 0 0 0 1000px var(--color-field) inset;
+  transition: background-color 9999s ease-out;
 }
 
 

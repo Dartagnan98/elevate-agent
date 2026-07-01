@@ -296,13 +296,12 @@ function ProviderGroupCard({
   return (
     <div className="overflow-hidden rounded-md border border-border bg-card">
       {/* Header — always visible */}
-      <div className="flex w-full items-center justify-between gap-3 transition-colors hover:bg-muted">
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
-          className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 px-4 py-3 text-left"
-        >
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted"
+      >
+        <div className="flex items-center gap-3 min-w-0">
           {expanded ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
           <span className="font-semibold text-sm tracking-wide">{group.name === "Other" ? t.common.other : group.name}</span>
           {hasAnyConfigured && (
@@ -310,11 +309,12 @@ function ProviderGroupCard({
               {configuredCount} {t.common.set.toLowerCase()}
             </Badge>
           )}
-        </button>
-        <div className="flex items-center gap-2 shrink-0 pr-4">
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
           {keyUrl && (
             <a href={keyUrl} target="_blank" rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[0.65rem] text-primary hover:underline">
+              className="inline-flex items-center gap-1 text-[0.65rem] text-primary hover:underline"
+              onClick={(e) => e.stopPropagation()}>
               {t.env.getKey} <ExternalLink className="h-2.5 w-2.5" />
             </a>
           )}
@@ -322,7 +322,7 @@ function ProviderGroupCard({
             {t.env.keysCount.replace("{count}", String(group.entries.length)).replace("{s}", group.entries.length !== 1 ? "s" : "")}
           </span>
         </div>
-      </div>
+      </button>
 
       {/* Expanded content */}
       {expanded && (

@@ -293,7 +293,7 @@ _BC: dict[str, Any] = {
     },
     "buyer": {
         "stages": [
-            _stage("Hot Leads (Top 25)", "Watchlist of active buyers", [("pre-approval", "Pre-approval confirmed"), ("search-active", "Active search / showings"), ("buyer-agency", "Buyer agency signed (BAEC)")], fields=[("preApprovalAmount", "Pre-approval amount")]),
+            _stage("Client Onboarding", "Agency, disclosures + pre-approval", [("buyer-agency", "Buyer's Agency Agreement signed (BAEC)"), ("dorts-pnc", "DORTS + PNC signed"), ("fintrac-id", "FINTRAC ID collected"), ("pre-approval", "Pre-approval confirmed")], fields=[("preApprovalAmount", "Pre-approval amount")]),
             _stage("Offer Prep", "Decided to write - comps + CPS", [("lender-paperwork", "Lender paperwork sent"), ("doc-list", "Doc list built"), ("cps-drafted", "CPS drafted")], docs=[("cps_draft", "CPS draft")]),
             _stage("Accepted Offer", "Accepted - subjects pending", [("inspection-booked", "Inspection booked"), ("insurance-deadline", "Insurance deadline tracked"), ("deposit-due", "Deposit due date tracked")], fields=[("subjectRemovalDate", "Subject removal date"), ("depositDueDate", "Deposit due date")], docs=[("cps_signed", "Fully-signed CPS")]),
             _stage("Condition Removal", "Subjects off + firm", [("subjects-removed", "All subjects removed"), ("deposit-received", "Deposit received"), ("lawyer-info", "Lawyer / conveyancer info captured"), ("completion-locked", "Completion + possession dates locked")], fields=[("completionDate", "Completion date"), ("possessionDate", "Possession date")], docs=[("subject_removal_form", "Fully-signed condition removal")]),

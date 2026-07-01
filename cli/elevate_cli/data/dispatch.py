@@ -77,7 +77,7 @@ _ADMIN_WORKER_SKILL_REFS = {
     "buyer-cps": "real-estate-admin/webforms",
     "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
     "closing-admin": "real-estate-admin/closing-admin",
-    "cma": "real-estate-admin/cma-generator",
+    "cma": "real-estate-admin/cma",
     "cma-generator": "real-estate-admin/cma-generator",
     "listing-build": "real-estate-admin/listing-build",
     "lofty-crm-client-contacts": "real-estate-admin/lofty-crm-client-contacts",
@@ -122,10 +122,11 @@ _DEFAULT_ADMIN_ACTIONS: tuple[dict[str, Any], ...] = (
     {
         "name": "CMA: Generate evaluation",
         "trigger": "stage_entry",
-        "skill": "real-estate-admin/cma-generator",
+        "skill": "real-estate-admin/cma",
         "side": "listing",
         "to_stage": 1,
         "priority": 90,
+        "skill_args": {"mode": "seller_evaluation"},
     },
     {
         "name": "Listing Intake: Collect MLC info",
@@ -1278,8 +1279,24 @@ def mark_stale_action_runs(
     *,
     max_running_minutes: int = 120,
     actor: str = "agent-worker",
+    requeue: bool = True,
+    max_retries: int = 2,
 ) -> list[dict[str, Any]]:
-    """Fail running Admin action runs that never wrote a result callback."""
+    """Recover Admin action runs stuck in 'running' with no result callback.
+
+    A run still 'running' longer than ``max_running_minutes`` without writing a
+    result almost always means its worker session died mid-run (the callback
+    never fired). Note 'running' covers active execution only — runs paused for
+    a human decision are 'waiting_human' and are NOT touched here, so this never
+    races a legitimate gate.
+
+    Rather than just failing a stale run, re-queue it (status -> 'queued',
+    detach the dead worker) so the next ``drain_queued_action_runs`` pass
+    dispatches a FRESH worker session. The run then self-heals through transient
+    session deaths. After ``max_retries`` re-queues that still go stale, give up
+    and mark it failed so it cannot loop forever. ``requeue=False`` restores the
+    old fail-only behavior.
+    """
     if max_running_minutes < 1:
         raise ValueError("max_running_minutes must be >= 1")
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_running_minutes)
@@ -1307,24 +1324,55 @@ def mark_stale_action_runs(
         payload = _decode_json(row["payload_json"]) or {}
         if not isinstance(payload, dict):
             payload = {"prior": payload}
-        payload["recovery"] = {
-            "event": "stale_running_failed",
-            "actor": actor,
-            "maxRunningMinutes": max_running_minutes,
-            "recordedAt": now,
-        }
-        message = (
-            "Admin action run exceeded "
-            f"{max_running_minutes} minute runtime without result callback."
-        )
-        conn.execute(
-            """
-            UPDATE admin_action_runs
-            SET status='failed', error_message=?, payload_json=?, updated_at=?, completed_at=?
-            WHERE id=?
-            """,
-            (message, _encode_json(payload), now, now, row["id"]),
-        )
+        prior_recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
+        attempts = int(prior_recovery.get("attempts") or 0)
+
+        if requeue and attempts < max_retries:
+            # Re-dispatch: clear the dead worker binding so drain_queued picks it
+            # up fresh. started_at=NULL (and updated_at=now) so the re-queued run
+            # is not instantly re-flagged as stale on the same pass.
+            attempts += 1
+            payload["recovery"] = {
+                "event": "stale_running_requeued",
+                "actor": actor,
+                "attempts": attempts,
+                "maxRetries": max_retries,
+                "maxRunningMinutes": max_running_minutes,
+                "recordedAt": now,
+            }
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET status='queued', cron_job_id=NULL, started_at=NULL,
+                    result_idempotency_key=NULL, result_json=NULL,
+                    error_message=NULL, completed_at=NULL,
+                    payload_json=?, updated_at=?
+                WHERE id=?
+                """,
+                (_encode_json(payload), now, row["id"]),
+            )
+        else:
+            payload["recovery"] = {
+                "event": "stale_running_failed",
+                "actor": actor,
+                "attempts": attempts,
+                "maxRetries": max_retries,
+                "maxRunningMinutes": max_running_minutes,
+                "recordedAt": now,
+            }
+            message = (
+                "Admin action run exceeded "
+                f"{max_running_minutes} minute runtime without result callback"
+                + (f" after {attempts} recovery re-queue(s)." if attempts else ".")
+            )
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET status='failed', error_message=?, payload_json=?, updated_at=?, completed_at=?
+                WHERE id=?
+                """,
+                (message, _encode_json(payload), now, now, row["id"]),
+            )
         updated = conn.execute("SELECT * FROM admin_action_runs WHERE id=?", (row["id"],)).fetchone()
         recovered.append(_row_to_run(updated))
     return recovered
@@ -1361,10 +1409,18 @@ def approve_action_run(
             (_encode_json(prompt), now, now, run_id),
         )
         return _row_to_run(_select_action_run_with_registry(conn, run_id))
+    # Re-running is a FRESH attempt: clear the prior result so the re-run's
+    # callback records cleanly. Without this, a skill that re-reaches the same
+    # conclusion produces the same result_idempotency_key, record_run_result
+    # treats it as a duplicate and early-returns, and the run stays stuck in
+    # 'running'/'queued' forever (until the 2h reaper). That is the "card sits in
+    # working forever" bug.
     conn.execute(
         """
         UPDATE admin_action_runs
-        SET status='queued', human_prompt_json=?, updated_at=?
+        SET status='queued', human_prompt_json=?, updated_at=?,
+            result_idempotency_key=NULL, result_json=NULL,
+            error_message=NULL, completed_at=NULL
         WHERE id=?
         """,
         (_encode_json(prompt), now, run_id),

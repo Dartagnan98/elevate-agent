@@ -56,3 +56,13 @@ The Admin agent decides whether the task can run now. If required inputs are mis
 | Accepted offer arrives | `offer-review` |
 | Subjects active/removing | `subject-removal` |
 | Completion/possession/closeout | `closing-admin` |
+
+
+## Easy-reply to a missing-info prompt (Telegram / chat)
+
+When Skyleigh has a deal `waiting_human` for missing intake and she replies with the answers (Telegram or chat) — e.g. a few lines of values, or `field: value` pairs — treat that as filling the prompt, NOT a new request. Steps:
+1. Identify the target `waiting_human` run (match by deal/address in context; if only one is pending, use it).
+2. Map her reply to that run's `requiredFields` (line order, or explicit `field: value`).
+3. Submit so the skill continues: POST `http://127.0.0.1:9120/api/admin/action-runs/<run_id>/answer` with `{ "answers": {<field>: <value>...}, "runNow": true }` (session token in header or `?token=`).
+4. Reply briefly, e.g. `Got it — running the CMA now.` Do not re-ask for anything she already answered.
+Never dump internal detail back at her; keep replies to one clean line.

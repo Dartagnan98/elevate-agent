@@ -41,7 +41,7 @@ function hasConditionsRemoved(d: AdminDeal): boolean {
   if (d.subjectsRemovedAt) return true;
 
   const stage = d.currentStage ?? 0;
-  if (d.side === "buyer") return stage >= 3;
+  if (d.side === "buyer") return stage >= 4;
 
   return false;
 }
@@ -68,11 +68,11 @@ export function computeAdminKpis(deals: AdminDeal[]): AdminKpi[] {
   const listingCount = activeListing.length;
   const buyerCount = activeBuyer.length;
 
-  // 5. In offer / conditions (listing stages 7-8, buyer stages 4-6)
+  // 5. In offer / conditions (listing stages 7-8, buyer stages 5-7)
   const inMotion = active.filter(d => {
     const s = d.currentStage ?? 0;
     if (d.side === "listing") return s === 7 || s === 8;
-    return s >= 4 && s <= 6;
+    return s >= 5 && s <= 7;
   });
   const inMotionListing = inMotion.filter(d => d.side === "listing").length;
   const inMotionBuyer = inMotion.filter(d => d.side === "buyer").length;

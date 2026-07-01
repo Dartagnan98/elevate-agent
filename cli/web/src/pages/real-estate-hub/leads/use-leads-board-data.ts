@@ -169,11 +169,12 @@ export function useLeadsBoardData() {
   );
 
   const handleDraftAction = useCallback(
-    async (action: LeadsDraftAction, draft: LeadsDraft) => {
+    async (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => {
       if (!draft.sourceId || !draft.taskId) throw new Error("Draft is missing source/task identifiers.");
       try {
         const res = await api.updateSourceInboxDraft(
           draft.sourceId, draft.taskId, action, draft.body ?? "",
+          scheduledAt ? { scheduledAt } : undefined,
         );
         setSourceInbox(res);
       } catch (err) {

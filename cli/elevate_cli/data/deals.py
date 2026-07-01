@@ -1086,6 +1086,46 @@ def record_deal_activity(
     return event
 
 
+def set_deal_status(
+    conn: sqlite3.Connection,
+    deal_id: str,
+    *,
+    status: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Set a deal's lifecycle status (active / closed / archived).
+
+    Used to take a card off the live board ("archived") or restore it
+    ("active") without deleting the record. Appends a toggle_change event so
+    the history is preserved.
+    """
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"invalid status {status!r}")
+    existing = get_deal(conn, deal_id)
+    if existing is None:
+        raise LookupError(f"deal {deal_id!r} not found")
+    old_status = existing.get("status")
+    if old_status == status:
+        return existing
+    now = now_iso()
+    conn.execute(
+        "UPDATE deals SET status=?, updated_at=? WHERE id=?",
+        (status, now, deal_id),
+    )
+    _insert_deal_event(
+        conn,
+        deal_id=deal_id,
+        kind="toggle_change",
+        actor=actor,
+        field_name="status",
+        old_value=old_status,
+        new_value=status,
+        payload={"field": "status", "from": old_status, "to": status},
+        created_at=now,
+    )
+    return get_deal(conn, deal_id)  # type: ignore[return-value]
+
+
 def move_deal_stage(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -1197,6 +1237,13 @@ def set_deal_toggle(
         extra = _decode_json(row["extra_toggles_json"]) or {}
         if not isinstance(extra, dict):
             extra = {}
+        # Strip the core. or extra. UI namespace so the value lands on the bare key the
+        # card reads (e.g. core.pid -> pid). Guards every writer (card UI, admin_deal
+        # agent, sync scripts) from re-introducing the invisible prefixed-key bug.
+        if field.startswith("core."):
+            field = field[5:]
+        elif field.startswith("extra."):
+            field = field[6:]
         old_value = extra.get(field)
         extra[field] = _normalize_extra_field_value(value)
         new_value = extra[field]
@@ -2341,6 +2388,34 @@ def _run_payload_stage(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _is_missing_info_prompt(human_prompt: Mapping[str, Any] | None) -> bool:
+    """True for a 'fill in to continue' card (one with requiredFields).
+
+    These are the cards a skill raises when it can't proceed without info from
+    the user. Approval / preview cards (previewPdf, actionId, decision) have no
+    requiredFields and are NOT deduped here.
+    """
+    return isinstance(human_prompt, Mapping) and bool(human_prompt.get("requiredFields"))
+
+
+def _open_missing_info_sibling(
+    conn: sqlite3.Connection, deal_id: str, exclude_run_id: str
+) -> str | None:
+    """Return the id of the earliest still-open 'Info needed' run on this deal,
+    excluding ``exclude_run_id``. Used to collapse duplicate intake cards so the
+    user is asked the same thing only once."""
+    rows = conn.execute(
+        "SELECT id, human_prompt_json FROM admin_action_runs "
+        "WHERE deal_id=? AND status='waiting_human' AND id<>? "
+        "AND human_prompt_json IS NOT NULL ORDER BY created_at ASC",
+        (deal_id, exclude_run_id),
+    ).fetchall()
+    for row in rows:
+        if _is_missing_info_prompt(_decode_json(row["human_prompt_json"])):
+            return str(row["id"])
+    return None
+
+
 def record_run_result(
     conn: sqlite3.Connection,
     deal_id: str,
@@ -2380,6 +2455,66 @@ def record_run_result(
     payload = _decode_json(row["payload_json"]) or {}
     if not isinstance(payload, dict):
         payload = {"prior": payload}
+
+    # Dedup intake cards: if this run is raising an "Info needed" card while the
+    # deal already has one open, park this run instead of showing a second card.
+    # When the surviving card is answered and its skill succeeds, the parked
+    # skill is re-dispatched (see the success branch below) and runs against the
+    # now-resolved deal state. Guarded so any failure falls back to old behavior.
+    if normalized_status == "waiting_human" and _is_missing_info_prompt(human_prompt):
+        try:
+            survivor_id = _open_missing_info_sibling(conn, deal_id, run_id)
+        except Exception:
+            survivor_id = None
+        if survivor_id:
+            reg = conn.execute(
+                "SELECT skill FROM admin_action_registry WHERE id=?",
+                (row["registry_id"],),
+            ).fetchone()
+            deferred_skill = reg["skill"] if reg else None
+            payload["supersededByRunId"] = survivor_id
+            payload["deferredSkill"] = deferred_skill
+            payload["result"] = {
+                "status": "superseded",
+                "supersededByRunId": survivor_id,
+                "humanPrompt": dict(human_prompt) if human_prompt else None,
+                "recordedAt": now,
+            }
+            conn.execute(
+                """
+                UPDATE admin_action_runs
+                SET status='cancelled', error_message=?, payload_json=?,
+                    result_json=?, human_prompt_json=NULL,
+                    updated_at=?, completed_at=?
+                WHERE id=?
+                """,
+                (
+                    f"Superseded by open Info needed card {survivor_id}",
+                    _encode_json(payload),
+                    _encode_json(payload["result"]),
+                    now,
+                    now,
+                    run_id,
+                ),
+            )
+            _insert_deal_event(
+                conn,
+                deal_id=deal_id,
+                kind="run_result",
+                actor=actor,
+                payload={
+                    "runId": run_id,
+                    "status": "superseded",
+                    "supersededByRunId": survivor_id,
+                    "deferredSkill": deferred_skill,
+                },
+                created_at=now,
+            )
+            updated = conn.execute(
+                "SELECT * FROM admin_action_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            return _row_to_action_run(updated)
+
     result_payload = {
         "status": status,
         "artifacts": [dict(item) for item in (artifacts or [])],
@@ -2437,6 +2572,47 @@ def record_run_result(
                     create_cron_job=bool(task.get("runNow") or task.get("run_now")),
                     actor=actor,
                 )
+
+        # Re-run any skills parked behind THIS run's now-resolved Info needed
+        # card. They were deduped earlier so the user saw a single card; now
+        # that the deal state is resolved they run cleanly without re-asking.
+        try:
+            parked = conn.execute(
+                "SELECT id, payload_json FROM admin_action_runs "
+                "WHERE deal_id=? AND status='cancelled'",
+                (deal_id,),
+            ).fetchall()
+        except Exception:
+            parked = []
+        if parked:
+            from elevate_cli.data.dispatch import queue_action_run
+
+            for parked_row in parked:
+                parked_payload = _decode_json(parked_row["payload_json"]) or {}
+                if not isinstance(parked_payload, dict):
+                    continue
+                if (
+                    parked_payload.get("supersededByRunId") == run_id
+                    and parked_payload.get("deferredSkill")
+                    and not parked_payload.get("deferredRedispatched")
+                ):
+                    queue_action_run(
+                        conn,
+                        deal_id=deal_id,
+                        skill=str(parked_payload["deferredSkill"]),
+                        name=f"Re-run after info resolved: {parked_payload['deferredSkill']}",
+                        payload={
+                            "reranAfterRunId": run_id,
+                            "deferredFromRunId": parked_row["id"],
+                        },
+                        create_cron_job=True,
+                        actor=actor,
+                    )
+                    parked_payload["deferredRedispatched"] = True
+                    conn.execute(
+                        "UPDATE admin_action_runs SET payload_json=? WHERE id=?",
+                        (_encode_json(parked_payload), parked_row["id"]),
+                    )
     conn.execute(
         """
         UPDATE admin_action_runs

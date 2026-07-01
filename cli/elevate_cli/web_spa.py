@@ -87,9 +87,6 @@ def mount_spa(
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        if full_path.startswith("api/"):
-            return JSONResponse({"error": "API route not found"}, status_code=404)
-
         file_path = web_dist / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (

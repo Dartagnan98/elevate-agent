@@ -8,6 +8,8 @@ from fastapi import FastAPI
 
 from elevate_cli.web_routes.agent_hub import create_agent_hub_router
 from elevate_cli.web_routes.admin_contacts import create_admin_contacts_router
+from elevate_cli.web_routes.admin_deal_chat import create_admin_deal_chat_router
+from elevate_cli.web_routes.admin_desk_sections import create_admin_desk_sections_router
 from elevate_cli.web_routes.admin_onboarding import create_admin_onboarding_router
 from elevate_cli.web_routes.admin_pack import create_admin_pack_router
 from elevate_cli.web_routes.admin_setup import create_admin_setup_router
@@ -43,6 +45,8 @@ def register_agent_admin_routes(
     app.include_router(create_admin_contacts_router(web_actor=web_actor, log=log))
     app.include_router(create_admin_setup_router(web_actor=web_actor, log=log))
     app.include_router(create_admin_onboarding_router(log=log))
+    app.include_router(create_admin_deal_chat_router(log=log))
+    app.include_router(create_admin_desk_sections_router(log=log))
     app.include_router(create_admin_pack_router(web_actor=web_actor, log=log))
     app.include_router(
         create_heartbeats_router(

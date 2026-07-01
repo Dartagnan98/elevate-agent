@@ -10,6 +10,8 @@ import {
   ShieldAlert,
   AlertTriangle,
   Clock,
+  Pin,
+  PinFilled,
 } from "../icons";
 import {
   ADMIN_PIPELINE,
@@ -21,6 +23,9 @@ import type { BuyerDeal } from "../admin-data";
 import type { AdminKpi } from "../compute-admin-kpis";
 import type { AdminEvent } from "../compute-admin-events";
 import DealDetailModal from "./deal-modal";
+import BoardLoader from "./BoardLoader";
+import CriticalDates from "./critical-dates";
+import ApprovalsQueue from "./approvals-queue";
 import { api } from "@/lib/api";
 import type { AdminDealCreateRequest, AdminDealSide } from "@/lib/api-types";
 
@@ -113,11 +118,27 @@ interface KpiTileProps {
   breakdown?: string;
 }
 
+// Brand tone for the KPI value, keyed off the metric label.
+// Orange (#C46340) = hot / pending / in-flight money + dates.
+// Blue   (#5E8AD0) = closed / done outcomes.
+// White (bright)   = neutral headline metrics (Pipeline value, Active deals).
+function kpiValueTone(label: string): "hot" | "done" | "" {
+  const l = label.toLowerCase();
+  if (l.includes("gci pending") || l.includes("in offer") || l.includes("conditions") || l.includes("key date")) {
+    return "hot";
+  }
+  if (l.includes("gci ytd") || l.includes("closed ytd")) {
+    return "done";
+  }
+  return "";
+}
+
 function KpiTile({ label, value, delta, deltaTone, breakdown }: KpiTileProps) {
+  const tone = kpiValueTone(label);
   return (
     <div className="ab-kpi">
       <div className="ab-kpi-label">{label}</div>
-      <div className="ab-kpi-value">{value}</div>
+      <div className={"ab-kpi-value" + (tone ? " " + tone : "")}>{value}</div>
       {breakdown && <div className="ab-kpi-breakdown">{breakdown}</div>}
       {delta && <div className={"ab-kpi-delta " + (deltaTone || "")}>{delta}</div>}
     </div>
@@ -188,10 +209,27 @@ interface Deal {
   waitingHumanCount?: number;
   activeRunLabel?: string | null;
   activeRunStatus?: string | null;
+  status?: string;
+  archivedNote?: string;
+  archivedAt?: string;
+}
+
+function rankTop25Deals(deals: Deal[], score: (deal: Deal) => number): Deal[] {
+  return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);
 }
 
 const DEAL_DRAG_MIME = "application/x-elevate-admin-deal-id";
 const POST_DRAG_CLICK_SUPPRESS_MS = 500;
+
+function formatArchivedDate(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  try {
+    return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
+}
 
 function phaseStageNumber(phase: PipelinePhase): number | null {
   const value = Number.parseInt(String(phase.stage).replace(/^S/i, ""), 10);
@@ -226,15 +264,33 @@ function DealCard({
   onOpen,
   onDragStart,
   onDragEnd,
+  onTogglePin,
   dragging,
 }: {
   deal: Deal;
   onOpen?: (deal: Deal) => void;
   onDragStart?: (deal: Deal) => void;
   onDragEnd?: () => void;
+  /** Called after a pin toggle resolves so the board can refresh. */
+  onTogglePin?: (dealId: string) => void;
   dragging?: boolean;
 }) {
   const lastDragAtRef = useRef(0);
+  const [pinning, setPinning] = useState(false);
+  const pinned = deal.primary === true;
+
+  const handleTogglePin = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (pinning) return;
+    setPinning(true);
+    try {
+      await api.setAdminDealToggle(deal.id, "pinnedTop25", !pinned);
+      onTogglePin?.(deal.id);
+    } finally {
+      setPinning(false);
+    }
+  };
   const waitingCount = deal.waitingHumanCount ?? 0;
   const runningCount = deal.runningRunCount ?? 0;
   const activityLabel = deal.activeRunLabel || `${deal.daysInStage || "3d"} in stage`;
@@ -288,6 +344,17 @@ function DealCard({
       role="button"
       tabIndex={0}
     >
+      <button
+        type="button"
+        className={"ab-deal-pin" + (pinned ? " pinned" : "")}
+        disabled={pinning}
+        onClick={handleTogglePin}
+        title={pinned ? "In Top 25 — click to remove" : "Add to Top 25"}
+        aria-pressed={pinned}
+        aria-label={pinned ? "In Top 25 — click to remove" : "Add to Top 25"}
+      >
+        {pinned ? <PinFilled /> : <Pin />}
+      </button>
       <div className="ab-deal-addr" title={deal.addr}>{deal.addr}</div>
       <div className="ab-deal-line2">{deal.line2}</div>
       <div className="ab-deal-mid">
@@ -325,6 +392,7 @@ function PipelineColumn({
   onDropDeal,
   onCardDragStart,
   onCardDragEnd,
+  onTogglePin,
   draggingDeal,
   canDrop,
 }: {
@@ -334,6 +402,7 @@ function PipelineColumn({
   onDropDeal?: (dealId: string, toStage: number) => void;
   onCardDragStart?: (deal: Deal) => void;
   onCardDragEnd?: () => void;
+  onTogglePin?: (dealId: string) => void;
   draggingDeal?: Deal | null;
   canDrop?: boolean;
 }) {
@@ -375,7 +444,9 @@ function PipelineColumn({
       <div className="ab-col-deals">
         {deals.length === 0 ? (
           <div className="ab-col-empty">
-            {isOver && canDrop ? "Drop to move here" : "No deals in this stage"}
+            <span className="ab-col-empty-text">
+              {isOver && canDrop ? "Drop to move here" : "Nothing here yet"}
+            </span>
           </div>
         ) : (
           deals.map(d => (
@@ -385,6 +456,7 @@ function PipelineColumn({
               onOpen={onOpenDeal}
               onDragStart={onCardDragStart}
               onDragEnd={onCardDragEnd}
+              onTogglePin={onTogglePin}
               dragging={draggingDeal?.id === d.id}
             />
           ))
@@ -402,11 +474,116 @@ function Top25Deals({
   deals,
   mode,
   onOpenDeal,
+  onRefresh,
 }: {
   deals: Deal[];
   mode: string;
   onOpenDeal: (deal: Deal) => void;
+  onRefresh?: () => void;
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [formName, setFormName] = useState("");
+  const [formTimeline, setFormTimeline] = useState("");
+  const [formBudget, setFormBudget] = useState("");
+  const [formLookingFor, setFormLookingFor] = useState("");
+  // Default the new-lead Side to the strip you're adding from: the buyer strip
+  // (mode "buyer") defaults Buyer, the "Top 25 sellers" strip defaults Seller
+  // (which maps to side:"listing" on create). Adding from a strip should land
+  // the lead in that same strip.
+  const [formSide, setFormSide] = useState<"buyer" | "seller">(mode === "buyer" ? "buyer" : "seller");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+
+  // Take a lead off the board. Archives the deal (status -> archived) so it
+  // drops out of the Top 25 + pipeline but stays recoverable in the Archived
+  // tab if their timeline picks back up.
+  const handleRemove = async (deal: Deal) => {
+    if (removingId) return;
+    if (confirmRemoveId !== deal.id) {
+      setConfirmRemoveId(deal.id);
+      setRemoveError(null);
+      return;
+    }
+    setRemovingId(deal.id);
+    try {
+      await api.setAdminDealStatus(deal.id, "archived");
+      setConfirmRemoveId(null);
+      onRefresh?.();
+    } catch {
+      setRemoveError("Could not remove that lead. Try again.");
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  const resetForm = () => {
+    setFormName("");
+    setFormTimeline("");
+    setFormBudget("");
+    setFormLookingFor("");
+    setFormSide("buyer");
+    setCreateError(null);
+  };
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    nameRef.current?.focus();
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [pickerOpen]);
+
+  const canSubmitLead = formName.trim().length > 0 && !creating;
+
+  const handleCreateLead = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmitLead) return;
+    setCreating(true);
+    setCreateError(null);
+    const timeline = formTimeline.trim();
+    const budget = formBudget.trim();
+    const lookingFor = formLookingFor.trim();
+    const note = [budget, lookingFor].filter(Boolean).join(" · ");
+    try {
+      await api.createAdminDeal({
+        title: formName.trim(),
+        // Board "side": seller-side deals are stored as "listing".
+        side: formSide === "seller" ? "listing" : "buyer",
+        currentStage: 0,
+        fields: {
+          pinnedTop25: true,
+          hotLeadTimeline: timeline,
+          hotLeadBudget: budget,
+          hotLeadLookingFor: lookingFor,
+          top25Note: note,
+        },
+      });
+      onRefresh?.();
+      setPickerOpen(false);
+      resetForm();
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Could not add lead");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const ranked = useMemo(() => {
     const listingOrder = [
       "pre-cma", "cma", "intake", "skyslope", "go", "live",
@@ -422,7 +599,7 @@ function Top25Deals({
     };
     // Top 25 = hot leads Skyleigh explicitly pinned (d.primary), not all active deals.
     const pinnedDeals = deals.filter(d => d.primary);
-    return [...pinnedDeals].sort((a, b) => score(b) - score(a)).slice(0, 25);
+    return rankTop25Deals(pinnedDeals, score);
   }, [deals, mode]);
 
   const label = mode === "buyer" ? "Top 25 buyers" : "Top 25 sellers";
@@ -443,37 +620,140 @@ function Top25Deals({
           <span className="ab-top25-legend-item"><span className="ab-top25-legend-dot blocked"></span>blocked</span>
           <span className="ab-top25-legend-item"><span className="ab-top25-legend-dot primary"></span>primary</span>
         </div>
-      </header>
-      {ranked.length === 0 ? (
-        <div className="ab-top25-empty">{subEmpty}</div>
-      ) : (
-        <div className="ab-top25-strip">
-          {ranked.map((d, i) => (
-            <button
-              key={d.id}
-              type="button"
-              className={"ab-top25-card" + (d.blocked ? " blocked" : "") + (d.primary ? " primary" : "")}
-              onClick={() => onOpenDeal && onOpenDeal(d)}
-            >
-              <div className="ab-top25-rank mono">{(i + 1).toString().padStart(2, "0")}</div>
-              <div className="ab-top25-card-body">
-                <div className="ab-top25-card-head">
-                  <span className="ab-top25-card-addr">{d.addr}</span>
-                  {d.blocked && <span className="ab-top25-card-flag">&bull;</span>}
-                </div>
-                <div className="ab-top25-card-badge mono">{d.badge}</div>
-                {d.primary && d.top25Note && (
-                  <div className="ab-top25-card-note">
-                    <span className="ab-top25-card-note-label mono">Looking</span>
-                    <span className="ab-top25-card-note-text">{d.top25Note}</span>
-                  </div>
-                )}
-                <div className="ab-top25-card-foot">
-                  {d.price && <span className="ab-top25-card-price mono">{d.price}</span>}
-                  {d.progress && <span className="ab-top25-card-progress mono">{d.progress}</span>}
+        <button
+          type="button"
+          className="ab-top25-add"
+          onClick={() => setPickerOpen(o => !o)}
+          aria-expanded={pickerOpen}
+        >
+          + Add
+        </button>
+        {pickerOpen && (
+          <div className="ab-top25-add-pop" ref={pickerRef}>
+            <form className="ab-top25-form" onSubmit={handleCreateLead}>
+              <div className="ab-top25-form-title mono">NEW HOT LEAD</div>
+              <label className="ab-top25-form-field">
+                <span>Name</span>
+                <input
+                  ref={nameRef}
+                  type="text"
+                  value={formName}
+                  onChange={e => setFormName(e.target.value)}
+                  placeholder="Lead name"
+                />
+              </label>
+              <div className="ab-top25-form-side">
+                <span className="ab-top25-form-side-label">Side</span>
+                <div className="ab-top25-side-toggle">
+                  <button
+                    type="button"
+                    className={"ab-top25-side-btn" + (formSide === "buyer" ? " active" : "")}
+                    onClick={() => setFormSide("buyer")}
+                  >
+                    Buyer
+                  </button>
+                  <button
+                    type="button"
+                    className={"ab-top25-side-btn" + (formSide === "seller" ? " active" : "")}
+                    onClick={() => setFormSide("seller")}
+                  >
+                    Seller
+                  </button>
                 </div>
               </div>
-            </button>
+              <label className="ab-top25-form-field">
+                <span>Timeline</span>
+                <input
+                  type="text"
+                  value={formTimeline}
+                  onChange={e => setFormTimeline(e.target.value)}
+                  placeholder="e.g. 30–60 days"
+                />
+              </label>
+              <label className="ab-top25-form-field">
+                <span>Budget</span>
+                <input
+                  type="text"
+                  value={formBudget}
+                  onChange={e => setFormBudget(e.target.value)}
+                  placeholder="e.g. $600–700K"
+                />
+              </label>
+              <label className="ab-top25-form-field">
+                <span>Looking for</span>
+                <textarea
+                  rows={3}
+                  value={formLookingFor}
+                  onChange={e => setFormLookingFor(e.target.value)}
+                  placeholder="What they want"
+                />
+              </label>
+              {createError && <div className="ab-top25-form-error">{createError}</div>}
+              <div className="ab-top25-form-actions">
+                <button
+                  type="button"
+                  className="ab-top25-form-cancel"
+                  onClick={() => { setPickerOpen(false); resetForm(); }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="ab-top25-form-submit"
+                  disabled={!canSubmitLead}
+                >
+                  {creating ? "Adding…" : "Add to Top 25"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </header>
+      {ranked.length === 0 ? (
+        <div className="ab-top25-empty">
+          <span>{subEmpty}</span>
+        </div>
+      ) : (
+        <div className="ab-top25-strip">
+          {removeError && <div className="ab-top25-form-error">{removeError}</div>}
+          {ranked.map((d, i) => (
+            <div className="ab-top25-card-wrap" key={d.id}>
+              <button
+                type="button"
+                className="ab-top25-card-remove"
+                title={confirmRemoveId === d.id ? "Click again to archive" : "Take off the board (archive)"}
+                aria-label="Take off the board"
+                disabled={removingId === d.id}
+                onClick={(e) => { e.stopPropagation(); void handleRemove(d); }}
+              >
+                {removingId === d.id ? "…" : confirmRemoveId === d.id ? "sure" : "×"}
+              </button>
+              <button
+                type="button"
+                className={"ab-top25-card" + (d.blocked ? " blocked" : "") + (d.primary ? " primary" : "")}
+                onClick={() => onOpenDeal && onOpenDeal(d)}
+              >
+                <div className="ab-top25-rank mono">{(i + 1).toString().padStart(2, "0")}</div>
+                <div className="ab-top25-card-body">
+                  <div className="ab-top25-card-head">
+                    <span className="ab-top25-card-addr">{d.addr}</span>
+                    {d.blocked && <span className="ab-top25-card-flag">&bull;</span>}
+                  </div>
+                  {/* Hot leads don't show pipeline stage/progress — just who they are + what they want. */}
+                  {d.primary && d.top25Note && (
+                    <div className="ab-top25-card-note">
+                      <span className="ab-top25-card-note-label mono">Looking</span>
+                      <span className="ab-top25-card-note-text">{d.top25Note}</span>
+                    </div>
+                  )}
+                  {d.price && (
+                    <div className="ab-top25-card-foot">
+                      <span className="ab-top25-card-price mono">{d.price}</span>
+                    </div>
+                  )}
+                </div>
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -837,12 +1117,20 @@ function NewDealModal({
 }) {
   const [side, setSide] = useState<AdminDealSide>("listing");
   const [title, setTitle] = useState("");
+  const [clientName, setClientName] = useState("");
   const [province, setProvince] = useState("");
   const [listingAddress, setListingAddress] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = title.trim().length > 0 && province.trim().length > 0 && !submitting;
+  const isListing = side === "listing";
+  // A listing card is identified by the property, so the address IS the card
+  // title (the client is a separate contact). A buyer has no listing address,
+  // so the free-text title (client name / deal label) stands in.
+  const canSubmit =
+    province.trim().length > 0 &&
+    (isListing ? listingAddress.trim().length > 0 : title.trim().length > 0) &&
+    !submitting;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -858,12 +1146,14 @@ function NewDealModal({
     setSubmitting(true);
     setError(null);
     const cleanAddress = listingAddress.trim();
+    const cleanClient = clientName.trim();
     const request: AdminDealCreateRequest = {
-      title: title.trim(),
+      title: isListing ? cleanAddress : title.trim(),
       side,
       province: province.trim().toUpperCase(),
       currentStage: 0,
-      listingAddress: side === "listing" ? cleanAddress || null : null,
+      listingAddress: isListing ? cleanAddress || null : null,
+      fields: isListing && cleanClient ? { clientName: cleanClient } : undefined,
     };
     try {
       await api.createAdminDeal(request);
@@ -915,19 +1205,56 @@ function NewDealModal({
               </div>
             </div>
 
-            <div className="abm-section">
-              <label className="abm-section-label mono" htmlFor="nd-title">
-                CLIENT / TITLE
-              </label>
-              <input
-                id="nd-title"
-                className="abm-input"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Client name or deal title"
-                autoFocus
-              />
-            </div>
+            {isListing ? (
+              <>
+                <div className="abm-section">
+                  <label className="abm-section-label mono" htmlFor="nd-address">
+                    LISTING ADDRESS
+                  </label>
+                  <input
+                    id="nd-address"
+                    className="abm-input"
+                    value={listingAddress}
+                    onChange={(e) => setListingAddress(e.target.value)}
+                    placeholder="123 Sample Lane, Vancouver, BC"
+                    autoFocus
+                  />
+                  <span
+                    className="mono"
+                    style={{ fontSize: "0.7rem", opacity: 0.6, marginTop: 4, display: "block" }}
+                  >
+                    Becomes the card title
+                  </span>
+                </div>
+
+                <div className="abm-section">
+                  <label className="abm-section-label mono" htmlFor="nd-client">
+                    CLIENT NAME <span style={{ opacity: 0.6 }}>(optional)</span>
+                  </label>
+                  <input
+                    id="nd-client"
+                    className="abm-input"
+                    value={clientName}
+                    onChange={(e) => setClientName(e.target.value)}
+                    placeholder="Seller name"
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="abm-section">
+                <label className="abm-section-label mono" htmlFor="nd-title">
+                  CLIENT / TITLE
+                </label>
+                <input
+                  id="nd-title"
+                  className="abm-input"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Client name or deal title"
+                  autoFocus
+                />
+              </div>
+            )}
 
             <div className="abm-section">
               <label className="abm-section-label mono" htmlFor="nd-province">
@@ -941,21 +1268,6 @@ function NewDealModal({
                 placeholder="e.g. BC"
               />
             </div>
-
-            {side === "listing" && (
-              <div className="abm-section">
-                <label className="abm-section-label mono" htmlFor="nd-address">
-                  LISTING ADDRESS
-                </label>
-                <input
-                  id="nd-address"
-                  className="abm-input"
-                  value={listingAddress}
-                  onChange={(e) => setListingAddress(e.target.value)}
-                  placeholder="123 Sample Lane, Vancouver, BC"
-                />
-              </div>
-            )}
 
             {error && (
               <div className="abm-tag warn" style={{ display: "block", padding: "6px 8px" }}>
@@ -988,15 +1300,68 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [showNewDeal, setShowNewDeal] = useState(false);
   const [draggingDeal, setDraggingDeal] = useState<Deal | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+
+  // Restore an archived deal back to the live board (status -> active).
+  const handleRestore = async (deal: Deal | BuyerDeal) => {
+    if (restoringId) return;
+    setRestoringId(deal.id);
+    try {
+      await api.setAdminDealStatus(deal.id, "active");
+      setRestoreError(null);
+      onRefresh?.();
+    } catch {
+      setRestoreError("Could not restore that lead. Try again.");
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  // Guaranteed octopus splash on a fresh app open. Data often loads from cache
+  // before the board's `loading` loader ever renders, so the mascot never gets
+  // seen. We force a short intro on mount, then gate it with sessionStorage so
+  // it only plays once per app session (fresh load = new session = key absent).
+  const [showIntro, setShowIntro] = useState(() => {
+    try {
+      return sessionStorage.getItem("adminOctoIntro") !== "1";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    if (!showIntro) return;
+    const t = setTimeout(() => {
+      try {
+        sessionStorage.setItem("adminOctoIntro", "1");
+      } catch {
+        /* SSR / private-mode safety: still hide the splash */
+      }
+      setShowIntro(false);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [showIntro]);
 
   // Never fall back to the ADMIN_DEALS / ADMIN_BUYER_DEALS demo fixtures: a
   // real account with no deals must see an empty board, not fabricated sample
   // listings ("Demo Listing", "Sample Drive", MLS DEMO…). The board is driven
   // entirely by the live /api/admin/deals fetch; absent data = empty.
-  const listingDeals = deals ?? [];
-  const buyerDealsResolved = buyerDeals ?? [];
+  const isArchived = (d: Deal | BuyerDeal) => (d.status ?? "").toLowerCase() === "archived";
+
+  // Archived deals (cancelled-without-relist) are filtered out of the live
+  // pipeline and shown only in the Archived tab.
+  const rawListingDeals = deals ?? [];
+  const rawBuyerDeals = buyerDeals ?? [];
+  const listingDeals = rawListingDeals.filter((d) => !isArchived(d));
+  const buyerDealsResolved = rawBuyerDeals.filter((d) => !isArchived(d));
+  const archivedDeals = useMemo(
+    () => [...rawListingDeals, ...rawBuyerDeals].filter(isArchived),
+    [rawListingDeals, rawBuyerDeals],
+  );
 
   const isBuyer = tab === "buyer";
+  const isArchivedTab = tab === "archived";
   const activePipeline = isBuyer ? ADMIN_BUYER_PIPELINE : ADMIN_PIPELINE;
   const allDeals       = isBuyer ? buyerDealsResolved   : listingDeals;
 
@@ -1019,9 +1384,23 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     onOpenDeal?.(deal.id);
   };
 
+  // Open a deal modal from a deal id (used by the Critical dates + Approvals
+  // desk sections, which only carry ids).
+  const openDealById = (dealId: string) => {
+    const d =
+      listingDeals.find((x) => x.id === dealId) ||
+      buyerDealsResolved.find((x) => x.id === dealId);
+    if (d) handleOpenDeal(d);
+    else onOpenDeal?.(dealId);
+  };
+
   const dealsByPhase = useMemo(() => {
     const m: Record<string, Deal[]> = {};
-    for (const d of activeDeals) (m[d.phase] = m[d.phase] || []).push(d);
+    // Pinned Top-25 hot leads live ONLY in the Top 25 strip, not the pipeline columns.
+    for (const d of activeDeals) {
+      if (d.primary) continue;
+      (m[d.phase] = m[d.phase] || []).push(d);
+    }
     return m;
   }, [activeDeals]);
 
@@ -1029,6 +1408,7 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
     <main className="admin-board">
       <header className="ab-top">
         <div className="ab-crumb">
+          {/* octopus moved to the global sidebar brand mark (on every page) */}
           <span className="crumb">Admin desk</span>
           <span className="sep">&middot;</span>
           <span className="ab-live"><span className="ab-live-dot"></span>Local gateway online</span>
@@ -1051,9 +1431,18 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
             </button>
           </div>
         ) : null}
+        {restoreError ? (
+          <div className="ab-error mono" role="alert" aria-live="polite">
+            <span>{restoreError}</span>
+          </div>
+        ) : null}
 
+        {loading || showIntro ? (
+          <BoardLoader />
+        ) : (
+        <>
         {/* Top 25 deals strip */}
-        <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} />
+        <Top25Deals deals={activeDeals} mode={tab} onOpenDeal={handleOpenDeal} onRefresh={onRefresh} />
 
         {/* KPI tiles */}
         <section className="ab-kpis">
@@ -1082,6 +1471,10 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
           )}
         </section>
 
+        {/* Critical dates + Approvals — cross-deal desk sections (between KPIs and board) */}
+        <CriticalDates onOpenDeal={openDealById} />
+        <ApprovalsQueue onOpenDeal={openDealById} />
+
         {/* Kanban with tabs + search */}
         <section className="ab-card">
           <header className="ab-card-head">
@@ -1091,6 +1484,9 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
               </button>
               <button className={"ab-tab" + (tab === "buyer" ? " active" : "")} onClick={() => setTab("buyer")}>
                 <span>Buyer admin</span><span className="count mono">{buyerDealsResolved.length}</span>
+              </button>
+              <button className={"ab-tab" + (tab === "archived" ? " active" : "")} onClick={() => setTab("archived")}>
+                <span>Archived</span><span className="count mono">{archivedDeals.length}</span>
               </button>
               {/* Real events only (Google Calendar + deal milestones via
                   useAdminEvents / computeAdminEvents). Never fall back to the
@@ -1112,7 +1508,46 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
             </div>
           </header>
 
-          {/* Kanban */}
+          {isArchivedTab ? (
+            /* Archived deals: cancelled-without-relist sellers. Compact cards,
+               open the same deal modal on click. */
+            <div className="ab-archived">
+              {archivedDeals.length === 0 ? (
+                <div className="ab-archived-empty">Nothing archived yet.</div>
+              ) : (
+                <div className="ab-archived-grid">
+                  {archivedDeals.map((d) => (
+                    <div className="ab-archived-card-wrap" key={d.id}>
+                      <button
+                        type="button"
+                        className="ab-archived-restore"
+                        title="Restore to board"
+                        disabled={restoringId === d.id}
+                        onClick={(e) => { e.stopPropagation(); void handleRestore(d); }}
+                      >
+                        {restoringId === d.id ? "Restoring…" : "Restore"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ab-archived-card"
+                        onClick={() => handleOpenDeal(d as Deal)}
+                      >
+                        <span className="ab-archived-tag mono">archived</span>
+                        <span className="ab-archived-addr">{d.addr}</span>
+                        {(d.archivedNote || d.line2) && (
+                          <span className="ab-archived-note">{d.archivedNote || d.line2}</span>
+                        )}
+                        {d.archivedAt && (
+                          <span className="ab-archived-date mono">{formatArchivedDate(d.archivedAt)}</span>
+                        )}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+          /* Kanban */
           <div className="ab-kanban">
             {activePipeline.map((p) => (
               <PipelineColumn
@@ -1123,18 +1558,21 @@ function AdminBoard({ deals, buyerDeals, kpis, events, loading, error, onRefresh
                 onDropDeal={onMoveDeal}
                 onCardDragStart={(deal) => setDraggingDeal(deal)}
                 onCardDragEnd={() => setDraggingDeal(null)}
+                onTogglePin={() => onRefresh?.()}
                 draggingDeal={draggingDeal}
                 canDrop={shouldDropDeal(dealsByPhase[p.id] || [], draggingDeal, phaseStageNumber(p))}
               />
             ))}
           </div>
+          )}
         </section>
+        </>
+        )}
       </div>
       {activeDeal && (
         <DealDetailModal
           deal={activeDeal}
           onClose={() => setActiveDeal(null)}
-          onChanged={onRefresh}
         />
       )}
       {showNewDeal && (

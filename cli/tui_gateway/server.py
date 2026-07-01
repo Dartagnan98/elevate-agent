@@ -4179,56 +4179,6 @@ def _emit_sign_in_nag(sid: str) -> None:
 # `status` is `completed` or `error`. NEVER render this verbatim as a user turn.
 _SUBAGENT_RESULT_MARKER = "⟦subagent-result"  # ⟦subagent-result:<status>⟧
 
-_TOOL_ONLY_NO_RESPONSE_TEXT = (
-    "The run stopped after tool activity before producing a final response. "
-    "Ask me to continue from here or retry the request."
-)
-
-
-def _tool_activity_without_final_response(messages: list) -> bool:
-    """Return True when the latest user turn ended on tools, not text."""
-    if not isinstance(messages, list) or not messages:
-        return False
-    saw_tool_activity = False
-    for msg in reversed(messages):
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        content = str(msg.get("content") or "").strip()
-        tool_calls = msg.get("tool_calls")
-        if role == "tool":
-            saw_tool_activity = True
-            continue
-        if role == "assistant":
-            if isinstance(tool_calls, list) and tool_calls:
-                saw_tool_activity = True
-                continue
-            if content:
-                return False
-            continue
-        if role == "user":
-            return saw_tool_activity
-        if content:
-            return False
-    return saw_tool_activity
-
-
-def _append_tool_only_no_response_message(
-    messages: list,
-    *,
-    assistant_message_id: str | None,
-) -> list:
-    next_messages = list(messages)
-    next_messages.append(
-        {
-            "role": "assistant",
-            "content": _TOOL_ONLY_NO_RESPONSE_TEXT,
-            "finish_reason": "interrupted",
-            "client_message_id": assistant_message_id,
-        }
-    )
-    return next_messages
-
 
 def _format_delegate_completion(results: list) -> str:
     """Render an async-delegation result payload as a chat-ready summary.
@@ -4882,42 +4832,6 @@ def _(rid, params: dict) -> dict:
                         if result.get("interrupted")
                         else "error" if result.get("error") else "complete"
                     )
-                    result_messages = result.get("messages")
-                    if (
-                        status == "complete"
-                        and not str(raw or "").strip()
-                        and isinstance(result_messages, list)
-                        and _tool_activity_without_final_response(result_messages)
-                    ):
-                        repaired_messages = _append_tool_only_no_response_message(
-                            result_messages,
-                            assistant_message_id=turn_ids.get("assistant"),
-                        )
-                        result["messages"] = repaired_messages
-                        raw = _TOOL_ONLY_NO_RESPONSE_TEXT
-                        status = "interrupted"
-                        status_note = (
-                            "The model stopped after tool activity without a final "
-                            "assistant response, so this turn was marked interrupted "
-                            "instead of silently completing."
-                        )
-                        with session["history_lock"]:
-                            current_version = int(session.get("history_version", 0))
-                            current_saved_history = session.get("history")
-                            if (
-                                current_saved_history == result_messages
-                                or _tool_activity_without_final_response(
-                                    current_saved_history
-                                    if isinstance(current_saved_history, list)
-                                    else []
-                                )
-                            ):
-                                session["history"] = repaired_messages
-                                _next_ver = max(
-                                    current_version, current_history_version
-                                ) + 1
-                                session["history_version"] = _next_ver
-                                current_history_version = _next_ver
                     lr = result.get("last_reasoning")
                     if isinstance(lr, str) and lr.strip():
                         last_reasoning = lr.strip()
@@ -5392,11 +5306,6 @@ def _(rid, params: dict) -> dict:
     live ``session["running"]`` latch (False for an unknown/closed session)."""
     sid = params.get("session_id", "")
     sess = _sessions.get(sid) if sid else None
-    if sess is None and sid:
-        for candidate in list(_sessions.values()):
-            if str(candidate.get("session_key") or "") == str(sid):
-                sess = candidate
-                break
     return _ok(rid, {"running": bool(sess and sess.get("running"))})
 
 

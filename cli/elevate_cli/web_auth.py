@@ -14,7 +14,8 @@ from fastapi import HTTPException, Request
 
 # The CMA PDF download route accepts the session token via ?token= because
 # window.open() can't attach an Authorization header. Scoped to this path only.
-_CMA_PDF_PATH_RE = re.compile(r"^/api/admin/deals/[^/]+/cma-pdf/?$")
+_CMA_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/cma-pdf/?$")
+_DRAFT_PDF_PATH_RE = re.compile(r"^/api/(?:admin/)?deals/[^/]+/run-draft-pdf/[^/]+/?$")
 
 
 def load_session_token() -> str:
@@ -82,7 +83,7 @@ def has_valid_session_token(
     # the CMA PDF route also accepts the same session token as a ?token= query
     # param. Scoped to that one read-only download path only — everything else
     # stays header/cookie-only.
-    if _CMA_PDF_PATH_RE.match(request.url.path):
+    if _CMA_PDF_PATH_RE.match(request.url.path) or _DRAFT_PDF_PATH_RE.match(request.url.path):
         query_tok = request.query_params.get("token", "")
         if query_tok and hmac.compare_digest(
             query_tok.encode(),

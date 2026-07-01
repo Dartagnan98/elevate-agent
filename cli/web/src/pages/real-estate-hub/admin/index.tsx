@@ -253,7 +253,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Pre-CMA",
     labels: {
       listing: { title: "Pre-CMA", subtitle: "Dashboard setup + contact verification" },
-      buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
+      buyer: { title: "Client Onboarding", subtitle: "Agency, disclosures + pre-approval" },
     },
   },
   {
@@ -262,7 +262,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "CMA",
     labels: {
       listing: { title: "CMA / Evaluation", subtitle: "PDF + pricing story" },
-      buyer: { title: "Accepted", subtitle: "Lender + docs" },
+      buyer: { title: "Offer Prep", subtitle: "Comps + offer paperwork" },
     },
   },
   {
@@ -271,7 +271,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "Intake",
     labels: {
       listing: { title: "Listing Intake", subtitle: "Trigger MLC + missing fields" },
-      buyer: { title: "Conditions", subtitle: "Inspection + strata" },
+      buyer: { title: "Accepted", subtitle: "Lender + docs" },
     },
   },
   {
@@ -280,7 +280,7 @@ const ADMIN_COLUMNS: AdminColumn[] = [
     stageLabel: "SkySlope",
     labels: {
       listing: { title: "SkySlope & Matrix Prep", subtitle: "Compliance file + incomplete MLS draft" },
-      buyer: { title: "Condition Removal", subtitle: "Deposit + dates" },
+      buyer: { title: "Conditions", subtitle: "Inspection + strata" },
     },
   },
   {
@@ -418,10 +418,10 @@ const ADMIN_PHASE_AUTOMATIONS: Record<AdminSide, Record<AdminStageNumber, AdminP
     },
   },
   buyer: {
-    0: { agents: [], background: [], moveSignal: "offer package ready" },
-    1: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
-    2: { agents: [], background: [], moveSignal: "conditions tracked" },
-    3: { agents: [], background: [], moveSignal: "conditions removed" },
+    0: { agents: [], background: [], moveSignal: "agency + disclosures signed" },
+    1: { agents: [], background: [], moveSignal: "offer package ready" },
+    2: { agents: [], background: [], moveSignal: "accepted-offer checklist complete" },
+    3: { agents: [], background: [], moveSignal: "conditions tracked" },
     4: { agents: [], background: [], moveSignal: "conditions removed" },
     5: { agents: [], background: [], moveSignal: "conditions removed" },
     6: { agents: [], background: [], moveSignal: "conditions removed" },
@@ -519,24 +519,25 @@ const ADMIN_STAGE_CHECKLISTS: Record<AdminSide, Record<AdminStageNumber, AdminCh
   },
   buyer: {
     0: [
+    { id: "buyer-agency-signed", label: "Buyer's Agency Agreement signed" },
+    { id: "dorts-pnc-signed", label: "DORTS + PNC signed" },
+    { id: "fintrac-id", label: "FINTRAC ID collected" },
+    { id: "pre-approval", label: "Pre-approval confirmed" },
+    ],
+    1: [
     { id: "lender-paperwork", label: "Lender paperwork sent" },
     { id: "accepted-offer-checklist", label: "Accepted-offer checklist run" },
     { id: "doc-list", label: "Doc list (offer, addenda, disclosures, deposit receipt)" },
     ],
-    1: [
+    2: [
     { id: "inspection-booked", label: "Inspection booked" },
     { id: "insurance-deadline", label: "Insurance deadline tracked" },
     { id: "strata-review", label: "Strata / condo review (if applicable)" },
     ],
-    2: [
+    3: [
     { id: "deposit-due", label: "Deposit due date tracked" },
     { id: "lawyer-info", label: "Lawyer / conveyancer info captured" },
     { id: "skyslope-docs", label: "SkySlope missing-doc list cleared" },
-    ],
-    3: [
-    { id: "conditions-removed", label: "All conditions removed / waived" },
-    { id: "deposit-received", label: "Deposit received" },
-    { id: "completion-locked", label: "Completion + possession dates locked" },
     ],
     4: [
     { id: "conditions-removed", label: "All conditions removed / waived" },
@@ -734,7 +735,7 @@ function adminPhaseAutomation(side: AdminSide, stage: AdminStageNumber): AdminPh
 }
 
 function isHiddenAdminStage(side: AdminSide, stage: AdminStageNumber): boolean {
-  if (side === "buyer") return stage > 3;
+  if (side === "buyer") return stage > 4;
   return ADMIN_HIDDEN_PIPELINE_STAGES.has(stage);
 }
 

@@ -1002,12 +1002,7 @@ export function AgentConfigEditor({
         </section>
 
         <div className="flex justify-end">
-          <Button
-            size="sm"
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            title={saving ? "Saving changes" : !dirty ? "No changes to save" : "Save changes"}
-          >
+          <Button size="sm" onClick={handleSave} disabled={!dirty || saving}>
             {saving ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
@@ -1129,7 +1124,6 @@ export function AgentTelegramLaneEditor({
             variant="outline"
             onClick={onSave}
             disabled={saving || !changed}
-            title={saving ? "Saving Telegram lane" : !changed ? "Enter a bot token or chat/topic ID to save" : "Save Telegram lane"}
           >
             {saving ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />

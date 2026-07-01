@@ -447,7 +447,13 @@
   gap: 14px;
 }
 .ab-top > * { -webkit-app-region: no-drag; }
-.ab-crumb { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--fg); }
+.ab-crumb { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg); }
+.ab-crumb-octo {
+  width: 26px; height: 26px;
+  object-fit: contain;
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 3px rgba(24, 40, 72, 0.35));
+}
 .ab-crumb .crumb { font-weight: 600; font-size: 14px; letter-spacing: -0.005em; white-space: nowrap; }
 .ab-crumb .sep { color: var(--fg-dim); }
 .ab-live {
@@ -537,14 +543,13 @@
 @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
 .ab-kpi {
   background: var(--bg-2);
-  border: 1px solid transparent;
-  border-radius: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
   padding: 10px 12px;
   min-width: 0;
-  transition: background 200ms var(--ease-out), transform 200ms var(--ease-out);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.025) inset;
+  transition: border-color 200ms var(--ease-out);
 }
-.ab-kpi:hover { background: var(--bg-3); transform: translateY(-1px); }
+.ab-kpi:hover { border-color: var(--border); }
 .ab-kpi-label {
   font: 500 10.5px/1.1 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg-faint);
@@ -686,24 +691,32 @@
 }
 .ab-pill.subtle { color: var(--fg-muted); }
 
-/* KPI tiles -- compact 8-up */
+/* KPI tiles -- compact 8-up, on-brand navy band with brand-colored values */
 .ab-kpis {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 6px;
-  padding: 6px 6px 14px;
+  gap: 7px;
+  margin: 0 6px 14px;
+  padding: 12px 12px;
+  /* soft band + left accent border so the KPIs read as one unit */
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid #5E8AD0;
+  border-radius: 8px;
 }
 @media (max-width: 1400px) { .ab-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 760px)  { .ab-kpis { grid-template-columns: repeat(2, 1fr); } }
 .ab-kpi {
-  background: var(--bg-1);
+  background: var(--bg-2);
   border: 1px solid var(--border-soft);
-  border-radius: 5px;
-  padding: 10px 12px;
+  border-radius: 6px;
+  padding: 11px 13px;
   min-width: 0;
-  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
+  transition: border-color 140ms var(--ease-out);
 }
-.ab-kpi:hover { border-color: var(--border); background: var(--bg-2); }
+.ab-kpi:hover {
+  border-color: var(--border);
+}
 .ab-kpi-label {
   font: 500 9.5px/1 "Geist Mono", monospace;
   color: var(--fg-faint);
@@ -719,6 +732,9 @@
   margin-top: 6px;
   letter-spacing: -0.01em;
 }
+/* brand tone on the value -- orange = hot/pending, blue = closed/done */
+.ab-kpi-value.hot  { color: #C46340; }
+.ab-kpi-value.done { color: #5E8AD0; }
 .ab-kpi-delta {
   margin-top: 5px;
   font: 500 10px/1 "Geist Mono", monospace;
@@ -840,17 +856,26 @@
 
 /* Top 25 deals strip */
 .ab-top25 {
-  margin: 8px 6px 10px;
+  margin: 8px 6px 12px;
   background: var(--bg-1);
-  border: 1px solid var(--border-soft);
-  border-radius: 4px;
-  overflow: hidden;
+  border: 1px solid rgba(24, 40, 72, 0.45);
+  border-radius: 8px;
+  /* visible (not hidden) so the "+ Add" form popover can extend below the
+     section without being clipped; the horizontal strip keeps its own
+     overflow-x scroll on .ab-top25-strip. */
+  overflow: visible;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
 }
 .ab-top25-head {
   display: flex; align-items: center; gap: 14px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--border-soft);
+  padding: 11px 16px;
+  /* clean brand-blue tint band (matches the blue accents) instead of the
+     washed-out navy-over-grey that read as brushed silver. */
+  background: linear-gradient(180deg, rgba(94, 138, 208, 0.16), rgba(94, 138, 208, 0.03) 100%);
+  border-bottom: 1px solid rgba(94, 138, 208, 0.34);
+  border-radius: 8px 8px 0 0;
   flex-wrap: wrap;
+  position: relative;
 }
 .ab-top25-title-block {
   display: flex; align-items: baseline; gap: 10px;
@@ -883,6 +908,179 @@
 }
 .ab-top25-legend-dot.blocked { background: var(--status-warn); }
 .ab-top25-legend-dot.primary { background: var(--status-done); }
+
+.ab-top25-add {
+  display: inline-flex; align-items: center;
+  height: 24px; padding: 0 10px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  color: var(--fg-muted);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: background 120ms var(--ease-out), border-color 120ms var(--ease-out), color 120ms var(--ease-out);
+}
+.ab-top25-add:hover {
+  color: var(--accent);
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+}
+
+.ab-top25-add-pop {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 14px;
+  z-index: 40;
+  width: 290px;
+  max-height: min(74vh, 520px);
+  display: flex; flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  overflow-y: auto;
+}
+.ab-top25-add-search {
+  flex: 0 0 auto;
+  margin: 8px;
+  height: 30px; padding: 0 9px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--fg);
+  font: 500 12.5px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  outline: none;
+}
+.ab-top25-add-search:focus {
+  border-color: var(--accent-ring);
+}
+.ab-top25-add-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 0 4px 6px;
+}
+.ab-top25-add-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0; border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+  transition: background 100ms var(--ease-out);
+}
+.ab-top25-add-row:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.ab-top25-add-row:disabled { opacity: 0.5; cursor: default; }
+.ab-top25-add-row-addr {
+  font: 500 12.5px/1.25 "Anthropic Sans Display", "Geist", sans-serif;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ab-top25-add-row-badge {
+  flex: 0 0 auto;
+  font: 500 10.5px/1 "Geist Mono", monospace;
+  color: var(--fg-faint);
+  letter-spacing: 0.02em;
+}
+.ab-top25-add-empty {
+  padding: 14px 10px;
+  font: 500 12px/1.4 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+/* New hot-lead form (replaces the deal picker) */
+.ab-top25-form {
+  display: flex; flex-direction: column; gap: 9px;
+  padding: 11px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.ab-top25-form-title {
+  font: 600 10px/1 "Geist Mono", monospace;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+}
+.ab-top25-form-field {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ab-top25-form-field > span {
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+.ab-top25-form-field input,
+.ab-top25-form-field textarea {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--bg-1);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--fg);
+  font: 500 12.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
+  outline: none;
+  resize: vertical;
+}
+.ab-top25-form-field input:focus,
+.ab-top25-form-field textarea:focus {
+  border-color: var(--accent-ring);
+}
+.ab-top25-form-field textarea { min-height: 54px; }
+.ab-top25-form-side {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.ab-top25-form-side-label {
+  font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+.ab-top25-side-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.ab-top25-side-btn {
+  padding: 5px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: background 100ms var(--ease-out), color 100ms var(--ease-out);
+}
+.ab-top25-side-btn + .ab-top25-side-btn { border-left: 1px solid var(--border-soft); }
+.ab-top25-side-btn.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.ab-top25-form-error {
+  font: 500 11.5px/1.35 "Anthropic Sans Display", "Geist", sans-serif;
+  color: var(--status-warn);
+}
+.ab-top25-form-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  margin-top: 2px;
+}
+.ab-top25-form-cancel {
+  padding: 6px 11px;
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--fg-muted);
+  font: 500 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+}
+.ab-top25-form-cancel:hover { border-color: var(--border); color: var(--fg); }
+.ab-top25-form-submit {
+  padding: 6px 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--accent-fg);
+  font: 600 12px/1 "Anthropic Sans Display", "Geist", sans-serif;
+  cursor: pointer;
+  transition: opacity 120ms var(--ease-out);
+}
+.ab-top25-form-submit:disabled { opacity: 0.45; cursor: default; }
 
 .ab-top25-strip {
   display: flex;
@@ -925,6 +1123,42 @@
 .ab-top25-card.blocked {
   border-color: color-mix(in srgb, var(--status-warn) 50%, var(--border-soft));
 }
+.ab-top25-card-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+}
+/* Remove (archive) button — small ×, top-right, fades in on card hover. */
+.ab-top25-card-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font: 600 12px/1 "Geist Mono", monospace;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms var(--ease-out), background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+.ab-top25-card-wrap:hover .ab-top25-card-remove,
+.ab-top25-card-remove:focus-visible {
+  opacity: 1;
+}
+.ab-top25-card-remove:hover {
+  background: color-mix(in srgb, var(--status-warn) 22%, var(--bg-3));
+  border-color: color-mix(in srgb, var(--status-warn) 55%, var(--border));
+  color: var(--fg);
+}
+.ab-top25-card-remove:disabled { cursor: default; opacity: 0.6; }
 .ab-top25-rank {
   font: 500 10px/1 "Geist Mono", monospace;
   color: var(--fg-dim);
@@ -1000,11 +1234,16 @@
   margin-left: auto;
 }
 .ab-top25-empty {
-  padding: 18px 14px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 22px 14px 24px;
   color: var(--fg-faint);
   font-size: 12.5px;
   text-align: center;
 }
+.ab-top25-empty .ab-empty-octo { width: 44px; }
 
 /* Tabs */
 .ab-tabs {
@@ -1036,11 +1275,16 @@
   border-radius: 10px;
   box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 40px 80px -20px rgba(0,0,0,0.8);
   width: 100%;
-  max-width: 760px;
+  max-width: min(95vw, 1180px);
   max-height: calc(100vh - 64px);
   display: flex; flex-direction: column;
   position: relative;
-  overflow: hidden;
+  /* Scroll the whole modal as one unit. The fixed header + money + action bar
+     + performance strip can exceed the viewport on shorter screens, leaving
+     nothing for the inner scroll area and clipping the card. Letting the modal
+     scroll (with a sticky header) makes everything reachable. */
+  overflow-y: auto;
+  overflow-x: hidden;
   animation: ab-modal-rise 240ms var(--ease-out) both;
 }
 @keyframes ab-modal-rise {
@@ -1052,13 +1296,16 @@
   appearance: none; background: transparent; border: 0;
   width: 30px; height: 30px;
   border-radius: 999px;
-  color: var(--fg-muted);
+  /* The .abm-head banner is always the dark-blue gradient (any theme), so the
+     close X must always be light — --fg-muted went dark on light/medium and
+     disappeared. */
+  color: rgba(255, 255, 255, 0.72);
   cursor: pointer;
   display: grid; place-items: center;
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
   z-index: 2;
 }
-.ab-modal-close:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+.ab-modal-close:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
 .ab-modal-close .x { font: 300 22px/1 "Anthropic Sans Display", "Geist", sans-serif; }
 
 .ab-modal-head {
@@ -1108,7 +1355,9 @@
 }
 
 .ab-modal-scroll {
-  flex: 1; min-height: 0; overflow-y: auto;
+  /* No longer the sole scroll boundary — the modal itself scrolls now, so this
+     just flows its content (waiting panel + columns) at natural height. */
+  flex: 0 0 auto; min-height: 0; overflow: visible;
   padding: 4px 0 28px;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--fg) 10%, transparent) transparent;
@@ -1606,6 +1855,17 @@
   background: var(--fg);
   border-color: var(--fg);
 }
+.abm-check-auto {
+  margin-left: auto;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
 
 .abm-province { margin-top: 6px; }
 .abm-doc-list {
@@ -1756,7 +2016,7 @@
 .abm-toggle-unset    { font-size: 10px; }
 .abm-modal-scroll, .ab-modal-scroll { padding-top: 0; padding-bottom: 22px; }
 .ab-modal-close      { top: 10px; right: 10px; width: 26px; height: 26px; }
-.ab-modal            { max-width: 1140px; border-radius: 8px; }
+.ab-modal            { max-width: min(95vw, 2000px); border-radius: 8px; }
 
 /* Two-column modal layout */
 .abm-cols {
@@ -2045,13 +2305,28 @@
   border-top: 1px solid var(--border-soft);
 }
 .ab-col-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
   color: var(--fg-dim);
   text-align: center;
-  padding: 8px 0;
+  padding: 16px 0 14px;
   font-size: 11.5px;
+}
+.ab-col-empty-text { line-height: 1.3; }
+
+/* faded brand mascot shown above empty-state copy */
+.ab-empty-octo {
+  width: 40px;
+  height: auto;
+  object-fit: contain;
+  opacity: 0.5;
+  filter: drop-shadow(0 2px 4px rgba(24, 40, 72, 0.25)) saturate(0.9);
 }
 
 .ab-deal {
+  position: relative;
   background: var(--bg-3);
   border: 1px solid transparent;
   border-radius: 5px;
@@ -2061,6 +2336,33 @@
 }
 .ab-deal:hover { background: color-mix(in srgb, var(--fg) 6%, var(--bg-3)); }
 .ab-deal:active { transform: translateY(1px); }
+
+/* Pin-to-Top-25 control on the kanban card tile */
+.ab-deal-pin {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 28%, transparent);
+  cursor: pointer;
+  transition: color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+.ab-deal-pin svg { width: 16px; height: 16px; }
+.ab-deal-pin:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.ab-deal-pin.pinned { color: #5E8AD0; }
+.ab-deal-pin.pinned:hover { color: color-mix(in srgb, #5E8AD0 80%, #fff); }
+.ab-deal-pin:disabled { opacity: 0.5; cursor: default; }
 .ab-deal-flag {
   margin-left: auto;
   font: 500 11px/1 "Anthropic Sans Display", "Geist", sans-serif;
@@ -2068,12 +2370,13 @@
   white-space: nowrap;
 }
 .ab-deal-flag.working { color: var(--accent); }
-.ab-deal-flag.waiting,
+.ab-deal-flag.waiting { color: #C46340; }
 .ab-deal-flag.failed { color: var(--status-warn); }
 .ab-deal-addr {
   font: 500 13.5px/1.3 "Anthropic Sans Display", "Geist", sans-serif;
   color: var(--fg);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-right: 26px;
 }
 .ab-deal-line2 {
   font-size: 11.5px;
@@ -2579,6 +2882,59 @@
   font-size: 12px;
 }
 
+/* SkySlope — Missing Documents (read-only punch list) */
+.abm-phase-count.warn { color: var(--elev-orange); }
+.abm-phase-count.ok { color: var(--status-ok, #4f9d69); }
+.abm-skyslope-body { padding: 0 12px 12px; }
+.abm-skyslope-head {
+  font: 500 10px/1.3 "Geist Mono", monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 8px;
+}
+.abm-skyslope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.abm-skyslope-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 500 12.5px/1.35 "Geist", sans-serif;
+  color: var(--fg);
+}
+.abm-skyslope-row::before {
+  content: "•";
+  color: var(--fg-dim);
+  flex: 0 0 auto;
+}
+.abm-skyslope-doc { flex: 1 1 auto; min-width: 0; }
+.abm-skyslope-chip {
+  flex: 0 0 auto;
+  font: 600 9.5px/1 "Geist Mono", monospace;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--elev-orange);
+  background: color-mix(in srgb, var(--elev-orange) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 30%, transparent);
+  padding: 3px 6px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.abm-skyslope-clear {
+  font: 500 12.5px/1.35 "Geist", sans-serif;
+  color: var(--status-ok, #4f9d69);
+}
+.abm-skyslope-empty {
+  font: 500 12px/1.4 "Geist", sans-serif;
+  color: var(--fg-muted);
+}
+
 /* Elevation: new card action buttons */
 .abm-btn.collapse-sale {
   background: transparent;
@@ -2586,6 +2942,12 @@
   border: 1px solid color-mix(in srgb, var(--elev-orange) 45%, transparent);
 }
 .abm-btn.collapse-sale:hover { background: color-mix(in srgb, var(--elev-orange) 12%, transparent); }
+.abm-btn.price-reduction {
+  background: transparent;
+  color: var(--elev-orange);
+  border: 1px solid color-mix(in srgb, var(--elev-orange) 45%, transparent);
+}
+.abm-btn.price-reduction:hover { background: color-mix(in srgb, var(--elev-orange) 12%, transparent); }
 .abm-btn.landing {
   background: var(--elev-navy);
   color: #9DBDE8;
@@ -2604,6 +2966,57 @@
   align-items: center;
 }
 .abm-btn.cma-pdf.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; cursor: default; }
+/* Weekly seller-update PDF — compact variant that lives in the Listing Performance header */
+.abm-btn.seller-pdf {
+  background: var(--elev-navy);
+  color: #9DBDE8;
+  border: 1px solid #2E4670;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 10.5px;
+}
+.abm-btn.seller-pdf.empty { color: var(--elev-orange); border-color: color-mix(in srgb, var(--elev-orange) 40%, transparent); background: transparent; cursor: default; }
+
+/* Approve & Send — filled brand-blue primary so it reads as the action; sits next to the PDF button in the perf header */
+.abm-btn.send-update {
+  background: #5E8AD0;
+  color: #ffffff;
+  border: 1px solid #5E8AD0;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 11px;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.abm-btn.send-update:hover { background: color-mix(in srgb, #5E8AD0 88%, #000); }
+.abm-btn.send-update.sent {
+  background: transparent;
+  color: var(--fg-faint);
+  border-color: var(--border);
+  font-weight: 500;
+  cursor: default;
+}
+
+/* Confirm dialog for the external send (Approve & Send) */
+.abm-confirm-overlay {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 12, 22, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.abm-confirm {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 18px 20px;
+  max-width: 380px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.4);
+}
+.abm-confirm-title { font-size: 14px; font-weight: 700; color: var(--fg); margin-bottom: 8px; }
+.abm-confirm-body { font-size: 12.5px; color: var(--fg-muted); line-height: 1.5; }
+.abm-confirm-error { margin-top: 10px; font-size: 11.5px; color: var(--elev-orange); }
+.abm-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 
 /* Elevation: master document tray */
 .abm-doctray-prog { color: var(--accent); font-size: 11px; }
@@ -2618,7 +3031,7 @@
 .abm-doc-chip.missing .abm-doc-box { border-color: var(--elev-orange); border-style: dashed; }
 
 /* Elevation: money strip in modal header */
-.abm-money { display: flex; gap: 0; margin-top: 14px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--elev-navy) 30%, var(--bg, #0F0F0F)); }
+.abm-money { display: flex; gap: 0; margin-top: 14px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: color-mix(in srgb, var(--elev-navy) 30%, var(--bg)); }
 .abm-money-cell { flex: 1; padding: 9px 14px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
 .abm-money-cell:last-child { border-right: none; }
 .abm-money-cell .k { font-size: 9px; letter-spacing: .7px; text-transform: uppercase; color: var(--fg-faint); }
@@ -2627,6 +3040,44 @@
 .abm-money-cell .v.b { color: var(--accent); }
 .abm-money-cell .n { font-size: 10px; color: var(--accent); }
 
+/* ── Listing Performance (listing-side only) — at-a-glance under the action bar ── */
+.abm-perf {
+  padding: 12px 28px 14px;
+  background: color-mix(in srgb, var(--elev-navy) 12%, var(--bg));
+  border-bottom: 1px solid var(--border);
+}
+.abm-perf-head { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+.abm-perf-head .abm-btn.seller-pdf { margin-left: auto; }
+.abm-perf-title { font-size: 13px; font-weight: 700; letter-spacing: .2px; color: var(--fg); }
+.abm-perf-asof { font-size: 10px; color: var(--fg-faint); }
+.abm-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--elev-navy) 22%, var(--bg));
+}
+.abm-perf-cell {
+  padding: 9px 12px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+.abm-perf-cell:last-child { border-right: none; }
+.abm-perf-num { font-size: 19px; font-weight: 800; color: #ffffff; line-height: 1.1; }
+.abm-perf-num.blue { color: #5E8AD0; }
+.abm-perf-num.orange { color: #C46340; }
+.abm-perf-label { font-size: 9px; letter-spacing: .6px; text-transform: uppercase; color: var(--fg-faint); }
+.abm-perf-empty { font-size: 12px; color: var(--fg-faint); line-height: 1.5; }
+@media (max-width: 760px) {
+  .abm-perf-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .abm-perf-cell:nth-child(3) { border-right: none; }
+}
+
 /* ── Mockup-match: gradient header + visible action bar (2026-06-20) ── */
 .abm-head {
   background: linear-gradient(135deg,
@@ -2634,6 +3085,10 @@
     color-mix(in srgb, var(--elev-navy) 72%, #3a5a8f) 55%,
     color-mix(in srgb, var(--elev-navy) 52%, #4774b5) 100%);
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  /* Pin the header (with the money strip) while the modal body scrolls. */
+  position: sticky;
+  top: 0;
+  z-index: 4;
 }
 .abm-actionbar {
   display: flex; gap: 8px; align-items: center;
@@ -2651,6 +3106,23 @@
 .abm-head {
   background: linear-gradient(118deg, #12223d 0%, #203c70 50%, #2f59a4 100%) !important;
 }
+/* ── Readability fix (2026-06-25): .abm-head is ALWAYS the dark navy gradient in
+   every theme, but .abm-title/.abm-crumbs used var(--fg) which is DARK on the
+   light/medium themes — so the deal name + "Add a card to the board" rendered as
+   dark text on a dark navy header and was unreadable. Force header text light,
+   the same way the close-X was already pinned light. ── */
+.abm-head .abm-title,
+.abm-head .abm-title * { color: rgba(255, 255, 255, 0.97) !important; }
+.abm-head .abm-crumbs,
+.abm-head .abm-crumbs * { color: rgba(255, 255, 255, 0.72) !important; }
+.abm-head .abm-crumbs .stage { color: var(--elev-orange) !important; }
+.abm-head .abm-meta,
+.abm-head .abm-meta * { color: rgba(255, 255, 255, 0.88) !important; }
+/* Money strip ("LIST"/"OFFER" labels) sits on the LIGHT money box, not the navy,
+   so its label must stay DARK — it used var(--fg-faint) and was barely legible.
+   Bump to the muted (readable) theme tone; stays theme-safe (dark on light,
+   light on dark). The value (.v) already uses var(--fg) and is fine. */
+.abm-money-cell .k { color: var(--fg-muted) !important; font-weight: 600; }
 /* current pipeline stage = orange brand (was greyed out by later rules) — applies in EVERY stage */
 .abm-tag.current {
   color: var(--elev-orange) !important;
@@ -2674,6 +3146,12 @@
 /* Electron treats -webkit-app-region:drag areas as window-drag and eats clicks.
    Force the whole modal to no-drag so the X (and every button) is clickable. */
 .ab-modal-backdrop, .ab-modal, .ab-modal * { -webkit-app-region: no-drag !important; }
+.abm-btn.cancel-only {
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: transparent;
+}
+.abm-btn.cancel-only:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .abm-btn.cancel-relist {
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
@@ -2703,3 +3181,251 @@
   color: #fff;
 }
 .abm-btn.top25-toggle.active:hover { background: #4f7bc0; }
+
+/* ─────────────────────────────────────────────────────────────────
+   BoardLoader — cute on-brand loading state
+   Brand: navy #182848 · brand blue #5E8AD0 · brand orange #C46340
+   ───────────────────────────────────────────────────────────────── */
+
+.bl-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 260px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.bl-stage {
+  position: relative;
+  width: 108px;
+  height: 116px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.bl-octo {
+  position: relative;
+  z-index: 2;
+  width: 96px;
+  height: auto;
+  transform-origin: 50% 100%;
+  animation: bl-bounce 1s ease-in-out infinite;
+  filter: drop-shadow(0 4px 6px rgba(24, 40, 72, 0.16));
+}
+
+.bl-shadow {
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  width: 64px;
+  height: 12px;
+  margin-left: -32px;
+  border-radius: 50%;
+  background: rgba(24, 40, 72, 0.18);
+  filter: blur(1.5px);
+  transform-origin: 50% 50%;
+  animation: bl-shadow-scale 1s ease-in-out infinite;
+}
+
+.bl-caption {
+  font-size: 14px;
+  font-weight: 500;
+  color: #6b7280;
+  letter-spacing: 0.01em;
+}
+
+.bl-dots {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.bl-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: bl-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.bl-dot-1 { background: #5E8AD0; animation-delay: 0s; }
+.bl-dot-2 { background: #C46340; animation-delay: 0.18s; }
+.bl-dot-3 { background: #5E8AD0; animation-delay: 0.36s; }
+
+.bl-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes bl-bounce {
+  0%, 100% { transform: translateY(0) scaleX(1) scaleY(1); }
+  45%      { transform: translateY(-14px) scaleX(0.98) scaleY(1.02); }
+  55%      { transform: translateY(-14px) scaleX(0.98) scaleY(1.02); }
+  78%      { transform: translateY(0) scaleX(1.04) scaleY(0.96); }
+}
+
+@keyframes bl-shadow-scale {
+  0%, 100% { transform: scale(1); opacity: 0.18; }
+  50%      { transform: scale(0.6); opacity: 0.10; }
+}
+
+@keyframes bl-dot-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  40%      { opacity: 1; transform: scale(1.25); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bl-octo {
+    animation: bl-soft-pulse 1.6s ease-in-out infinite;
+  }
+  .bl-shadow { animation: none; opacity: 0.14; }
+  .bl-dot { animation: bl-soft-pulse 1.6s ease-in-out infinite; }
+}
+
+@keyframes bl-soft-pulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+
+/* ── "Waiting on you" detail panel in the deal modal (shows what an
+      automation is actually asking for) — 2026-06-21 ── */
+.abm-waiting {
+  margin: 4px 16px 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, #C46340 45%, transparent);
+  border-left: 3px solid #C46340;
+  border-radius: 8px;
+  background: color-mix(in srgb, #C46340 9%, var(--bg-2));
+}
+.abm-waiting-head {
+  color: #C46340;
+  font-size: 10.5px;
+  letter-spacing: 0.09em;
+  margin-bottom: 8px;
+}
+.abm-waiting-item { padding: 9px 0; border-top: 1px solid color-mix(in srgb, #C46340 22%, transparent); }
+.abm-waiting-item:first-of-type { border-top: none; padding-top: 2px; }
+.abm-waiting-title { font-weight: 650; font-size: 14px; margin-bottom: 5px; color: var(--fg, #f2f2f2); }
+.abm-waiting-msg { font-size: 13px; line-height: 1.5; color: color-mix(in srgb, var(--fg, #f2f2f2) 78%, transparent); margin-bottom: 8px; }
+.abm-waiting-needs { color: #C46340; font-size: 10px; letter-spacing: 0.08em; margin-bottom: 4px; }
+.abm-waiting-fields { margin: 0; padding-left: 18px; }
+.abm-waiting-fields li { font-size: 12.5px; line-height: 1.45; margin: 3px 0; color: color-mix(in srgb, var(--fg, #f2f2f2) 90%, transparent); }
+
+.abm-waiting-actions { display: flex; gap: 8px; margin-top: 10px; }
+.abm-waiting-btn {
+  appearance: none; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600;
+  padding: 7px 14px; border-radius: 6px; border: 1px solid transparent;
+  transition: filter 120ms ease, opacity 120ms ease;
+}
+.abm-waiting-btn:disabled { opacity: 0.55; cursor: default; }
+.abm-waiting-btn.approve { background: #C46340; color: #fff; }
+.abm-waiting-btn.approve:hover:not(:disabled) { filter: brightness(1.08); }
+.abm-waiting-btn.dismiss { background: transparent; color: color-mix(in srgb, var(--fg, #f2f2f2) 70%, transparent); border-color: var(--border-soft, #2a2d34); }
+.abm-waiting-btn.dismiss:hover:not(:disabled) { color: var(--fg, #f2f2f2); }
+.abm-waiting-btn.preview { background: transparent; color: var(--accent, #5E8AD0); border-color: color-mix(in srgb, var(--accent, #5E8AD0) 55%, transparent); }
+.abm-waiting-btn.preview:hover:not(:disabled) { background: color-mix(in srgb, var(--accent, #5E8AD0) 14%, transparent); }
+/* Fillable "Waiting on you" form — type answers to the missing-info questions. */
+.abm-waiting-form { display: flex; flex-direction: column; gap: 9px; margin: 8px 0 6px; }
+.abm-waiting-field { display: flex; flex-direction: column; gap: 3px; }
+.abm-waiting-field-label { font-size: 11.5px; color: color-mix(in srgb, var(--fg, #2b2b2b) 70%, transparent); }
+.abm-waiting-input {
+  font: inherit; font-size: 13px;
+  padding: 7px 10px; border-radius: 6px;
+  background: var(--bg, #fff); color: var(--fg, #2b2b2b);
+  border: 1px solid var(--border-soft); color-scheme: light;
+}
+.abm-waiting-input:focus { outline: 1px solid var(--accent-ring); border-color: var(--border); }
+.abm-waiting-field-help { font-size: 11px; line-height: 1.35; color: color-mix(in srgb, var(--fg, #2b2b2b) 62%, transparent); margin-bottom: 1px; }
+select.abm-waiting-input { appearance: auto; -webkit-appearance: menulist; cursor: pointer; }
+textarea.abm-waiting-textarea { resize: vertical; min-height: 64px; line-height: 1.45; font: inherit; }
+.abm-waiting-btn.submit { background: #5E8AD0; color: #fff; }
+.abm-waiting-btn.submit:hover:not(:disabled) { filter: brightness(1.08); }
+
+/* ── Archived board view (cancelled-without-relist sellers) 2026-06-21 ── */
+.ab-archived { padding: 14px 0 4px; }
+.ab-archived-empty {
+  padding: 18px 4px;
+  color: color-mix(in srgb, #182848 35%, #9aa3b2);
+  font-size: 13px;
+}
+.ab-archived-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.ab-archived-card-wrap {
+  position: relative;
+  display: flex;
+}
+.ab-archived-restore {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid #2E4670;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  font: 600 10px/1.4 "Geist Mono", monospace;
+  letter-spacing: .4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease, border-color .12s ease, color .12s ease, background .12s ease;
+}
+.ab-archived-card-wrap:hover .ab-archived-restore,
+.ab-archived-restore:focus-visible { opacity: 1; }
+.ab-archived-restore:hover {
+  border-color: #5E8AD0;
+  color: var(--fg);
+  background: color-mix(in srgb, #5E8AD0 22%, var(--bg-3));
+}
+.ab-archived-restore:disabled { cursor: default; opacity: .7; }
+.ab-archived-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #2E4670;
+  background: color-mix(in srgb, #182848 22%, transparent);
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+.ab-archived-card:hover {
+  border-color: #5E8AD0;
+  background: color-mix(in srgb, #182848 32%, transparent);
+}
+.ab-archived-tag {
+  font-size: 9px;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  color: #C46340;
+  border: 1px solid color-mix(in srgb, #C46340 45%, transparent);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.ab-archived-addr { font-size: 13.5px; font-weight: 700; color: #E8ECF3; }
+.ab-archived-note {
+  font-size: 11.5px;
+  color: color-mix(in srgb, #E8ECF3 65%, transparent);
+  line-height: 1.35;
+}
+.ab-archived-date { font-size: 10px; color: #5E8AD0; }
+
+/* The "Waiting on you" panel now lives inside .ab-modal-scroll and scrolls with
+   the rest of the modal content, so it no longer needs its own cap/scroll. 2026-06-22 */

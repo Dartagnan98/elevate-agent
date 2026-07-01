@@ -40,8 +40,7 @@ describe("large data page guards", () => {
     expect(leadsProfiles).toContain("const PROFILE_PAGE = 50;");
     expect(leadsProfiles).toContain("const visibleProfiles = showAll ? filtered : filtered.slice(safePage * PROFILE_PAGE, safePage * PROFILE_PAGE + PROFILE_PAGE);");
     expect(admin).toContain("const PAGE = 3;");
-    expect(admin).toContain("const pinnedDeals = deals.filter(d => d.primary);");
-    expect(admin).toContain("return [...pinnedDeals].sort((a, b) => score(b) - score(a)).slice(0, 25);");
+    expect(admin).toContain("return [...deals].sort((a, b) => score(b) - score(a)).slice(0, 25);");
     expect(admin).toContain("const visible = showAll ? filtered : filtered.slice(safePage * PAGE, safePage * PAGE + PAGE);");
     expect(social).toContain("const SOCIAL_POST_RENDER_LIMIT = 96;");
     expect(social).toContain("const rendered = useMemo(() => visible.slice(0, SOCIAL_POST_RENDER_LIMIT), [visible]);");

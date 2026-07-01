@@ -245,7 +245,6 @@ describe("icon-only control accessibility", () => {
       "pages/agent-hub.css",
       "pages/real-estate-hub/admin/admin.css",
       "pages/real-estate-hub/leads/leads.css",
-      "pages/real-estate-hub/social/social.css",
     ];
 
     for (const file of tokenFiles) {

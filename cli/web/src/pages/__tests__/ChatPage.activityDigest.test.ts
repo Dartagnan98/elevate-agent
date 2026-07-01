@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { __chatPageTestables } from "../ChatPage";
 
@@ -94,17 +94,17 @@ describe("ChatActivityDigest tool labels", () => {
 });
 
 describe("ChatActivityDigest reasoning persistence", () => {
-  it("collapses completed work by default", () => {
+  it("keeps completed work expanded by default", () => {
     expect(
       __chatPageTestables.defaultActivityDigestOpen({
         busy: false,
         hasErroredStep: false,
         hasSteps: true,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("keeps live work open but collapses historical work after completion", () => {
+  it("keeps the step body visible across the live-to-completed transition", () => {
     const live = __chatPageTestables.resolveActivityDigestVisibility({
       busy: true,
       hasErroredStep: false,
@@ -119,18 +119,7 @@ describe("ChatActivityDigest reasoning persistence", () => {
     });
 
     expect(live).toMatchObject({ expanded: true, showSteps: true });
-    expect(completed).toMatchObject({ expanded: false, showSteps: false });
-  });
-
-  it("keeps errored completed work expanded for debugging", () => {
-    expect(
-      __chatPageTestables.resolveActivityDigestVisibility({
-        busy: false,
-        hasErroredStep: true,
-        hasSteps: true,
-        userOpen: null,
-      }),
-    ).toEqual({ expanded: true, showSteps: true });
+    expect(completed).toMatchObject({ expanded: true, showSteps: true });
   });
 
   it("keeps the live header active before the first step arrives without a placeholder row", () => {
@@ -204,60 +193,6 @@ describe("ChatActivityDigest reasoning persistence", () => {
   });
 });
 
-describe("stored transcript hydration", () => {
-  it("restores a tool-only turn as an interrupted assistant response", () => {
-    const restored = __chatPageTestables.normalizeStoredTranscript([
-      {
-        content: "Previous answer",
-        message_id: "assistant-before",
-        role: "assistant",
-        timestamp: 1,
-      },
-      {
-        content: "Run QA",
-        message_id: "user-qa",
-        role: "user",
-        timestamp: 2,
-      },
-      {
-        content: "",
-        role: "assistant",
-        timestamp: 3,
-        tool_calls: [
-          {
-            id: "call-1",
-            function: { name: "browser_cdp", arguments: "{}" },
-          },
-        ],
-      },
-      {
-        content: '{"success":true}',
-        role: "tool",
-        timestamp: 4,
-        tool_call_id: "call-1",
-        tool_name: "browser_cdp",
-      },
-    ]);
-
-    expect(restored).toHaveLength(3);
-    expect(restored[0]).toMatchObject({
-      content: "Previous answer",
-      role: "assistant",
-    });
-    expect(restored[0].tools).toBeUndefined();
-    expect(restored[2]).toMatchObject({
-      role: "assistant",
-      status: "interrupted",
-    });
-    expect(restored[2].content).toContain("stopped after tool activity");
-    expect(restored[2].tools).toHaveLength(1);
-    expect(restored[2].tools?.[0]).toMatchObject({
-      messageId: restored[2].id,
-      name: "browser_cdp",
-    });
-  });
-});
-
 describe("manual /compact activity", () => {
   it("recognizes manual compact commands without starting activity locally", () => {
     expect(__chatPageTestables.isCompactSlashCommand("/compact")).toBe(true);
@@ -279,97 +214,7 @@ describe("manual /compact activity", () => {
       __chatPageTestables.shouldClearUsageForStatusUpdate(undefined, "Compacting context"),
     ).toBe(true);
     expect(
-      __chatPageTestables.shouldClearUsageForStatusUpdate(
-        "lifecycle",
-        "Working through earlier context so I can continue...",
-      ),
-    ).toBe(false);
-    expect(
       __chatPageTestables.shouldClearUsageForStatusUpdate("session_compacted", "Session compacted"),
-    ).toBe(false);
-  });
-
-  it("accepts live frames from any owned session id", () => {
-    const owned = new Set(["persisted-session", "lineage-root", "gateway-live"]);
-
-    expect(
-      __chatPageTestables.shouldAcceptGatewayEventSession(
-        "gateway-live",
-        "other-live",
-        owned,
-      ),
-    ).toBe(true);
-    expect(
-      __chatPageTestables.shouldAcceptGatewayEventSession(
-        "other-live",
-        "other-live",
-        owned,
-      ),
-    ).toBe(true);
-    expect(
-      __chatPageTestables.shouldAcceptGatewayEventSession(
-        "foreign-live",
-        "other-live",
-        owned,
-      ),
-    ).toBe(false);
-  });
-
-  it("detects an unanswered visible turn after a dropped run", () => {
-    const owned = new Set(["chat-1"]);
-
-    expect(
-      __chatPageTestables.hasUnfinishedVisibleTurn(
-        [
-          message({
-            id: "user-1",
-            role: "user",
-            content: "please keep going",
-            sessionKey: "chat-1",
-          }),
-        ],
-        owned,
-      ),
-    ).toBe(true);
-    expect(
-      __chatPageTestables.hasUnfinishedVisibleTurn(
-        [
-          message({
-            id: "user-1",
-            role: "user",
-            content: "please keep going",
-            sessionKey: "chat-1",
-          }),
-          message({
-            id: "assistant-1",
-            role: "assistant",
-            content: "",
-            status: "streaming",
-            sessionKey: "chat-1",
-          }),
-        ],
-        owned,
-      ),
-    ).toBe(true);
-    expect(
-      __chatPageTestables.hasUnfinishedVisibleTurn(
-        [
-          message({
-            id: "user-1",
-            role: "user",
-            content: "please keep going",
-            sessionKey: "chat-1",
-          }),
-          message({
-            id: "assistant-1",
-            role: "assistant",
-            content: "done",
-            status: "complete",
-            sessionKey: "chat-1",
-          }),
-        ],
-        owned,
-      ),
     ).toBe(false);
   });
 
@@ -384,71 +229,6 @@ describe("manual /compact activity", () => {
         context_used: 29310,
       }),
     ).toBe("Context left: 89%. 11% used. 29,310 / 272,000 tokens used");
-  });
-});
-
-describe("blank trace diagnostics", () => {
-  const storageKey = "elevate.debug.blankTrace";
-  const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
-
-  afterEach(() => {
-    if (originalWindowDescriptor) {
-      Object.defineProperty(globalThis, "window", originalWindowDescriptor);
-    } else {
-      delete (globalThis as typeof globalThis & { window?: unknown }).window;
-    }
-  });
-
-  it("stays disabled by default and requires an explicit opt-in", () => {
-    expect(__chatPageTestables.isBlankTraceEnabled()).toBe(false);
-
-    const values = new Map<string, string>();
-    const fakeWindow = {
-      localStorage: {
-        getItem: (key: string) => values.get(key) ?? null,
-        removeItem: (key: string) => {
-          values.delete(key);
-        },
-        setItem: (key: string, value: string) => {
-          values.set(key, value);
-        },
-      },
-    } as { __ELEVATE_BLANK_TRACE__?: unknown; localStorage: Pick<Storage, "getItem" | "removeItem" | "setItem"> };
-
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: fakeWindow,
-    });
-
-    expect(__chatPageTestables.isBlankTraceEnabled()).toBe(false);
-
-    fakeWindow.localStorage.setItem(storageKey, "1");
-    expect(__chatPageTestables.isBlankTraceEnabled()).toBe(true);
-
-    fakeWindow.localStorage.removeItem(storageKey);
-    fakeWindow.__ELEVATE_BLANK_TRACE__ = true;
-    expect(__chatPageTestables.isBlankTraceEnabled()).toBe(true);
-  });
-});
-
-describe("queued disconnected sends", () => {
-  it("preserves the already-rendered user bubble id for later submit", () => {
-    const restored = __chatPageTestables.normalizeStoredQueue([
-      {
-        agentId: "executive-assistant",
-        createdAt: 123,
-        id: "queued-1",
-        routedText: "hello",
-        status: "queued",
-        text: "hello",
-        userMessageId: "user-visible-1",
-      },
-    ]);
-
-    expect(restored).toHaveLength(1);
-    expect(__chatPageTestables.queuedInputExistingUserMessageId(restored[0])).toBe(
-      "user-visible-1",
-    );
   });
 });
 
@@ -485,21 +265,6 @@ describe("preview shortcuts", () => {
         text: "open the pdf",
       }),
     ).toBe(true);
-  });
-
-  it("does not treat queue show-all prompts as preview commands", () => {
-    const text =
-      "Test the Leads queue deeply. Verify select all across a large filtered queue, show all, skipped sorting, approved/sent refresh, bulk approve, bulk skip, restore, empty states, and failure recovery. Use mocked or disposable data only. Keep a running checklist of each behavior and the evidence that proves it.";
-
-    expect(__chatPageTestables.isOpenPreviewIntent(text)).toBe(false);
-    expect(
-      __chatPageTestables.shouldHandlePreviewShortcut({
-        currentKey: null,
-        sidePanel: "none",
-        targetKey: "image:browser_screenshot",
-        text,
-      }),
-    ).toBe(false);
   });
 });
 
