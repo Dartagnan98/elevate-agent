@@ -28,6 +28,9 @@ def test_whatsapp_configure_reports_bridge_and_session_state(tmp_path, monkeypat
     (session_dir / "creds.json").write_text("{}")
 
     monkeypatch.setenv("HOME", str(home))
+    # Session dir resolves through get_elevate_home() (ELEVATE_HOME wins over
+    # HOME expansion), so isolate via the canonical knob too.
+    monkeypatch.setenv("ELEVATE_HOME", str(home / ".elevate"))
     monkeypatch.setattr(channel_whatsapp, "get_env_value", lambda key: env.get(key, ""))
     monkeypatch.setattr(channel_whatsapp, "save_env_value", lambda key, value: env.__setitem__(key, value))
     monkeypatch.setattr(channel_whatsapp, "load_config", lambda: {"platforms": {"whatsapp": {"enabled": False}}})
