@@ -53,14 +53,6 @@ directly or only PROPOSE them for dashboard approval. Approvals are dashboard-on
 - Dashboard HTTP endpoints are for the UI. Do not depend on a dashboard session token during your
   cron run.
 
-## Cycle API notes
-
-- `modify_cycle` on `every_n_runs` leaves the cycle's `loop_interval` text stale — issue a
-  second modify with the matching text so the display and the interval agree.
-- `create_cycle` rejects `metric_type='qualitative_compound'` (only `qualitative` |
-  `quantitative`); compound scoring is reserved for your own system-review cycle.
-- Cron delivery = your final response, never `send_message`.
-
 ## The loop — 8 phases
 
 ### 1. Scan every surface

@@ -15,8 +15,7 @@ the realtor's standard process for putting a cancelled or expired listing back o
 0. **Read `docs/playbooks/matrix-automation.md` FIRST.** Synthesized playbook with Matrix vs Xposure split, login flow, fillByLabel helper, JS-evaluate setter, room cards, listing-contract field rules, file-upload patterns, picker-control taxonomy. Codifies what the lessons.md learned across 25+ corrections.
 1. **Read `lessons.md` BEFORE every run.** Apply every lesson. The Matrix UI has session-specific input IDs that change between runs — ALWAYS bind by visible label text, never raw id.
 2. **Add to lessons.md AFTER every run.** If anything is unclear, broken, or the realtor corrects, append the lesson immediately. Format: `[date] | what happened | rule/insight`. the realtor's instruction at skill creation: *"any recommendations should be added to lessons.md so we can rely on the flow"* — this skill compounds value only if we record what we learn.
-3. **the realtor's Matrix relist rule (durable):** only Contract Effective Date, Expiration Date, List Price, and Buyer Agency Commission change on a relist. Photos, remarks, legal, PID, sellers, and everything else carry from the prior listing. Do NOT modify other fields without explicit instruction. Verify the four changed fields against the board's convention.
-4. **Stage-mapping guardrail (from a real misfire):** Admin stage 6 = Accepted Offer — it is never a relist trigger. A stage-6 card entering its stage does not mean "relist this property".
+3. **the realtor's Matrix relist rule (durable):** only Contract Effective Date, Expiration Date, List Price, and Buyer Agency Commission change on a relist. Photos, remarks, legal, PID, sellers, and everything else carry from the prior listing. Do NOT modify other fields without explicit instruction.
 
 ## What this skill does
 

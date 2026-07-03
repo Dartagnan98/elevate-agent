@@ -157,9 +157,6 @@ If the realtor declines the push, write `status: "preview-only"` with no
   `config/realtor.json`. Never narrow it to the primary market only.
 - Photos that are `null` in inputs.json must not appear in the rendered HTML
   (no broken `<img>` tags).
-- Cloudflare-Pages-style deploys replace the WHOLE site: deploying one page's
-  folder 404s every other live page. Always deploy the persistent accumulated
-  site root (what `deploy-landing.sh` assembles) — never a single run's folder.
 
 ## Fair housing & copy boundaries
 

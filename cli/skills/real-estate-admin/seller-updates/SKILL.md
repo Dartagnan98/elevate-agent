@@ -77,22 +77,6 @@ These hold for the entire run. Do not consult a reference for them — just do t
   `references/pdf-format.md`.
 - **Never auto-resolve direct listing URLs** (Realtor.ca anti-bot, Xposure
   deep-links fail). → consult `references/listing-urls.md`.
-- **`--help` is not a harmless probe.** Some local automation scripts execute
-  their real scraper/report work on `--help` — inspect unknown scripts with a
-  file read before running anything.
-- **Never guess a recipient.** Weak contact matches produce no-recipient drafts
-  for human addressing; stale auto-created duplicate drafts get deleted before
-  reporting.
-- **Partial-run discipline.** Keep any dated JSON a mid-crash scraper saved,
-  produce reports for the usable rows, label the run partial, and write
-  SOMETHING back per deal (report / draft-note / blocker-note) so the board
-  stays truthful.
-- **Platform metrics honesty.** Local view/favorite counts are not a
-  portal/social/marketplace breakdown — never infer one from the other.
-- **Feedback-request texts: check the thread first.** Skip anyone the realtor
-  is already talking to or who already gave feedback (double-asking is the
-  failure mode); keep wording casual — showing agents already know the listing
-  agent.
 - Write run artifacts under `scripts/output/handoffs/seller-updates/<date>/`.
 
 ## Phase 0 — Precheck

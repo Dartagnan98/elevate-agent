@@ -46,11 +46,6 @@ Never post or send directly. Missing launch inputs should produce `waiting_human
 - If photos or copy are not approved, create tasks instead of launch assets.
 - Close with `admin-result-writer` so the Admin board reflects drafts, artifacts, and launch gaps.
 
-## Buffer Notes
-
-- Buffer's older wrapper fails with `Field "images" is not defined by type "AssetInput"` — use direct Buffer GraphQL assets: `[{"image": {"url": …}}]` with the required `schedulingType`/`mode` and `saveToDraft`.
-- Superseded drafts get NEW post IDs and need a fresh approval — a repaired draft invalidates the old approval. If the user says they fixed the asset themselves, cancel any in-flight repair delegations.
-
 ## Output Contract
 
 ```json

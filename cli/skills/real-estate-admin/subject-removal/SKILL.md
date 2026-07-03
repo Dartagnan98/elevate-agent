@@ -41,15 +41,6 @@ Human confirmation is required before the subject-removal phase is marked comple
 - If a condition is waived/removed manually, record the human confirmation as evidence.
 - Do not mark the deal sold/firm unless the required subject-removal evidence exists or the human explicitly confirms.
 
-## Form Semantics and Placement
-
-- Notice of Condition Waiver semantics: "Additional Subject Clause(s) remain in effect" = PARTIAL removal; "All conditions are hereby Declared Fulfilled, and this contract is now Unconditional" = FINAL. Partial drafts populate only the waived clause and must NOT select the unconditional option.
-- Buyers signed via e-sign with blank seller lines = place seller fields only in seller areas.
-- F7205 final subject removal: no witness blocks, no Section B; one shared date.
-- CPS: some initial boxes near the immigration/rescission/acknowledgment sections are buyer-only — seller fields only on seller-labelled lines.
-- Addendum pages can print buyer lines ABOVE seller lines near the bottom — go by line labels, not position.
-- The Section 28 final-acceptance date needs a tight DateSigned block on the underline, or it covers the sentence below.
-
 ## Output Contract
 
 ```json

@@ -34,11 +34,6 @@ A verified, deduped CRM contact is what lets every later stage (marketing, selle
 - This skill reads and writes the CRM contact only. It does not send the client anything.
 - Same finalization in any context: in a live session converse inline; on a stage trigger the conversation goes to the Admin agent lane. Always close through `admin-result-writer` so the kanban card reflects the outcome (see its "Where this writes").
 
-## API Notes (Lofty/Chime)
-
-- The `q=` search is unreliable (returns recent/unrelated leads) — treat hits as candidates only. Confirm by normalized email or last-10-digit phone match, and prefer a known lead ID when one is stored (`source_key` `crm:lofty-lead:<id>` → `GET /v1.0/leads/<id>`).
-- Notes endpoint is `POST /v1.0/notes` with `{leadId, content}` — `POST /v1.0/leads/{id}/notes` 404s.
-
 ## Checklist Cell This Clears
 
 - Checklist: `lofty_contact_verified` (set only once the contact is confirmed verified or freshly created and linked to the deal).

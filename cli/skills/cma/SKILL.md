@@ -45,22 +45,6 @@ Ask for only the missing pieces:
 - Create a human approval prompt before delivering a client-facing PDF or email draft.
 - For Admin-board test runs, use a real non-mock listing with a usable address or MLS number. If the initially selected test deal lacks property identity, choose another real Admin board deal with enough data and continue the full workflow, unless the user explicitly required that exact deal.
 
-## Comps & subject verification
-
-- Portal address search can bind a prior SOLD instance as the subject while an active MLS exists — verify the live listing separately before answering "is it overpriced". A subject MLS from an old/cancelled/sold record is historical — never write it to the deal's current `mls_number`.
-- Saved-search modal lingers in the DOM after clicking a row — verify the post-click `/ViewListings?listId=…` URL and the "N listings found" count before extracting rows.
-- `PLAYWRIGHT_NO_CDP=1` rescues `page.goto: Frame has been detached` when driving a shared CDP tab.
-
-## Photos & PDF rendering
-
-- RealtyServer photo-ID mapping: on saved-search result pages the row `checkedId` (decimal) converts to the photo prefix by uppercase hex (20088700 → 0132877C), giving `images.realtyserver.com/photo_server.php?...name=<HEX>.LNN` URLs — verify each comp photo against address+MLS before use.
-- Branded PDFs rendering all-black/blank in some preview/email clients = renderer compatibility. Ship a flattened copy: pdftoppm pages → images → `sips -s format pdf` → pdfunite; verify page 1 renders before delivery.
-
-## Recovery & fresh pulls
-
-- Deleted artifacts may survive in the macOS Mail attachment cache (`~/Library/Mail/**/Attachments`) when they were ever emailed — search there before re-pulling portals.
-- Fresh-pull zero-results: bounded retries only (normalized civic, Ave/Avenue variant, historical MLS), then `waiting_human` — never silently substitute stale comps for a requested fresh pull.
-
 ## Handoff Contract
 
 Every phase should leave a compact handoff so the next run can resume without reading chat history:

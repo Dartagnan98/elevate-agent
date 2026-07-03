@@ -30,8 +30,9 @@ Result shape:
 {
   "status": "succeeded | waiting_human | failed | skipped",
   "idempotencyKey": "skill:deal-id:stable-output",
+  "summary": "what changed",
   "checklist_updates": [{ "id": "workflow_item_id", "completed": true }],
-  "artifacts": [{ "kind": "document", "file_path": "/path/to/file", "summary": "what it is" }],
+  "artifacts": [{ "kind": "document", "filePath": "/path/to/file", "summary": "what it is" }],
   "next_tasks": [{ "skill": "seller-update", "title": "Next safe task", "payload": {} }],
   "human_prompt": {
     "title": "Decision needed",
@@ -46,19 +47,6 @@ Result shape:
 **`previewPdf` (approval-gated documents):** when the human prompt asks the user to approve a PDF you drafted (release form, MLC, CPS, amendment — anything that goes to DigiSign on approval), set `human_prompt.previewPdf` to the absolute local path of the **clean** PDF (the one that would actually be sent, not a placement-only overlay). The dashboard renders a "Preview PDF ↗" button on the waiting card from this field so the user can read the exact document before Approve & re-run. Must be a local `.pdf` that exists (not a `gdrive://` URI). Still attach the same file under `artifacts` for the record.
 
 For unsafe or incomplete work, use `waiting_human`; do not mark checklist cells complete. For external sends, signatures, document approvals, price/listing copy approvals, and final photo approval, create a human prompt first.
-
-## Write mechanics — payload and callback rules
-
-These are hard rules learned from real burned runs:
-
-- Artifact dicts require snake_case `file_path` — `path` raises `ValueError` MID-write (earlier artifacts in the list may already be attached) and camelCase `filePath` has been rejected. There is no top-level `summary` kwarg on the result; the summary rides on each artifact dict.
-- Statuses are a closed set: `succeeded` (never `done`), `queued`, `failed`, `waiting_human`, `waiting_external`, `skipped`.
-- The callback port can drift: if `127.0.0.1:9119` refuses, retry the IDENTICAL payload/token on `127.0.0.1:9120` — same idempotency key. Only report an operational write after a 2xx PLUS a readback.
-- A retried run that already recorded a result returns `400: action run result has already been recorded`. That is a reconciliation state — never force a second callback under a new idempotency key.
-- Re-read the live `admin_action_runs` row before any callback (cron context lags; the row may already be terminal). After a 2xx, do NOT assume `checklist_updates` mutated the card — read back the gate.
-- A `waiting_human` run that flips back to `running` means the dashboard auto-applied a stored answer — proceed from the answer, don't re-post the prompt.
-- `admin_deal(action='set_fields')` rejects non-schema fields — write those via the curated `set_deal_toggle` into `extra_toggles_json`. But NEVER `set_deal_toggle(field='mlsNumber')`: it writes a toggle and leaves the real `deals.mls_number` empty — use `set_deal_fields` for real schema fields.
-- `deals_overview` can serve stale values (e.g. `mlsNumber: null`) after a verified write — trust `get_deal_context()` or a direct deals query for freshness.
 
 ## Idempotency
 

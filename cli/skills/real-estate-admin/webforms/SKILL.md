@@ -29,8 +29,6 @@ If form code, role, address, or MLS number is missing for a create/import task, 
 - Use the configured forms provider login from onboarding.
 - Do not print, store, or hardcode WEBForms passwords, MFA codes, cookies, or full download URLs.
 - If MFA appears, use the available human-approved email-code flow or pause for the user.
-- MFA can offer WebAuthn/TouchID that automation cannot pass — pick "Try another method" and use the email code.
-- Login can also be walled by Imperva/hCaptcha. Stop and report `waiting_human`; never substitute a self-designed form layout for the real form.
 - Treat login/MFA as a human blocker, not as a failed forms workflow.
 
 ## Browser Rules (read before opening anything)
@@ -87,21 +85,7 @@ Use this path when the user asks to make an envelope from WEBForms for one of th
 - Buyer-side in BC is often called Selling Agent in WEBForms.
 - Seller-side is usually Listing Agent.
 - Source must be selected before the MLS input may appear.
-- CPS Strata can use a strata template while the main downloaded form may still be titled CPS - Residential. Name output files by actual form content, not the template title.
-
-## Form-Fill Rules
-
-- Every BCREA/CREA/board form with property-ID fields gets the full identity block (civic address, legal description, PID, other PIDs) even when a parent contract already has them. Source priority: title PDF → BC Assessment/lookup → SkySlope Property tab → original CPS/MLC.
-- Manufactured homes on rented pads use the MHR identity (registration number, pad/park, serial, year/make/model) instead of a land PID.
-- Execution/signing dates are the day the envelope is SENT, not a future effective date.
-
-### BC Collapse Scenarios
-
-Verify against the brokerage's ops doc before treating this tree as a hard default, and never default to a General Release before verifying deposit/subject status from the deal and the CPS:
-
-- Subjects NOT removed + NO deposit → Collapse of Sale form + cancel the transaction.
-- Subjects not removed + deposit PAID → the Collapse-with-Deposit path (bank details/void cheque for the deposit return; FINTRAC Receipt of Funds on buyer files).
-- Collapsed AFTER conditions were removed / sale reported → General Release & Authorization to Pay Deposit Funds + MLS Collapsed Sales Report.
+- CPS Strata can use a strata template while the main downloaded form may still be titled CPS - Residential.
 
 ## Provider Rules
 

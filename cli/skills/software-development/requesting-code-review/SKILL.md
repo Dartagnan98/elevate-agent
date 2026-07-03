@@ -40,17 +40,6 @@ If empty, try `git diff` then `git diff HEAD~1 HEAD`.
 If `git diff --cached` is empty but `git diff` shows changes, tell the user to
 `git add <files>` first. If still empty, run `git status` — nothing to verify.
 
-Always inventory UNTRACKED files too:
-
-```bash
-git ls-files --others --exclude-standard
-```
-
-Generated artifacts, client documents, and scratch scripts are the common leak
-when the diff is empty — an empty diff with untracked files present is NOT
-"nothing to verify". Review the untracked list for anything that must not land
-(or needs gitignoring) before declaring the tree clean.
-
 If the diff exceeds 15,000 characters, split by file:
 ```bash
 git diff --name-only
@@ -280,7 +269,7 @@ tests exist, tests pass, no regressions.
 
 ## Pitfalls
 
-- **Empty diff** — check `git status` and `git ls-files --others --exclude-standard`; it's only "nothing to verify" if both are clean
+- **Empty diff** — check `git status`, tell user nothing to verify
 - **Not a git repo** — skip and tell user
 - **Large diff (>15k chars)** — split by file, review each separately
 - **delegate_task returns non-JSON** — retry once with stricter prompt, then treat as FAIL

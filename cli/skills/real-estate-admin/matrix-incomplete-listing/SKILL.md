@@ -79,10 +79,6 @@ Status is `done` only if every applicable line is verified. Otherwise `partial` 
 
 - Approval: surface the listing for the realtor's review before she submits; this skill never submits.
 - Missing identity facts, picker failures, MFA/login, or upload failures are `waiting_human` / `partial` with the exact blocker — never a silent pass.
-- Board-IAM MFA interstitial: a "Verify your identity" / "Send code via Email" screen can appear BEFORE any OTP field exists — click send-code first, then poll the inbox for the OTP.
-- Verify photo uploads by re-reading the Photos tab — partial success is real; a completed upload call is not proof.
-- Manage Supplements upload controls are stable (`#InputForm_supplements_input_description|type|file`).
-- Record failed picker fields as `manual_or_unverified_fields` — Title Tier 2, Sub Area, Property Sub Type, and Year Built commonly fail.
 - Keep the platform's labels alongside the province-package labels in artifacts when they differ.
 - Same finalization in any context: in a live session converse inline; on a stage trigger the conversation goes to the Admin agent lane. Always close through `admin-result-writer` so the kanban card reflects the outcome (see its "Where this writes").
 

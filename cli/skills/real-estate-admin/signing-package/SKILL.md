@@ -34,16 +34,6 @@ After signing status changes, attach signed documents and update checklist cells
 - Render or preview the package when the provider supports it.
 - Ask for human approval before the envelope is sent outside Elevate.
 
-## Browser Procedure Notes
-
-Editor mechanics learned in the DigiSign editor; most apply to any browser-driven signing editor:
-
-- The PDF pane is an internal scroll container — generic scroll commands will not reach the signature area. Scroll the viewer element via synchronous JS (async/Promise eval snippets serialize as `{}`/None in browser drivers — use sync JS, or verify through state and screenshots).
-- Field placement is two clicks: toolbar field type, then a PDF coordinate. A first click may select an existing block — press Escape and retry.
-- Switch signer via the left-panel dropdown BEFORE each signer's placements.
-- A disabled Send button means fields are still missing.
-- An adjacent envelope row's "Completed" badge can sit directly above your target — tie status to the exact row/name.
-
 ## Flow
 
 1. Verify deal identity with `deal-matcher` unless run context already proves `deal_id`.

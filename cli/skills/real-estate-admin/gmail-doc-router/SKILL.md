@@ -39,30 +39,11 @@ If the inbox, storage provider, or deal database is not configured, close as `wa
 6. If unmatched, write an unmatched-doc task with sender, subject, attachment names, and suggested deal candidates.
 7. Close through `admin-result-writer`.
 
-## Query Building
-
-- Unit-address rule: for unit-style titles like `<unit>-<civic> <street>`, address-backed Gmail queries must use the BASE civic phrase ("450 Main Street", not "12-450 Main Street") — the unit prefix breaks matching.
-- Deals with a blank `listingAddress` but the address in the deal TITLE must still be included in address-backed scans.
-- Deals with a canonical `subjectRemovalDate` belong in subject-removal scans even when their stage is unusual.
-- A single street token matching boilerplate/thread text produces cross-deal false positives — verify the full civic phrase before treating a hit as a match.
-- Senders vary wildly (assistants send "Please see attached signed subject removals") — never limit searches to "Signed MLC"/"Envelope completed" language.
-- The user's own self-sent workflow/mockup emails match address terms and must be excluded.
-
 ## Duplicate Rules
 
 - Do not create duplicate artifacts for the same message ID, attachment ID, provider file ID, or checksum.
 - If the same file arrives again with a better match, update the existing artifact's deal link only after human confirmation.
 - Never delete the source email or source file.
-
-## Implementation Notes
-
-- Data-layer shapes: `elevate_cli.data.list_deals` returns camelCase (`currentStage`, `listingAddress`, `mlsNumber`, `extraToggles`) while `elevate_db` SQL rows are snake_case — scan code must not mix them.
-- `deal_events.kind` is a closed enum — invented kinds are rejected.
-- `admin_deal(action='attach')` is NOT a harmless probe: it creates the attachment row even for a nonexistent `file_path` — verify the file exists first.
-- Helper scripts require the app venv interpreter with the CLI on `PYTHONPATH`.
-- macOS File-Provider (Drive) PDFs can pass `os.access`+size checks yet fail with `OSError: [Errno 11] Resource deadlock avoided` — materialize/download before reading.
-- A corrupted `SSL_CERT_FILE` env makes gws fail with "no native root CA certificates found" — fix the env var; OAuth is fine.
-- Image-only scanned letters defeat pdftotext — render + OCR before routing.
 
 ## Output Contract
 

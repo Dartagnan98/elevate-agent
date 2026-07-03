@@ -16,8 +16,6 @@ category: agent-ops
 - Inbox triage outputs — check incoming work with the agent_bus tool (action `check_inbox`); for direct handoffs from other agents use **agent_handoff** and reply through native **Comms**.
 - Human-owed items — the agent_bus tool (action `check_human_tasks`) for anything blocked on a person.
 
-If an input requires querying an operational store directly, describe the table before querying — schemas vary by pack; never assume column names.
-
 ## Summary Rules
 
 - Batch low-urgency items.

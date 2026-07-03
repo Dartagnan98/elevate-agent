@@ -192,15 +192,6 @@ $GAPI gmail modify MESSAGE_ID --add-labels LABEL_ID
 $GAPI gmail modify MESSAGE_ID --remove-labels UNREAD
 ```
 
-**Large attachments (send/draft).** Passing base64 raw MIME as a CLI argument fails once attachments get big (`OSError: [Errno 7] Argument list too long`; Node `spawnSync /bin/sh E2BIG`). Build a complete RFC822 `.eml` with `email.message.EmailMessage` and upload it instead:
-
-```bash
-gws gmail users messages send --params '{"userId":"me"}' --upload msg.eml --upload-content-type message/rfc822
-# drafts: gws gmail users drafts create — same --upload flags
-```
-
-`--upload` paths must resolve inside the current working directory — `/tmp/x.eml` fails with "outside the current directory" (macOS resolves /tmp → /private/tmp). Run with cwd set to the containing dir and pass a relative filename. If even `--json '{"raw": ...}'` is too long, POST the same raw MIME to the Gmail REST API directly using the refresh token in `~/.config/gws/credentials.json`. Always verify after: `drafts get` / `messages get` and walk `payload.parts` for attachment filenames and sizes.
-
 ### Calendar
 
 ```bash
@@ -216,13 +207,6 @@ $GAPI calendar create --summary "Review" --start 2026-03-01T14:00:00Z --end 2026
 # Delete event
 $GAPI calendar delete EVENT_ID
 ```
-
-Calendar gotchas:
-
-- `conferenceData.createRequest` only works for providers listed in `calendarList.get` → `allowedConferenceSolutionTypes` (usually only `hangoutsMeet`). A Zoom meeting cannot be created that way — put the user's Zoom link in `location`/`description` instead.
-- Invites only email attendees when `sendUpdates: "all"` is passed — on create AND update.
-- Patching an all-day event to a timed `dateTime` can be rejected with "Invalid start time" — re-query the day and delete/recreate rather than retrying the patch.
-- Conflict-check the window before creating, and dedupe by property/date/type.
 
 ### Drive
 
@@ -256,12 +240,6 @@ $GAPI sheets append SHEET_ID "Sheet1!A:C" --values '[["new","row","data"]]'
 $GAPI docs get DOC_ID
 ```
 
-Drive/Docs notes:
-
-- HTML → Google Doc: upload the HTML with `drive files create --upload page.html --upload-content-type text/html --json '{"mimeType": "application/vnd.google-apps.document", ...}'`, then verify the readback `mimeType` is exactly the Docs type.
-- Child folders inherit parent sharing — a failed permission downgrade means fix the parent, not the child.
-- When a shareable link is requested, create the `anyone`/`reader` permission explicitly via `permissions create`.
-
 ## Output Format
 
 All commands return JSON. Parse with `jq` or read directly. Key fields:
@@ -283,29 +261,16 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 4. **Calendar times must include timezone** — always use ISO 8601 with offset (e.g., `2026-03-01T10:00:00-06:00`) or UTC (`Z`).
 5. **Respect rate limits** — avoid rapid-fire sequential API calls. Batch reads when possible.
 
-## gws CLI Scripting Quirks
-
-- gws prints keyring/status lines before the JSON, and wrappers may merge stderr into stdout — `JSONDecodeError: Extra data` is not a search failure; parse from the first `{` or `[`.
-- Attachment responses can exceed stdout caps and contain control characters — write to a file, `json.loads(text, strict=False)`, base64url-decode with padding, then verify the `%PDF` magic and byte size.
-- `attachments get --output` may still print JSON instead of writing binary — decode it yourself.
-- Direct Gmail calls require `userId` in `--params`.
-- In headless/cron contexts keychain access fails — retry with `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`.
-- `gws schema --resolve-refs` stack-overflows on large APIs — skip introspection.
-- In the Python sandbox gws may be off PATH — use `/usr/local/bin/gws`.
-- Build all `--params` with `json.dumps` and argv lists, never hand-quoted shell strings.
-
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `NOT_AUTHENTICATED` | Split-auth is a state, not a failure: `--check` reads `~/.elevate/google_token.json`, but `gws` may be independently authenticated via its own keyring — try a harmless direct `gws` read before blocking on OAuth setup (Steps 2-5 above) |
+| `NOT_AUTHENTICATED` | Run setup Steps 2-5 above |
 | `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
 | `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
 | `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
 | `ModuleNotFoundError` | Run `$GSETUP --install-deps` |
 | Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |
-| Managed Gmail/Calendar connector revoked | Not blind — local `gws` is the fallback; use it while the connector is re-authorized |
-| People API `insufficient authentication scopes` | Resolve recipient emails via Gmail metadata search instead of asking the user |
 
 ## Revoking Access
 

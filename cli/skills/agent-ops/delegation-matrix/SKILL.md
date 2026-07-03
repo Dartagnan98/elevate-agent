@@ -109,7 +109,6 @@ When using `delegate_task`, route by owner and brief the child as if it has neve
 - Put the exact operating brief in `context`: user intent, selected deal title/id, address/MLS/contact if known, loaded skill/workflow name, test-vs-client-delivery mode, no-send or approval constraints, expected artifact/record updates, fallback behavior, and what counts as done.
 - For Admin-board skill tests, if the initially selected test deal lacks property identity, instruct Admin to choose a real non-mock board deal with sufficient data and run the full workflow unless the user explicitly required that exact deal.
 - Treat subagent summaries as self-reports. Verify returned IDs, file paths, attachments, and record changes before telling the user the work succeeded.
-- Failure handling: the wrapper-failure family — `'dict' object has no attribute 'lstrip'` and runs whose summary says failed despite completing — means VERIFY actual side effects (session search → operational rows → artifacts) before rerunning; the work often happened. `agent_handoff(action='complete')` returning "result has already been recorded" means it is already completed — never retry or duplicate. Self-handoffs (same source and target agent) may be rejected. If a compressed summary says a trust-boundary action already ran, verify proof instead of re-running the portal/send.
 
 ---
 

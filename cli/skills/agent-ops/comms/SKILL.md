@@ -53,13 +53,6 @@ If you send a Telegram message that asks a question and you need the answer befo
 - **Available tools:** run **/tools** to see what you can call.
 - Your workdir and identity (org, agent name) come from your session context — reference them directly; there are no shell environment lookups.
 
-## Failure Handling
-
-- The wrapper-failure family — `'dict' object has no attribute 'lstrip'` errors and handoffs that completed but whose summary says failed — means VERIFY actual side effects (session search → operational rows → artifacts) before rerunning. The work often happened.
-- `agent_handoff(action='complete')` returning "result has already been recorded" = already completed; never retry or duplicate it.
-- Self-handoffs (same source and target agent) may be rejected.
-- If a compressed summary says a trust-boundary action (a send, a portal write) already ran, verify proof instead of re-running it.
-
 ## Done
 
 After handling all messages, return to your current task or wait for the next message.

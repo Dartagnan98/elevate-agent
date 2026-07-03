@@ -73,11 +73,3 @@ Run this during morning review or when something feels off. Walk the checks in o
 Record the run with the **agent_bus** tool (action `log_event`) so the snapshot is captured, and write anything worth remembering across sessions to your **memory** (the `memory` tool, plus your `MEMORY.md` / `memory/<day>.md`).
 
 Surface critical findings to the user via native **Comms**. If a finding has no Elevate mechanism to resolve it, do not invent one — raise it as a `[HUMAN]` task and route it through the native **Approvals** surface.
-
----
-
-## Gateway Diagnostics & Runtime Triage
-
-**Stuck chat-lane recovery.** Restarting the gateway alone does NOT clear a wedged lane — the session mapping reloads and immediately re-triggers on the oversized transcript. Recovery: stop the launch agent fully, back up `sessions.json`, give ONLY the affected lane a fresh `session_id` (reset token counters, clear `resume_pending`/`suspended`, set `memory_flushed: true`), create the empty transcript `.jsonl`, and register the matching SessionDB row. Editing `suspended` while the gateway runs is futile — the process rewrites the file from its cached mapping.
-
-**Packaged-app bug triage order.** Get the exact stack from `~/.elevate/logs/errors.log` / `gateway.error.log` → read the file at the STACK path (the installed bundle, not a checkout) → reproduce under the bundled runtime Python → prefer a user-space fix (`~/.elevate/plugins/<name>/` via `discover_plugins()`, or a runtime-overrides overlay dir) — never edit inside the signed .app bundle. Always use the bundled runtime/venv Python for data-layer work; system Python lacks psycopg/httpx and produces misleading failures.
