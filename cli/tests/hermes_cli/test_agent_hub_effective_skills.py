@@ -326,6 +326,50 @@ def test_reconcile_upgrades_1_2_60_souls_to_legal_boundary(monkeypatch):
         assert rows[agent_id]["config"]["soul"]["core_truths"] == expected[agent_id]
 
 
+def test_reconcile_rebases_appended_user_edit_onto_new_default(monkeypatch):
+    # Skyleigh case: her box stored core_truths = OLD default + her appended
+    # Browser-Use rule. The new default appends the legal boundary to the same
+    # base. Neither is a prefix of the other — the plain prefix-upgrade would
+    # freeze her soul and she'd silently MISS the new boundary. The rebase
+    # merge keeps HER rule and lands OURS: new_default + " " + her_suffix.
+    from elevate_cli.agent_hub import DEFAULT_AGENT_DEFS
+
+    RULE = (
+        " Skyleigh's hard rule: every online event uses the local/free "
+        "Browser Use CLI through terminal."
+    )
+    admin_new = next(d for d in DEFAULT_AGENT_DEFS if d["id"] == "admin")["soul"]["core_truths"]
+    old_default = admin_new.split(" Facts and options,")[0].strip()
+    stored = old_default + RULE
+
+    config = {
+        "agent_hub": {
+            "agents": [
+                {"id": "admin", "soul": {"core_truths": stored}},
+                # A mid-sentence rewrite is a REAL edit — must stay untouched.
+                {"id": "marketing", "soul": {"core_truths": "Marketing owns the funnel but never"}},
+            ]
+        }
+    }
+    monkeypatch.setattr(
+        "elevate_cli.agent_hub.load_config", lambda: copy.deepcopy(config)
+    )
+    monkeypatch.setattr("elevate_cli.config.save_config", lambda cfg: None)
+
+    reconcile_agent_hub_defaults()
+
+    from elevate_cli.data import connect, surface_state
+
+    with connect() as conn:
+        rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
+    admin_after = rows["admin"]["config"]["soul"]["core_truths"]
+    assert admin_after == admin_new + RULE  # ours landed, hers rode along, exactly once
+    assert admin_after.count("Browser Use CLI") == 1
+    assert "never legal or financial advice" in admin_after
+    # the real edit stayed frozen
+    assert rows["marketing"]["config"]["soul"]["core_truths"] == "Marketing owns the funnel but never"
+
+
 def test_reconcile_upgrades_all_souls_to_question_gating_autonomy(monkeypatch):
     # P2 appends the question-gating sentence to every agent's autonomy_rules.
     # Append-only, so a soul stored at any prior default stays a strict prefix

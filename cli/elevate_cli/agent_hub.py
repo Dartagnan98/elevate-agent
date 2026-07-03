@@ -1712,7 +1712,51 @@ def _merge_agent_section_defaults(raw: dict[str, Any], field: str, defaults: Any
             s, d = stored.strip(), default_value.strip()
             if s and d and s != d and d.startswith(s):
                 section[key] = default_value
+            elif s and d and s != d and not s.startswith(d):
+                # Append-edit rebase: the user APPENDED text to an older
+                # default (stored = old_default + user_suffix) and we ALSO
+                # appended (new = old_default + our_suffix). Neither is a
+                # prefix of the other, but both diverge from a shared base
+                # that ends at a sentence boundary — rebase the user's suffix
+                # onto the new default so THEIR rule survives AND ours lands.
+                # Guarded: the shared base must end a sentence (a mid-sentence
+                # rewrite is a real edit and stays untouched), both suffixes
+                # must be non-empty, and the base must be substantial.
+                merged = _rebase_appended_soul_edit(s, d)
+                if merged:
+                    section[key] = merged
     raw[field] = section
+
+
+def _rebase_appended_soul_edit(stored: str, default: str) -> str | None:
+    """Merge an append-only user edit onto a newer appended default.
+
+    Returns ``new_default + " " + user_suffix`` when ``stored`` and
+    ``default`` share a sentence-terminated common prefix (the old default)
+    and both carry non-empty tails; otherwise None (caller keeps stored).
+    """
+    limit = min(len(stored), len(default))
+    i = 0
+    while i < limit and stored[i] == default[i]:
+        i += 1
+    common = stored[:i]
+    # Retreat to the last sentence terminator inside the common prefix.
+    cut = max(common.rfind(". "), common.rfind(".\n"))
+    if cut == -1:
+        if common.endswith("."):
+            cut = len(common) - 1
+        else:
+            return None
+    base = common[: cut + 1]
+    if len(base) < 40:  # too little shared context to trust the rebase
+        return None
+    user_suffix = stored[len(base):].strip()
+    default_suffix = default[len(base):].strip()
+    if not user_suffix or not default_suffix:
+        return None
+    if user_suffix in default:  # their text already rode along somehow
+        return None
+    return default + " " + user_suffix
 
 
 # Agent ids that were shipped as installable packs and later consolidated into
