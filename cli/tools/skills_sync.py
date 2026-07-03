@@ -358,6 +358,14 @@ _STALE_CONTENT_MARKERS: tuple = (
     "webdriver.Chrome",
     "debuggerAddress",
     "remote-allow-origins",
+    # A per-user browser preference that an agent mass-injected into every
+    # bundled skill body on one box (2026-07), freezing all 185 of them out
+    # of updates and breaking skill routing (stale pre-rewrite descriptions).
+    # The preference now lives where it belongs — the box's agent souls
+    # (core_truths) — so any skill copy still carrying the injected section
+    # is pollution to correct. Bundled skills never contain these strings.
+    "Skyleigh's hard rule",
+    "must use the local/free Browser Use CLI",
 )
 
 
