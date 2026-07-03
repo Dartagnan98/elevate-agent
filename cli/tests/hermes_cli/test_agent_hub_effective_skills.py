@@ -142,6 +142,41 @@ def test_agent_lane_prompt_carries_platform_invariants_without_autonomy_contract
     assert "Autonomous run contract" not in persona
 
 
+def test_grounding_lines_render_on_run_context_and_lane_prompt():
+    # Routing checklist, history-search cues, unrecognized-entity rule, and
+    # instruction precedence are competence rules for EVERY surface.
+    from gateway.agent_lanes import agent_lane_prompt
+    from elevate_cli.agent_hub import get_agent_def
+
+    update_agent_config("admin", {"enabled": True})
+    context = agent_run_context("admin", config={})
+    persona = agent_lane_prompt(get_agent_def("admin", config={}))
+
+    for surface in (context, persona):
+        assert "Tool routing, in order" in surface
+        assert "never claim you lack context before searching" in surface
+        assert "search the CRM and deal cards before answering" in surface
+        assert "Instruction precedence" in surface
+
+
+def test_run_context_carries_product_truth_and_tail_recap():
+    # Product truth (no-vapor grounding), the compaction-continuation note,
+    # and the closing recap are background-run additions.
+    update_agent_config("admin", {"enabled": True})
+    context = agent_run_context("admin", config={})
+
+    assert "Product truth:" in context
+    assert "Never promise or imply a feature you haven't verified." in context
+    # PRODUCT.md ships in cli/docs — the block itself must render in-repo.
+    assert "[PRODUCT TRUTH]" in context
+    assert "never send outbound messages" in context
+    assert "compacted automatically" in context
+    assert "lead with the outcome" in context
+    assert "Recap — the five rules that break most often" in context
+    # Recap sits at the tail, after the agent instruction block.
+    assert context.index("Recap — the five rules") > context.index("Platform invariants")
+
+
 def test_analyst_and_theta_wave_are_backend_defaults():
     update_agent_config("analyst", {"enabled": True})
     update_agent_config("theta-wave", {"enabled": True})

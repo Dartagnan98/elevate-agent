@@ -652,6 +652,21 @@ NOTE: The agent's final response is auto-delivered to the target. Put the primar
 user-facing content in the final response. Cron jobs run autonomously with no user
 present — they cannot ask questions or request clarification.
 
+Scheduling doctrine:
+- Avoid the :00 and :30 minute marks when the request is approximate. Everyone's
+  "9am" is `0 9` and everyone's "hourly" is `0 *`, so those instants herd every
+  job in the fleet (and shared providers) onto the same second. "every morning
+  around 9" -> `57 8 * * *` or `3 9 * * *`; "hourly" -> `7 * * * *`. Use :00/:30
+  only when the user names that exact time and clearly means it.
+- One-shot vs recurring: "remind me at X" / "at <time> do Y" is a ONE-SHOT (pin
+  the time, repeat once); "every N" / "weekdays at 9" is recurring. Don't create
+  a recurring job for a one-time ask.
+- A cron job polls a schedule — it cannot watch for a moment. For "tell me when
+  X happens", the job's check must cover EVERY terminal state, not just success:
+  a check that only reports the happy path stays silent through a crash or hang,
+  and silence reads as "still fine". Before scheduling a watcher, ask: if the
+  watched thing broke right now, would this job say so?
+
 Important safety rule: cron-run sessions should not recursively schedule more cron jobs.""",
     "parameters": {
         "type": "object",
@@ -670,7 +685,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "schedule": {
                 "type": "string",
-                "description": "For create/update: '30m', 'every 2h', '0 9 * * *', or ISO timestamp"
+                "description": "For create/update: '30m', 'every 2h', '0 9 * * *', or ISO timestamp. When the user's time is approximate, pick a minute that is NOT 0 or 30 (see scheduling doctrine) — nudge a few minutes off; the user won't notice and the fleet will."
             },
             "name": {
                 "type": "string",

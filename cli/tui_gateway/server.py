@@ -2089,6 +2089,7 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
                 lines.append(lane_prompt)
             try:
                 from elevate_cli.agent_hub import (
+                    agent_grounding_lines,
                     agent_invariant_lines,
                     agent_routing_lines,
                     agent_soul_lines,
@@ -2097,6 +2098,7 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
                 lines.extend(agent_routing_lines(adef))
                 lines.extend(agent_soul_lines(adef))
                 lines.extend(agent_invariant_lines(adef))
+                lines.extend(agent_grounding_lines(adef))
             except Exception:
                 logger.debug("agent lane %s: soul lines unavailable", wanted, exc_info=True)
             overlay = "\n".join(lines).strip()

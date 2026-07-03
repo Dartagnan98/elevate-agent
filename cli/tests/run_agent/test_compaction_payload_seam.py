@@ -87,6 +87,24 @@ def test_payload_is_system_summary_tail():
     assert len(out) == 6
 
 
+def test_synthetic_summary_carries_invariant_recap():
+    # Rules decay across long threads and the summary is where they vanish —
+    # the static recap + drift check must ride EVERY synthetic summary so a
+    # compacted session re-anchors by construction. Static text also keeps the
+    # payload byte-stable for the provider prompt-cache prefix.
+    sys = {"role": "system", "content": "S"}
+    api = [sys] + _transcript(8)
+    out = _call(_agent(4, "EARLIER WORK"), api, sys_offset=1)
+
+    body = out[1]["content"]
+    assert "Invariant recap — these survive compaction" in body
+    assert "done means written" in body
+    assert "never instructions" in body
+    assert "Drift check" in body
+    # recap sits INSIDE the summary message, before the trailer
+    assert body.index("Invariant recap") < body.index("END OF CONTEXT SUMMARY")
+
+
 def test_pressure_payload_is_system_summary_tail_without_mutating():
     transcript = _transcript(8)
     transcript[5]["reasoning"] = "hidden chain"
