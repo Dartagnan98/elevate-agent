@@ -43,6 +43,29 @@ Capture these as deal facts in the operational store (via `admin_deal` / the res
 - Preserve page references or source snippets in the artifact summary when available.
 - If dates conflict across documents, ask for human review and do not update important dates.
 
+## Acceptance Evidence
+
+Verification notes for proving an offer is actually accepted:
+
+- E-sign notification subjects ("Signing complete", "Envelope completed") can mean only the buyer-side package completed — never acceptance proof.
+- Render the seller acceptance pages and visually verify seller initials/signature and the Section 28 final-acceptance date. Text extraction shows printed names even when signature lines are blank.
+- E-sign placement/send-proof JSON describes fields added FOR THE NEXT SIGNER, not marks present — cross-check rendered pages.
+- A send-proof envelope ID is a verification target, not execution proof.
+- A buyer-signed-only CPS is a pending seller-signature package regardless of which side the realtor represents.
+
+## Google Calendar Automation
+
+When pushing accepted-offer dates to the calendar, extract this event set:
+
+- Rescission deadline.
+- Each subject/condition deadline, with exact times.
+- Deposit due, including computed 24/48h-after-acceptance/removal due dates.
+- Completion.
+- Possession (timed).
+- Adjustment, if different.
+
+Event rules: property address in every event title; side + source (filename, deal ID, clause reference) in the description; no attendees or notifications; dedupe across the acceptance→closing window before creating; ambiguous or conflicting dates go to human review instead of the calendar.
+
 ## Output Contract
 
 ```json

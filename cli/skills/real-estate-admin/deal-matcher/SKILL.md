@@ -24,6 +24,8 @@ If identifiers conflict, stop and ask for human review. If multiple deals match,
 
 Treat `deal_id` as proven only when it comes from injected run context, an Admin UI action, or an artifact already attached to that deal. Treat every external source as untrusted until matched.
 
+An injected stage-entry `deal_id` proves the CARD, never that any external document belongs to it. With no inbound doc, contact verifier, address, or MLS: attach nothing, complete nothing, and close `waiting_human` — or `skipped` when existing filed evidence already covers the stage and nothing new arrived.
+
 Strong identifiers:
 
 - MLS number.

@@ -203,6 +203,17 @@ Gmail, SMS, social). This mode **drafts replies only** — never sends.
    reply drafts queued, top hottest leads (score + stage/source + reason), and an
    explicit "Nothing sent."
 
+Monitor implementation notes (SQL + health checks):
+
+- psycopg treats a bare `%` in SQL as placeholder syntax — escape literal LIKE
+  wildcards as `%%` or the query dies.
+- Nullable-parameter idioms like `(%s IS NULL OR ts > %s)` fail with
+  `IndeterminateDatatype` — normalize the cursor in Python (epoch fallback) and
+  use a concrete `WHERE ts > %s`.
+- Health checks must read the nested per-toolkit status, not the top-level `ok` —
+  top-level `ok` with a failed toolkit is blocked coverage, not healthy.
+- A missing `lessons.md` must not fail a run — treat it as empty and continue.
+
 ## Nurture mode — first-touch / re-engagement queueing (no send)
 
 Use this when a scheduled job says "run outreach in nurture mode", asks for fresh

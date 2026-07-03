@@ -211,6 +211,63 @@ autoresearch loop for the cycle.
   keep the old baseline.
 - Be fast and quiet: most runs should end in a one-line summary, not a wall of text.
 
+## Runtime tool facts (appendix)
+
+Hard-won facts about the live tool surface. Trust these over guesses; log gaps and route around
+them instead of failing the run.
+
+### agent_bus and surface tools
+- `lead_status` errors on a bare call — `action='set'` is required. Valid statuses:
+  `follow_up|new_lead|ghosting|dead`; heat: `warm|hot|cold`.
+- `update_working_state`: `needs_review` is invalid — use `pending_external` for review-only
+  drafts.
+- `list_active_working_state` accepts `entity_kind='contact'|'deal'`, not lead/conversation.
+- In cron, `agent_bus` writes attribute to the scheduler/EA identity unless the explicit
+  agent-id field is passed — verify with `read_heartbeats` and rewrite if misattributed.
+- `agent_bus` has NO inbox/check_inbox/list_messages/list_handoffs/list_events/list_goals/
+  write_heartbeat actions — use `list_tasks`, `list_approvals`, `check_human_tasks`, and
+  `agent_handoff(action='list')` with client-side filtering. Log unsupported probes; never fail
+  the run on them.
+- `agent_handoff(action='create')` requires the body in `task` (not title/summary); list
+  statuses are `running`/`waiting_human` (not open/pending). An unknown or omitted
+  `agent_handoff` action can DEFAULT TO CREATING A REAL HANDOFF and dispatch a cron job — never
+  probe with placeholder values. If a no-op handoff is created, remove its cron job and cancel
+  it.
+- `update_task` errors when both `assignee` and `assigned_to` are sent (pass only `assignee`);
+  the id kwarg is `task_id`. `create_task` can return with empty outputs even when provided —
+  follow with `update_task` and verify, or future runs duplicate the work. `log_event`:
+  human-readable text goes in `message`; summary-only produces a blank Activity item.
+
+### Data layer
+- Several Postgres columns are TEXT timestamps — cast (`ts::timestamptz` etc.); lexicographic
+  comparison makes old RFC-822 dates look new. `ingest_runs.status` uses `completed` for
+  success, not `ok`.
+- `pcs_buyers` can be sparse while `lead_signals` rows with `source_id='xposure-pcs'` carry the
+  full payload (score, tier, `searches[].criteria`) — query the signals and draft against
+  `graduated_to_contact_id`.
+- Paid-ad importer realities: order IDs repeat across different people (dedupe by message id +
+  name/email/phone, never order id); `lead_source` may be a raw vendor slug; contacts import
+  with placeholder names, `inbound_count=0`, and repeated `crm_lead_synced` lifecycle rows that
+  are NOT hot movement.
+- MLS-derived saved-search criteria embed status labels and internal property-type jargon —
+  translate to natural client language before any client-facing draft, and read staged drafts
+  back for leaked jargon or duplicate area phrases.
+- `deals_overview.subjectsSoon` can show the original subject date after removal evidence is
+  filed — reconcile the deal field/attachments before re-flagging.
+
+### Cron-run survival
+- `elevate insights --days 1 && --days 7` combined can exceed cron timeouts — run them
+  separately; `--turns` returning no rows is not failure. For usage math use the app venv
+  Python (`from elevate_state import SessionDB; from agent.insights import InsightsEngine`);
+  `agent.session_db` does not exist. If `InsightsEngine.generate()` hangs, aggregate the
+  read-only SessionDB `sessions` table directly.
+- Dashboard surface-tasks API 401 in cron is survivable: fall back to the embedded store /
+  `elevate_cli.data` helpers / `agent_bus(list_tasks)` and log the 401 as a covered fallback,
+  not a heartbeat failure.
+- Persisted-output temp files from oversized tool results must be parsed from disk directly; a
+  line-numbering read wrapper corrupts large JSON — and never rewrite a state file from a
+  line-numbered view.
+
 ## Version history
 - **0.3.1** — Run index moved to the account database: every run ends with `agent_bus log_run`
   (kind `work`|`experiment`), and the experiment-cadence check uses `agent_bus run_count`

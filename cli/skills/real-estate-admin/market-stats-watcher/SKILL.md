@@ -106,7 +106,9 @@ Also look for:
 
 ### Step 5: Save as Markdown
 
-Write the extracted data to the appropriate markdown file.
+Write the extracted data to the appropriate markdown file. Archive by the
+STATS month, not the email date — February stats emailed March 4 save as
+`2026-02.md`, never `2026-03.md`.
 
 **File format:**
 ```markdown

@@ -113,6 +113,11 @@ verified one. `resources/GAPS.md` has the server-tool webhook schema + pricing.
     Answer `ping` events with the pong message. Watch for
     `agent_tool_response` events AND assert the gateway audit log recorded each
     call with real args. Spoken numbers must match the live data exactly.
+    This handshake — fetch `/api/signed-url`, connect, send the
+    `conversation_initiation_client_data` override as the first frame, then
+    `user_message` events, answering each `ping` with the pong — is the general
+    recipe for driving ANY headless text-only ElevenLabs session, not just E2E
+    verification.
 13. **Targets may already have a voice scaffold — coexist, never clobber.** Check
     `<agentDir>/voice/` first. If occupied, pick new filenames + a free port,
     reuse existing modules by import only, and append to the existing README

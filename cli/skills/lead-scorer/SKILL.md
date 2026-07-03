@@ -107,7 +107,7 @@ POST /api/threads/score
   "threadId": "<id>",
   "score": 0-100,
   "label": "buyer",
-  "reason": "asked about Lewis Creek listing yesterday",
+  "reason": "asked about the Maple Street listing yesterday",
   "scoredBy": "lead-scorer@v1"
 }
 ```

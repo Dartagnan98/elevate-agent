@@ -201,6 +201,13 @@ Tell the user, in one short paragraph: which platforms pulled, how many posts an
 - If `last30days` research times out (> 8 min), proceed with whatever it returned and note the partial result.
 - If idea generator produces fewer than 3 viable ideas after dedup against recent posts, surface that as an explicit message — don't pad with junk.
 
+## Diagnostics — OAuth and fetcher triage
+
+- Composio status semantics: CONNECTED / a valid API key only proves the platform key works — per-platform OAuth can still be EXPIRED or REVOKED. Check per-toolkit account statuses, never just the top-level flag.
+- Error decoding: Instagram HTTP 410 on insights = expired Instagram OAuth (not env config). Facebook `user_pages` HTTP 422 + REVOKED = reconnect (and re-select the page after). YouTube `discover_channel` HTTP 422 + REVOKED = reconnect.
+- Running fetchers under system `python3` (missing httpx) makes account discovery silently return nothing with a misleading `not_configured` — use the app venv.
+- In reports distinguish three states: runtime/config issue, OAuth reconnect required, and active-but-API-error. Top-level `ok=true` with per-toolkit `ok=false` rows = blocked coverage, not healthy.
+
 ## First-run backfill
 
 On the first run for a workspace, set `--lookback 90` to pull a richer baseline. Subsequent runs use 30. The aggregator uses the full 90d window for percentile ranking but the 30d window for "what's hot right now."

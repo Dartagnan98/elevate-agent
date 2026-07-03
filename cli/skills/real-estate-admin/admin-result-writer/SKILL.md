@@ -30,9 +30,8 @@ Result shape:
 {
   "status": "succeeded | waiting_human | failed | skipped",
   "idempotencyKey": "skill:deal-id:stable-output",
-  "summary": "what changed",
   "checklist_updates": [{ "id": "workflow_item_id", "completed": true }],
-  "artifacts": [{ "kind": "document", "filePath": "/path/to/file", "summary": "what it is" }],
+  "artifacts": [{ "kind": "document", "file_path": "/path/to/file", "summary": "what it is" }],
   "next_tasks": [{ "skill": "seller-update", "title": "Next safe task", "payload": {} }],
   "human_prompt": {
     "title": "Decision needed",
@@ -44,9 +43,22 @@ Result shape:
 ```
 
 
-**`previewPdf` (approval-gated documents):** when the human prompt asks Skyleigh to approve a PDF you drafted (release form, MLC, CPS, amendment — anything that goes to DigiSign on approval), set `human_prompt.previewPdf` to the absolute local path of the **clean** PDF (the one that would actually be sent, not a placement-only overlay). The dashboard renders a "Preview PDF ↗" button on the waiting card from this field so Skyleigh can read the exact document before Approve & re-run. Must be a local `.pdf` that exists (not a `gdrive://` URI). Still attach the same file under `artifacts` for the record.
+**`previewPdf` (approval-gated documents):** when the human prompt asks the user to approve a PDF you drafted (release form, MLC, CPS, amendment — anything that goes to DigiSign on approval), set `human_prompt.previewPdf` to the absolute local path of the **clean** PDF (the one that would actually be sent, not a placement-only overlay). The dashboard renders a "Preview PDF ↗" button on the waiting card from this field so the user can read the exact document before Approve & re-run. Must be a local `.pdf` that exists (not a `gdrive://` URI). Still attach the same file under `artifacts` for the record.
 
 For unsafe or incomplete work, use `waiting_human`; do not mark checklist cells complete. For external sends, signatures, document approvals, price/listing copy approvals, and final photo approval, create a human prompt first.
+
+## Write mechanics — payload and callback rules
+
+These are hard rules learned from real burned runs:
+
+- Artifact dicts require snake_case `file_path` — `path` raises `ValueError` MID-write (earlier artifacts in the list may already be attached) and camelCase `filePath` has been rejected. There is no top-level `summary` kwarg on the result; the summary rides on each artifact dict.
+- Statuses are a closed set: `succeeded` (never `done`), `queued`, `failed`, `waiting_human`, `waiting_external`, `skipped`.
+- The callback port can drift: if `127.0.0.1:9119` refuses, retry the IDENTICAL payload/token on `127.0.0.1:9120` — same idempotency key. Only report an operational write after a 2xx PLUS a readback.
+- A retried run that already recorded a result returns `400: action run result has already been recorded`. That is a reconciliation state — never force a second callback under a new idempotency key.
+- Re-read the live `admin_action_runs` row before any callback (cron context lags; the row may already be terminal). After a 2xx, do NOT assume `checklist_updates` mutated the card — read back the gate.
+- A `waiting_human` run that flips back to `running` means the dashboard auto-applied a stored answer — proceed from the answer, don't re-post the prompt.
+- `admin_deal(action='set_fields')` rejects non-schema fields — write those via the curated `set_deal_toggle` into `extra_toggles_json`. But NEVER `set_deal_toggle(field='mlsNumber')`: it writes a toggle and leaves the real `deals.mls_number` empty — use `set_deal_fields` for real schema fields.
+- `deals_overview` can serve stale values (e.g. `mlsNumber: null`) after a verified write — trust `get_deal_context()` or a direct deals query for freshness.
 
 ## Idempotency
 
@@ -97,15 +109,15 @@ If these are present, **use them to fill the missing fields and proceed** — wr
 
 ## Concise missing-info prompts (no walls of text — reads on card AND Telegram)
 
-When you surface a `waiting_human` because required intake is missing, keep it TIGHT. The same prompt renders on the fillable scorecard AND gets delivered to Skyleigh on Telegram, so verbosity there is confusing for any user.
-- `title`: short, e.g. `Info needed: 1740 Clifford`.
+When you surface a `waiting_human` because required intake is missing, keep it TIGHT. The same prompt renders on the fillable scorecard AND gets delivered to the user on their home channel, so verbosity there is confusing for any user.
+- `title`: short, e.g. `Info needed: 450 Main St`.
 - `message`: ONE short line, e.g. `To run the CMA I need a few details.` Optionally one hint line: `Reply with the answers (one per line) or fill them on the card.`
 - `requiredFields`: the missing items as SHORT labels, one concept each (these become the fillable fields on the card and the `Need: …` list): e.g. `client email`, `lead source`, `requested CMA date`, `property notes`.
 - Do NOT put internal context, file paths, run IDs, skill names, SHAs, reasoning, or "I did X / did not do Y" into `message`. Those belong in artifacts/audit, never the user prompt.
 
 ## Answering a missing-info prompt from Telegram / chat (easy reply)
 
-If Skyleigh replies (Telegram or chat) with answers to a deal's missing-info prompt, do NOT re-ask. Find the matching `waiting_human` run for that deal (most recent if context is clear), map her reply to the `requiredFields` (one per line, or `field: value` pairs), and submit so the skill re-runs WITH the answers:
+If the user replies (home channel or chat) with answers to a deal's missing-info prompt, do NOT re-ask. Find the matching `waiting_human` run for that deal (most recent if context is clear), map their reply to the `requiredFields` (one per line, or `field: value` pairs), and submit so the skill re-runs WITH the answers:
 - Preferred: POST `http://127.0.0.1:9120/api/admin/action-runs/<run_id>/answer` with JSON `{ "answers": { "<field>": "<value>", ... }, "runNow": true }` (session token via header or `?token=`).
 - Or set `payload.intake_answers` on the run and re-dispatch.
 Then confirm briefly: `Got it — running the CMA now.` Only surface a new prompt for items STILL missing.
@@ -113,7 +125,7 @@ Then confirm briefly: `Got it — running the CMA now.` Only surface a new promp
 
 ## The DELIVERED message (Telegram / home channel) must be ONE clean line
 
-Whatever you say at the end of a run is delivered verbatim to Skyleigh on Telegram. Keep that final user-facing message to ONE short line — the same standard as the card prompt. Specifically:
+Whatever you say at the end of a run is delivered verbatim to the user on their home channel. Keep that final user-facing message to ONE short line — the same standard as the card prompt. Specifically:
 - waiting_human (missing info): `Info needed for <address>: <item1>, <item2>, <item3>. Fill the card or reply with the answers.`
 - done: `<address>: <one-line outcome>.`
 - blocked: `<address> blocked: <one short reason>.`
@@ -122,11 +134,11 @@ NEVER narrate internal mechanics in the delivered message: no callback-port retr
 
 ## Concise must still be COMPLETE — the card has to be answerable on its own
 
-CONCISE ≠ context-free. A user reading ONLY the card must understand what is being asked and be able to answer without any outside explanation. The 2026-06-22 failure: the card said "Which Lofty contact should I use for 1740 Clifford?" with a field "Lofty contact / seller email decision" — but never said a contact ALREADY EXISTED or what the choices were, so Skyleigh could not answer from the card.
+CONCISE ≠ context-free. A user reading ONLY the card must understand what is being asked and be able to answer without any outside explanation. A real failure: the card said "Which CRM contact should I use for 450 Main St?" with a field "CRM contact / seller email decision" — but never said a contact ALREADY EXISTED or what the choices were, so the user could not answer from the card.
 
 Rules:
-- If the prompt references a finding, conflict, or existing record, STATE it in the `message` in plain words — short, but include the decisive facts (e.g. "Found an existing Lofty contact for 1740 Clifford under skyleigh@hotmail.com.").
+- If the prompt references a finding, conflict, or existing record, STATE it in the `message` in plain words — short, but include the decisive facts (e.g. "Found an existing CRM contact for 450 Main St under sellerpersonal@example.com.").
 - For a DECISION, give the actual options. Prefer a STRUCTURED field so the card renders real choices:
-  - `requiredFields` items may be objects: `{ "label": "...", "help": "one-line context", "type": "select", "options": ["Use existing skyleigh@hotmail.com", "Create new skyleigh.mccallum@gmail.com"] }`. Plain strings still work for free-text.
+  - `requiredFields` items may be objects: `{ "label": "...", "help": "one-line context", "type": "select", "options": ["Use existing sellerpersonal@example.com", "Create new seller.work@example.com"] }`. Plain strings still work for free-text.
   - Use `type":"select"` + `options` whenever the answer is a choice among known values; use `help` to carry the one-line context for any field.
 - Still no internal plumbing (paths, run IDs, callback ports). Concise + complete + plain-language — not terse-and-cryptic.

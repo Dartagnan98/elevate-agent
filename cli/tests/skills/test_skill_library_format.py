@@ -108,6 +108,31 @@ def test_skill_description_format(path):
         )
 
 
+# --- Customer-data leak guard -------------------------------------------------
+
+# Bundled skills ship to EVERY customer's box. Real customer names, client
+# names, and deal addresses were found baked into skill text (2026-07: three
+# skills instructed all agents about one customer by name). Examples in skills
+# use generic placeholders ("the user", "450 Main Street"). High-signal tokens
+# only — no common words.
+_CUSTOMER_DATA_RE = re.compile(
+    r"\b(Skyleigh|McCallum|Boholij|Pilon|Bertoli|Choquet|Johnstone|Newlove|"
+    r"Lavoie|Gleneagles|Hapke)\b"
+    r"|Lewis Creek|1232 Ellis|125 Corry|1740 Clifford|1223 Highridge",
+    re.IGNORECASE,
+)
+
+
+@pytest.mark.parametrize("path", ALL_SKILLS, ids=_rel)
+def test_no_customer_data_in_bundle(path):
+    text = path.read_text(encoding="utf-8")
+    m = _CUSTOMER_DATA_RE.search(text)
+    assert not m, (
+        f"{_rel(path)}: customer data {m.group(0)!r} in a bundled skill — "
+        f"replace with a generic placeholder (the user / 450 Main Street)"
+    )
+
+
 # --- Doctrine block parity ---------------------------------------------------
 
 def _canonical_blocks():
