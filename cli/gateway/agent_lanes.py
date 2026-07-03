@@ -251,10 +251,15 @@ def agent_lane_prompt(agent: Mapping[str, Any] | None) -> str:
     if prompt:
         parts.append(f"Agent instructions: {prompt}")
     try:
-        from elevate_cli.agent_hub import agent_routing_lines, agent_soul_lines
+        from elevate_cli.agent_hub import (
+            agent_invariant_lines,
+            agent_routing_lines,
+            agent_soul_lines,
+        )
 
         parts.extend(agent_routing_lines(dict(agent)))
         parts.extend(agent_soul_lines(dict(agent)))
+        parts.extend(agent_invariant_lines(dict(agent)))
     except Exception:
         pass
     parts.append("]")
