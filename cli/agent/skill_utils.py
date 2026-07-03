@@ -30,6 +30,8 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".github",
         ".hub",
         ".archive",
+        ".bundled-base",
+        ".pending-merges",
         ".venv",
         "venv",
         "node_modules",

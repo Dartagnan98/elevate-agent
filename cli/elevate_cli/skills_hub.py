@@ -1019,6 +1019,98 @@ def do_reset(name: str, restore: bool = False,
         c.print("[dim]Use /reset to start a new session now, or --now to apply immediately (invalidates prompt cache).[/]\n")
 
 
+def do_merge_updates(name: Optional[str] = None,
+                     console: Optional[Console] = None) -> None:
+    """Agent-merge queued bundled-skill updates into user-customized copies."""
+    from tools.skills_merge import list_pending, run_pending_merges
+
+    c = console or _console
+    pending = list_pending()
+    if name:
+        pending = [e for e in pending if e.get("skill") == name]
+    if not pending:
+        c.print("[dim]No skill updates waiting for a merge. You're in sync.[/]\n")
+        return
+
+    c.print(f"[bold]Merging {len(pending)} skill update(s) with the agent — "
+            f"your customizations are preserved (backups: <skill>.bak-premerge)...[/]\n")
+    result = run_pending_merges(skill=name)
+    if result["merged"]:
+        c.print(f"[bold green]Merged:[/] {', '.join(result['merged'])}")
+        try:
+            from agent.prompt_builder import clear_skills_system_prompt_cache
+            clear_skills_system_prompt_cache(clear_snapshot=True)
+        except Exception:
+            pass
+    for f in result["failed"]:
+        c.print(f"[bold red]Left queued:[/] {f['skill']} — {f['reason']}")
+    c.print()
+
+
+def do_changes(name: Optional[str] = None, export_dir: str = "",
+               console: Optional[Console] = None) -> None:
+    """Diff user skill copies against their recorded bundled base snapshots."""
+    import difflib
+
+    from tools.skills_sync import (
+        base_snapshot_root,
+        _base_dir_for,
+        _read_file_map,
+        _read_manifest,
+        _compute_relative_dest,
+        _discover_bundled_skills,
+        _get_bundled_dir,
+    )
+
+    c = console or _console
+    if not base_snapshot_root().is_dir():
+        c.print("[dim]No base snapshots recorded yet — run `elevate update` once, "
+                "then customized skills can be diffed here.[/]\n")
+        return
+
+    bundled = dict(_discover_bundled_skills(_get_bundled_dir()))
+    names = [name] if name else sorted(_read_manifest().keys())
+    shown = 0
+    for skill_name in names:
+        base_dir = _base_dir_for(skill_name)
+        src = bundled.get(skill_name)
+        if not base_dir.is_dir() or src is None:
+            continue
+        dest = _compute_relative_dest(src, _get_bundled_dir())
+        if not dest.is_dir():
+            continue
+        base_files = _read_file_map(base_dir)
+        user_files = _read_file_map(dest)
+        diff_lines: list = []
+        for rel in sorted(set(base_files) | set(user_files)):
+            b = base_files.get(rel)
+            u = user_files.get(rel)
+            if b == u:
+                continue
+            b_text = (b or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
+            u_text = (u or b"").decode("utf-8", errors="replace").splitlines(keepends=True)
+            diff_lines += difflib.unified_diff(
+                b_text, u_text,
+                fromfile=f"bundled/{skill_name}/{rel}",
+                tofile=f"yours/{skill_name}/{rel}",
+            )
+        if not diff_lines:
+            continue
+        shown += 1
+        c.print(f"[bold cyan]— {skill_name} —[/]")
+        c.print("".join(diff_lines))
+        if export_dir:
+            out = Path(export_dir).expanduser()
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{skill_name}.diff").write_text("".join(diff_lines), encoding="utf-8")
+
+    if shown == 0:
+        c.print("[dim]No customizations found relative to recorded bases.[/]\n")
+    elif export_dir:
+        c.print(f"[bold green]Exported {shown} diff(s) to {export_dir}[/] — "
+                f"share these to get your improvements into the product.\n")
+
+
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
     """Manage taps (custom GitHub repo sources)."""
     from tools.skills_hub import TapsManager
@@ -1349,6 +1441,13 @@ def skills_command(args) -> None:
     elif action == "reset":
         do_reset(args.name, restore=getattr(args, "restore", False),
                  skip_confirm=getattr(args, "yes", False))
+    elif action == "merge-updates":
+        do_merge_updates(name=getattr(args, "name", None))
+    elif action == "changes":
+        do_changes(
+            name=getattr(args, "name", None),
+            export_dir=getattr(args, "export", "") or "",
+        )
     elif action == "publish":
         do_publish(
             args.skill_path,

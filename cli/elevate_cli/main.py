@@ -4928,6 +4928,13 @@ def _update_via_zip(args):
             )
         if result.get("user_modified"):
             print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
+        if result.get("merged"):
+            print(f"  ⇡ {len(result['merged'])} merged (upstream changes + your edits)")
+        if result.get("queued_for_agent"):
+            print(
+                f"  ⇢ {len(result['queued_for_agent'])} update(s) waiting on an agent merge — "
+                f"run: elevate skills merge-updates"
+            )
         if result.get("cleaned"):
             print(f"  − {len(result['cleaned'])} removed from manifest")
         if not result["copied"] and not result.get("updated"):
@@ -6150,6 +6157,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 )
             if result.get("user_modified"):
                 print(f"  ~ {len(result['user_modified'])} user-modified (kept)")
+            if result.get("merged"):
+                print(f"  ⇡ {len(result['merged'])} merged (upstream changes + your edits)")
+            if result.get("queued_for_agent"):
+                print(
+                    f"  ⇢ {len(result['queued_for_agent'])} update(s) waiting on an agent merge — "
+                    f"run: elevate skills merge-updates"
+                )
             if result.get("cleaned"):
                 print(f"  − {len(result['cleaned'])} removed from manifest")
             if not result["copied"] and not result.get("updated"):
@@ -8693,6 +8707,39 @@ Examples:
         "-y",
         action="store_true",
         help="Skip confirmation prompt when using --restore",
+    )
+
+    skills_merge = skills_subparsers.add_parser(
+        "merge-updates",
+        help="Let the agent merge queued skill updates into your customized copies",
+        description=(
+            "Drain ~/.elevate/skills/.pending-merges/: for each skill where both you "
+            "and a bundled update changed the same file, the agent produces a merged "
+            "version that keeps your customizations and integrates the update. Your "
+            "current copy is backed up to <skill>.bak-premerge first."
+        ),
+    )
+    skills_merge.add_argument(
+        "name", nargs="?", help="Specific skill to merge (default: all queued)"
+    )
+
+    skills_changes = skills_subparsers.add_parser(
+        "changes",
+        help="Show what you customized in bundled skills (diff vs the shipped version)",
+        description=(
+            "Diff your skill copies against their recorded base snapshots "
+            "(~/.elevate/skills/.bundled-base/). Use this to review or share local "
+            "improvements so they can be folded into the product upstream."
+        ),
+    )
+    skills_changes.add_argument(
+        "name", nargs="?", help="Specific skill to diff (default: all user-modified)"
+    )
+    skills_changes.add_argument(
+        "--export",
+        metavar="DIR",
+        default="",
+        help="Also write per-skill unified diffs into DIR for sharing",
     )
 
     skills_publish = skills_subparsers.add_parser(

@@ -172,6 +172,160 @@ def _dir_hash(directory: Path) -> str:
     return hasher.hexdigest()
 
 
+# ── Three-way update support ────────────────────────────────────────────
+# Pristine copies of the bundled version each skill was last synced from live
+# under SKILLS_DIR/.bundled-base/<manifest key>/. With that base on disk, a
+# user-modified skill is no longer a dead end: per-file classification against
+# (base, user, new-bundled) applies upstream changes the user never touched,
+# keeps user edits upstream never touched, and queues genuine collisions under
+# SKILLS_DIR/.pending-merges/ for the box's own agent to merge semantically
+# (``elevate skills merge-updates``). Both dot-dirs are in
+# EXCLUDED_SKILL_DIRS so skill scanners never read them as real skills.
+
+def base_snapshot_root() -> Path:
+    """Resolved at call time so tests/profile-seeding can patch SKILLS_DIR."""
+    return SKILLS_DIR / ".bundled-base"
+
+
+def pending_merges_root() -> Path:
+    """Resolved at call time so tests/profile-seeding can patch SKILLS_DIR."""
+    return SKILLS_DIR / ".pending-merges"
+
+
+def _safe_key(skill_name: str) -> str:
+    """Manifest keys are frontmatter names — sanitize for use as a dirname."""
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in skill_name)
+
+
+def _base_dir_for(skill_name: str) -> Path:
+    return base_snapshot_root() / _safe_key(skill_name)
+
+
+def _write_base_snapshot(skill_name: str, src_dir: Path) -> None:
+    """Record *src_dir* as the pristine base for *skill_name* (best-effort)."""
+    dest = _base_dir_for(skill_name)
+    try:
+        tmp = dest.with_suffix(".tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_dir, tmp)
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        shutil.move(str(tmp), str(dest))
+    except (OSError, IOError) as e:
+        logger.debug("base snapshot for %s failed: %s", skill_name, e)
+
+
+def _read_file_map(directory: Path) -> Dict[str, bytes]:
+    """All files under *directory* as {relative posix path: content bytes}."""
+    out: Dict[str, bytes] = {}
+    try:
+        for fpath in sorted(directory.rglob("*")):
+            if fpath.is_file():
+                out[fpath.relative_to(directory).as_posix()] = fpath.read_bytes()
+    except (OSError, IOError):
+        pass
+    return out
+
+
+def _three_way_classify(
+    base_dir: Path, user_dir: Path, new_dir: Path
+) -> Tuple[List[str], List[str]]:
+    """Classify every file across base/user/new.
+
+    Returns (updates, conflicts):
+      updates   — rel paths where the user never diverged from base and the
+                  bundled version changed → safe to apply mechanically
+                  (copy new over, or delete when removed upstream).
+      conflicts — rel paths where BOTH sides changed and disagree.
+    Files only the user changed (or added/deleted) are silently kept.
+    """
+    base = _read_file_map(base_dir)
+    user = _read_file_map(user_dir)
+    new = _read_file_map(new_dir)
+
+    updates: List[str] = []
+    conflicts: List[str] = []
+    for rel in sorted(set(base) | set(user) | set(new)):
+        b, u, n = base.get(rel), user.get(rel), new.get(rel)
+        if u == n:
+            continue  # already identical (or both absent)
+        if b == u:
+            updates.append(rel)  # user untouched → take upstream
+        elif b == n:
+            continue  # upstream untouched → keep user's version
+        else:
+            conflicts.append(rel)  # three distinct versions
+    return updates, conflicts
+
+
+def _apply_file_updates(user_dir: Path, new_dir: Path, rels: List[str]) -> None:
+    """Apply mechanical updates: copy each rel from new_dir, delete if absent."""
+    for rel in rels:
+        src = new_dir / rel
+        dst = user_dir / rel
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        elif dst.exists():
+            dst.unlink()
+
+
+def _queue_agent_merge(
+    skill_name: str,
+    dest: Path,
+    skill_src: Path,
+    bundled_hash: str,
+    conflicts: List[str],
+    bootstrap: bool,
+    quiet: bool,
+) -> None:
+    """Queue a skill whose update needs the agent (self-contained snapshot).
+
+    Idempotent per bundled version: an existing entry for the same
+    bundled_hash is left alone; a newer bundled version refreshes the entry.
+    """
+    import json as _json
+    import time as _time
+
+    key = _safe_key(skill_name)
+    entry = pending_merges_root() / f"{key}.json"
+    new_copy = pending_merges_root() / f"{key}.new"
+    try:
+        if entry.exists():
+            try:
+                if _json.loads(entry.read_text(encoding="utf-8")).get("bundled_hash") == bundled_hash:
+                    return  # already queued for this exact upstream version
+            except (ValueError, OSError):
+                pass  # unreadable entry — rebuild it
+        pending_merges_root().mkdir(parents=True, exist_ok=True)
+        if new_copy.exists():
+            shutil.rmtree(new_copy, ignore_errors=True)
+        shutil.copytree(skill_src, new_copy)
+        entry.write_text(
+            _json.dumps(
+                {
+                    "skill": skill_name,
+                    "dest": str(dest),
+                    "new_copy": str(new_copy),
+                    "base": str(_base_dir_for(skill_name)) if _base_dir_for(skill_name).exists() else None,
+                    "bundled_hash": bundled_hash,
+                    "conflicts": conflicts,
+                    "bootstrap": bootstrap,
+                    "queued_at": _time.time(),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if not quiet:
+            print(f"  ⇢ {skill_name} (update waiting — agent merge queued)")
+    except (OSError, IOError) as e:
+        logger.debug("could not queue agent merge for %s: %s", skill_name, e)
+
+
 # ── Corrective resync ──────────────────────────────────────────────────
 # Markers of the SQLite-era skill instructions that were rewritten for the
 # per-account Postgres data layer (2026-06). A skill on disk still carrying
@@ -324,6 +478,8 @@ def sync_skills(quiet: bool = False) -> dict:
     copied = []
     updated = []
     user_modified = []
+    merged = []
+    queued_for_agent = []
     corrected = []
     skipped = 0
 
@@ -383,6 +539,7 @@ def sync_skills(quiet: bool = False) -> dict:
                     shutil.copytree(skill_src, dest)
                     copied.append(skill_name)
                     manifest[skill_name] = bundled_hash
+                    _write_base_snapshot(skill_name, skill_src)
                     if not quiet:
                         print(f"  + {skill_name}")
             except (OSError, IOError) as e:
@@ -407,10 +564,64 @@ def sync_skills(quiet: bool = False) -> dict:
                 continue
 
             if user_hash != origin_hash:
-                # User modified this skill — don't overwrite their changes
+                # User modified this skill. With a base snapshot on disk this
+                # is no longer a dead end — merge what we safely can.
+                base_dir = _base_dir_for(skill_name)
+                if bundled_hash == origin_hash:
+                    # No upstream change pending. The current bundled copy IS
+                    # the base they diverged from — record it (exact) so a
+                    # future upstream change can three-way merge.
+                    if not base_dir.exists():
+                        _write_base_snapshot(skill_name, skill_src)
+                    user_modified.append(skill_name)
+                    if not quiet:
+                        print(f"  ~ {skill_name} (user-modified, no update pending)")
+                    continue
+
+                if base_dir.exists():
+                    updates, conflicts = _three_way_classify(base_dir, dest, skill_src)
+                    if not conflicts:
+                        # Every changed file is one-sided → mechanical merge.
+                        backup = dest.with_suffix(".bak-merge")
+                        try:
+                            if backup.exists():
+                                shutil.rmtree(backup, ignore_errors=True)
+                            shutil.copytree(dest, backup)
+                            _apply_file_updates(dest, skill_src, updates)
+                            _write_base_snapshot(skill_name, skill_src)
+                            manifest[skill_name] = bundled_hash
+                            merged.append(skill_name)
+                            shutil.rmtree(backup, ignore_errors=True)
+                            if not quiet:
+                                print(
+                                    f"  ⇡ {skill_name} (merged: {len(updates)} upstream "
+                                    f"file(s), your edits kept)"
+                                )
+                        except (OSError, IOError) as e:
+                            if backup.exists() and not dest.exists():
+                                shutil.move(str(backup), str(dest))
+                            if not quiet:
+                                print(f"  ! Failed to merge {skill_name}: {e}")
+                        continue
+                    # Both sides touched the same file(s) → the box's agent
+                    # merges semantically; nothing is overwritten meanwhile.
+                    _queue_agent_merge(
+                        skill_name, dest, skill_src, bundled_hash,
+                        conflicts, bootstrap=False, quiet=quiet,
+                    )
+                    queued_for_agent.append(skill_name)
+                    user_modified.append(skill_name)
+                    continue
+
+                # Diverged with an update pending but no base recorded (installs
+                # that predate base snapshots): the true base is unknowable, so
+                # never guess mechanically — hand the whole skill to the agent.
+                _queue_agent_merge(
+                    skill_name, dest, skill_src, bundled_hash,
+                    conflicts=[], bootstrap=True, quiet=quiet,
+                )
+                queued_for_agent.append(skill_name)
                 user_modified.append(skill_name)
-                if not quiet:
-                    print(f"  ~ {skill_name} (user-modified, skipping)")
                 continue
 
             # User copy matches origin — check if bundled has a newer version
@@ -422,6 +633,7 @@ def sync_skills(quiet: bool = False) -> dict:
                     try:
                         shutil.copytree(skill_src, dest)
                         manifest[skill_name] = bundled_hash
+                        _write_base_snapshot(skill_name, skill_src)
                         updated.append(skill_name)
                         if not quiet:
                             print(f"  ↑ {skill_name} (updated)")
@@ -437,6 +649,9 @@ def sync_skills(quiet: bool = False) -> dict:
                         print(f"  ! Failed to update {skill_name}: {e}")
             else:
                 skipped += 1  # bundled unchanged, user unchanged
+                if not _base_dir_for(skill_name).exists():
+                    # Backfill the base snapshot while all three copies agree.
+                    _write_base_snapshot(skill_name, skill_src)
 
         else:
             # ── In manifest but not on disk — user deleted it ──
@@ -446,6 +661,15 @@ def sync_skills(quiet: bool = False) -> dict:
     cleaned = sorted(set(manifest.keys()) - bundled_names)
     for name in cleaned:
         del manifest[name]
+        # Drop the matching base snapshot and any queued merge — the skill no
+        # longer ships, so there is nothing to merge toward.
+        shutil.rmtree(_base_dir_for(name), ignore_errors=True)
+        _key = _safe_key(name)
+        try:
+            (pending_merges_root() / f"{_key}.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+        shutil.rmtree(pending_merges_root() / f"{_key}.new", ignore_errors=True)
 
     # Also copy DESCRIPTION.md files for categories (if not already present)
     for desc_md in bundled_dir.rglob("DESCRIPTION.md"):
@@ -465,6 +689,8 @@ def sync_skills(quiet: bool = False) -> dict:
         "updated": updated,
         "skipped": skipped,
         "user_modified": user_modified,
+        "merged": merged,
+        "queued_for_agent": queued_for_agent,
         "corrected": corrected,
         "cleaned": cleaned,
         "total_bundled": len(bundled_skills),
