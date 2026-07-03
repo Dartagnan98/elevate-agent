@@ -324,3 +324,38 @@ def test_reconcile_upgrades_1_2_60_souls_to_legal_boundary(monkeypatch):
         rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
     for agent_id in agent_ids:
         assert rows[agent_id]["config"]["soul"]["core_truths"] == expected[agent_id]
+
+
+def test_reconcile_upgrades_all_souls_to_question_gating_autonomy(monkeypatch):
+    # P2 appends the question-gating sentence to every agent's autonomy_rules.
+    # Append-only, so a soul stored at any prior default stays a strict prefix
+    # and self-upgrades on reconcile. Assert the phrase reached all 7 defaults
+    # and that a stored predecessor upgrades for each.
+    from elevate_cli.agent_hub import DEFAULT_AGENT_DEFS
+
+    PHRASE = "Before interrupting the user with a question"
+    stored_agents: list[dict] = []
+    expected: dict[str, str] = {}
+    for default in DEFAULT_AGENT_DEFS:
+        agent_id = default["id"]
+        new_rules = default["soul"]["autonomy_rules"]
+        assert PHRASE in new_rules, f"{agent_id} missing question-gating append"
+        predecessor = new_rules.split(" " + PHRASE)[0].strip()
+        assert predecessor and new_rules.startswith(predecessor)
+        expected[agent_id] = new_rules
+        stored_agents.append({"id": agent_id, "soul": {"autonomy_rules": predecessor}})
+
+    config = {"agent_hub": {"agents": stored_agents}}
+    monkeypatch.setattr(
+        "elevate_cli.agent_hub.load_config", lambda: copy.deepcopy(config)
+    )
+    monkeypatch.setattr("elevate_cli.config.save_config", lambda cfg: None)
+
+    reconcile_agent_hub_defaults()
+
+    from elevate_cli.data import connect, surface_state
+
+    with connect() as conn:
+        rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
+    for agent_id, want in expected.items():
+        assert rows[agent_id]["config"]["soul"]["autonomy_rules"] == want

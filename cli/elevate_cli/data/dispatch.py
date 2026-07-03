@@ -77,7 +77,7 @@ _ADMIN_WORKER_SKILL_REFS = {
     "buyer-cps": "real-estate-admin/webforms",
     "deal-matcher": _ADMIN_DEAL_MATCHER_SKILL,
     "closing-admin": "real-estate-admin/closing-admin",
-    "cma": "real-estate-admin/cma",
+    "cma": "cma",
     "cma-generator": "real-estate-admin/cma-generator",
     "listing-build": "real-estate-admin/listing-build",
     "lofty-crm-client-contacts": "real-estate-admin/lofty-crm-client-contacts",

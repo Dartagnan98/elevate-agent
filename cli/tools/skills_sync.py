@@ -289,6 +289,34 @@ def sync_skills(quiet: bool = False) -> dict:
     except Exception:
         logger.debug("agent-ops manifest resync skipped", exc_info=True)
 
+    # One-time manifest key renames: when a bundled skill's frontmatter `name`
+    # changes but its directory does not, the manifest (keyed by name) still
+    # holds the OLD key, so the sync loop reads the renamed skill as brand-new,
+    # sees the same-named directory already on disk, and prints the scary
+    # "yours was kept" notice instead of updating it. Carry the origin hash to
+    # the new key once (sentinel-guarded) so an unedited install updates
+    # normally and a genuinely user-edited copy still reads as user-modified.
+    _MANIFEST_KEY_RENAMES = {"ideation": "creative-ideation"}
+    try:
+        _rn_sentinel = SKILLS_DIR / ".manifest-key-renames-v1"
+        if not _rn_sentinel.exists():
+            _m = _read_manifest()
+            _renamed = 0
+            for _old, _new in _MANIFEST_KEY_RENAMES.items():
+                if _old in _m and _new not in _m:
+                    _m[_new] = _m.pop(_old)
+                    _renamed += 1
+            if _renamed:
+                _write_manifest(_m)
+                logger.info(
+                    "skills sync: carried %d manifest entries across a skill "
+                    "rename so unedited copies keep auto-updating",
+                    _renamed,
+                )
+            _rn_sentinel.write_text("done\n")
+    except Exception:
+        logger.debug("manifest key rename migration skipped", exc_info=True)
+
     manifest = _read_manifest()
     bundled_skills = _discover_bundled_skills(bundled_dir)
     bundled_names = {name for name, _ in bundled_skills}
