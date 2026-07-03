@@ -44,4 +44,9 @@ def run_dashboard_server(
 
         threading.Thread(target=_open, daemon=True).start()
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # proxy_headers=False: uvicorn's default rewrites scope["client"] from
+    # X-Forwarded-For when the peer is 127.0.0.1, which made the chat
+    # websocket's loopback guard reject legitimate traffic arriving through a
+    # local reverse proxy (cloudflared tunnel) as "remote". The guard's intent
+    # is the DIRECT peer — locality is already enforced by the loopback bind.
+    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)
