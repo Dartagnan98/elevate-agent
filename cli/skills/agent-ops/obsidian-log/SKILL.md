@@ -1,7 +1,7 @@
 ---
 name: obsidian-log
 effort: low
-description: "Write key decisions, project milestones, and feedback rules back to the Obsidian vault. Use this after confirming any architectural decision, project milestone, or durable feedback rule — keeps the vault current with agent memory."
+description: "Write decisions, milestones, and feedback rules back to the Obsidian vault. Use when you confirm an architectural decision, ship a milestone, or lock a durable rule, or the user says 'log this decision', 'write to vault', 'obsidian log'. Decisions/milestones only, not every task. Not for agent working memory across sessions — use memory."
 triggers: ["obsidian", "write to vault", "log decision", "save to obsidian", "update vault", "obsidian log", "decision log", "vault write-back", "milestone logged", "write back", "obsidian write"]
 category: agent-ops
 ---

@@ -1,6 +1,6 @@
 ---
 name: dogfood
-description: Systematic exploratory QA testing of web applications — find bugs, capture evidence, and generate structured reports
+description: "Systematic exploratory QA of a web app — find bugs, capture evidence, write a report. Use when the user says 'dogfood this', 'QA this app', 'find bugs on the site', 'exploratory testing', or hands a URL and scope to test in the browser. Produces screenshots plus a structured bug report. Not for scripted assertion tests against a spec — use software-development/test-driven-development; not for reproducing one known bug — use software-development/systematic-debugging. Needs the browser toolset and a target URL."
 version: 1.0.0
 metadata:
   elevate:

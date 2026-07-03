@@ -1,6 +1,6 @@
 ---
 name: tool-use-patterns
-description: "Patterns for Claude tool use including sequential tools, parallel execution, error handling, and agentic loops."
+description: "Claude tool-use patterns — sequential and parallel calls, error handling, agentic loops. Use when designing how an app should call tools, structure a function-calling loop, or handle tool errors and retries. Not for the Messages API surface (models, streaming, params) — use claude-api-helper; not for prompt wording — use prompt-engineering."
 homepage: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
 tags: [tools, function-calling, agents, patterns]
 category: agent-ops

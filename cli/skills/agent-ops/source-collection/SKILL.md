@@ -1,6 +1,6 @@
 ---
 name: source-collection
-description: "Collect configured research sources, normalize signals, upsert them into SQLite, and log source health."
+description: "Fetch configured research sources, normalize signals, upsert to SQLite, log source health. Use when a research cycle starts (before scoring), or the user says 'collect sources', 'pull the feeds', 'run source collection'. Not for ranking/deduping the collected signals — use signal-scoring; not for querying stored knowledge — use knowledge-base."
 category: agent-ops
 ---
 
@@ -470,3 +470,10 @@ hacker_news: 18 items (15 new, 3 updated)
 ---
 Total: 33 raw, 29 new, 4 updated, 1 failure
 ```
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

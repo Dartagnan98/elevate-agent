@@ -1,7 +1,7 @@
 ---
 name: local-ultrareview
 category: agent-ops
-description: Local multi-stage code review — parallel review, synthesis, and implementation planning, then offer to apply fixes.
+description: "Multi-stage local code review — parallel passes, synthesis, fix plan, then apply. Use when the user says 'run local ultrareview', '/local-ultrareview', '/local-ultrareview <PR#>', or wants a deep review of a branch/PR diff. Not for the pre-commit security+quality gate — use requesting-code-review; not for daily git snapshots — use local-version-control."
 ---
 
 # local-ultrareview

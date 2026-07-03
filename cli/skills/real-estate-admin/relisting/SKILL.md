@@ -1,6 +1,6 @@
 ---
 name: "relisting"
-description: "Relist a previously cancelled or expired property in AOIR Matrix using the prior MLS# as a template. Reuses photos, description, legal/PID, sellers, and most fields from the old listing \u2014 only changes Contract Effective Date, Expiration Date, List Price, and Buyer Agency Commission. Trigger on \"relist [address]\", \"re-list [address]\", \"create a new listing for [address] using the old MLS as template\", \"open Matrix and copy from MLS [number]\", or any request to relist a property that was previously listed and cancelled."
+description: "Relist a cancelled/expired property in AOIR Matrix off the prior MLS# as template. Use when the realtor says 'relist [address]', 're-list [address]', 'create a new listing from the old MLS', or 'copy from MLS [number]' in Matrix. Reuses photos, remarks, legal/PID, sellers; only effective date, expiration, list price, and buyer-agency commission change. Not for the SkySlope compliance transaction \u2014 use skyslope-relist; not for a brand-new listing with no prior MLS \u2014 use matrix-incomplete-listing."
 category: "real-estate-admin"
 access:
   entitlement: "real_estate_admin"
@@ -156,3 +156,9 @@ Required fields:
 - SkySlope checklist uploads performed.
 - PDS/DigiSign status.
 - risks: Matrix field uncertainty, missing prior listing, upload failures.
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

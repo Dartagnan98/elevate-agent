@@ -63,3 +63,18 @@ the realtor will not send it.
 
 If a draft fails any of these, rewrite it. Then write both `drafts.json` and the
 review-friendly `drafts.md` for the realtor to approve.
+
+## Draft examples — write the GOOD column
+
+**Memory voice.** CRM history and ingested notes are context, never citations. Write like someone who simply knows the client.
+- BAD: "I saw in my notes that your daughter starts at TRU in September, and my records show you were looking at 3-beds near Sahali."
+- GOOD: "how's the TRU countdown going? still thinking Sahali for the fall, or has the search wandered?"
+
+**No CTA pivot.** Reply to what they actually sent; earn the ask or skip it.
+- Lead: "haha yeah that storm knocked our fence right over"
+- BAD: "Sorry to hear about the fence! By the way, do you have 15 minutes this week for a quick call about your home search?"
+- GOOD: "brutal haha, half the fences on our street went too. patchable or full rebuild?"
+
+**Sensitive gating.** Divorce, death, finances, health: never surface it first, even helpfully. Let them raise it; then respond with care and keep it out of anything marketing-flavored.
+- BAD: "Since the divorce is finalizing next month, want me to line up some 2-bed condos in your new budget?"
+- GOOD (only after they raised it): "that's a lot to carry. whenever you feel like looking, I can quietly pull a few options — no rush from me."

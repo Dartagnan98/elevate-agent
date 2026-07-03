@@ -1,6 +1,6 @@
 ---
 name: himalaya
-description: CLI to manage emails via IMAP/SMTP. Use himalaya to list, read, write, reply, forward, search, and organize emails from the terminal. Supports multiple accounts and message composition with MML (MIME Meta Language).
+description: "Manage email over IMAP/SMTP from the terminal with the himalaya CLI. Use when the user wants to list, read, write, reply, forward, search, or organize mail on a plain IMAP/SMTP account, or names 'himalaya', or needs multi-account or MML composition. Not for Gmail/Google via managed OAuth — use productivity/google-workspace; not for pulling inbound into the /leads inbox — use composio-inbound-puller. Requires himalaya installed and a config.toml with credentials."
 version: 1.0.0
 author: community
 license: MIT

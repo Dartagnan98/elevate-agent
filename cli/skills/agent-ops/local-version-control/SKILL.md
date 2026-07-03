@@ -1,6 +1,6 @@
 ---
 name: local-version-control
-description: "Daily git snapshots of agent workspace changes. Stages files with safety checks, reviews diff for PII, commits with descriptive message. Never pushes automatically."
+description: "Daily git snapshot of the agent workspace, staged and committed with PII checks. Use when the user says 'auto-commit', 'git snapshot', 'commit changes', 'version control', on a daily cron, or before destructive work. Never pushes automatically. Not for reviewing a diff for bugs — use local-ultrareview."
 triggers: ["auto-commit", "git snapshot", "commit changes", "version control"]
 external_calls: []
 category: agent-ops

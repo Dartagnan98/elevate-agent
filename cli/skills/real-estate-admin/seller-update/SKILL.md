@@ -1,6 +1,6 @@
 ---
 name: seller-update
-description: Cron skill for active listing updates. Pulls showing feedback/activity, writes a digest to the deal, and creates a seller-update email draft. Never sends directly.
+description: "Cron skill: update one active listing — showing feedback, digest, seller email draft. Use when a scheduled active-listing update fires for a single deal and you need showing feedback/activity written to the deal and a seller-update draft created. Never sends directly. Not for the realtor's on-demand run across ALL listings ('run weekly listings', 'snapshot my listings') — use seller-updates; not for the pre-appointment package — use seller-package."
 metadata:
   elevate:
     tags: [real-estate, seller-update, showing-feedback, cron]

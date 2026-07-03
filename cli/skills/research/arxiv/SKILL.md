@@ -1,6 +1,6 @@
 ---
 name: arxiv
-description: Search and retrieve academic papers from arXiv using their free REST API. No API key needed. Search by keyword, author, category, or ID. Combine with web_extract or the ocr-and-documents skill to read full paper content.
+description: "Search and retrieve academic papers from arXiv's free REST API (no key). Use when the user names 'arXiv', wants an ML/AI paper by keyword, author, category, or arXiv ID, or needs a preprint's abstract or full PDF. Not for building a running knowledge base from those papers — use research/llm-wiki; not for structured web search of non-arXiv sources — use agent-ops/web-research. Pair with ocr-and-documents or web_extract to read full text."
 version: 1.0.0
 author: Elevate
 license: MIT
@@ -279,3 +279,10 @@ Papers can be withdrawn after submission. When this happens:
 - The `<summary>` field contains a withdrawal notice (look for "withdrawn" or "retracted")
 - Metadata fields may be incomplete
 - Always check the summary before treating a result as a valid paper
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

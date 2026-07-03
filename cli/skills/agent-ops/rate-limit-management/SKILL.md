@@ -1,7 +1,7 @@
 ---
 name: rate-limit-management
 effort: low
-description: "Framework protocol for responding to Claude Max API usage thresholds. Three-tier wind-down and recovery. Agent-specific behavior belongs in deployment config, not here."
+description: "Three-tier wind-down/recovery protocol for Claude Max usage thresholds. Use when the user says 'check usage', 'usage high', 'wind down', 'rate limit', 'resume after rate limit', or 5-hour/7-day utilization crosses a warn threshold. Framework only — agent-specific tier behavior lives in deployment config, not here."
 triggers: ["rate limit", "usage check", "usage high", "wind down", "resume after rate limit", "check usage"]
 category: agent-ops
 ---

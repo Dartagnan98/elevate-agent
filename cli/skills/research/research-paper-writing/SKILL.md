@@ -1,7 +1,7 @@
 ---
 name: research-paper-writing
 title: Research Paper Writing Pipeline
-description: End-to-end pipeline for writing ML/AI research papers — from experiment design through analysis, drafting, revision, and submission. Covers NeurIPS, ICML, ICLR, ACL, AAAI, COLM. Integrates automated experiment monitoring, statistical analysis, iterative writing, and citation verification.
+description: "End-to-end pipeline for writing an ML/AI research paper for a venue. Use when the user is drafting or revising a paper for 'NeurIPS', 'ICML', 'ICLR', 'ACL', 'AAAI', or 'COLM', or needs experiment design, statistical analysis, or citation verification through submission. Not for just fetching source papers to cite — use research/arxiv; not for a general-purpose plan of any project — use software-development/writing-plans. Iterative loop, not linear."
 version: 1.1.0
 author: Orchestra Research
 license: MIT
@@ -2375,3 +2375,10 @@ See [templates/README.md](templates/README.md) for compilation instructions.
 **APIs:** [Semantic Scholar](https://api.semanticscholar.org/api-docs/) | [CrossRef](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | [arXiv](https://info.arxiv.org/help/api/basics.html)
 
 **Venues:** [NeurIPS](https://neurips.cc/Conferences/2025/PaperInformation/StyleFiles) | [ICML](https://icml.cc/Conferences/2025/AuthorInstructions) | [ICLR](https://iclr.cc/Conferences/2026/AuthorGuide) | [ACL](https://github.com/acl-org/acl-style-files)
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

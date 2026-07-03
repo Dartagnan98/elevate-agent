@@ -1,6 +1,6 @@
 ---
 name: agentic-crm-setup
-description: "Full interactive setup for the agentic CRM personal assistant template. Use at first boot or whenever the user asks to configure/reconfigure the assistant."
+description: "Interactively configure the agentic-CRM personal-assistant template. Use when at first boot, or the user says 'set up the assistant', 'reconfigure', 'change your name/hours/scope', or onboarding was interrupted. Not for day-to-day contact upkeep — use crm-management; not for the research-agent template — use research-agent-setup."
 category: agent-ops
 ---
 

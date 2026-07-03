@@ -1,6 +1,6 @@
 ---
 name: tool-discovery
-description: "Discover available email, calendar, contacts, meeting notes, browser, and CRM tools for a tool-agnostic personal assistant."
+description: "Detect which email, calendar, contacts, notes, browser, and CRM tools are available. Use when at setup, a workflow fails because a tool may be missing, or the user asks 'what tools do I have', 'is Gmail connected'. Not for wiring a new MCP server — use mcp-integration."
 category: agent-ops
 ---
 

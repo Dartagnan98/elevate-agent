@@ -1,6 +1,6 @@
 ---
 name: nighttime-mode
-description: "Autonomous overnight orchestration mode. Active outside day hours. Dispatch and monitor deep work across agents while user sleeps. Internal building only — no external actions."
+description: "Autonomous overnight orchestration — dispatch and monitor deep work while the user sleeps. Use when the user says 'nighttime mode', 'overnight mode', 'night mode', or it is outside configured day hours and internal work should continue. Internal building only — no external actions, sends, purchases, or deploys."
 triggers: ["nighttime mode", "overnight mode", "night mode", "overnight orchestration", "nighttime protocol"]
 external_calls: []
 category: agent-ops

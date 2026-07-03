@@ -1,6 +1,6 @@
 ---
 name: idea-grooming
-description: "Pressure-test a captured idea against an objective rubric and write a structured analysis back into the source file. Use when: a new idea drops into an Ideas/ inbox (manual or cron-watched), or when re-grilling an existing groomed idea against fresh market data."
+description: "Score a captured idea against a rubric and write the analysis back into its source file. Use when a new idea lands in an 'Ideas/' inbox (manual or cron-watched), the user says 'groom this idea' or 'evaluate this idea', or re-grilling a groomed idea against fresh market data. Not for stress-testing a settled plan from many angles — use multi-perspective-grilling."
 category: agent-ops
 ---
 

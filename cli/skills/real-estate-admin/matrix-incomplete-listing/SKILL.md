@@ -1,6 +1,6 @@
 ---
 name: matrix-incomplete-listing
-description: Create and finish a NEW listing in the configured MLS input platform (AOIR Matrix / Xposure). Mode "draft" builds the incomplete listing from signed-MLC property facts and Saves as Incomplete (stage 3). Mode "photos" uploads the final best-99 photos and finishes the listing (stage 4). Never clicks Submit — the realtor reviews and submits.
+description: "Build a brand-new MLS listing in the input platform (AOIR Matrix / Xposure). Use when the realtor says 'start the MLS listing', 'create the listing in Matrix', 'save it as incomplete', or 'upload the listing photos' after the MLC is signed. Mode 'draft' fills from signed-MLC facts and Saves as Incomplete (stage 3); mode 'photos' uploads the best 99 and finishes it (stage 4). Not for relisting a cancelled property from a prior MLS — use relisting; not for the SkySlope compliance side — use skyslope-relist. Never clicks Submit."
 metadata:
   elevate:
     tags: [real-estate, mls, matrix, listing]

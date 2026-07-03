@@ -1,6 +1,6 @@
 ---
 name: crm-management
-description: "Maintain the structured agentic CRM: contacts, companies, interactions, follow-ups, relationship health, and search."
+description: "Maintain the structured agentic CRM — contacts, companies, interactions, follow-ups. Use when the user says 'add a contact', 'log this interaction', 'update the CRM', 'set a follow-up', or you need to search relationship records. Not for first-time assistant setup — use agentic-crm-setup; not for a health/stale sweep — use relationship-review."
 category: agent-ops
 ---
 

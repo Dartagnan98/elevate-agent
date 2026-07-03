@@ -1,6 +1,6 @@
 ---
 name: agentcard-purchase
-description: "You need to make a purchase on behalf of the user — buy a SaaS subscription, pay for an API, purchase a domain, or any transaction requiring a credit card. Use this skill to request approval, issue a scoped virtual Visa card via AgentCard, and complete the purchase autonomously. Requires the AgentCard MCP server to be configured."
+description: "Buy something for the user with a scoped virtual Visa via AgentCard. Use when you must spend real money — 'buy', 'purchase', 'pay for', 'subscribe to', 'buy a domain', 'purchase API credits', or any transaction needing a card. Not for logging an already-made payment — use crm-management; not for approval-gating a non-financial action — use approvals. Requires the AgentCard MCP server; card is approval-gated and single-use."
 triggers: ["buy", "purchase", "pay for", "subscribe to", "need a credit card", "make a payment", "sign up for paid plan", "buy a domain", "purchase API credits", "pay invoice", "need to pay", "financial transaction", "virtual card", "agentcard"]
 external_calls: ["mcp.agentcard.sh", "api.agentcard.sh"]
 category: agent-ops

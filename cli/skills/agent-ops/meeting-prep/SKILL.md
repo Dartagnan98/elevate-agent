@@ -1,6 +1,6 @@
 ---
 name: meeting-prep
-description: "Prepare users before meetings and process notes/transcripts afterward. Updates CRM, tasks, and follow-up drafts."
+description: "Brief the user before a meeting and process the notes/transcript after. Use when the user says 'prep me for my meeting', 'meeting brief', 'who am I meeting', or hands over post-call notes/a transcript to file. Updates CRM, tasks, and follow-up drafts. Not for schedule review or conflict detection — use calendar-management."
 category: agent-ops
 ---
 

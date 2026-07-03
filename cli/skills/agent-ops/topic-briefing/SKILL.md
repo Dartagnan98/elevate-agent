@@ -1,6 +1,6 @@
 ---
 name: topic-briefing
-description: "Turn recent scored signals into compact topic options, hidden detail briefs, and enriched follow-up briefs after human selection."
+description: "Turn scored signals into a compact topic menu plus hidden detail and follow-up briefs. Use when the user wants 'a menu of the best topics', asks 'what should I cover', picks a topic to expand, or the topic-briefing cron fires. Not for a single narrative brief on chosen signals — use brief-generation; not for scoring the signals first — use signal-scoring."
 category: agent-ops
 ---
 

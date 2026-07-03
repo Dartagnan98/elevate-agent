@@ -1,6 +1,6 @@
 ---
 name: llm-wiki
-description: "Karpathy's LLM Wiki — build and maintain a persistent, interlinked markdown knowledge base. Ingest sources, query compiled knowledge, and lint for consistency."
+description: "Build and maintain Karpathy's LLM Wiki — a persistent interlinked markdown KB. Use when the user says 'add to my wiki', 'ingest this source', 'build a knowledge base', queries an existing wiki at the configured path, or wants to lint/health-check it. Not for one-shot web lookups that need no durable store — use agent-ops/web-research; not for searching arXiv papers — use research/arxiv. The human curates sources; the agent summarizes, cross-references, and files."
 version: 2.1.0
 author: Elevate
 license: MIT
@@ -504,3 +504,10 @@ so users who want a scheduled/CLI-driven compile pipeline can point it at the sa
 skill maintains. Trade-offs: it owns page generation (replaces the agent's judgment on page
 creation) and is tuned for small corpora. Use this skill when you want agent-in-the-loop curation;
 use llmwiki when you want batch compile of a source directory.
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

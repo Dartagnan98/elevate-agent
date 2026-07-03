@@ -1,6 +1,6 @@
 ---
 name: seller-package
-description: Draft the pre-appointment seller package email after a listing appointment is booked, collect seller verifiers (name/email/phone/address), and on approved send promote the contact to the /admin listing kanban at stage 0 (CMA / Prospect). Never sends without human approval.
+description: "Draft the pre-appointment seller package email after a listing appointment is booked. Use when the realtor says 'send the seller package', 'prep for the listing appointment', or 'draft the pre-listing email' for a booked seller. Collects verifiers (name/email/phone/address) and, on approved send, promotes the contact to the /admin listing kanban at stage 0 (CMA / Prospect). Never sends without approval. Not for post-list showing-feedback emails — use seller-update; not for the CMA itself — use cma."
 metadata:
   elevate:
     tags: [real-estate, seller, email, pre-listing, admin-entry]
@@ -80,3 +80,7 @@ If any required field is missing, return `status: "waiting_human"` with a `human
 - **Missing verifier**: `status: "waiting_human"`, `requiredFields` lists which of seller_names/seller_email/seller_phone/listing_address are missing. Do not draft.
 - **Contact already promoted**: if `contacts.stage='closed'` and a listing deal already exists for this contact, skip promotion, attach the new artifact to the existing deal, and return `admin_promoted: true` with the existing `deal_id`.
 - **close_to_admin rejected (no verifier on contact row)**: this should not happen if required inputs are enforced; if it does, return `status: "failed"` with the rejection reason and do NOT mark the package as sent — the human has to fix the contact record first.
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

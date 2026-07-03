@@ -1,7 +1,7 @@
 ---
 name: officecli
 effort: low
-description: "Create, read, and edit Word (.docx), Excel (.xlsx), and PowerPoint (.pptx) files. Use when a task requires generating a report, analysis spreadsheet, or presentation. No Office installation needed — single binary, works offline."
+description: "Create, read, and edit Word (.docx), Excel (.xlsx), and PowerPoint (.pptx) files. Use when a task needs a report, analysis spreadsheet, or deck, or mentions 'docx', 'xlsx', 'pptx', 'generate report', 'owner report'. Single binary, offline, no Office install. Not for editing a PDF's text — use nano-pdf."
 triggers: ["word document", "excel", "spreadsheet", "powerpoint", "presentation", "docx", "xlsx", "pptx", "generate report", "create report", "monthly report", "owner report", "work order report", "onboarding deck", "officecli", "office document"]
 category: agent-ops
 ---

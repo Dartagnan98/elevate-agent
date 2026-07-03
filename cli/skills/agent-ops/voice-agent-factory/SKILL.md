@@ -1,6 +1,6 @@
 ---
 name: voice-agent-factory
-description: "Turn ANY Elevate agent into a live ElevenLabs voice agent: mine its skills, CLIs, MCPs, and transcripts into a tool catalog, distill its skills into a voice persona, dynamically generate a policy-gated gateway and all code per target (NO pre-built scripts), test exhaustively on probe-shaped fixtures, provision on ElevenLabs with automatic tier fallback, and verify end-to-end with real conversations before shipping a link."
+description: "Turn any Elevate agent into a live ElevenLabs voice agent, gateway and all. Use when the user says 'give my agent a voice', 'voice agent', 'elevenlabs', 'talk to my agent', 'tap to talk', or wants a conversational voice surface. Mines skills/CLIs/MCPs into a tool catalog, generates a policy-gated gateway per target (no pre-built scripts), tests, provisions with tier fallback, verifies end-to-end before shipping a link."
 triggers: ["voice agent", "elevenlabs", "voice surface", "talk to my agent", "conversational ai", "voice gateway", "give my agent a voice", "voice tools", "el agent", "convai", "speech interface", "tap to talk"]
 external_calls: ["api.elevenlabs.io", "unpkg.com (EL widget embed)", "trycloudflare.com (quick tunnel)"]
 category: agent-ops

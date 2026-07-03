@@ -1,6 +1,6 @@
 ---
 name: mcp-integration
-description: "Integrate Model Context Protocol (MCP) servers with Elevate agents. Covers server setup, tool discovery, and multi-server orchestration."
+description: "Wire external MCP servers into an Elevate agent. Use when adding an 'MCP server', editing mcpServers in settings.json, connecting a Model Context Protocol tool, or debugging why an MCP tool is missing. Covers setup, tool discovery, multi-server orchestration. Not for the built-in native MCP client — use native-mcp; not for discovering local CLIs/connectors — use tool-discovery."
 homepage: https://modelcontextprotocol.io
 tags: [mcp, integration, servers, tools]
 category: agent-ops

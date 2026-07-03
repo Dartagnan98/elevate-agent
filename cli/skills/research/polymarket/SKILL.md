@@ -1,6 +1,6 @@
 ---
 name: polymarket
-description: Query Polymarket prediction market data — search markets, get prices, orderbooks, and price history. Read-only via public REST APIs, no API key needed.
+description: "Query Polymarket prediction-market data — markets, prices, orderbooks, history. Use when the user names 'Polymarket', asks 'what are the odds of X', wants betting odds or event probabilities, or wants to track a market's price movement. Not for general news or web research on the event itself — use agent-ops/web-research; not for academic sources — use research/arxiv. Read-only via public REST APIs, no key."
 version: 1.0.0
 author: Elevate + Teknium
 tags: [polymarket, prediction-markets, market-data, trading]
@@ -74,3 +74,10 @@ Generous — unlikely to hit for normal usage:
 - Trading requires wallet-based crypto authentication (EIP-712 signatures)
 - Some new markets may have empty price history
 - Geographic restrictions apply to trading but read-only data is globally accessible
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

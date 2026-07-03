@@ -1,6 +1,6 @@
 ---
 name: composio-inbound-puller
-description: Pull DMs / replies / messages from connected Composio toolkits (Gmail, Outlook, Slack, etc.) into the source-inbox so /leads can show inbound across every connected channel.
+description: "Pull inbound from connected Composio toolkits into the /leads source-inbox. Use it as the documented contract for the background ticker that ingests Gmail, Outlook, Slack, etc. DMs and replies so autopilot lanes, hot-leads watcher, and follow-ups see them as plain records. Not an LLM-driven runtime skill — it never runs interactively. Not for sending outbound — that is the Composio outbound sender; not for running a lane end to end — use outreach-lanes."
 version: 1.0.0
 metadata:
   elevate:

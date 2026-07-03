@@ -1,6 +1,6 @@
 ---
 name: community-publish
-description: "Package a local skill, agent, or org template for community sharing. Strips PII, scans for secrets, prepares a clean submission, and opens a PR to the community catalog."
+description: "Package a local skill, agent, or org template and open a PR to the community catalog. Use when the user says 'publish skill', 'share skill', 'community submit', 'package for sharing', or 'contribute'. Strips PII, scans for secrets, stages a clean submission. Not for browsing/installing catalog items — use catalog-browse."
 triggers: ["publish skill", "share skill", "community submit", "package for sharing", "contribute"]
 external_calls: ["github.com"]
 category: agent-ops

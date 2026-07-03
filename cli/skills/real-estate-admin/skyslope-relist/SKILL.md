@@ -1,6 +1,6 @@
 ---
 name: "skyslope-relist"
-description: "Relist a previously cancelled or expired property in SkySlope (the compliance/transaction platform) by creating a new Listing transaction from the prior one. Reuses sellers, property, PID/legal, and documents from the old transaction; only the listing dates, list price, and commission change. Companion to the Matrix `relisting` skill — Matrix handles the MLS, this handles SkySlope. Trigger on \"relist [address] in skyslope\", \"prep skyslope for relist [address]\", \"create the skyslope listing for the relist\", \"add [address] to skyslope as a relist\", or any request to put a cancelled/expired listing back into SkySlope."
+description: "Relist a property in SkySlope as a new Listing transaction from the prior one. Use when the realtor says 'relist [address] in SkySlope', 'prep SkySlope for the relist', 'create the SkySlope listing for the relist', or 'add [address] to SkySlope as a relist'. The compliance/transaction portal side; reuses sellers, property, PID/legal, documents — only dates, list price, and commission change. Not for the Matrix/MLS side of the relist — use relisting; not for syncing an existing transaction's status — use skyslope-sync."
 category: "real-estate-admin"
 metadata:
   elevate:

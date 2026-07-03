@@ -1,7 +1,7 @@
 ---
 name: opencli
 effort: medium
-description: "Turn any website into a CLI command by driving Chrome's live session. Use when you need structured data from a site that has no API or where the API is inadequate — reads the browser's actual session (logged-in state, cookies) to extract data. Requires Chrome + Browser Bridge extension setup (one-time)."
+description: "Turn a website into a CLI command by driving Chrome's logged-in session. Use when you need structured data from a site with no API or an inadequate one, or the user says 'opencli', 'scrape', 'build an adapter for'. Reuses the browser's cookies/session. Requires Chrome + Browser Bridge (one-time). Not for one-off click/fill automation — use playwright-cli."
 triggers: ["opencli", "browser automation", "website cli", "scrape", "browser adapter", "web adapter", "generate adapter", "opencli explore", "opencli generate", "property meld adapter", "browser control"]
 category: agent-ops
 ---

@@ -1,6 +1,6 @@
 ---
 name: multi-perspective-grilling
-description: "Pressure-test a plan, idea, or active strategy by walking it through a fixed roster of distinct skeptical perspectives. Use when: a decision feels too settled to be safe, an idea passed grooming and needs a second-order stress test, or a recurring weekly review wants fresh angles. Personas defined here, domain customization in agent config."
+description: "Grill a plan or strategy through a roster of distinct skeptical personas. Use when the user says 'stress-test this', 'poke holes in this', 'grill this plan', a decision feels too settled to be safe, or a groomed idea needs a second-order check. Personas defined here, domain overrides in agent config. Not for first-pass rubric scoring of a raw idea — use idea-grooming."
 category: agent-ops
 ---
 

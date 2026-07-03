@@ -1,6 +1,6 @@
 ---
 name: web-research
-description: "Structured web research patterns using search APIs, content extraction, and synthesis. For agents that need to gather and analyze online information."
+description: "Structured web research — sub-query search, content extraction, cited synthesis. Use when the user asks to 'research', 'look up', 'find sources on', or 'summarize what's online about' a topic and the answer lives on the open web. Not for hypothesis-driven metric iteration — use autoresearch; not for extracting from an API-less site's logged-in session — use opencli."
 homepage: https://docs.anthropic.com/en/docs/build-with-claude/tool-use
 tags: [research, web, search, analysis]
 category: agent-ops
@@ -48,3 +48,10 @@ WebFetch: "https://docs.anthropic.com/en/docs/agents"
 - Check for recency (information may be outdated)
 - Synthesize, don't just aggregate
 - Flag conflicting information explicitly
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

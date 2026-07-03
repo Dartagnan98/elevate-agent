@@ -1,6 +1,6 @@
 ---
 name: mlc
-description: Listing intake and Multiple Listing Contract workflow. Collects listing details, prepares required listing documents, and asks for human approval before signing/send.
+description: "Listing intake and Multiple Listing Contract prep for a new listing (stage 2). Use when the realtor says 'do the MLC', 'prepare the listing contract', 'draft the listing paperwork', or has price, commission, term, and seller details ready to sign. Collects details, prepares the required forms, and asks for approval before signing/send. Not for the MLS input listing itself — use matrix-incomplete-listing; not for the pre-appointment seller intake — use pre-cma-dashboard-setup."
 metadata:
   elevate:
     tags: [real-estate, listing-intake, mlc, documents]

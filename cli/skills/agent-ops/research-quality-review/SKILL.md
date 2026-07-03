@@ -1,6 +1,6 @@
 ---
 name: research-quality-review
-description: "Audit source quality, scoring performance, duplicate patterns, source failures, stale config, and tuning opportunities."
+description: "Audit research source quality, scoring, dupes, failures, and stale config for tuning. Use when running the weekly cadence, the user says 'review research quality' or 'the briefs feel noisy', or a quality cron fires. Not for the initial niche/source setup — use research-agent-setup; not for scoring the current run's signals — use signal-scoring."
 category: agent-ops
 ---
 

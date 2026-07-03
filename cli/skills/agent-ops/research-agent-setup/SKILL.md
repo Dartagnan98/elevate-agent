@@ -1,6 +1,6 @@
 ---
 name: research-agent-setup
-description: "Configure the research agent template: niche, sources, scoring, delivery, approval policy, and recurring schedules."
+description: "Configure the research-agent template — niche, sources, scoring, delivery, schedules. Use when at first boot, or the user says 'set up the research agent', 'reconfigure research', or 'change my sources/niche'. Writes config.json. Not for the personal-assistant CRM template — use agentic-crm-setup; not for auditing an existing setup's output — use research-quality-review."
 category: agent-ops
 ---
 

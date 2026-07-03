@@ -1,6 +1,6 @@
 ---
 name: blogwatcher
-description: Monitor blogs and RSS/Atom feeds for updates using the blogwatcher-cli tool. Add blogs, scan for new articles, track read status, and filter by category.
+description: "Monitor blogs and RSS/Atom feeds for new posts via the blogwatcher-cli tool. Use when the user says 'watch this blog', 'any new articles', 'check my feeds', wants to add/scan feeds, track read status, or import an OPML. Not for one-off academic paper search — use research/arxiv; not for ad-hoc web research or fetching a single page — use agent-ops/web-research. Requires the blogwatcher-cli binary installed."
 version: 2.0.0
 author: JulienTant (fork of Hyaxia/blogwatcher)
 license: MIT
@@ -134,3 +134,10 @@ Unread articles (2):
 - Import blogs in bulk from OPML files exported by Feedly, Inoreader, NewsBlur, etc.
 - Database stored at `~/.blogwatcher-cli/blogwatcher-cli.db` by default (override with `--db` or `BLOGWATCHER_DB`).
 - Use `blogwatcher-cli <command> --help` to discover all flags and options.
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

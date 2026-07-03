@@ -1,6 +1,6 @@
 ---
 name: claude-api-helper
-description: "Build applications with the Claude API and Anthropic SDKs. Covers Messages API, streaming, tool use, vision, and best practices."
+description: "Build apps on the Claude API / Anthropic SDKs — Messages, streaming, tool use, vision. Use when writing code against 'the Claude API', 'anthropic SDK', 'messages.create', model ids, or SDK streaming and best practices. Not for tool-calling loop design — use tool-use-patterns; not for prompt wording — use prompt-engineering."
 homepage: https://docs.anthropic.com/en/api
 tags: [api, anthropic, sdk, development]
 category: agent-ops
