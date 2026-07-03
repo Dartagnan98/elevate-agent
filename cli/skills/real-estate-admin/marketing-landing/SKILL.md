@@ -1,6 +1,6 @@
 ---
 name: "marketing-landing"
-description: "Builds and previews a per-listing landing page (<landing-base>/<slug>/), then deploys to Cloudflare Pages on confirm. Runs after marketing-render and before marketing-copy so the live URL is available to social posts and the Mailjet email."
+description: "Build, preview, and deploy a per-listing landing page to Cloudflare Pages on confirm. Use when the realtor says 'build the listing landing page', 'make the property page', or 'get the listing URL live', or the marketing run reaches the landing step (after render, before copy). Not for social/email launch assets — use marketing. The realtor always previews before push; the live URL then feeds the social posts and Mailjet email."
 category: "real-estate-marketing"
 tags: ["real-estate", "marketing", "landing-page", "cloudflare-pages", "listing-launch"]
 access:
@@ -157,3 +157,9 @@ If the realtor declines the push, write `status: "preview-only"` with no
   `config/realtor.json`. Never narrow it to the primary market only.
 - Photos that are `null` in inputs.json must not appear in the rendered HTML
   (no broken `<img>` tags).
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

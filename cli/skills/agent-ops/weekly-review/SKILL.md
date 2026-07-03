@@ -1,6 +1,6 @@
 ---
 name: weekly-review
-description: "Weekly comprehensive synthesis. Run Sunday evening or when user requests. Reviews week's accomplishments across all agents, evaluates performance, plans next week."
+description: "Run the weekly synthesis across all agents. Use when the Sunday-evening cron fires or the user says 'weekly review', 'week summary', 'end of week', 'plan next week' — it covers accomplishments, goal progress, self-evaluation, and the next-week plan. Not for the daily morning or evening briefing — use morning-review/evening-review instead. Aggregates the last 7 days of heartbeats, tasks, memory, and goals."
 triggers: ["weekly review", "weekly check-in", "end of week", "week summary", "run weekly review", "weekly briefing"]
 external_calls: []
 category: agent-ops

@@ -1,6 +1,6 @@
 ---
 name: social-content-engine
-description: Weekly real-estate social content engine. Pulls full native metrics from every connected platform (IG, TikTok, YouTube Shorts, FB, LinkedIn), researches what's trending in real estate via last30days, reads inbox/CRM signals for grounded ideation, and writes 5-10 approval-gated content ideas to the /social-media queue. Runs weekly via cron.
+description: "Run the weekly real-estate social content engine that proposes grounded post ideas. Use when the weekly cron fires or the user asks to 'plan this week's content', 'what should I post', or 'refresh the social queue': pull native metrics from every connected platform (IG, TikTok, YouTube Shorts, FB, LinkedIn), research real-estate trends via last30days, read inbox/CRM signals, then write 5-10 approval-gated ideas (hook + format + best time + reasoning) to the /social-media queue. Never auto-publishes — the human approves and schedules. Not for buyer/seller lead texting — use outreach-lanes."
 version: 0.1.0
 metadata:
   elevate:
@@ -204,3 +204,9 @@ Tell the user, in one short paragraph: which platforms pulled, how many posts an
 ## First-run backfill
 
 On the first run for a workspace, set `--lookback 90` to pull a richer baseline. Subsequent runs use 30. The aggregator uses the full 90d window for percentile ranking but the 30d window for "what's hot right now."
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

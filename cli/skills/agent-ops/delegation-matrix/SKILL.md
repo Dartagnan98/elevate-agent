@@ -1,7 +1,7 @@
 ---
 name: delegation-matrix
 effort: low
-description: "Orchestrator/agent/Codex delegation matrix. Reference this when scoping a task to determine who owns what. Covers three Codex modes: reviewer-only (default), implementer+reviewer, and no Codex."
+description: "Decide who owns a task: orchestrator, agent, or Codex. Use when scoping work and unsure who does it — 'who owns this', 'should Codex handle this', 'delegate or do it myself', 'task scoping'. Covers three Codex modes (reviewer-only default, implementer+reviewer, no Codex). Not for actually spawning an isolated worker session — use worker-agents instead. Dividing line: execution-heavy → Codex, judgment-heavy → Agent."
 triggers: ["who owns", "delegation", "codex or agent", "should codex", "task scoping", "who does this", "delegation matrix", "codex mode"]
 category: agent-ops
 ---

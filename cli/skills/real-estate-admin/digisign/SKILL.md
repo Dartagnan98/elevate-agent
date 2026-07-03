@@ -1,7 +1,7 @@
 ---
 name: digisign
 requires_onboarding: [identity_profile, signing_provider]
-description: Send real estate forms for electronic signature through SkySlope DigiSign, place signer blocks, verify delivery, and route signed PDFs back into the transaction record. Use when the realtor asks to send documents for signing, create a DigiSign envelope, get seller or buyer signatures, send listing paperwork, or pull signed documents back from DigiSign.
+description: "Send forms for e-signature through SkySlope DigiSign. Use when the realtor says 'send this for signing', 'create a DigiSign envelope', 'get the sellers to sign', or 'pull the signed docs back'. Places signer blocks and routes signed PDFs back to the transaction. Not for provider-neutral signing — use signing-package; not for preparing the editable forms — use webforms. Sends only after human approval; SkySlope MFA pauses for login."
 metadata:
   elevate:
     tags: [real-estate, signatures, skyslope, digisign, forms]

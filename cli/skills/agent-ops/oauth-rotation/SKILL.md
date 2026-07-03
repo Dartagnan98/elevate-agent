@@ -1,7 +1,7 @@
 ---
 name: oauth-rotation
 category: agent-ops
-description: "Rotate, refresh, or repair OAuth/provider credentials through Elevate's agent configuration and approval surfaces without exposing secrets."
+description: "Rotate, refresh, or repair OAuth and provider credentials without exposing secrets. Use when a token expired or a connector needs reauth — 'refresh token', 'reauthorize the connector', 'expired OAuth', 'rotate this app password'. Not for adding a plain API key or general secret lifecycle — use env-management instead. Agents can't store secrets; raise a [HUMAN] task to store the value, then manage_agent to reload; never print raw secrets."
 triggers: ["oauth", "token rotation", "refresh token", "expired token", "connector auth", "reauthorize", "api key rotation", "credential rotation"]
 ---
 

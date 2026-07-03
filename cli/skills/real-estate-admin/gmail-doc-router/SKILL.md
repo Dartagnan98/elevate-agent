@@ -1,6 +1,6 @@
 ---
 name: gmail-doc-router
-description: Cron skill for routing inbound email attachments to the correct deal file. Matches documents, attaches PDFs, and creates review tasks without sending messages.
+description: "Route inbound email attachments to the correct deal file. Use when a background cron sweeps recent Gmail/Outlook attachments, or the realtor says 'file the docs from my inbox' or 'sort these attachments into deals'. Runs deal-matcher, attaches matched PDFs, and creates review tasks; low-confidence or conflicting matches become an unmatched-doc task, never a guess. Never sends email."
 metadata:
   elevate:
     tags: [real-estate, email, documents, cron]

@@ -1,6 +1,6 @@
 ---
 name: property-lookup
-description: Look up prior MLS/property context after MLC is signed. Feeds listing-build with property facts, prior remarks, features, and safe verification notes.
+description: "Gather prior MLS and property context after MLC is signed. Use when prepping for listing-build, or when the realtor says 'look up the property history', 'pull the old listing on [address]', or 'get the property facts'. Collects facts, old remarks, features, tax/assessment, and PID/legal, each with source and confidence. Unsupported claims never flow into public listing copy; uncertain MLS access or address identity asks for human review."
 metadata:
   elevate:
     tags: [real-estate, mls, property-research]
@@ -52,3 +52,7 @@ Do not hardcode boards, cities, or portals. A realtor may work multiple boards; 
 ```
 
 Partial results are useful. If zoning fails but MLS and assessment succeed, write the handoff with a zoning risk instead of blocking the whole listing.
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

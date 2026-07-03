@@ -1,6 +1,6 @@
 ---
 name: listing-build
-description: Build the MLS-ready listing package after docs, photos, and property context are available. Produces remarks, features, photo labels/order, feature sheet inputs, and launch checklist.
+description: "Build the MLS-ready listing package. Use when MLC is signed, photos are cleaned, and property lookup is done, or when the realtor says 'build the listing', 'write the MLS remarks', or 'prep [address] for MLS'. Produces remarks, feature bullets, photo labels and order, feature-sheet inputs, and the launch checklist. Not for post-launch marketing assets — use marketing. Fair-housing conservative; nothing publishes without human approval of copy, photos, and forms."
 metadata:
   elevate:
     tags: [real-estate, listing, mls]
@@ -56,3 +56,9 @@ Do not publish or mark launch complete without human approval of copy, photos, f
   "risks": []
 }
 ```
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

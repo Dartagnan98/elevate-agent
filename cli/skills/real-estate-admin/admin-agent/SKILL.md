@@ -1,6 +1,6 @@
 ---
 name: admin-agent
-description: Coordinate Elevate Admin deal-file workflow runs. Use when a cron/admin action run needs an Admin agent to delegate worker skills, enforce human approval, and close the operational-store run through admin-result-writer.
+description: "Coordinate an Elevate Admin deal-file run end to end. Use when a cron or Admin-board action fires an Admin agent run, a deal advances a kanban stage, or the realtor says 'run the admin workflow' or 'move this deal forward'. Delegates worker skills, gates approvals, and always closes through admin-result-writer; run deal-matcher before touching external docs."
 metadata:
   elevate:
     tags: [real-estate, admin, orchestration]

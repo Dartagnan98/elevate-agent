@@ -1,6 +1,6 @@
 ---
 name: admin-result-writer
-description: Shared helper contract for writing Admin skill results back to operational-store deal runs with checklist updates, artifacts, next tasks, human prompts, and idempotency keys.
+description: "Write an Admin skill's result onto the deal's kanban card. Use when closing any Admin workflow run, syncing an outcome to the deal via admin_deal in a live session, or finishing a background/stage run through its callback. Applies checklist, artifacts, next tasks, and human prompt with a stable idempotencyKey so retries never duplicate. Not the coordinator — use admin-agent to sequence the run."
 metadata:
   elevate:
     tags: [real-estate, admin, operational-store, callback]

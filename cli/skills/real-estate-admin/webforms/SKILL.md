@@ -1,7 +1,7 @@
 ---
 name: webforms
 requires_onboarding: [forms_provider]
-description: Pull or draft BCREA / CREA WEBForms transaction forms with MLS data pre-imported through TransactionDesk. Use when the realtor asks for WEBForms, TransactionDesk, AuthentiSign from WEBForms, pulling a CPS/listing/amendment PDF, creating a forms transaction from an MLS number, or creating a signing envelope from an existing WEBForms deal.
+description: "Pull or draft BCREA/CREA WEBForms transaction forms via TransactionDesk. Use when the realtor asks for 'WEBForms', 'TransactionDesk', 'a CPS/listing/amendment PDF', 'a forms transaction from an MLS number', or an AuthentiSign envelope built from a WEBForms deal. Pre-imports MLS data and prepares the editable forms. Not for sending SkySlope envelopes — use digisign; not for provider-neutral signing — use signing-package. Login/MFA pauses for the user."
 metadata:
   elevate:
     tags: [real-estate, forms, documents, webforms, transactiondesk]

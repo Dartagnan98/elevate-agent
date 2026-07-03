@@ -1,6 +1,6 @@
 ---
 name: deal-matcher
-description: Safely match documents, conversations, drafts, and portal records to the correct Elevate deal using MLS number, property address, phone, email, contact ID, and deal ID.
+description: "Match a document, conversation, draft, or portal record to the correct Elevate deal. Use when attaching external material to a deal, when a cron skill files an inbound doc, or whenever a deal ID is not already proven by run context. Resolves by MLS number, address, phone, email, contact ID, or deal ID, strongest first; on a fuzzy or conflicting match it stops and asks — never attach on a guess."
 metadata:
   elevate:
     tags: [real-estate, admin, matching, safety]
@@ -57,3 +57,7 @@ Return a compact match decision to the caller:
 ```
 
 Only `matched` may proceed to writes. `ambiguous`, `conflict`, and `not_found` must become a human prompt.
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

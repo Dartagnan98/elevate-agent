@@ -1,6 +1,6 @@
 ---
 name: catalog-browse
-description: "Browse the community catalog for new skills, agent templates, and org templates. Discover what is available and recommend useful items to the user."
+description: "Browse the community catalog for new skills, agent templates, and org templates. Use when the user asks 'what skills are available', 'browse the catalog', 'find a skill for X', or an agent needs a capability that might already exist to recommend and install with approval. Not for authoring a new skill from your own work — use auto-skill instead. Install always goes through approval."
 triggers: ["catalog", "browse skills", "community", "find skill", "new skills available", "what skills"]
 external_calls: []
 category: agent-ops

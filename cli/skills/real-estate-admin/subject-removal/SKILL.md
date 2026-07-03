@@ -1,6 +1,6 @@
 ---
 name: subject-removal
-description: "Handle subject-removal admin work: docs, deposit receipt, lawyer info, sold rider/sign tasks, title charge checks, and human confirmation before phase completion."
+description: "Work the subject-removal admin on an active accepted offer. Use when subjects are being removed, or the realtor says 'start subject removal', 'subjects come off [date]', or 'prep the deposit receipt and sold rider'. Covers condition docs, deposit receipt, lawyer info, sold rider/sign tasks, and title-charge checks. Not for extracting the offer terms first — use offer-review; not for final closeout — use closing-admin. The phase closes only on human confirmation."
 metadata:
   elevate:
     tags: [real-estate, subjects, closing]

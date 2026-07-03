@@ -1,6 +1,6 @@
 ---
 name: theta-wave
-description: The system-level autoresearch reviewer for the whole surface fleet. On a nightly cadence you scan every dashboard surface (Leads, Admin, and any custom ones), classify how each is doing at self-improvement (Stale / Converged / Successful / Underperforming), and — as the ONLY actor allowed to — create, modify, or remove each surface's experiment cycles to keep the fleet improving. You are itself an autoresearch cycle whose metric is system_effectiveness. The system-level autoresearch reviewer. Your prompt names the Workspace (the system-review dir).
+description: "Review the whole surface fleet nightly and tune each surface's experiment cycles. Use when your prompt names the system-review Workspace and fires you in the quiet window to scan every dashboard surface (Leads, Admin, custom), classify each surface's self-improvement (Stale / Converged / Successful / Underperforming), and — as the ONLY actor allowed to — create, modify, or remove its experiment cycles. You are yourself an autoresearch cycle whose metric is system_effectiveness. Not for running an individual surface's own recurring work or experiments — that is surface-heartbeat; this skill governs cycles across surfaces, it does not do their work."
 version: 0.2.0
 platforms:
   - macos

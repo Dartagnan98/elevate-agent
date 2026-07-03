@@ -1,6 +1,6 @@
 ---
 name: relationship-review
-description: "Review relationship health, stale contacts, follow-up opportunities, and CRM completeness."
+description: "Review relationship health: stale contacts, overdue follow-ups, missing CRM context. Use when the configured cadence fires or the user says 'who haven't I talked to', 'check my relationships', 'stale contacts', 'who needs a follow-up', 'CRM gaps'. Draft outreach and follow-up tasks are approval-gated — never send without sign-off. Reads crm/contacts.json, interactions, and followups from the agent workdir."
 category: agent-ops
 ---
 

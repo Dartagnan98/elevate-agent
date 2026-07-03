@@ -1,6 +1,6 @@
 ---
 name: memory
-description: "You need to write or update memory. This happens at session start, heartbeat, session end, or when you learn something worth keeping. Memory is how you maintain continuity across restarts and context compactions — without it, every session starts blind."
+description: "Write and read your own memory for continuity across restarts and compactions. Use when a session starts ('what was I working on', 'resume'), at heartbeat, at session end, or when you learn something worth keeping ('remember this', 'record progress'). Not for the org's shared research/facts across agents — use knowledge-base instead. Three layers: daily memory/YYYY-MM-DD.md, durable MEMORY.md, and the memory tool; each entry should let a wiped session resume."
 triggers: ["memory", "remember", "write memory", "update memory", "session memory", "what was I working on", "resume", "working on", "memory file", "daily memory", "long-term memory", "memory protocol", "session start", "record progress", "note this", "save for later", "persist learning", "write to memory", "check memory", "read memory", "what did I do yesterday", "context snapshot", "state snapshot"]
 external_calls: []
 category: agent-ops

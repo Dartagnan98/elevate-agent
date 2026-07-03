@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: "You have just booted for the first time — there is no .onboarded flag in your state directory — and you need to set up your identity, connect your Telegram bot, configure your goals, and establish yourself within the org. Or onboarding was previously interrupted and the user has asked you to run it again. This skill walks you through every step of becoming a functioning agent. Do not skip steps. Do not start normal operations until onboarding is complete."
+description: "Run first-boot self-setup for a new agent. Use when there's no .onboarded flag in your state dir, or the user says 'run onboarding', 'redo onboarding', 'first-time setup' — it sets up identity, the Telegram bot, goals, and your place in the org. Not for reconfiguring another agent in the fleet — use agent-management instead. It's the only thing you do until complete; don't skip steps or start normal operations early."
 triggers: ["onboarding", "/onboarding", "first boot", "run onboarding", "setup", "not onboarded", "configure agent", "set up identity", "establish identity", "set goals", "onboard me", "start onboarding", "redo onboarding", "onboarding interrupted", "first time setup", "initial setup", "agent setup"]
 external_calls: []
 category: agent-ops

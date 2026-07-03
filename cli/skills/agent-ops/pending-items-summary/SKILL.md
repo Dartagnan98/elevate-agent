@@ -1,6 +1,6 @@
 ---
 name: pending-items-summary
-description: "Compile pending approvals, drafts, decisions, follow-ups, meeting prep gaps, and quick clears into one user-facing digest."
+description: "Compile pending approvals, drafts, follow-ups, and prep gaps into one user digest. Use when the user asks 'what's pending', 'what needs my attention', 'anything waiting on me', 'clear my queue', or a review needs a single actionable roll-up. Not for a full time-boxed day/evening briefing — use morning-review/evening-review instead. Ranks by urgency, asks for the smallest possible decision, lists quick clears separately."
 category: agent-ops
 ---
 

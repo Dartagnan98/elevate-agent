@@ -1,6 +1,6 @@
 ---
 name: humanizer
-description: "Humanize text: strip AI-isms and add real voice."
+description: "Strip AI-writing tells from text so it reads natural and human. Use when the user says 'humanize', 'de-AI', 'de-slop', or 'un-ChatGPT' this, 'make it sound less like AI', or asks to edit a draft (blog, essay, email, PR, docs) to match their voice or pass an AI-tell check. Detects and fixes inflated symbolism, promotional language, em-dash overuse, rule-of-three, AI vocabulary, passive voice, and filler, per Wikipedia's 'Signs of AI writing' guide. Also apply to your own user-facing prose before shipping."
 version: 2.5.1
 author: Siqi Chen (@blader, https://github.com/blader/humanizer), ported by Hermes Agent
 license: MIT

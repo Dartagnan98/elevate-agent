@@ -1,6 +1,6 @@
 ---
 name: prompt-engineering
-description: "Techniques for writing effective prompts for Claude. Covers structured outputs, chain of thought, few-shot examples, and system prompt design."
+description: "Apply prompt-engineering techniques to get better results from Claude. Use when writing or debugging a prompt — 'improve this prompt', 'structured output', 'chain of thought', 'few-shot examples', 'system prompt design', 'why won't the model follow this'. Not for building against the Claude API/SDK (endpoints, streaming, tool-use wiring) — use claude-api-helper instead. Reference techniques, not a runnable workflow."
 homepage: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering
 tags: [prompting, techniques, optimization]
 category: agent-ops

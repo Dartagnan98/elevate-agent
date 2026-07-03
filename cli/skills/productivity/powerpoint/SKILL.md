@@ -1,6 +1,6 @@
 ---
 name: powerpoint
-description: "Use this skill any time a .pptx file is involved in any way — as input, output, or both. This includes: creating slide decks, pitch decks, or presentations; reading, parsing, or extracting text from any .pptx file (even if the extracted content will be used elsewhere, like in an email or summary); editing, modifying, or updating existing presentations; combining or splitting slide files; working with templates, layouts, speaker notes, or comments. Trigger whenever the user mentions \"deck,\" \"slides,\" \"presentation,\" or references a .pptx filename, regardless of what they plan to do with the content afterward. If a .pptx file needs to be opened, created, or touched, use this skill."
+description: "Create, read, edit, split, or combine PowerPoint .pptx decks. Use whenever a .pptx file is involved as input or output — the user mentions 'deck', 'slides', 'presentation', 'pitch deck', or a .pptx filename; wants to build a deck from a template or scratch; or wants to extract/parse text from a .pptx (even if the text is reused elsewhere, e.g. in an email or summary). Covers templates, layouts, speaker notes, and comments. Not for editing PDFs — use nano-pdf; not for Word or Excel files — use officecli."
 license: Proprietary. LICENSE.txt has complete terms
 ---
 

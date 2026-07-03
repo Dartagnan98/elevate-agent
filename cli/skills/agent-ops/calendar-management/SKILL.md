@@ -1,6 +1,6 @@
 ---
 name: calendar-management
-description: "Tool-agnostic calendar management: schedule review, conflict detection, protected time, meeting prep chaining, and follow-up creation."
+description: "Review the calendar, catch conflicts, protect time, and chain meeting prep. Use when the user says 'what's on my calendar', 'check my schedule', 'any conflicts today', 'prep me for my meetings', or a morning/evening review needs the day's events and follow-ups. Uses the calendar provider in TOOLS.md; event create/move/delete needs approval unless setup marks calendar writes autonomous."
 category: agent-ops
 ---
 

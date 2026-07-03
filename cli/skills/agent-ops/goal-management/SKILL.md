@@ -1,6 +1,6 @@
 ---
 name: goal-management
-description: "Daily goal lifecycle management. Use for: morning briefing goal cascade, setting daily focus, refreshing agent goals, reviewing goal progress. Triggered daily as part of morning review."
+description: "Manage the daily goal lifecycle: cascade the user's focus down to per-agent goals. Use when the user says 'set today's goals', 'what should we work on', 'refresh agent goals', 'daily focus', or the morning cascade runs. Not for the full morning briefing wrapper — use morning-review (which calls this). Goals live in the agent_bus tool (get_goals/update_goals), not files."
 triggers: ["goals", "daily focus", "priorities", "what should we work on", "goal cascade", "set goals", "update goals", "goal management", "north star"]
 external_calls: []
 category: agent-ops

@@ -1,6 +1,6 @@
 ---
 name: marketing
-description: Listing marketing workflow for live listings. Creates launch assets, seller-facing drafts, and marketing tasks only after listing-live inputs exist.
+description: "Create launch assets, seller-facing drafts, and marketing tasks for a live listing. Use when a listing goes live or is approved for launch, or the realtor says 'market this listing', 'draft the launch posts', or 'make the just-listed assets'. Not for building the MLS package — use listing-build; not for the per-listing landing page — use marketing-landing. Requires address, MLS, price, live date, approved photos; never posts or sends directly."
 metadata:
   elevate:
     tags: [real-estate, marketing, listing-live]
@@ -61,3 +61,9 @@ Never post or send directly. Missing launch inputs should produce `waiting_human
   "risks": []
 }
 ```
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

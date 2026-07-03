@@ -1,6 +1,6 @@
 ---
 name: closing-admin
-description: "Final conveyance and closeout workflow: conveyancer package, mortgage instructions, insurance binder, sign-down, funds, commission, compliance close, and nurture handoff."
+description: "Run final conveyance and closeout on a deal moving to completion. Use when subjects are removed and the deal moves toward completion, or the realtor says 'close out this deal', 'prep the conveyancer package', or 'we're completing on [address]'. Covers conveyancer package, mortgage instructions, insurance binder, funds, commission, and compliance close. Not for removing subjects — use subject-removal. Evidence-driven; never close just because a date passed."
 metadata:
   elevate:
     tags: [real-estate, closing, conveyance]
@@ -54,3 +54,7 @@ Do not mark closeout complete unless the required evidence is attached or manual
   "risks": []
 }
 ```
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

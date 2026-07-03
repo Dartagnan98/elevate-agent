@@ -1,6 +1,6 @@
 ---
 name: autoresearch
-description: "The analyst has assigned you a research cycle, or you have identified a metric you want to improve through systematic experimentation. You will form a hypothesis, make a targeted change, measure the outcome against a baseline, and decide whether to keep or discard the change. You repeat this loop until the metric improves or you exhaust viable hypotheses. This is not ad-hoc research — it is structured scientific iteration with a defined metric, a hypothesis, and a measurable result."
+description: "Run a structured experiment loop to improve a defined metric. Use when an autoresearch cycle fires or you want to systematically move a metric — form a hypothesis, make one targeted change, measure against a baseline, keep or discard, repeat. Triggers: 'run experiment', 'test hypothesis', 'improve this metric', assigned research cycle. Not for gathering facts about the outside world — use web-research/knowledge-base instead. Needs a metric, direction, and measurement window (experiments/config.json)."
 triggers: ["experiment", "autoresearch", "hypothesis", "research cycle", "optimize", "improve metric", "run experiment", "test hypothesis", "measure improvement", "scientific loop", "iteration cycle", "theta wave research", "baseline measurement", "keep or discard", "research assignment"]
 external_calls: []
 category: agent-ops
@@ -131,3 +131,10 @@ To modify a cycle when the user asks, edit the cycle's entry in `experiments/con
 4. If `approval_required` is true, WAIT for native Approval before running.
 5. Never repeat a hypothesis that was already discarded. Find a new angle.
 6. Keep experiments focused - change one thing at a time when possible.
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

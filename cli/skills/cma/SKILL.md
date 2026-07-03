@@ -1,6 +1,6 @@
 ---
 name: cma
-description: Canonical CMA workflow for Canadian realtors. Collects MLS/property data, compares active/sold comps, analyzes photos and market stats, produces pricing guidance, renders the CMA report, and requires human approval before client delivery.
+description: "Run the full comparative market analysis workflow for a Canadian realtor, end to end. Use when the realtor asks for a 'CMA', 'market evaluation', 'pricing opinion', 'comp review', or a listing/price-reduction pricing package: collect MLS/property facts, compare active/sold comps, analyze photos and market stats, produce pricing guidance, render the report, and get human approval before client delivery. Not for just generating the comps set as one step inside an Admin deal run — use real-estate-admin/cma-generator; this is the whole client-facing workflow, that is the comps-generation sub-step."
 metadata:
   elevate:
     tags: [real-estate, cma, pricing, report]
@@ -64,3 +64,7 @@ Every phase should leave a compact handoff so the next run can resume without re
 ```
 
 When attached to an Admin deal, close through `admin-result-writer` with artifacts, checklist updates, and any next tasks. If it is chat-only CMA work, report the artifact path and approval question in the conversation.
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

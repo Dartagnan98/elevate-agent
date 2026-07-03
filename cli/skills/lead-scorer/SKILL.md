@@ -1,6 +1,6 @@
 ---
 name: lead-scorer
-description: Score open threads 0-100 and label them buyer/seller/investor/chitchat/dead. Auto-marks long-cold threads as dead so the lanes stop drafting against them.
+description: "Score open lead threads 0-100 and label them buyer/seller/investor/chitchat/dead. Use when running the lead-scoring cron or when the user asks to 'score my leads', 'rank the threads', 'find the warm leads', or 'clean out dead threads' — reads each thread's recent messages + profile and writes {score, label, reason}, auto-marking 60+-day-cold or explicitly-disengaged threads dead so lanes stop drafting them. Never sends or drafts messages — scoring only. Not for drafting the outreach message itself — use outreach-lanes, which reads these scores to pick who to draft next."
 version: 1.0.0
 metadata:
   elevate:
@@ -142,3 +142,9 @@ have to read the thread to decide. A score of 80 buyer is different from a score
 of 80 seller — different lane treatment, different template pool. Without the label,
 all the dashboard can show is a heat number, which forces the user to open every
 thread to figure out the lane.
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

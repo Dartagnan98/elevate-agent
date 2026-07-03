@@ -1,6 +1,6 @@
 ---
 name: surface-heartbeat
-description: Run one Elevate dashboard surface (Leads, Admin, ...) as a heartbeat. On a cadence you do the surface's recurring work, log it, distill durable learnings that sharpen the next run, and on each research cycle's interval you run an autoresearch experiment to improve your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. An autoresearch loop applied to real surface work. Your prompt names the Surface and the Workspace path. Surface STATE (config, goals, heartbeat, experiment records, run index) lives in the account database via the agent_bus tool; the Workspace holds only file artifacts (learnings.md, history/ run records, playbooks, results.tsv).
+description: "Run one Elevate dashboard surface (Leads, Admin, ...) as a self-improving heartbeat. Use when your prompt names a single Surface and Workspace and fires you on a cadence to do that surface's recurring work, log it, distill learnings, and on each research-cycle interval run one autoresearch experiment on your own playbook — hypothesize, change how you work, measure, keep or discard, ratchet the baseline. Surface STATE lives in the account DB via agent_bus; the Workspace holds only file artifacts (learnings.md, history/, playbooks, results.tsv). Not for reviewing the whole fleet or authoring/removing cycles — that is theta-wave; a surface runs its cycles, it never creates them."
 version: 0.5.0
 platforms:
   - macos

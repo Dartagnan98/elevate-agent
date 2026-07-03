@@ -1,6 +1,6 @@
 ---
 name: heartbeat
-description: "Your heartbeat cron has fired and you need to run your beat: update your status so the dashboard shows you alive, sweep your inbox, check your tasks and goals, and log what you did. Or you are checking whether another agent is responsive before sending work, or an agent looks offline/stale and you need to investigate. A dead heartbeat means the system thinks you are down — update it proactively and run your full beat every cycle."
+description: "Run your beat: refresh alive status, sweep the inbox, check tasks/goals, log activity. Use when your heartbeat cron fires ('Read HEARTBEAT.md'), when checking whether a peer is responsive before handing work, or when an agent looks offline/stale and needs investigating — 'is that agent alive', 'fleet status', 'who is online'. Not for a system-wide stuck-work diagnosis — use system-diagnostics. HEARTBEAT.md in your workdir is the source of truth; a dead heartbeat reads as DOWN."
 triggers: ["heartbeat", "update heartbeat", "check health", "agent health", "fleet health", "agent status", "is agent alive", "agent offline", "agent stale", "read heartbeats", "heartbeat cron", "i'm alive", "prove alive", "agent not responding", "stale agent", "check fleet", "fleet status", "who is online", "agent last seen"]
 external_calls: []
 category: agent-ops

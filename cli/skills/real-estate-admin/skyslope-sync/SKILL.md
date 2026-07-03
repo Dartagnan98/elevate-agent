@@ -1,6 +1,6 @@
 ---
 name: skyslope-sync
-description: Sync configured compliance-platform transaction status and documents to an Elevate deal file. Works with SkySlope or another brokerage compliance portal via browser workflow.
+description: "Sync a compliance portal's transaction status and documents onto an Elevate deal. Use when the realtor says 'sync SkySlope', 'check the compliance status', or 'pull the transaction docs', or during MLC/closeout when portal state must match the deal. Provider-neutral (SkySlope or another configured portal); files missing-document tasks and attaches files only on a proven match. Conflicting status or MFA asks for human review, never a guess."
 metadata:
   elevate:
     tags: [real-estate, compliance, documents]

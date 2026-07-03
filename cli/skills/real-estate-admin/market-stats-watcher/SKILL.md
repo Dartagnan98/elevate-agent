@@ -1,6 +1,6 @@
 ---
 name: "market-stats-watcher"
-description: "Watches Gmail for the monthly AOIR Market Statistics email, clicks into InterLink for Okanagan/Shuswap and Kamloops & District stats, extracts all data, and saves as markdown files organized by region and month. Trigger on: \"pull market stats\", \"market stats\", \"check for new stats\", \"AOIR stats\", or runs automatically on a monthly cron when the email arrives."
+description: "Pull the monthly AOIR market statistics into per-region markdown. Use when the realtor says 'pull market stats', 'check for new stats', or 'AOIR stats', or the monthly stats-release email arrives on cron. Follows the release email into InterLink for all four regions (Okanagan/Shuswap, Kamloops & District, Kootenay, South Peace River). Feeds the CMA workflow with absorption, DOM, and inventory; every figure cites its dataset and month."
 category: "real-estate-marketing"
 access:
   entitlement: "real_estate_cma"
@@ -260,3 +260,14 @@ Required fields:
 - `outputs`: markdown files written under `market-stats/<region>/`.
 - `risks`: selector drift, missing links, MFA, partial extraction.
 - `next`: whether CMA context can trust this month's stats.
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

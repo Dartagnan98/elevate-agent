@@ -1,6 +1,6 @@
 ---
 name: auto-skill
-description: "You just completed a complex task that required 8+ distinct tool calls, or you noticed you are solving the same type of problem for the third time. Create a skill candidate draft so this workflow can be reused in future sessions without rediscovery. Draft goes to skills/drafts/ — never auto-activates until the user approves."
+description: "Draft a reusable skill candidate from a workflow you just did. Use when a task took 8+ distinct tool calls or you've solved the same problem a third time and want to capture it — 'make this a skill', 'save this workflow', 'skill candidate'. Not for browsing existing community skills to install — use catalog-browse instead. Draft lands in skills/drafts/ and never auto-activates until the user approves."
 triggers: ["create skill", "draft skill", "skill candidate", "auto-skill", "I've done this before", "skill from task", "save this workflow", "make this a skill", "approve skill", "reject skill", "activate skill"]
 category: agent-ops
 ---

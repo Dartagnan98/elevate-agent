@@ -1,6 +1,6 @@
 ---
 name: nano-pdf
-description: Edit PDFs with natural-language instructions using the nano-pdf CLI. Modify text, fix typos, update titles, and make content changes to specific pages without manual editing.
+description: "Edit an existing PDF's text with natural-language instructions via the nano-pdf CLI. Use when the user asks to 'edit this PDF', 'fix a typo in the PDF', 'change the title/text on page N', or make a wording change to a specific PDF page without manual retyping. Point it at a page and describe the change. Not for building slide decks or presentations — use powerpoint; not for extracting or OCR-reading PDF text — use ocr-and-documents."
 version: 1.0.0
 author: community
 license: MIT

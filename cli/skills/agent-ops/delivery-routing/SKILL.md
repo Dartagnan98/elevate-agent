@@ -1,6 +1,6 @@
 ---
 name: delivery-routing
-description: "Route research summaries to local markdown, Telegram, or Slack with approval gates and delivery-state updates."
+description: "Route a research run summary to local markdown, Telegram, or Slack, gated by approval. Use when a research run finishes and the summary is ready to send after brief-generation — 'send the summary', 'deliver the briefs', 'route the digest'. Not for writing the briefs themselves — use brief-generation first. Checks research.delivery.requires_approval before any external send; marks delivered_at only on success."
 category: agent-ops
 ---
 

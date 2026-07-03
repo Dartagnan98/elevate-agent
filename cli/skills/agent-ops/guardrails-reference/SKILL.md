@@ -1,6 +1,6 @@
 ---
 name: guardrails-reference
-description: Full red flag table with all guardrail patterns. Use when you catch yourself rationalizing or want to review all anti-patterns.
+description: "Review the full red-flag table of guardrail anti-patterns. Use when you catch yourself rationalizing skipping a procedure — 'this is too small for a task', 'I'll update memory later', 'no approval needed for a quick message' — or on session start / heartbeat to self-check. Reference table only; each row names the corrective tool (Tasks, memory, Approvals, cron, manage_agent) to route to."
 triggers:
   - guardrail
   - red flag

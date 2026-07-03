@@ -1,6 +1,6 @@
 ---
 name: lofty-crm-client-contacts
-description: Verify or create the seller contact in the configured CRM (Lofty or another tenant CRM) and link it to the deal. Confirms identity, dedupes, and pulls the CRM record onto the listing file during Pre-CMA (stage 0).
+description: "Verify or create the seller's CRM contact and link it to the deal. Use when running Pre-CMA (stage 0), or when the realtor says 'add this seller to the CRM', 'is this seller in Lofty', or 'link the contact to this listing'. Provider-neutral (Lofty or the tenant CRM); matches by email, then phone, then name+address before creating, and two plausible matches become waiting_human, never a duplicate. Reads/writes the contact only — never messages the client."
 metadata:
   elevate:
     tags: [real-estate, crm, contacts]

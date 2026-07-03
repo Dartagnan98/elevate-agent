@@ -1,6 +1,6 @@
 ---
 name: comms
-description: "A message has just arrived in your session from the fast-checker daemon — you see a block starting with === TELEGRAM or === AGENT MESSAGE. Read it, decide what action to take, and reply using the command shown in the message header. If it is from the user, they are waiting for your response right now. If it is from another agent, they may be blocked on your reply. Handle all messages before returning to other work."
+description: "Handle an incoming message injected into your session and reply correctly. Use whenever you see a block starting with '=== TELEGRAM' or '=== AGENT MESSAGE' — read it, act, and reply with the tool named in its header (Comms to the user's chat_id, agent_handoff to the sending agent). Not for org-wide broadcasts to no one in particular — use activity-channel instead. Handle every message before returning to other work; senders may be blocked on you."
 triggers: ["=== TELEGRAM", "=== AGENT MESSAGE", "message received", "incoming message", "reply to", "telegram from", "agent message from", "fast-checker", "message injected", "respond to message", "handle message", "incoming telegram", "message block"]
 external_calls: []
 category: agent-ops

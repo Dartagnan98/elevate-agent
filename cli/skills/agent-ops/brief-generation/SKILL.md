@@ -1,6 +1,6 @@
 ---
 name: brief-generation
-description: "Generate source-backed markdown briefs and run summaries for selected research signals."
+description: "Write source-backed markdown briefs and a run summary for selected research signals. Use when a research run reaches the briefing step after signal-scoring picks the top N — 'write the briefs', 'generate briefs', 'summarize the selected signals'. Not for scoring/selecting signals — use signal-scoring first; not for sending the summary out — use delivery-routing after. Input: research/output/YYYY-MM-DD/signals-selected.json + config.json."
 category: agent-ops
 ---
 

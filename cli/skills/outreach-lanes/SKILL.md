@@ -1,6 +1,6 @@
 ---
 name: outreach-lanes
-description: Run an outreach lane (new outreach, hot leads watcher, follow-ups). Pull leads from connected sources, pick a template, draft an approval-gated message, log the attempt for outcome learning.
+description: "Run a buyer-lead outreach lane — new outreach, hot-leads watcher, or follow-ups. Use when the user asks to 'draft outreach', 'text my leads', 'who should I follow up with', or a lane fires on the lead desk: pull leads from connected sources, pick a template, draft an approval-gated message in the user's voice, and log the attempt for outcome learning. Never auto-sends — the human approves on /leads. Not for condition-tuned seller outreach on a specific listing — use real-estate-admin/listing-outreach; not for computing the lead scores this lane reads — use lead-scorer."
 version: 1.2.0
 metadata:
   elevate:
@@ -211,3 +211,24 @@ If a buyer lead touched the realtor's own listing, use disclosure-safe wording a
 - Scoring, follow-up, draft, and attempt state must be written through the operational backend so the UI and future cron runs see it.
 - Skipped, dead, and blocked leads must be reflected immediately through the backend endpoints, not only in the chat summary.
 - Approved sends are separate from drafts. A draft in `/leads` is not a sent message.
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.
+
+## Draft examples — write the GOOD column
+
+**Memory voice.** CRM history and ingested notes are context, never citations. Write like someone who simply knows the client.
+- BAD: "I saw in my notes that your daughter starts at TRU in September, and my records show you were looking at 3-beds near Sahali."
+- GOOD: "how's the TRU countdown going? still thinking Sahali for the fall, or has the search wandered?"
+
+**No CTA pivot.** Reply to what they actually sent; earn the ask or skip it.
+- Lead: "haha yeah that storm knocked our fence right over"
+- BAD: "Sorry to hear about the fence! By the way, do you have 15 minutes this week for a quick call about your home search?"
+- GOOD: "brutal haha, half the fences on our street went too. patchable or full rebuild?"
+
+**Sensitive gating.** Divorce, death, finances, health: never surface it first, even helpfully. Let them raise it; then respond with care and keep it out of anything marketing-flavored.
+- BAD: "Since the divorce is finalizing next month, want me to line up some 2-bed condos in your new budget?"
+- GOOD (only after they raised it): "that's a lot to carry. whenever you feel like looking, I can quietly pull a few options — no rush from me."

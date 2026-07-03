@@ -1,6 +1,6 @@
 ---
 name: photo-cleanup
-description: Bulk listing photo cleanup after signed MLC. Uses the configured Drive/Dropbox source and configured image-processing provider, then prepares a listing-ready export for human approval.
+description: "Bulk-clean, order, and name listing photos into a listing-ready export. Use when MLC is signed and photos exist, or when the realtor says 'clean up the listing photos', 'sort the photos for [address]', or 'prep the photo set'. Pulls from the configured Drive/Dropbox, de-dupes and labels hero/exterior/interior/detail, and keeps originals untouched. Final photo approval stays human; missing source, provider, or listing identity returns waiting_human."
 metadata:
   elevate:
     tags: [real-estate, photos, listing]

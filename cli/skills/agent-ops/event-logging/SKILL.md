@@ -1,6 +1,6 @@
 ---
 name: event-logging
-description: "You have just completed a task, started a session, dispatched work to another agent, finished a research cycle, or taken any significant action — and you need to record it so the dashboard activity feed shows your work. Without logging, you are invisible. Every session start, task completion, and major coordination action must produce at least one event. If you have been active but see no events in the dashboard, you have been logging nothing."
+description: "Log an event to the dashboard activity feed so your work is visible. Use when you finish a significant action — session start/end, task completed, dispatch to another agent, research cycle done — or notice 'nothing showing on the dashboard' / 'no events' despite being active. Not for broadcasting an announcement humans read — use activity-channel instead. Logs via the agent_bus tool (action log_event); aim for at least one event per significant action."
 triggers: ["log event", "log activity", "activity feed", "event log", "track activity", "record event", "log completion", "log session", "no events", "invisible on dashboard", "dashboard empty", "nothing showing", "log task", "log coordination", "log research", "session start event", "task completed event", "log error", "log warning"]
 external_calls: []
 category: agent-ops

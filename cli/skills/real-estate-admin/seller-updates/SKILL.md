@@ -1,6 +1,6 @@
 ---
 name: "seller-updates"
-description: "the realtor's full Seller Updates workflow, end to end. Use for \"seller update\", \"weekly seller update\", \"weekly listing report\", \"weekly update\", \"run weekly listings\", \"listing snapshot\", \"listing rundown\", \"listing reports\", \"snapshot my listings\", \"where are we at with my listings\", \"draft seller emails for my listings\", \"showing feedback follow-up\", \"showing-time\", \"showingtime\", seller report PDFs, ShowingTime feedback, or active-listing rundowns. One skill, one continuous run: pull data -> build reports -> handle feedback -> draft emails. No handoffs, no sub-skills."
+description: "Run the full seller-updates pass end to end. Use when the realtor says 'seller update', 'weekly listing report', 'snapshot my listings', 'where are we at with my listings', 'draft seller emails', or 'showing feedback follow-up' (ShowingTime/SellerHub). Pulls data, builds per-listing report PDFs, chases feedback, and drafts seller emails in one run. Not the background single-listing cron — use seller-update; not proactive check-in texts — use listing-outreach. Never sends."
 category: "real-estate-marketing"
 tags: ["real-estate", "seller-updates", "showingtime", "sellerhub", "listing-snapshot", "workflow"]
 access:
@@ -313,3 +313,9 @@ didn't complete, and why (no seller contact, ShowingTime MFA, render fail).
 If a selector broke, a wrong-direction send was caught, a privacy slip happened,
 or the realtor corrected any output, append a dated entry to `lessons.md`
 (format: `[date] | issue | rule`).
+
+## Fair housing & copy boundaries
+
+- Fair housing is absolute: never write, imply, or optimize copy around protected classes (race, color, religion, sex, disability, familial status, national origin, or local additions such as age or source of income). Describe the property and its features, never the neighbors or "who this home is for." "Great for young families" fails; "4 beds, fenced yard, two blocks to the elementary school" passes.
+- Targeting and scoring follow the same line: no audience filters, lead scores, or send/skip decisions keyed on protected classes or their proxies.
+- Never lift another agent's listing copy, photos, or brand phrasing. Other listings are data (facts, price, days on market), not copy to reuse. Write from the property record and the owner's materials; when quoting a document such as an inspection, attribute it.

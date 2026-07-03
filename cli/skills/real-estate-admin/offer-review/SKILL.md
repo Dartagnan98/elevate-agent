@@ -1,6 +1,6 @@
 ---
 name: offer-review
-description: Review accepted offer documents, extract key dates/terms, create human review tasks, and prepare the deal for subject removal.
+description: "Review an accepted offer and prep the deal for subject removal. Use when an offer is accepted, accepted-offer docs arrive, or the realtor says 'review this offer', 'pull the dates off the contract', or 'we got an accepted offer on [address]'. Extracts dates, deposit, terms, and clauses as deal facts and queues a human review. Not for working the conditions themselves — use subject-removal. The phase does not advance until the terms are reviewed."
 metadata:
   elevate:
     tags: [real-estate, offer, documents]
@@ -58,3 +58,7 @@ Capture these as deal facts in the operational store (via `admin_deal` / the res
   "risks": []
 }
 ```
+
+## Provenance contract
+
+Every number and material fact in generated output carries its source inline, at the claim — not in a footer. Comp prices and statuses cite the MLS number ("$914,900, MLS R2891234, sold 2026-05-12"); subject-property facts cite the record or document they came from; market stats cite the dataset and date range ("HPI, Kamloops SFH, May 2026"). A claim you cannot source does not ship — verify it live, or mark it unverified and say why. Never round, blend, or restate a sourced number in a way the source no longer supports.

@@ -1,6 +1,6 @@
 ---
 name: activity-channel
-description: "You have completed something significant and want the whole org — all agents and the user — to know about it. Or you need to broadcast a status update, a briefing summary, or a coordination announcement that is not directed at one specific agent. Use this skill any time the audience is the entire org rather than a single person or agent."
+description: "Post an org-wide broadcast to the shared activity feed. Use when the audience is the whole org, not one agent — 'announce to everyone', 'let the team know', 'post to the activity channel', broadcasting a major completion, status update, or briefing summary. Not for a message aimed at one specific agent or the user — use comms (reply/handoff) instead. Sends via the agent_bus tool (action post_activity)."
 triggers: ["post activity", "activity channel", "broadcast", "announce to everyone", "org announcement", "post to channel", "notify all agents", "team update", "org-wide update", "let everyone know", "status broadcast", "announce completion", "briefing summary", "coordination update", "fleet announcement"]
 external_calls: []
 category: agent-ops

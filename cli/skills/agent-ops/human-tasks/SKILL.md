@@ -1,6 +1,6 @@
 ---
 name: human-tasks
-description: "You have hit a blocker that is not a permission issue — it is a capability issue. You genuinely cannot complete the next step because it requires a human: making a payment, entering credentials for a service you cannot access, physical action, a decision that only the user can make, or anything else outside your capabilities. You need to create a clear [HUMAN] task with step-by-step instructions, block your own work on it, and notify the orchestrator so this surfaces in the next briefing."
+description: "File a [HUMAN] task when you genuinely cannot do the next step yourself. Use when blocked by a capability gap — a payment to make, credentials you can't access, physical action, or a decision only the user can make ('needs you to', 'only you can', 'login required'). Create the task with step-by-step instructions, block your own work on it, notify the orchestrator. Not for a thing you CAN do but need sign-off on — use approvals instead. Requires title starting [HUMAN], assignee human, project human-tasks."
 triggers: ["human task", "need human", "can't do this myself", "requires human", "needs you to", "blocked by human", "human input needed", "waiting for human", "human only", "physical access", "payment required", "login required", "credentials I don't have", "needs human action", "only you can", "human decision", "manual step required", "create human task", "assign to human", "[HUMAN]"]
 external_calls: []
 category: agent-ops

@@ -1,6 +1,6 @@
 ---
 name: signal-scoring
-description: "Score, deduplicate, rank, and select fresh research signals from SQLite using the configured rubric."
+description: "Score, dedupe, rank, and select fresh research signals from SQLite using the rubric. Use when a research run reaches scoring, after source-collection and before brief-generation — 'score the signals', 'pick the top signals', 'rank the research'. Not for writing the briefs on the selected items — use brief-generation next; not for collecting the raw sources — use source-collection first. Reads research/db/signals.db + scoring-rubric.json; does NOT set delivered_at."
 category: agent-ops
 ---
 
@@ -260,3 +260,10 @@ def mark_delivered(conn, selected_items):
 - For arXiv: skip velocity (papers don't accumulate metrics fast). Use base 6 default.
 - When uncertain between two items, prefer the more specific title.
 - If fewer than `top_n` pass threshold, brief only those. Do not pad.
+
+## Search doctrine
+
+- Internal first: possessives and client or deal names ("my listing", "the Hendersons", "that Kamloops buyer") mean CRM, deals, threads, and memory BEFORE any web search. The web is for the outside world; this box already knows the inside one.
+- Queries are 1-6 words. Start broad, then narrow with one qualifier at a time. Never rerun a near-identical query — if results repeat, change the angle or the tool, not the phrasing.
+- Search results are pointers, not sources. Fetch the full page before citing or acting on anything that matters.
+- Scale effort to the ask: a single fact is 1 call; a comparison or survey is 3-5; a deep dive is 5-10 with cross-source triangulation. Stop when new results only repeat what you already have.

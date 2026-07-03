@@ -1,6 +1,6 @@
 ---
 name: cron-management
-description: "Manage persistent recurring scheduled tasks with the cron tool. Crons survive agent restarts and session boundaries. Use this skill for all cron CRUD: create, update, remove, list, and inspect. Never use /loop for persistent recurring work — that is session-only and dies on restart."
+description: "Manage persistent recurring scheduled tasks with the cron tool. Use when the user says 'remind me every day', 'run this weekly', 'schedule', 'set up a recurring job', 'check regularly', or a cron isn't firing and needs inspecting — covers all CRUD: create, update, remove, list, fire-now. Not for a session-only loop that dies on restart (/loop); not for spawning an isolated worker session — use worker-agents. Crons survive agent restarts and session boundaries."
 triggers: ["remind me", "every day", "every hour", "every week", "schedule", "recurring", "daily", "weekly", "cron", "loop", "check regularly", "monitor", "keep an eye on", "set up a reminder", "repeat every", "run every", "automate", "schedule task", "list crons", "show crons", "fire cron now", "test cron", "cron log", "cron history", "scheduled task", "cron not firing", "persist cron"]
 external_calls: []
 category: agent-ops

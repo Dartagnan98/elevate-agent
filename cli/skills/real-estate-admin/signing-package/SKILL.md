@@ -1,6 +1,6 @@
 ---
 name: signing-package
-description: Provider-neutral e-sign package orchestration for listing, MLC, offer, subject-removal, and closing documents. Can use DigiSign, DocuSign, Authentisign, or another configured provider.
+description: "Orchestrate a provider-neutral e-sign package for any transaction document. Use when the realtor asks to 'send documents for signature' and the provider is unspecified or is DocuSign/Authentisign, or you need one flow across mixed signing tools for listing, MLC, offer, subject-removal, or closing docs. Not for SkySlope-specific envelopes — use digisign; not for preparing WEBForms — use webforms. Confirms document set, signers, order, and placements; sends only after human approval."
 metadata:
   elevate:
     tags: [real-estate, documents, signing]

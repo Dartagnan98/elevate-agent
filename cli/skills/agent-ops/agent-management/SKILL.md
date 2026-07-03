@@ -1,6 +1,6 @@
 ---
 name: agent-management
-description: "You need to create a new agent, restart a crashed agent, change an agent's model or config, fix a Telegram bot token, troubleshoot why an agent is not responding, enable or disable an agent, spawn an agent for another user, reset crash limits, or do anything that touches an agent's lifecycle, configuration, or credentials. This is the definitive guide for every agent operation in Elevate."
+description: "Manage the agent fleet's lifecycle and config via the manage_agent tool. Use when the user says 'create an agent', 'restart the agent', 'change its model', 'agent isn't responding', 'fix the bot token', 'disable that agent', or needs to reset crash limits, edit toolsets/skills/role, or spawn an agent for another user. Not for an agent's own first-boot self-setup — use onboarding instead; not for adding/rotating secrets — use env-management. Reconfigures via the tool, never by editing files."
 triggers: ["new agent", "create agent", "spawn agent", "add agent", "restart", "soft restart", "hard restart", "disable agent", "enable agent", "change model", "switch model", "bot token", "BotFather", "agent not responding", "agent crashed", "agent down", "crash limit", "reset crashes", "agent health", "list agents", "heartbeat", "onboard", "setup agent", "configure agent", ".env", "config.json", "cross-org", "agent for someone else", "agent management", "agent lifecycle", "agent credentials", "telegram bot", "token not working"]
 external_calls: ["api.telegram.org"]
 category: agent-ops
