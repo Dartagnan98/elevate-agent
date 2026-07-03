@@ -1,9 +1,6 @@
 ---
 name: songwriting-and-ai-music
-description: >
-  Songwriting craft, AI music generation prompts (Suno focus), parody/adaptation
-  techniques, phonetic tricks, and lessons learned. These are tools and ideas,
-  not rules. Break any of them when the art calls for it.
+description: "Songwriting craft plus AI-music prompt-writing (Suno focus). Use when the user wants to 'write a song', needs 'song lyrics', a 'Suno prompt', a 'parody song', or to adapt an existing song with phonetic/structure tricks. Not for running a local music model to render audio — use heartmula; not for audio analysis/spectrograms — use songsee. Guidelines, not rules."
 tags: [songwriting, music, suno, parody, lyrics, creative]
 triggers:
   - writing a song

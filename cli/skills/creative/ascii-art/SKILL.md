@@ -1,6 +1,6 @@
 ---
 name: ascii-art
-description: Generate ASCII art using pyfiglet (571 fonts), cowsay, boxes, toilet, image-to-ascii, remote APIs (asciified, ascii.co.uk), and LLM fallback. No API keys required.
+description: "Generate static ASCII art and text banners. Use when the user wants an 'ASCII banner', 'figlet text', 'ASCII logo', 'cowsay', a text-art sign, or an image turned into ASCII characters. Tools: pyfiglet (571 fonts), cowsay, boxes, toilet, image-to-ASCII, no API keys. Not for animated/video ASCII output — use ascii-video; not for retro game-console pixel art — use pixel-art."
 version: 4.0.0
 author: 0xbyt4, Elevate
 license: MIT

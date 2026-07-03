@@ -1,6 +1,6 @@
 ---
 name: pixel-art
-description: Convert images into retro pixel art with hardware-accurate palettes (NES, Game Boy, PICO-8, C64, etc.), and animate them into short videos. Presets cover arcade, SNES, and 10+ era-correct looks. Use `clarify` to let the user pick a style before generating.
+description: "Convert images to retro pixel art with era-accurate palettes, then animate them. Use when the user wants 'pixel art', a 'NES/Game Boy/PICO-8/C64 look', an '8-bit/16-bit' or 'SNES' image, or a short animated pixel MP4/GIF. Not for ASCII-character art or video — use ascii-art or ascii-video. Use clarify to pick a style first."
 version: 2.0.0
 author: dodo-reach
 license: MIT

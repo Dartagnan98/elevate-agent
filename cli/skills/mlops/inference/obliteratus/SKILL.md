@@ -1,6 +1,6 @@
 ---
 name: obliteratus
-description: Remove refusal behaviors from open-weight LLMs using OBLITERATUS — mechanistic interpretability techniques (diff-in-means, SVD, whitened SVD, LEACE, SAE decomposition, etc.) to excise guardrails while preserving reasoning. 9 CLI methods, 28 analysis modules, 116 model presets across 5 compute tiers, tournament evaluation, and telemetry-driven recommendations. Use when a user wants to uncensor, abliterate, or remove refusal from an LLM.
+description: "Excise refusal directions from open-weight LLM weights via OBLITERATUS. Use when 'uncensor this model', 'abliterate', 'remove refusal/guardrails', creating an uncensored Llama/Qwen/Mistral, or analyzing a model's refusal mechanism. Mechanistic-interpretability methods (diff-in-means, SVD, LEACE, SAE); 9 CLI methods, 116 model presets, tournament eval. AGPL — CLI only, never import."
 version: 2.0.0
 author: Elevate
 license: MIT

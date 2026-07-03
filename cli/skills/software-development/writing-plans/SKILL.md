@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Use when you have a spec or requirements for a multi-step task. Creates comprehensive implementation plans with bite-sized tasks, exact file paths, and complete code examples.
+description: "Write a detailed implementation plan — bite-sized tasks, exact file paths, full code. Use when you have a spec or requirements for a multi-step feature, or before delegating to subagents. Assumes the implementer has zero codebase context. Not for plan-only mode with no execution — use plan; not for a throwaway feasibility experiment — use spike; then execute via subagent-driven-development."
 version: 1.1.0
 author: Elevate (adapted from obra/superpowers)
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: outlines
-description: Guarantee valid JSON/XML/code structure during generation, use Pydantic models for type-safe outputs, support local models (Transformers, vLLM), and maximize inference speed with Outlines - dottxt.ai's structured generation library
+description: "Constrain LLM generation to valid JSON/XML/code with Outlines. Use when 'force valid JSON', 'generate against this Pydantic model/JSON schema', grammar-constrained decoding, or type-safe structured outputs from local models (Transformers, llama.cpp, vLLM). Not for prompt/pipeline optimization or RAG structure — use dspy. dottxt.ai's structured-generation library."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

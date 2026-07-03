@@ -1,6 +1,6 @@
 ---
 name: claude-code
-description: Delegate coding tasks to Claude Code (Anthropic's CLI agent). Use for building features, refactoring, PR reviews, and iterative coding. Requires the claude CLI installed.
+description: "Delegate coding to Claude Code, Anthropic's CLI agent, via the terminal. Use when the user says 'use Claude Code', or you want to hand off building a feature, refactoring, a PR review, or iterative coding to the `claude` CLI. Not for OpenAI Codex — use codex; not for OpenCode — use opencode. Requires the claude CLI installed."
 version: 2.2.0
 author: Elevate + Teknium
 license: MIT

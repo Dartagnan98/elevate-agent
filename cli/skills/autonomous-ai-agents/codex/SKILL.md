@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Delegate coding tasks to OpenAI Codex CLI agent. Use for building features, refactoring, PR reviews, and batch issue fixing. Requires the codex CLI and a git repository.
+description: "Delegate coding to OpenAI's Codex CLI agent via the terminal. Use when the user says 'use Codex', or you want to hand off building a feature, refactoring, a PR review, or batch issue-fixing to the `codex` CLI. Not for Anthropic's agent — use claude-code; not for OpenCode — use opencode. Requires the codex CLI and a git repo."
 version: 1.0.0
 author: Elevate
 license: MIT

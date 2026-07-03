@@ -1,6 +1,6 @@
 ---
 name: python-debugpy
-description: "Debug Python: pdb REPL + debugpy remote (DAP)."
+description: "Debug Python with pdb breakpoints and debugpy remote attach (DAP). Use when a test fails and the traceback won't explain a wrong value, you need a REPL at a line, post-mortem on a crash, or attaching to a live gateway/daemon/PTY process. Not for Node.js — use node-inspect-debugger; not for root-cause method — use systematic-debugging; not for TUI-command sync bugs — use debugging-hermes-tui-commands."
 version: 1.0.0
 author: Hermes Agent
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: minecraft-modpack-server
-description: Set up a modded Minecraft server from a CurseForge/Modrinth server pack zip. Covers NeoForge/Forge install, Java version, JVM tuning, firewall, LAN config, backups, and launch scripts.
+description: "Set up a modded Minecraft server from a CurseForge/Modrinth server-pack zip. Use when the user wants to 'set up a Minecraft server', run a 'modpack server', or configure 'NeoForge'/'Forge', JVM tuning, LAN, whitelist, or backups. Not for playing a game autonomously — use pokemon-player."
 tags: [minecraft, gaming, server, neoforge, forge, modpack]
 ---
 

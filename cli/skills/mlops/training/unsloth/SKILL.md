@@ -1,6 +1,6 @@
 ---
 name: unsloth
-description: Expert guidance for fast fine-tuning with Unsloth - 2-5x faster training, 50-80% less memory, LoRA/QLoRA optimization
+description: "Fast, low-memory LoRA/QLoRA fine-tuning with Unsloth (2-5x faster, 50-80% less VRAM). Use when 'fine-tune fast on one GPU', hitting OOM while training Llama/Mistral/Gemma/Qwen, or squeezing QLoRA onto limited VRAM. Not for YAML-driven multi-recipe pipelines — use axolotl; not for full RLHF trainer coverage — use fine-tuning-with-trl."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

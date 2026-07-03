@@ -1,6 +1,6 @@
 ---
 name: apple-reminders
-description: Manage Apple Reminders via remindctl CLI (list, add, complete, delete).
+description: "Manage Apple Reminders via the remindctl CLI — list, add, complete, delete. Use when the user says 'remind me', 'add a reminder', 'Reminders app', or wants a personal to-do with a due date that syncs to iOS. Requires macOS + the remindctl CLI."
 version: 1.0.0
 author: Elevate
 license: MIT

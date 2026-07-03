@@ -1,6 +1,6 @@
 ---
 name: touchdesigner-mcp
-description: "Control a running TouchDesigner instance via twozero MCP — create operators, set parameters, wire connections, execute Python, build real-time visuals. 36 native tools."
+description: "Drive a running TouchDesigner instance via the twozero MCP (36 tools). Use when the user wants to 'control TouchDesigner', build 'real-time visuals', a 'VJ'/installation patch, or audio-reactive graphics by creating operators, setting parameters, wiring nodes, and running Python. Requires TouchDesigner running with the twozero MCP on port 40404."
 version: 1.1.0
 author: kshitijk4poor
 license: MIT

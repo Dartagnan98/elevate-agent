@@ -1,6 +1,6 @@
 ---
 name: hermes-agent
-description: "Configure, extend, or contribute to Hermes Agent."
+description: "Configure, extend, or contribute to the Hermes Agent framework (Nous Research). Use when the user wants to set up Hermes, spawn a Hermes instance, configure its gateway/skills/profiles, troubleshoot the framework, or contribute code. Not for handing off a coding task to an external agent — use claude-code, codex, or opencode."
 version: 2.1.0
 author: Hermes Agent + Teknium
 license: MIT

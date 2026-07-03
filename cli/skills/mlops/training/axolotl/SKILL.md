@@ -1,6 +1,6 @@
 ---
 name: axolotl
-description: Expert guidance for fine-tuning LLMs with Axolotl - YAML configs, 100+ models, LoRA/QLoRA, DPO/KTO/ORPO/GRPO, multimodal support
+description: "Fine-tune LLMs from YAML configs with Axolotl — LoRA/QLoRA, DPO/KTO/ORPO/GRPO. Use when 'fine-tune with Axolotl', writing a training YAML, running multi-GPU/DeepSpeed jobs across 100+ models, or multimodal tuning. Not for the fastest single-GPU LoRA — use unsloth; not for a Python-first TRL trainer API — use fine-tuning-with-trl."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

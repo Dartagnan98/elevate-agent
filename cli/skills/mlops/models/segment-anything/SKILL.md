@@ -1,6 +1,6 @@
 ---
 name: segment-anything-model
-description: Foundation model for image segmentation with zero-shot transfer. Use when you need to segment any object in images using points, boxes, or masks as prompts, or automatically generate all object masks in an image.
+description: "Zero-shot image segmentation with Meta's SAM foundation model. Use when 'segment this object', 'mask everything in the image', prompting with points/boxes/masks, building annotation tools, or generating vision training data. Works across any image domain without fine-tuning. Not for text-to-image or audio generation — use the relevant media skill."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

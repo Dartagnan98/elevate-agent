@@ -1,6 +1,6 @@
 ---
 name: github-auth
-description: Set up GitHub authentication for the agent using git (universally available) or the gh CLI. Covers HTTPS tokens, SSH keys, credential helpers, and gh auth — with a detection flow to pick the right method automatically.
+description: "Set up GitHub authentication via git or the gh CLI. Use when a GitHub push or API call fails on auth/permission, the user says 'set up GitHub auth', 'add my token', configures SSH keys, or before first GitHub work. Not for repo/PR/issue operations once authed — use github-repo-management, github-pr-workflow, or github-issues."
 version: 1.1.0
 author: Elevate
 license: MIT

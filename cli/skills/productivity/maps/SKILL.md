@@ -1,11 +1,6 @@
 ---
 name: maps
-description: >
-  Location intelligence — geocode a place, reverse-geocode coordinates,
-  find nearby places (46 POI categories), driving/walking/cycling
-  distance + time, turn-by-turn directions, timezone lookup, bounding
-  box + area for a named place, and POI search within a rectangle.
-  Uses OpenStreetMap + Overpass + OSRM. Free, no API key.
+description: "Location intelligence: geocode, nearby POIs, distance, directions, timezone. Use when the user asks 'how far', 'directions to', 'what's near', 'coordinates of', 'geocode', or the drive/walk time between two places. Uses OpenStreetMap, Overpass, and OSRM — free, no API key, Python stdlib only."
 version: 1.2.0
 author: Mibayy
 license: MIT

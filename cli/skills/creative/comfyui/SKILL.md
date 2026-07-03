@@ -1,6 +1,6 @@
 ---
 name: comfyui
-description: "Generate images, video, and audio with ComfyUI — install, launch, manage nodes/models, run workflows with parameter injection. Uses the official comfy-cli for lifecycle and direct REST/WebSocket API for execution."
+description: "Generate images, video, and audio with ComfyUI (SD/Flux/SD3/Wan/Hunyuan). Use when the user wants to 'run a ComfyUI workflow', generate media with 'Stable Diffusion'/'Flux' locally, or needs to install, launch, or manage ComfyUI nodes and models. Covers full lifecycle via comfy-cli plus direct REST/WebSocket execution with parameter injection."
 version: 5.1.0
 author: [kshitijk4poor, alt-glitch, purzbeats]
 license: MIT

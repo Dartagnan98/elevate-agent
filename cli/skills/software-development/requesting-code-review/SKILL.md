@@ -1,9 +1,6 @@
 ---
 name: requesting-code-review
-description: >
-  Pre-commit verification pipeline — static security scan, baseline-aware
-  quality gates, independent reviewer subagent, and auto-fix loop. Use after
-  code changes and before committing, pushing, or opening a PR.
+description: "Pre-commit verification — security scan, quality gates, reviewer subagent, auto-fix. Use when the user says 'commit', 'push', 'ship', 'done', 'verify', or 'review before merge', or after a task with 2+ file edits in a git repo. No agent verifies its own work. Not for authoring plans — use writing-plans. Skip for docs-only or pure-config changes."
 version: 2.0.0
 author: Elevate (adapted from obra/superpowers + MorAlekss)
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: songsee
-description: Generate spectrograms and audio feature visualizations (mel, chroma, MFCC, tempogram, etc.) from audio files via CLI. Useful for audio analysis, music production debugging, and visual documentation.
+description: "Generate spectrograms and audio-feature visuals (mel, chroma, MFCC, tempogram) from audio. Use when the user wants a 'spectrogram', to 'visualize audio', or to analyze/debug a track's frequency or tempo content. Not for generating music — use heartmula; not for songwriting — use songwriting-and-ai-music. Requires the songsee CLI (Go)."
 version: 1.0.0
 author: community
 license: MIT

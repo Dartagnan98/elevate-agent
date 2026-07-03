@@ -1,6 +1,6 @@
 ---
 name: notion
-description: Notion API for creating and managing pages, databases, and blocks via curl. Search, create, update, and query Notion workspaces directly from the terminal.
+description: "Create and manage Notion pages, databases, and blocks via the API with curl. Use when the user says 'Notion', names a Notion page/database, or wants to search, create, update, or query a Notion workspace. Not for Airtable — use airtable. Requires NOTION_API_KEY and the target pages shared with the integration."
 version: 1.0.0
 author: community
 license: MIT

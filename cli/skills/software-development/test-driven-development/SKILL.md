@@ -1,6 +1,6 @@
 ---
 name: test-driven-development
-description: Use when implementing any feature or bugfix, before writing implementation code. Enforces RED-GREEN-REFACTOR cycle with test-first approach.
+description: "Test-first RED-GREEN-REFACTOR — write the failing test before implementation code. Use when implementing any feature, bug fix, refactor, or behavior change, before touching the implementation. If you didn't watch it fail, you don't know it tests the right thing. Not for orchestrating tasks across subagents — use subagent-driven-development; not for root-causing a bug — use systematic-debugging."
 version: 1.1.0
 author: Elevate (adapted from obra/superpowers)
 license: MIT

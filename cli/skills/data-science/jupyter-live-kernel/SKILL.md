@@ -1,11 +1,6 @@
 ---
 name: jupyter-live-kernel
-description: >
-  Use a live Jupyter kernel for stateful, iterative Python execution via hamelnb.
-  Load this skill when the task involves exploration, iteration, or inspecting
-  intermediate results — data science, ML experimentation, API exploration, or
-  building up complex code step-by-step. Uses terminal to run CLI commands against
-  a live Jupyter kernel. No new tools required.
+description: "Stateful, iterative Python in a live Jupyter kernel (hamelnb) where variables persist. Use when exploring or iterating — data science, ML experimentation, API exploration, inspecting DataFrames, or 'let me try this and check' step-by-step. Not for one-shot stateless scripts needing elevate tool access — use execute_code; not for shell/builds/git — use terminal. No new tools required."
 version: 1.0.0
 author: Elevate
 license: MIT

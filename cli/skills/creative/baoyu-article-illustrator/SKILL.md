@@ -1,6 +1,6 @@
 ---
 name: baoyu-article-illustrator
-description: "Article illustrations: type × style × palette consistency."
+description: "Place consistent illustrations into an article (type x style x palette). Use when the user says 'illustrate this article', 'add images to my post', 'generate illustrations for content', or the Chinese '为文章配图', and gives an article to enrich. Not for a sequential story told in comic panels — use baoyu-comic; not for a single dense data graphic — use baoyu-infographic."
 version: 1.57.0
 author: 宝玉 (JimLiu)
 license: MIT

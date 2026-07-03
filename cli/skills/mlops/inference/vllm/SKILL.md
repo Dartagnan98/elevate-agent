@@ -1,6 +1,6 @@
 ---
 name: serving-llms-vllm
-description: Serves LLMs with high throughput using vLLM's PagedAttention and continuous batching. Use when deploying production LLM APIs, optimizing inference latency/throughput, or serving models with limited GPU memory. Supports OpenAI-compatible endpoints, quantization (GPTQ/AWQ/FP8), and tensor parallelism.
+description: "Serve LLMs at high throughput with vLLM (PagedAttention, continuous batching). Use when 'deploy an LLM API', 'serve with vLLM', optimizing inference latency/throughput, or fitting a model into limited GPU memory. OpenAI-compatible endpoints, GPTQ/AWQ/FP8 quantization, tensor parallelism. Not for CPU/Apple-Silicon GGUF inference — use llama-cpp."
 version: 1.0.0
 author: Orchestra Research
 license: MIT

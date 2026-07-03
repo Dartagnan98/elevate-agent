@@ -1,6 +1,6 @@
 ---
 name: baoyu-comic
-description: Knowledge comic creator supporting multiple art styles and tones. Creates original educational comics with detailed panel layouts and sequential image generation. Use when user asks to create "知识漫画", "教育漫画", "biography comic", "tutorial comic", or "Logicomix-style comic".
+description: "Create an original multi-panel knowledge comic with art-style x tone control. Use when the user asks for a 'knowledge comic', 'educational comic', 'biography comic', 'tutorial comic', 'Logicomix-style comic', or the Chinese '知识漫画'/'教育漫画', to explain a topic as a sequential story. Not for illustrations dropped into prose — use baoyu-article-illustrator."
 version: 1.56.1
 author: 宝玉 (JimLiu)
 license: MIT

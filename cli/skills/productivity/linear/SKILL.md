@@ -1,6 +1,6 @@
 ---
 name: linear
-description: Manage Linear issues, projects, and teams via the GraphQL API. Create, update, search, and organize issues. Uses API key auth (no OAuth needed). All operations via curl — no dependencies.
+description: "Manage Linear issues, projects, and teams via the GraphQL API with curl. Use when the user says 'Linear', gives an issue id like 'ENG-123', or wants to create, update, search, or organize Linear issues and projects. Not for GitHub issues — use github-issues. Requires LINEAR_API_KEY (API-key auth, no OAuth)."
 version: 1.0.0
 author: Elevate
 license: MIT

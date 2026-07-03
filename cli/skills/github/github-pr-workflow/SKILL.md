@@ -1,6 +1,6 @@
 ---
 name: github-pr-workflow
-description: Full pull request lifecycle — create branches, commit changes, open PRs, monitor CI status, auto-fix failures, and merge. Works with gh CLI or falls back to git + GitHub REST API via curl.
+description: "Drive the full pull-request lifecycle: branch, commit, open, CI, merge. Use when the user says 'open a PR', 'create a pull request', 'get this merged', 'check CI', or wants CI failures auto-fixed. Not for reviewing an existing diff — use github-code-review; not for issues — use github-issues. Works via gh CLI or git + curl."
 version: 1.1.0
 author: Elevate
 license: MIT

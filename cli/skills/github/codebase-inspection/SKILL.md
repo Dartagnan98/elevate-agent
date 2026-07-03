@@ -1,6 +1,6 @@
 ---
 name: codebase-inspection
-description: Inspect and analyze codebases using pygount for LOC counting, language breakdown, and code-vs-comment ratios. Use when asked to check lines of code, repo size, language composition, or codebase stats.
+description: "Count lines of code and language breakdown with pygount. Use when the user asks 'how many lines of code', 'how big is this repo', 'what languages', or wants codebase size, composition, or code-vs-comment stats. Not for cloning or configuring repos — use github-repo-management. Requires the pygount CLI."
 version: 1.0.0
 author: Elevate
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: claude-design
-description: Design one-off HTML artifacts (landing, deck, prototype).
+description: "Design a from-scratch, production-grade HTML artifact with good taste. Use when the user wants a designed 'landing page', 'prototype', 'deck', 'component lab', or 'motion study' with no brand dictated, and expects real design process and polish. Not for cloning a known brand's look (Stripe/Linear/Vercel) — use popular-web-designs; not for throwaway variants to compare — use sketch; not for a token spec file — use design-md."
 version: 1.0.0
 author: BadTechBandit
 license: MIT

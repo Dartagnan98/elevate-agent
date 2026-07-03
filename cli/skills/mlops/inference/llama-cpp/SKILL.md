@@ -1,6 +1,6 @@
 ---
 name: llama-cpp
-description: llama.cpp local GGUF inference + HF Hub model discovery.
+description: "Run local GGUF inference with llama.cpp and pick the right quant. Use when 'run this GGUF locally', serving on CPU/Apple Silicon/CUDA/ROCm, building a llama-server or llama-cli command, or choosing between Q4/Q5/Q6/IQ for the user's RAM/VRAM. Not for GPU-server throughput on full-precision weights — use serving-llms-vllm."
 version: 2.1.2
 author: Orchestra Research
 license: MIT

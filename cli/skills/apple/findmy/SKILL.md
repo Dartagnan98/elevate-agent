@@ -1,6 +1,6 @@
 ---
 name: findmy
-description: Track Apple devices and AirTags via FindMy.app on macOS using AppleScript and screen capture.
+description: "Track Apple devices and AirTags via FindMy.app on macOS (AppleScript + screen capture). Use when the user asks 'where is my [phone/keys/bag/AirTag]', 'find my [device]', or wants a registered device's location. Requires macOS with Find My + iCloud signed in; no CLI exists so it drives the app UI."
 version: 1.0.0
 author: Elevate
 license: MIT

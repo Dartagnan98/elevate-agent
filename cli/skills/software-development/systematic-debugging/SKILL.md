@@ -1,6 +1,6 @@
 ---
 name: systematic-debugging
-description: Use when encountering any bug, test failure, or unexpected behavior. 4-phase root cause investigation — NO fixes without understanding the problem first.
+description: "4-phase root-cause investigation — no fix until the problem is understood. Use when hitting any bug, test failure, or unexpected behavior, or when you catch yourself reaching for a random patch. Symptom fixes are failure. Not for the debugger mechanics — use python-debugpy or node-inspect-debugger; not for Hermes TUI-command sync bugs — use debugging-hermes-tui-commands."
 version: 1.1.0
 author: Elevate (adapted from obra/superpowers)
 license: MIT

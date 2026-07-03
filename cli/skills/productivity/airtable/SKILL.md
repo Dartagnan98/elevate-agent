@@ -1,6 +1,6 @@
 ---
 name: airtable
-description: Airtable REST API via curl. Records CRUD, filters, upserts.
+description: "Read and write Airtable bases via the REST API with curl — record CRUD, filters, upserts. Use when the user says 'Airtable', names a base/table, or wants to query, add, update, or bulk-upsert Airtable rows. Not for Notion databases — use notion. Requires AIRTABLE_API_KEY (a per-base personal access token)."
 version: 1.1.0
 author: community
 license: MIT

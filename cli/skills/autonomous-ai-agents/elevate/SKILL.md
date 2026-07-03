@@ -1,6 +1,6 @@
 ---
 name: elevate
-description: Complete guide to using and extending Elevate — CLI usage, setup, configuration, spawning additional agents, gateway platforms, skills, voice, tools, profiles, and a concise contributor reference. Load this skill when helping users configure Elevate, troubleshoot issues, spawn agent instances, or make code contributions.
+description: "Guide to using and extending the Elevate framework itself. Use when the user wants to configure Elevate, spawn an Elevate agent instance, set up its gateway/skills/voice/profiles, troubleshoot the framework, or contribute code. Not for handing off a coding task to an external agent — use claude-code, codex, or opencode."
 version: 2.0.0
 author: Elevation Real Estate HQ
 license: MIT

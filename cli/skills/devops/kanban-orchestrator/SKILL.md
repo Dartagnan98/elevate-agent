@@ -1,6 +1,6 @@
 ---
 name: kanban-orchestrator
-description: Decomposition playbook + anti-temptation rules for an orchestrator profile routing work through Kanban. The "don't do the work yourself" rule and the basic lifecycle are auto-injected into every kanban worker's system prompt; this skill is the deeper playbook when you're specifically playing the orchestrator role.
+description: "Decomposition playbook for an orchestrator routing work through Kanban. Use when you play the orchestrator role — fanning a goal out into kanban cards, discovering profiles, resisting doing the work yourself. Not for a spawned worker executing a card — use kanban-worker; not for the Codex sub-lane — use kanban-codex-lane."
 version: 3.0.1
 platforms: [linux, macos, windows]
 metadata:

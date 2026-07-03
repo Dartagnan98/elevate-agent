@@ -1,6 +1,6 @@
 ---
 name: node-inspect-debugger
-description: "Debug Node.js via --inspect + Chrome DevTools Protocol CLI."
+description: "Debug Node.js from the terminal via --inspect and the Chrome DevTools Protocol. Use when console.log isn't enough on a Node/Ink-TUI process — real breakpoints, step in/over/out, call-stack and closure-scope dumps, or scripting CDP over many breakpoints. Not for Python — use python-debugpy; not for root-cause method — use systematic-debugging; not for TUI-command sync bugs — use debugging-hermes-tui-commands."
 version: 1.0.0
 author: Hermes Agent
 license: MIT

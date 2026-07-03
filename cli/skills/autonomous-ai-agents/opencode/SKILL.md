@@ -1,6 +1,6 @@
 ---
 name: opencode
-description: Delegate coding tasks to OpenCode CLI agent for feature implementation, refactoring, PR review, and long-running autonomous sessions. Requires the opencode CLI installed and authenticated.
+description: "Delegate coding to the OpenCode CLI agent via the terminal. Use when the user says 'use OpenCode', or you want a provider-agnostic external agent for feature work, refactoring, PR review, or long-running/parallel autonomous sessions. Not for Anthropic's agent — use claude-code; not for OpenAI Codex — use codex. Requires the opencode CLI installed + authed."
 version: 1.2.0
 author: Elevate
 license: MIT

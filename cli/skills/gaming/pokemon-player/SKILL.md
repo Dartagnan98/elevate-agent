@@ -1,6 +1,6 @@
 ---
 name: pokemon-player
-description: Play Pokemon games autonomously via headless emulation. Starts a game server, reads structured game state from RAM, makes strategic decisions, and sends button inputs — all from the terminal.
+description: "Play Pokemon autonomously via headless emulation, reading RAM state and sending inputs. Use when the user says 'play Pokemon', 'start Pokemon', wants to 'watch an AI play', or references a Pokemon ROM (Red/Blue/Yellow/FireRed, .gb/.gbc/.gba). Not for running a Minecraft server — use minecraft-modpack-server. User must supply the ROM."
 tags: [gaming, pokemon, emulator, pyboy, gameplay, gameboy]
 ---
 # Pokemon Player

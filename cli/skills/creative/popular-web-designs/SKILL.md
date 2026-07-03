@@ -1,10 +1,6 @@
 ---
 name: popular-web-designs
-description: >
-  54 production-quality design systems extracted from real websites. Load a template
-  to generate HTML/CSS that matches the visual identity of sites like Stripe, Linear,
-  Vercel, Notion, Airbnb, and more. Each template includes colors, typography, components,
-  layout rules, and ready-to-use CSS values.
+description: "54 ready-to-paste design systems copied from real sites (colors, type, components, CSS). Use when the user says 'make it look like Stripe', 'design like Linear', 'Vercel style', or wants a page styled after a known brand. Not for a from-scratch designed artifact with no brand — use claude-design; not for a design-token spec file — use design-md."
 version: 1.0.0
 author: Elevate + Teknium (design systems sourced from VoltAgent/awesome-design-md)
 license: MIT

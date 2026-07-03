@@ -1,6 +1,6 @@
 ---
 name: obsidian
-description: Read, search, and create notes in the Obsidian vault.
+description: "Read, search, and create markdown notes in the local Obsidian vault. Use when the user says 'my vault', 'Obsidian', 'my notes' referring to markdown files, or wants to look up or add a note in the vault. Not for Apple Notes.app — use apple-notes. Vault path from OBSIDIAN_VAULT_PATH."
 ---
 
 # Obsidian Vault

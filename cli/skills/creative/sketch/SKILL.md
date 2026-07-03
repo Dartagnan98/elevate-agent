@@ -1,6 +1,6 @@
 ---
 name: sketch
-description: "Throwaway HTML mockups: 2-3 design variants to compare."
+description: "Generate 2-3 throwaway HTML mockup variants to compare a design direction. Use when the user says 'sketch this screen', 'show me what X could look like', 'compare layout A vs B', 'give me a few takes on this UI', or 'mockup this before I build'. Not for a production-grade or polished one-off artifact — use claude-design; not for a diagram — use excalidraw."
 version: 1.0.0
 author: Hermes Agent (adapted from gsd-build/get-shit-done)
 license: MIT

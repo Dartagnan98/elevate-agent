@@ -1,6 +1,6 @@
 ---
 name: huggingface-hub
-description: Hugging Face Hub CLI (hf) — search, download, and upload models and datasets, manage repos, query datasets with SQL, deploy inference endpoints, manage Spaces and buckets.
+description: "Drive the Hugging Face Hub CLI (hf) for models, datasets, and repos. Use when 'download this HF model', 'upload to the Hub', searching models/datasets, querying a dataset with SQL, deploying an inference endpoint, or managing Spaces and buckets. Not for local GGUF discovery/serving — use llama-cpp; not for high-throughput serving — use serving-llms-vllm."
 version: 1.0.0
 author: Hugging Face
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: godmode
-description: "Jailbreak API-served LLMs using G0DM0D3 techniques — Parseltongue input obfuscation (33 techniques), GODMODE CLASSIC system prompt templates, ULTRAPLINIAN multi-model racing, encoding escalation, and Elevate-native prefill/system prompt integration. Use when a user wants to bypass safety filters, jailbreak a model, or red-team model robustness."
+description: "Jailbreak API-served LLMs using G0DM0D3 techniques at the prompt/API level. Use when the user wants to 'jailbreak' a model, bypass safety filters, red-team robustness, or asks about Parseltongue, GODMODE, L1B3RT4S, prefill, or racing models for the least-censored reply. Not for editing open-weight model weights to remove refusals — use obliteratus."
 version: 1.0.0
 author: Elevate + Teknium
 license: MIT

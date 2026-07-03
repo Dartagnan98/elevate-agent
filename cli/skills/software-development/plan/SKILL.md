@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan mode for Elevate — inspect context, write a markdown plan into the active workspace's `.elevate/plans/` directory, and do not execute the work.
+description: "Plan mode — inspect context and write a markdown plan, execute nothing this turn. Use when the user says 'just plan it', 'don't write code yet', 'plan mode', or wants an approach laid out before any changes. Deliverable saved under the workspace's .elevate/plans/. Not for a detailed multi-task implementation spec — use writing-plans; not for a throwaway feasibility experiment — use spike."
 version: 1.0.0
 author: Elevate
 license: MIT

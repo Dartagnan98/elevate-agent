@@ -1,6 +1,6 @@
 ---
 name: github-issues
-description: Create, manage, triage, and close GitHub issues. Search existing issues, add labels, assign people, and link to PRs. Works with gh CLI or falls back to git + GitHub REST API via curl.
+description: "Create, search, triage, label, assign, and close GitHub issues, and link them to PRs. Use when the user says 'open an issue', 'file a bug', 'triage issues', 'label/assign this issue', or 'find issues about X'. Not for pull requests — use github-pr-workflow; not for repo settings/releases — use github-repo-management. Works via gh CLI or git + curl."
 version: 1.1.0
 author: Elevate
 license: MIT

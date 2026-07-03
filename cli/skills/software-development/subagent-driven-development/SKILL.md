@@ -1,6 +1,6 @@
 ---
 name: subagent-driven-development
-description: Use when executing implementation plans with independent tasks. Dispatches fresh delegate_task per task with two-stage review (spec compliance then code quality).
+description: "Execute a plan by dispatching a fresh subagent per task with two-stage review. Use when you have an implementation plan with mostly-independent tasks and want spec-then-quality review between each. Fresh context per task avoids accumulated-state confusion. Not for the test-first RED-GREEN cycle — use test-driven-development; not for authoring the plan itself — use writing-plans."
 version: 1.1.0
 author: Elevate (adapted from obra/superpowers)
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: heartmula
-description: Set up and run HeartMuLa, the open-source music generation model family (Suno-like). Generates full songs from lyrics + tags with multilingual support.
+description: "Set up and run HeartMuLa, an open-source Suno-like model, to generate full songs. Use when the user wants 'local music generation', an 'open-source Suno alternative', or to 'generate a song' from lyrics + tags (multilingual). Not for writing lyrics or Suno prompts — use songwriting-and-ai-music. Needs a GPU (8GB+ VRAM)."
 version: 1.0.0
 metadata:
   elevate:

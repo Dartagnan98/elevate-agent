@@ -1,6 +1,6 @@
 ---
 name: native-mcp
-description: Built-in MCP (Model Context Protocol) client that connects to external MCP servers, discovers their tools, and registers them as native Elevate tools. Supports stdio and HTTP transports with automatic reconnection, security filtering, and zero-config tool injection.
+description: "Built-in MCP client that registers external MCP-server tools as native Elevate tools. Use when the user wants to add an MCP server, wire up filesystem/GitHub/database/API tools via MCP, or have MCP tools auto-loaded every conversation. Supports stdio and HTTP transports. Not for one-off ad-hoc MCP calls — use the mcporter skill."
 version: 1.0.0
 author: Elevate
 license: MIT

@@ -1,6 +1,6 @@
 ---
 name: hermes-agent-skill-authoring
-description: "Author in-repo SKILL.md: frontmatter, validator, structure."
+description: "Author an in-repo SKILL.md — frontmatter, validator rules, directory structure. Use when 'add a skill in this repo/branch', committing a reusable workflow that ships with hermes-agent, or editing an existing in-repo skill under skills/. Covers what skill_manage(create) can't target. Not for writing implementation plans — use writing-plans; not for pre-commit review — use requesting-code-review."
 version: 1.0.0
 author: Hermes Agent
 license: MIT

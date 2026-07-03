@@ -1,6 +1,6 @@
 ---
 name: apple-notes
-description: Manage Apple Notes via the memo CLI on macOS (create, view, search, edit).
+description: "Manage Apple Notes via the memo CLI on macOS — create, view, search, edit. Use when the user says 'add a note', 'save this to Notes', 'find my note about X', or wants info in Notes.app synced across Apple devices. Not for markdown vault notes — use obsidian instead. Requires macOS + the memo CLI."
 version: 1.0.0
 author: Elevate
 license: MIT

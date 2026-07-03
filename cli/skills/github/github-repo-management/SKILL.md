@@ -1,6 +1,6 @@
 ---
 name: github-repo-management
-description: Clone, create, fork, configure, and manage GitHub repositories. Manage remotes, secrets, releases, and workflows. Works with gh CLI or falls back to git + GitHub REST API via curl.
+description: "Clone, create, fork, and configure GitHub repositories. Use when the user says 'create a repo', 'clone/fork X', 'add a secret', 'cut a release', or 'set up the remote', including Actions workflows. Not for PRs — use github-pr-workflow; not for issues — use github-issues; not for LOC stats — use codebase-inspection. Works via gh CLI or git + curl."
 version: 1.1.0
 author: Elevate
 license: MIT

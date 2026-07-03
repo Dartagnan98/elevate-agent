@@ -1,6 +1,6 @@
 ---
 name: openhue
-description: Control Philips Hue lights, rooms, and scenes via the OpenHue CLI. Turn lights on/off, adjust brightness, color, color temperature, and activate scenes.
+description: "Control Philips Hue lights, rooms, and scenes via the OpenHue CLI. Use when the user says 'turn on/off the lights', 'dim the [room]', 'set the lights to [color]', 'change the color temperature', or 'activate [scene]'. Requires the openhue CLI paired to a Hue Bridge on the same network."
 version: 1.0.0
 author: community
 license: MIT
