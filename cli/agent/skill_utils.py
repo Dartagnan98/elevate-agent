@@ -45,14 +45,24 @@ EXCLUDED_SKILL_DIRS = frozenset(
     )
 )
 
+# Backup/scratch directories the sync machinery leaves BESIDE real skill dirs
+# (corrective restores write <skill>.stale-bak/, merge-updates writes
+# .bak-premerge, snapshot writes use .tmp). They contain a full SKILL.md with
+# the SAME frontmatter name as the live skill — if scanners read them, the
+# router can be served the stale pre-restore description again, resurrecting
+# exactly the routing confusion the restore fixed. Matched by suffix because
+# the prefix is the skill's own name.
+_EXCLUDED_DIR_SUFFIXES = (".stale-bak", ".bak-premerge", ".tmp")
+
 
 def is_excluded_skill_path(path) -> bool:
-    """True if any component of *path* is in EXCLUDED_SKILL_DIRS.
+    """True if any component of *path* is in EXCLUDED_SKILL_DIRS or carries
+    an excluded backup suffix (``.stale-bak``, ``.bak-premerge``, ``.tmp``).
 
     Use this on every SKILL.md path produced by ``rglob`` to prune
-    dependency, virtualenv, VCS, and cache directories. Centralising the
-    check here keeps every skill-scanning site in sync with the shared
-    exclusion set.
+    dependency, virtualenv, VCS, cache, and sync-backup directories.
+    Centralising the check here keeps every skill-scanning site in sync with
+    the shared exclusion set.
 
     Accepts a Path or string.
     """
@@ -61,7 +71,10 @@ def is_excluded_skill_path(path) -> bool:
     except AttributeError:
         from pathlib import PurePath
         parts = PurePath(str(path)).parts
-    return any(part in EXCLUDED_SKILL_DIRS for part in parts)
+    return any(
+        part in EXCLUDED_SKILL_DIRS or part.endswith(_EXCLUDED_DIR_SUFFIXES)
+        for part in parts
+    )
 
 
 # ── Lazy YAML loader ─────────────────────────────────────────────────────
@@ -576,7 +589,11 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     """
     matches = []
     for root, dirs, files in os.walk(skills_dir, followlinks=True):
-        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS]
+        dirs[:] = [
+            d for d in dirs
+            if d not in EXCLUDED_SKILL_DIRS
+            and not d.endswith(_EXCLUDED_DIR_SUFFIXES)
+        ]
         if filename in files:
             matches.append(Path(root) / filename)
     for path in sorted(matches, key=lambda p: str(p.relative_to(skills_dir))):
