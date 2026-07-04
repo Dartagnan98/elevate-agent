@@ -46,6 +46,15 @@ For each meeting:
 - write a brief under `meetings/<category>/<event-id>/brief.md` in the agent's workdir
 - create the reminder/delivery: a one-off task via native Tasks, or a recurring delivery via the `cron` tool
 
+## Browser Fallback (calendar APIs down)
+
+When events must be created through the browser because the calendar APIs are down:
+
+- Use the template URL instead of clicking the grid: `https://calendar.google.com/calendar/render?action=TEMPLATE&text=…&dates=YYYYMMDD/YYYYMMDD&ctz=…`.
+- All-day END dates are EXCLUSIVE — a Mon–Fri event is `…0629/0704`, not `…0629/0703`.
+- Element indices in Google Calendar are unstable across page loads — re-read state and re-find the Save button / calendar combobox each time rather than reusing indices.
+- Multi-day all-day events legitimately render as "Day 1/5, 2/5…" in search results — that is one event, not several.
+
 ## Notes
 
 - Recurring reviews (morning/evening): schedule with the `cron` tool.

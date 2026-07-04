@@ -100,3 +100,10 @@ imsg chats --limit 20 --json | jq '.[] | select(.displayName | contains("Mom"))'
 # 3. Send after confirmation
 imsg send --to "+1555123456" --text "I'll be late"
 ```
+
+## Troubleshooting & Parsing Gotchas
+
+- `imsg history --json` emits newline-delimited JSON, not an array — parse line-by-line.
+- `imsg search --query NAME` searches message text, not contact labels. To find a person, dump `imsg chats --limit 10000 --json` and regex the contact/display/participant fields, then pull `history --chat-id`.
+- `imsg status` can report "Basic features available" while `chats`/`history` fail with authorization denied (code: 23) — that is missing Full Disk Access for the CALLING process (blocked, not absent). Check for a local read-only ingest cache before giving up on history.
+- Shell trap: `imsg … | python3 - <<'EOF'` silently loses the pipe (the heredoc consumes stdin) — use `python3 -c` for piped NDJSON.

@@ -94,3 +94,8 @@ Read pending approvals with the **agent_bus** tool (action `list_approvals`), or
 2. **Always block your task** pointing to the approval ID — so work isn't lost while waiting
 3. **Never assume approval** — if you don't have an inbox confirmation (agent_bus action `check_inbox`), you don't have approval
 4. **One re-ping max** — after 4h, surface it once and wait
+
+## Verification Notes
+
+- Verb literalism: "draft" ≠ "send". But an explicit "send it" in chat for a specific, described item IS the approval — execute it, then reconcile/close the now-stale dashboard approval row rather than re-asking the user for a decision they already gave.
+- Verify attachments by CONTENT, not filename, before approving or executing a send — a correctly named file can contain a different document.

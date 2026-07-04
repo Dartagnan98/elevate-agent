@@ -27,6 +27,8 @@ Ask for anything missing in one concise prompt. Pull what you can from the lead 
 
 Convert relative dates to absolute dates.
 
+**Enrich before you ask.** Resolve seller name/email/phone/source from Contacts, Gmail, iMessage, and the CRM first, then prompt ONE concise card for only the genuinely missing fields. Re-dispatched runs carrying `human_prompt_json.providedAnswers` apply the answers instead of re-asking.
+
 ## Flow
 
 1. **Read the intake.** Open the configured Pre-CMA intake (Google Form response, dashboard record, or whatever the tenant has wired). Treat the form name, URL, and field labels as tenant configuration, not constants.

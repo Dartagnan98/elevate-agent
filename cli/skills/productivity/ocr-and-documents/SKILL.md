@@ -109,6 +109,12 @@ marker /path/to/folder --workers 4    # Batch
 
 ---
 
+## macOS-Native OCR Fallback
+
+When `pdftotext`/pymupdf return blank on a scanned PDF and installing marker-pdf's multi-GB stack isn't justified, use the OCR built into macOS: rasterize pages at 90–150 DPI with `pdftoppm`, then OCR the images via the Vision framework from a small Swift script (`VNRecognizeTextRequest`, accurate mode + language correction). No model downloads, and accuracy is strong on clean scans.
+
+---
+
 ## Arxiv Papers
 
 ```

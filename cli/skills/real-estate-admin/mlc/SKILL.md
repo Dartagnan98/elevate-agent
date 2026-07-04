@@ -49,6 +49,7 @@ Convert relative dates to absolute dates before creating forms.
 - Do not send signing packages until the realtor approves document contents and signature/initial/date placements.
 - When signed documents return, attach the executed PDFs and update only the checklist cells supported by evidence.
 - If a provider blocks on MFA or login, write `waiting_human` with the exact portal/account needed.
+- Amendments use an approved BC2040-style template only; blank all unrelated amendment sections.
 
 ## Output Contract
 

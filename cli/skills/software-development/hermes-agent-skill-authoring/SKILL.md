@@ -152,6 +152,8 @@ Pick the closest existing category. Don't invent new top-level categories casual
 
 7. **Linking to skills that don't exist in-repo.** `related_skills: [some-user-local-skill]` works for you but breaks for other clones. Prefer only in-repo links.
 
+8. **Guessing between same-named skills.** Cloud-skill copies (and the user-local vs in-repo trees) can carry the same skill name, making bare names ambiguous — never guess between matches. Resolve to the exact path/category before patching, viewing, or cross-referencing a skill.
+
 ## Verification Checklist
 
 - [ ] File is at `skills/<category>/<name>/SKILL.md` (not in `~/.elevate/skills/`)

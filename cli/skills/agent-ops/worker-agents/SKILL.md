@@ -122,6 +122,15 @@ agent_bus log-event action worker_completed info \
 
 ---
 
+## Failure Handling — verify before rerunning
+
+- The wrapper-failure family — `'dict' object has no attribute 'lstrip'` and workers that completed but whose summary says failed — means VERIFY actual side effects (session search → operational rows → artifacts) before rerunning. The work often happened; a blind rerun duplicates it.
+- `agent_handoff(action='complete')` returning "result has already been recorded" = the handoff is already completed — never retry or duplicate it.
+- Self-handoffs (same source and target agent) may be rejected — report back to the parent instead.
+- If a compressed summary says a trust-boundary action (a send, a portal write) already ran, verify the proof instead of re-running it.
+
+---
+
 ## Scaling Rules
 
 | Workers | Risk | Notes |

@@ -47,6 +47,11 @@ Use one skill name: `seller-update`.
 - If seller email matching is weak, ask for confirmation before drafting.
 - Pull only stale pieces for the day when possible; do not rerun slow browser steps if today's source file already exists.
 - Use message history only for context and tone. Showing/stats facts must come from source data.
+- `--help` is not a harmless probe: some local automation scripts execute their real scraper/report work on `--help` — inspect unknown scripts with a file read before running anything.
+- Never guess a recipient: weak contact matches produce no-recipient drafts for human addressing, and stale auto-created duplicate drafts get deleted before reporting.
+- Partial-run discipline: keep any dated JSON a mid-crash scraper saved, produce reports for the usable rows, label the run partial, and write something back per deal (report / draft-note / blocker-note) so the board stays truthful.
+- Platform metrics honesty: local view/favorite counts are not a portal/social/marketplace breakdown — never infer one from the other.
+- Feedback-request texts: check the thread first and skip anyone the realtor is already talking to or who already gave feedback (double-asking is the failure mode); keep wording casual — showing agents already know the listing agent.
 
 ## Output Contract
 

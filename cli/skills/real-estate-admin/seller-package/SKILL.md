@@ -56,6 +56,11 @@ If any required field is missing, return `status: "waiting_human"` with a `human
 - After admin promotion, attach the seller-package draft/sent artifact to the new deal_id through `admin-result-writer`.
 - Do not create MLC/listing checklist completion from this step — that lives at stage 2.
 
+## Template Rules
+
+- The absence of the approved template is never authorization to compose one: template unreadable or missing → STOP with `waiting_human`. This rule was born from a real unapproved send, and it generalizes to every templated client-send.
+- Mailjet template maintenance: back up `GET /template/<id>` and `/detailcontent` before any edit, modify only `detailcontent`, and verify by re-reading after the write. Email images must be public HTTPS URLs, never local paths.
+
 ## Output Contract
 
 ```json

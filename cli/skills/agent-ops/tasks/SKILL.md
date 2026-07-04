@@ -61,6 +61,8 @@ Tasks with `needs_approval: true` create an approval item that must be reviewed 
 
 **Priorities:** urgent, high, normal, low
 
+**Tool vs shell:** the `agent_bus` commands above are the shell form. In API/chat sessions the shell command may not exist while the **agent_bus** TOOL does — call the tool with the matching action (`create_task`, `list_tasks`, `update_task`, `complete_task`, `log_event`) instead of treating the missing binary as a failure.
+
 ## Best Practices
 
 - **Always create before starting** - ensures tracking and coordination
