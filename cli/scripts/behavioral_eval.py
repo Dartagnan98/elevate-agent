@@ -204,7 +204,9 @@ def run_case(case: dict, model: str | None) -> dict:
         return {**case, "status": "ERROR", "detail": f"provider timeout >{CASE_TIMEOUT_S}s", "elapsed": time.time() - t0, "response": ""}
     elapsed = time.time() - t0
 
-    text = out.strip()
+    # Models emit typographic quotes; patterns are ASCII. Normalize before matching.
+    text = (out.strip().replace("’", "'").replace("‘", "'")
+            .replace("“", '"').replace("”", '"'))
     # A reply that is only the session-id trailer means the provider stalled or
     # returned nothing — a harness/provider ERROR, not a behavioral verdict.
     substantive = re.sub(r"session_id:\s*\S+", "", text).strip()
