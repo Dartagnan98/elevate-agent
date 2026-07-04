@@ -565,3 +565,64 @@ def test_browse_skills_dedup_uses_identifier_not_name(monkeypatch):
         "browse_skills() must not deduplicate browse-sh skills with the same name "
         "but different identifiers"
     )
+
+
+# ---------------------------------------------------------------------------
+# do_changes: net-new custom skills export
+# ---------------------------------------------------------------------------
+
+
+def test_do_changes_exports_net_new_custom_skills(monkeypatch, tmp_path):
+    # The bundled-diff loop is blind to skills the user AUTHORED (no bundled
+    # base). Those are the bulk of a power user's work — do_changes must list
+    # them and --export must copy them whole, while skipping bundled copies,
+    # hub installs, backups, and parked (_disabled) trees.
+    import json as _json
+
+    import tools.skills_hub as hub
+    import tools.skills_sync as sync
+    from elevate_cli.skills_hub import do_changes
+
+    user_root = tmp_path / "skills"
+    bundled_root = tmp_path / "bundled"
+
+    def mk(root, rel):
+        d = root / rel
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {d.name}\ndescription: t\n---\nbody\n", encoding="utf-8"
+        )
+        return d
+
+    mk(bundled_root, "pack/shipped")           # bundled skill
+    mk(user_root, "pack/shipped")              # user's copy of it -> not custom
+    mk(user_root, "pack/hub-skill")            # hub-installed -> not custom
+    mk(user_root, "pack/my-own")               # net-new custom -> exported
+    mk(user_root, "pack/my-own.stale-bak")     # sync backup -> skipped
+    mk(user_root, "_disabled-old/thing")       # parked -> skipped
+    snap = tmp_path / "base"
+    snap.mkdir()
+
+    hub_dir = user_root / ".hub"
+    hub_dir.mkdir(parents=True)
+    lock = hub_dir / "lock.json"
+    lock.write_text(_json.dumps({"version": 1, "installed": {"hub-skill": {}}}))
+
+    monkeypatch.setattr(sync, "SKILLS_DIR", user_root)
+    monkeypatch.setattr(sync, "base_snapshot_root", lambda: snap)
+    monkeypatch.setattr(sync, "_get_bundled_dir", lambda: bundled_root)
+    monkeypatch.setattr(sync, "_read_manifest", lambda: {})
+    monkeypatch.setattr(hub, "LOCK_FILE", lock)
+
+    buf = StringIO()
+    out_dir = tmp_path / "export"
+    do_changes(export_dir=str(out_dir), console=Console(file=buf, width=200))
+
+    text = buf.getvalue()
+    assert "1 custom skill(s)" in text
+    assert "my-own" in text
+    assert (out_dir / "custom" / "pack" / "my-own" / "SKILL.md").is_file()
+    assert not (out_dir / "custom" / "pack" / "shipped").exists()
+    assert not (out_dir / "custom" / "pack" / "hub-skill").exists()
+    assert not (out_dir / "custom" / "pack" / "my-own.stale-bak").exists()
+    assert not (out_dir / "custom" / "_disabled-old").exists()

@@ -1098,15 +1098,75 @@ def do_changes(name: Optional[str] = None, export_dir: str = "",
             continue
         shown += 1
         c.print(f"[bold cyan]— {skill_name} —[/]")
-        c.print("".join(diff_lines))
+        # Diff content is DATA — skill bodies legitimately contain bracket
+        # text like [/INST] that rich would parse as markup and crash on.
+        c.print("".join(diff_lines), markup=False, highlight=False)
         if export_dir:
             out = Path(export_dir).expanduser()
             out.mkdir(parents=True, exist_ok=True)
             (out / f"{skill_name}.diff").write_text("".join(diff_lines), encoding="utf-8")
 
-    if shown == 0:
+    # Net-new custom skills — authored on this box, not from the bundle or the
+    # hub. These are the bulk of a power user's authorship, and the diff loop
+    # above (bundled-vs-base only) is blind to them, so exporting "my
+    # improvements" used to silently drop them. List them always; on --export
+    # copy each whole skill dir under <DIR>/custom/ with a safety-scan verdict
+    # so they can be reviewed, genericized, and folded into the product.
+    from tools.skills_sync import SKILLS_DIR as user_root
+    from tools.skills_hub import LOCK_FILE
+
+    hub_names: set = set()
+    try:
+        hub_names = set((json.loads(LOCK_FILE.read_text()).get("installed") or {}).keys())
+    except Exception:
+        pass
+    bundled_dir_names = {p.name for p in bundled.values()}
+
+    customs: List[Path] = []
+    if name is None and user_root.is_dir():
+        for sm in sorted(user_root.glob("**/SKILL.md")):
+            d = sm.parent
+            rel_parts = d.relative_to(user_root).parts
+            # Hidden (.hub, .bundled-base) and parked (_disabled-*) trees are
+            # not authorship; backup suffixes are handled by the shared helper.
+            if any(seg.startswith((".", "_")) for seg in rel_parts):
+                continue
+            if is_excluded_skill_path(d):
+                continue
+            if d.name in bundled or d.name in bundled_dir_names or d.name in hub_names:
+                continue
+            customs.append(d)
+
+    if customs:
+        c.print(f"[bold cyan]— {len(customs)} custom skill(s) (yours, not from the bundle) —[/]")
+        c.print(", ".join(d.name for d in customs), markup=False, style="dim")
+        if export_dir:
+            from tools.skills_guard import scan_skill
+
+            out = Path(export_dir).expanduser() / "custom"
+            flagged = 0
+            for d in customs:
+                dest = out.joinpath(*d.relative_to(user_root).parts)
+                shutil.copytree(
+                    d, dest, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+                )
+                try:
+                    verdict = scan_skill(d, source="self").verdict
+                except Exception:
+                    verdict = "scan-error"
+                if verdict != "safe":
+                    flagged += 1
+                    c.print(f"  [yellow]{d.name}[/]: scan verdict {verdict}")
+            c.print(
+                f"[bold green]Exported {len(customs)} custom skill(s) to {out}[/]"
+                + (f" — {flagged} flagged: review before folding upstream" if flagged else "")
+                + "\n"
+            )
+
+    if shown == 0 and not customs:
         c.print("[dim]No customizations found relative to recorded bases.[/]\n")
-    elif export_dir:
+    elif export_dir and shown:
         c.print(f"[bold green]Exported {shown} diff(s) to {export_dir}[/] — "
                 f"share these to get your improvements into the product.\n")
 

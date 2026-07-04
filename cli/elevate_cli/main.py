@@ -8728,7 +8728,9 @@ Examples:
         help="Show what you customized in bundled skills (diff vs the shipped version)",
         description=(
             "Diff your skill copies against their recorded base snapshots "
-            "(~/.elevate/skills/.bundled-base/). Use this to review or share local "
+            "(~/.elevate/skills/.bundled-base/) and list custom skills you authored "
+            "(not from the bundle or hub). With --export, also copies each custom "
+            "skill whole under DIR/custom/. Use this to review or share local "
             "improvements so they can be folded into the product upstream."
         ),
     )
