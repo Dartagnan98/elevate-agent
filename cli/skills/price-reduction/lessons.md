@@ -1,5 +1,0 @@
-# price-reduction lessons
-
-<!-- [date] | what happened | rule/insight -->
-[2026-06-22] | Skill authored from the realtor's spec, modeled on collapse-sale. | Rules: (1) NEVER drop list_price before the amendment is signed — the new price only goes on the card in Phase 2, after the seller(s) sign; Phase 1 records it as extra.priceReductionPending only. (2) Approval = the SEND authorization for the amendment (unlike collapse-sale's draft-only) — but still never create/send the DigiSign envelope before the realtor approves the filled PDF. (3) NO back-on-market / just-listed framing — it's a "Price Improved" / "New Price", not a relist. (4) Marketing (landing + Buffer + Mailjet) only fires in Phase 2, after the price is firm.
-[2026-06-22] | Two-phase split. | Phase 1 = fill amendment + approval + DigiSign-send + stamp pending. Phase 2 (signed return, or gmail-doc-router detecting an inbound price amendment) = update list_price + skyslope-sync + marketing revamp. The doc router hands off to Phase 2 so a reduction that arrives by email outside the button still updates the card.
