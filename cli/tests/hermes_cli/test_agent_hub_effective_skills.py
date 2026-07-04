@@ -403,3 +403,38 @@ def test_reconcile_upgrades_all_souls_to_question_gating_autonomy(monkeypatch):
         rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
     for agent_id, want in expected.items():
         assert rows[agent_id]["config"]["soul"]["autonomy_rules"] == want
+
+
+def test_reconcile_upgrades_all_souls_to_local_first_browsing(monkeypatch):
+    # Fleet-wide rule (2026-07-03): web work prefers the local browser over
+    # paid cloud browsing. Appended to every agent's core_truths, so a soul
+    # stored at any prior default (1.2.60 or 1.2.61) stays a strict prefix and
+    # self-upgrades on reconcile — and an append-EDITED soul rebases.
+    from elevate_cli.agent_hub import DEFAULT_AGENT_DEFS
+
+    PHRASE = "Web work is local-first"
+    stored_agents: list[dict] = []
+    expected: dict[str, str] = {}
+    for default in DEFAULT_AGENT_DEFS:
+        agent_id = default["id"]
+        new_truths = default["soul"]["core_truths"]
+        assert PHRASE in new_truths, f"{agent_id} missing local-first append"
+        predecessor = new_truths.split(" " + PHRASE)[0].strip()
+        assert predecessor and new_truths.startswith(predecessor)
+        expected[agent_id] = new_truths
+        stored_agents.append({"id": agent_id, "soul": {"core_truths": predecessor}})
+
+    config = {"agent_hub": {"agents": stored_agents}}
+    monkeypatch.setattr(
+        "elevate_cli.agent_hub.load_config", lambda: copy.deepcopy(config)
+    )
+    monkeypatch.setattr("elevate_cli.config.save_config", lambda cfg: None)
+
+    reconcile_agent_hub_defaults()
+
+    from elevate_cli.data import connect, surface_state
+
+    with connect() as conn:
+        rows = {row["agent_id"]: row for row in surface_state.list_hub_agents(conn)}
+    for agent_id, want in expected.items():
+        assert rows[agent_id]["config"]["soul"]["core_truths"] == want
