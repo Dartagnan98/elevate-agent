@@ -64,11 +64,23 @@ Rules — follow every one:
 """
 
 
+def _agent_argv(prompt: str) -> list:
+    """One-shot agent argv. `chat -q` prints ONLY the reply on stdout (the
+    session trailer goes to stderr) — same invocation the behavioral eval
+    uses. Kept as a function so tests can validate the shape against the
+    real CLI parser (a bogus flag here once failed every merge at runtime).
+    """
+    return [
+        sys.executable, "-m", "elevate_cli.main", "chat",
+        "-q", prompt, "--max-turns", "2", "-Q",
+    ]
+
+
 def _default_agent_merge(prompt: str) -> Optional[str]:
     """Run the box's own agent one-shot and return its raw text output."""
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "elevate_cli.main", "-z", prompt],
+            _agent_argv(prompt),
             capture_output=True,
             text=True,
             timeout=AGENT_TIMEOUT_SECONDS,

@@ -259,3 +259,22 @@ class TestBrowserUseInjectionCorrection:
         assert "demo-skill" in result["corrected"]
         assert (dest / "SKILL.md").read_text() == SKILL_MD
         assert (skills_dir / "cat" / "demo-skill.stale-bak" / "SKILL.md").exists()
+
+
+def test_agent_argv_is_a_valid_cli_invocation():
+    # The default merge shells out to the real CLI. A bogus flag here fails
+    # every merge at runtime while mocked tests stay green (shipped once:
+    # `-z` never existed and all 80 queued merges "failed"). Appending
+    # --help makes argparse validate every flag without touching a provider.
+    import subprocess
+    import sys
+
+    from tools.skills_merge import _agent_argv
+
+    argv = _agent_argv("dummy prompt")
+    assert argv[:4] == [sys.executable, "-m", "elevate_cli.main", "chat"]
+    assert "dummy prompt" in argv
+    proc = subprocess.run(
+        [*argv, "--help"], capture_output=True, text=True, timeout=120
+    )
+    assert proc.returncode == 0, proc.stderr[-300:]
