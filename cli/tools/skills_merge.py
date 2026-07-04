@@ -72,7 +72,7 @@ def _agent_argv(prompt: str) -> list:
     """
     return [
         sys.executable, "-m", "elevate_cli.main", "chat",
-        "-q", prompt, "--max-turns", "2", "-Q",
+        "-q", prompt, "--max-turns", "2", "-Q", "--source", "tool",
     ]
 
 
