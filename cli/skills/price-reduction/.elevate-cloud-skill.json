@@ -1,0 +1,26 @@
+{
+  "name": "price-reduction",
+  "source": "elevation-real-estate-hq",
+  "manifest": {
+    "source": "content-pack",
+    "pack_id": "elevate-premium-real-estate",
+    "section": "Admin",
+    "category": "real-estate-admin",
+    "pack_label": "Elevate Premium Real Estate",
+    "description": "Reduce the list price on an active listing. Use when the user clicks the Price Reduction button or says \"price reduce [address] to [price]\", \"drop [address] to [price]\", \"reduce the price on [address]\", or \"price reduction signed on [address]\": fills the BCREA Amendment to Listing Contract (price change), shows the realtor the filled amendment for approval, and on her approval sends it to the seller(s) for signature via DigiSign. When the signed amendment returns, updates the card list_price to the new figure, runs skyslope-sync, and fires the marketing revamp (landing-page price update + Price Improved Buffer posts + Mailjet price-adjustment blast). Never a back-on-market / just-listed post -- this is a price improvement, not a relist.",
+    "entitlement": "real_estate_admin",
+    "source_path": ".claude/skills/price-reduction/SKILL.md",
+    "content_pack": {
+      "id": "elevate-premium-real-estate",
+      "label": "Elevate Premium Real Estate",
+      "version": "2026.05.27",
+      "manifest_path": "/Users/dartagnanpatricio/elevate-premium/elevate-pack.json"
+    },
+    "pack_version": "2026.05.27",
+    "dashboard_modules": [
+      "real_estate_admin"
+    ],
+    "default_job_state": "disabled",
+    "requires_entitlement": "real_estate_admin"
+  }
+}

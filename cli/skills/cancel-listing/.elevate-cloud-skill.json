@@ -1,0 +1,24 @@
+{
+  "name": "cancel-listing",
+  "source": "elevation-real-estate-hq",
+  "manifest": {
+    "source": "content-pack",
+    "pack_id": "elevate-premium-real-estate",
+    "section": "Admin",
+    "category": "real-estate-admin",
+    "pack_label": "Elevate Premium Real Estate",
+    "description": "Cancel an active listing that is NOT being relisted. Fill the Cancellation of Multiple Listing Contract, DigiSign draft after the realtor approves, email the board's listings desk to cancel the MLS, file it (SkySlope + cancelled-listings.md + Lofty), and move the seller into the ARCHIVED section. Use the Cancel button or trigger on 'cancel the listing on [address]', 'cancel [address]', 'withdraw [address]'.",
+    "entitlement": "real_estate_admin",
+    "source_path": ".claude/skills/cancel-listing/SKILL.md",
+    "content_pack": {
+      "id": "elevate-premium-real-estate",
+      "label": "Elevate Premium Real Estate",
+      "version": "2026.05.27",
+      "manifest_path": "/Users/dartagnanpatricio/elevate-premium/elevate-pack.json"
+    },
+    "pack_version": "2026.05.27",
+    "dashboard_modules": ["real_estate_admin"],
+    "default_job_state": "disabled",
+    "requires_entitlement": "real_estate_admin"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "deal-onboarding",
+  "description": "When a new user onboards (or to refresh an existing user), build or update an accurate deal score card for every deal they have in flight, at whatever lifecycle stage each one is in. Discovers their deals across the Master Sheet, CRM transactions, MLS active listings, Drive folders, and recently signed contracts; infers each deal's current stage from the evidence; and populates the score-card fields group-by-group from knowledge/deals/card-field-sources.md using the admin deal API. Never guesses prices, dates, or legal info — leaves gaps blank and adds a card reminder. Trigger on 'onboard my deals', 'set up my deal cards', 'import my deals', 'build score cards for my pipeline', 'refresh my deal cards', or the onboarding wizard's deal-population step.",
+  "category": "real-estate-admin",
+  "tags": ["real-estate", "admin", "onboarding", "deals", "score-card", "pipeline"],
+  "access": {
+    "entitlement": "real_estate_admin"
+  }
+}
