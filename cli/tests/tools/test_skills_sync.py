@@ -448,6 +448,36 @@ class TestSyncSkills:
 
         assert (user_skill / "SKILL.md").read_text() == "# User modified"
 
+    def test_empty_husk_dir_is_reclaimed_and_skill_installs(self, tmp_path):
+        """An EMPTY dest dir with no SKILL.md is stale scaffolding, not a user
+        skill — the collision guard must not let it block a new bundled skill.
+        Live case: a month-old empty dir on a customer box silently blocked
+        one skill of a 68-skill port."""
+        bundled = self._setup_bundled(tmp_path)
+        skills_dir = tmp_path / "user_skills"
+        manifest_file = skills_dir / ".bundled_manifest"
+
+        husk = skills_dir / "category" / "new-skill"
+        husk.mkdir(parents=True)  # empty: no SKILL.md, no files at all
+
+        with self._patches(bundled, skills_dir, manifest_file):
+            result = sync_skills(quiet=True)
+
+        assert (husk / "SKILL.md").is_file(), "bundled skill must install over the husk"
+        assert "new-skill" in result["copied"]
+        # A NON-empty SKILL.md-less dir stays protected (conservative guard).
+        weird = skills_dir / "category2" / "other-skill"
+        weird.mkdir(parents=True)
+        (weird / "notes.txt").write_text("user parked something here")
+        (bundled / "category2" / "other-skill").mkdir(parents=True)
+        (bundled / "category2" / "other-skill" / "SKILL.md").write_text(
+            "---\nname: other-skill\ndescription: t\n---\nb\n"
+        )
+        with self._patches(bundled, skills_dir, manifest_file):
+            sync_skills(quiet=True)
+        assert not (weird / "SKILL.md").exists(), "non-empty dir must not be overwritten"
+        assert (weird / "notes.txt").read_text() == "user parked something here"
+
     def test_collision_does_not_poison_manifest(self, tmp_path):
         """Collision with an unmanifested user skill must NOT record bundled_hash.
 

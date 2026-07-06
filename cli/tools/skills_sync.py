@@ -522,6 +522,17 @@ def sync_skills(quiet: bool = False) -> dict:
         if skill_name not in manifest:
             # ── New skill — never offered before ──
             try:
+                # A dest dir WITHOUT a SKILL.md and WITHOUT any content is a
+                # stale husk (e.g. old feature scaffolding mkdir'd the path),
+                # not a user skill — reclaim it so the bundled skill installs.
+                # Live case: an empty Jun-5 dir on a customer box silently
+                # blocked a new bundled skill via the collision guard below.
+                if (
+                    dest.is_dir()
+                    and not (dest / "SKILL.md").exists()
+                    and not any(dest.iterdir())
+                ):
+                    dest.rmdir()
                 if dest.exists():
                     # User already has a skill with the same name — don't overwrite.
                     # Only baseline in the manifest when the on-disk copy is
