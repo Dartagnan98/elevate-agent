@@ -1,6 +1,7 @@
 import {
   Suspense,
   lazy,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -1351,6 +1352,13 @@ function DesktopSidebar({
 }) {
   const { t } = useI18n();
   const location = useLocation();
+  // Derive the active session ONCE here rather than each row calling
+  // useLocation() — so a navigation re-renders only the rows whose active
+  // state flips, not the whole (now memoized) list.
+  const activeSessionId =
+    embeddedChat && location.pathname === "/chat"
+      ? new URLSearchParams(location.search).get("resume")
+      : null;
   const navigate = useNavigate();
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>(readCachedSessions);
@@ -2254,6 +2262,7 @@ function DesktopSidebar({
 
         {pinnedSessions.length > 0 && (
           <SessionSection
+            activeSessionId={activeSessionId}
             embeddedChat={embeddedChat}
             label="Pinned"
             onOpenContextMenu={openSessionMenu}
@@ -2270,6 +2279,7 @@ function DesktopSidebar({
         )}
 
         <SessionSection
+          activeSessionId={activeSessionId}
           embeddedChat={embeddedChat}
           label="Chats"
           loading={sessionsLoading}
@@ -2518,6 +2528,7 @@ function SidebarAction({
 }
 
 function SessionSection({
+  activeSessionId,
   embeddedChat,
   label,
   loading = false,
@@ -2533,6 +2544,7 @@ function SessionSection({
   unreadIds,
   needsApprovalIds,
 }: {
+  activeSessionId: string | null;
   embeddedChat: boolean;
   label: string;
   loading?: boolean;
@@ -2570,6 +2582,7 @@ function SessionSection({
   const renderSession = (session: SessionInfo) => (
     <SessionListItem
       key={session.id}
+      active={activeSessionId === session.id}
       embeddedChat={embeddedChat}
       isRenaming={renamingSessionId === session.id}
       onCancelRename={onCancelRename}
@@ -2680,7 +2693,8 @@ function SessionStatusDot({
   );
 }
 
-function SessionListItem({
+const SessionListItem = memo(function SessionListItem({
+  active = false,
   embeddedChat,
   isRenaming = false,
   onCancelRename,
@@ -2694,6 +2708,7 @@ function SessionListItem({
   needsApproval = false,
   displayTitle,
 }: {
+  active?: boolean;
   embeddedChat: boolean;
   isRenaming?: boolean;
   onCancelRename?: () => void;
@@ -2708,12 +2723,7 @@ function SessionListItem({
   displayTitle?: string;
 }) {
   const route = sessionRoute(session, embeddedChat);
-  const location = useLocation();
   const renameRef = useRef<HTMLInputElement>(null);
-  const active =
-    embeddedChat &&
-    location.pathname === "/chat" &&
-    new URLSearchParams(location.search).get("resume") === session.id;
   const title = displayTitle ?? sessionTitle(session);
   const running = isFreshActiveSession(session) && !needsApproval;
 
@@ -2806,7 +2816,7 @@ function SessionListItem({
       </div>
     </div>
   );
-}
+});
 
 function formatNextRun(iso?: string | null): string {
   if (!iso) return "—";

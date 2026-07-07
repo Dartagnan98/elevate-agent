@@ -1282,6 +1282,23 @@ html .font-courier {
   gap: 28px;
 }
 
+.chat-load-earlier {
+  align-self: center;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  background: color-mix(in srgb, var(--fg) 5%, var(--bg-2));
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.chat-load-earlier:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 9%, var(--bg-2));
+}
+
 .user-msg {
   max-width: 88%;
   padding: 7px 13px;

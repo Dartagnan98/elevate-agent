@@ -1,10 +1,12 @@
 """Session detail routes for the dashboard."""
 
+import asyncio
 import hashlib
 import json
 import mimetypes
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -239,6 +241,40 @@ def _artifact_kind(path: Path, mime_type: Optional[str]) -> str:
     return "file"
 
 
+# ── Per-open transcript coalescing cache ─────────────────────────────────
+# One session open fans out to 5 detail routes (messages/todos/plan/files/
+# artifacts), each needing the full decoded transcript. Without this they'd
+# each run a synchronous full-table read + JSON decode ON the event loop —
+# 5x the work per click, all blocking. A short TTL collapses them to one
+# read; routes call this via asyncio.to_thread so the loop never blocks.
+# ponytail: 2s TTL — side panels poll at 2.5-4s and the REST transcript read
+# only fires on open/reconnect (live streaming arrives over WS, not here).
+# Cached lists are shared read-only across routes; the /messages route's
+# in-place client_message_id/message_id backfill is idempotent, so sharing
+# is safe. Upgrade path: key on (active_id, last_message_id) if 2s staleness
+# ever shows up in the side panels.
+_MSG_CACHE: dict[str, tuple[float, list]] = {}
+_MSG_CACHE_TTL = 2.0
+_MSG_CACHE_MAX = 64
+
+
+def _load_session_messages(db, active_id):
+    """Blocking full-transcript read, coalesced by a 2s TTL. Call via
+    asyncio.to_thread from async handlers."""
+    now = time.monotonic()
+    hit = _MSG_CACHE.get(active_id)
+    if hit and hit[0] > now:
+        return hit[1]
+    messages = db.get_messages(active_id)
+    if len(_MSG_CACHE) >= _MSG_CACHE_MAX:
+        for k in [k for k, (exp, _) in _MSG_CACHE.items() if exp <= now]:
+            _MSG_CACHE.pop(k, None)
+        if len(_MSG_CACHE) >= _MSG_CACHE_MAX:
+            _MSG_CACHE.pop(next(iter(_MSG_CACHE)), None)
+    _MSG_CACHE[active_id] = (now + _MSG_CACHE_TTL, messages)
+    return messages
+
+
 def create_session_detail_router(
     *,
     get_session_db: GetSessionDb,
@@ -268,7 +304,7 @@ def create_session_detail_router(
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
-            messages = db.get_messages(active_id)
+            messages = await asyncio.to_thread(_load_session_messages, db, active_id)
             _INTERNAL_ROW_PREFIXES = (
                 "[CONTEXT COMPACTION",
                 "[Your latest Plan panel plan was preserved",
@@ -314,7 +350,7 @@ def create_session_detail_router(
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = await asyncio.to_thread(_load_session_messages, db, active_id)
         finally:
             db.close()
 
@@ -367,7 +403,7 @@ def create_session_detail_router(
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = await asyncio.to_thread(_load_session_messages, db, active_id)
         finally:
             db.close()
 
@@ -403,7 +439,7 @@ def create_session_detail_router(
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = await asyncio.to_thread(_load_session_messages, db, active_id)
         finally:
             db.close()
 
@@ -447,7 +483,7 @@ def create_session_detail_router(
             checkpoint = _read_session_checkpoint(
                 db, active_id, identity.get("lineage_root_id"), sid
             )
-            messages = db.get_messages(active_id)
+            messages = await asyncio.to_thread(_load_session_messages, db, active_id)
         finally:
             db.close()
 

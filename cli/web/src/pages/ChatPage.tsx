@@ -35,6 +35,8 @@ import {
   type GatewayEvent,
 } from "@/lib/gatewayClient";
 import { executeSlash } from "@/lib/slashExec";
+import { tailWindow } from "@/lib/tailWindow";
+import { pruneTranscriptIndex } from "@/lib/transcriptCacheIndex";
 import {
   activateStore as activateTranscriptStore,
   clear as transcriptClear,
@@ -833,7 +835,13 @@ const STATE_LABEL: Record<ConnectionState, string> = {
 };
 
 const SESSION_MESSAGE_CACHE = new Map<string, ChatMessage[]>();
+// v1 was a single blob holding all sessions — opening one chat JSON.parsed all
+// 24. v2 stores each session under its own key + a tiny index, so an open
+// parses one small index + one session. The v1 key is kept only to evict the
+// orphaned blob on first v2 write.
 const SESSION_MESSAGE_STORAGE_KEY = "elevate.chat.messageCache.v1";
+const SESSION_MESSAGE_KEY_PREFIX = "elevate.chat.msg.v2:";
+const SESSION_MESSAGE_INDEX_KEY = "elevate.chat.msg.index.v2";
 const ACTIVE_TURN_STORAGE_KEY = "elevate.chat.activeTurnCache.v1";
 const MAX_CACHED_TRANSCRIPTS = 24;
 const MAX_ACTIVE_TURN_SNAPSHOTS = 12;
@@ -841,6 +849,13 @@ const MAX_STORED_TRANSCRIPT_MESSAGES = 160;
 const MAX_STORED_TRANSCRIPT_CHARS = 220_000;
 const MAX_STORED_MESSAGE_CHARS = 16_000;
 const ACTIVE_TURN_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+// ponytail: cap the DOM to the last N rows so opening a long chat mounts N
+// nodes, not the whole history. Older rows reveal in +STEP chunks on demand.
+// This kills the O(history) mount from the click path with no virtualization
+// dep; react-virtuoso is the upgrade only if scrolling THROUGH huge histories
+// (not opening) ever becomes the complaint.
+const MESSAGE_WINDOW_SIZE = 60;
+const MESSAGE_WINDOW_STEP = 60;
 let SHARED_CHAT_GATEWAY: GatewayClient | null = null;
 let SHARED_CHAT_GATEWAY_VERSION = 0;
 
@@ -849,7 +864,7 @@ interface StoredTranscriptCacheEntry {
   updatedAt: number;
 }
 
-type StoredTranscriptCache = Record<string, StoredTranscriptCacheEntry>;
+type StoredTranscriptIndex = Record<string, number>; // sessionId -> updatedAt
 
 interface ActiveTurnSnapshot {
   message: ChatMessage;
@@ -1319,17 +1334,40 @@ export const __chatPageTestables = {
   toolTarget,
 };
 
-function readStoredTranscriptCache(): StoredTranscriptCache {
+function sessionMessageStorageKey(sessionId: string): string {
+  return `${SESSION_MESSAGE_KEY_PREFIX}${sessionId}`;
+}
+
+function readStoredTranscriptIndex(): StoredTranscriptIndex {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(SESSION_MESSAGE_STORAGE_KEY);
+    const raw = window.localStorage.getItem(SESSION_MESSAGE_INDEX_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as StoredTranscriptCache
+      ? (parsed as StoredTranscriptIndex)
       : {};
   } catch {
     return {};
+  }
+}
+
+function readStoredTranscriptEntry(
+  sessionId: string,
+): StoredTranscriptCacheEntry | null {
+  if (typeof window === "undefined" || !sessionId) return null;
+  try {
+    const raw = window.localStorage.getItem(sessionMessageStorageKey(sessionId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredTranscriptCacheEntry;
+    return parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      Array.isArray(parsed.messages)
+      ? parsed
+      : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1732,35 +1770,65 @@ function trimTranscriptForStorage(messages: ChatMessage[]): ChatMessage[] {
 
 function writeStoredTranscript(sessionId: string, messages: ChatMessage[]): void {
   if (typeof window === "undefined" || !sessionId || !messages.length) return;
-  const cache = readStoredTranscriptCache();
-  cache[sessionId] = {
+  // One-time: drop the orphaned v1 blob that held every session.
+  try {
+    window.localStorage.removeItem(SESSION_MESSAGE_STORAGE_KEY);
+  } catch {
+    // best-effort
+  }
+  const entry: StoredTranscriptCacheEntry = {
     messages: trimTranscriptForStorage(messages),
     updatedAt: Date.now(),
   };
-  const entries = Object.entries(cache)
-    .filter(([, entry]) => Array.isArray(entry?.messages) && entry.messages.length)
-    .sort(([, a], [, b]) => (b.updatedAt || 0) - (a.updatedAt || 0))
-    .slice(0, MAX_CACHED_TRANSCRIPTS);
-  try {
-    window.localStorage.setItem(
-      SESSION_MESSAGE_STORAGE_KEY,
-      JSON.stringify(Object.fromEntries(entries)),
-    );
-  } catch {
+  // LRU-prune to MAX_CACHED_TRANSCRIPTS by dropping the oldest data keys —
+  // enumerating a small index, never parsing every session's messages.
+  const { keep, evict } = pruneTranscriptIndex(
+    readStoredTranscriptIndex(),
+    sessionId,
+    entry.updatedAt,
+    MAX_CACHED_TRANSCRIPTS,
+  );
+  for (const id of evict) {
     try {
-      const smaller = Object.fromEntries(entries.slice(0, Math.max(4, Math.floor(entries.length / 2))));
-      window.localStorage.setItem(SESSION_MESSAGE_STORAGE_KEY, JSON.stringify(smaller));
+      window.localStorage.removeItem(sessionMessageStorageKey(id));
     } catch {
-      // Cache persistence is best-effort.
+      // best-effort
     }
   }
+  const writeWith = (keepList: [string, number][]): boolean => {
+    try {
+      window.localStorage.setItem(sessionMessageStorageKey(sessionId), JSON.stringify(entry));
+      window.localStorage.setItem(
+        SESSION_MESSAGE_INDEX_KEY,
+        JSON.stringify(Object.fromEntries(keepList)),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (writeWith(keep)) return;
+  // Quota fallback: drop the oldest half of the remaining sessions and retry,
+  // keeping the one we're writing now.
+  const half = Math.max(4, Math.floor(keep.length / 2));
+  for (const [id] of keep.slice(half)) {
+    if (id === sessionId) continue;
+    try {
+      window.localStorage.removeItem(sessionMessageStorageKey(id));
+    } catch {
+      // best-effort
+    }
+  }
+  const trimmed = keep.slice(0, half).filter(([id]) => id !== sessionId);
+  trimmed.push([sessionId, entry.updatedAt]);
+  writeWith(trimmed);
 }
 
 function restoreTranscript(sessionId: string): ChatMessage[] | null {
   if (!sessionId) return null;
   const memory = SESSION_MESSAGE_CACHE.get(sessionId);
   if (memory?.length) return memory;
-  const entry = readStoredTranscriptCache()[sessionId];
+  const entry = readStoredTranscriptEntry(sessionId);
   const restored = normalizeCachedTranscript(entry?.messages);
   if (restored) {
     SESSION_MESSAGE_CACHE.set(sessionId, restored);
@@ -3002,6 +3070,11 @@ export default function ChatPage() {
   const chatStickToBottomRef = useRef(true);
   const pendingInitialBottomScrollRef = useRef(true);
   const scrollSessionKeyRef = useRef<string | null>(null);
+  // How many transcript rows are actually rendered (tail-windowed). Reset per
+  // chat switch; grows via the "Load earlier" control. earlierAnchorRef holds
+  // the pre-grow scroll metrics so a reveal doesn't jump the viewport.
+  const [renderWindow, setRenderWindow] = useState(MESSAGE_WINDOW_SIZE);
+  const earlierAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   // Live mirrors of tools/activityTrace so the message.complete handler
   // can snapshot the finished turn without a stale-closure read.
   const toolsRef = useRef<ToolEntry[]>([]);
@@ -4231,6 +4304,8 @@ export default function ChatPage() {
     scrollSessionKeyRef.current = key;
     chatStickToBottomRef.current = true;
     pendingInitialBottomScrollRef.current = true;
+    earlierAnchorRef.current = null;
+    setRenderWindow(MESSAGE_WINDOW_SIZE);
   }, [newChatId, resumeId, seedKey]);
 
   useEffect(() => {
@@ -7979,6 +8054,23 @@ export default function ChatPage() {
   const latestVisibleMessage = visibleMessages[visibleMessages.length - 1] ?? null;
   const latestVisibleMessageId = latestVisibleMessage?.id ?? "";
   const latestVisibleMessageContentLength = latestVisibleMessage?.content.length ?? 0;
+  // Render only the tail window; everything above (scroll stick, streaming,
+  // per-message lookups keyed by id) still sees the full list, so behavior is
+  // unchanged — only the DOM node count drops.
+  const { items: windowedMessages, hasEarlier: hasEarlierMessages } = tailWindow(
+    visibleMessages,
+    renderWindow,
+  );
+  const revealEarlierMessages = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (el) {
+      earlierAnchorRef.current = {
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
+    setRenderWindow((n) => n + MESSAGE_WINDOW_STEP);
+  }, []);
 
   const handleChatScroll = useCallback((event: ReactUIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
@@ -8019,6 +8111,18 @@ export default function ChatPage() {
     tools.length,
     visibleMessages.length,
   ]);
+  // After "Load earlier" prepends older rows, keep the viewport where it was
+  // (the content the user was reading shifts down by the new rows' height).
+  // No-op on chat switch (anchor is null there) — the effect above handles
+  // the initial bottom scroll.
+  useLayoutEffect(() => {
+    const anchor = earlierAnchorRef.current;
+    if (!anchor) return;
+    earlierAnchorRef.current = null;
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight - anchor.scrollHeight + anchor.scrollTop;
+  }, [renderWindow]);
   const artifactsByMessage = useMemo(() => {
     const grouped = new Map<string, ArtifactEntry[]>();
     for (const artifact of artifacts) {
@@ -8723,8 +8827,17 @@ export default function ChatPage() {
               />
             ) : (
               <div className="chat-inner w-full">
-                {visibleMessages.map((message, index) => {
-                  const isLatest = index === visibleMessages.length - 1;
+                {hasEarlierMessages && (
+                  <button
+                    type="button"
+                    className="chat-load-earlier"
+                    onClick={revealEarlierMessages}
+                  >
+                    Load earlier messages
+                  </button>
+                )}
+                {windowedMessages.map((message, index) => {
+                  const isLatest = index === windowedMessages.length - 1;
                   // A finished async delegation is stored as a user-role
                   // ⟦subagent-result⟧ marker (so the agent keeps it in context).
                   // Render it as a "sub agent completed" card with a status dot,
