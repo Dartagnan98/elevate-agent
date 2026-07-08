@@ -3802,6 +3802,10 @@ class AIAgent:
                     existing_steer_client_ids = set()
             return client_message_id in existing_steer_client_ids
 
+        # Cursor of the last fully-handled message (appended or intentionally
+        # skipped). Advanced per-message so a mid-batch append failure can't
+        # replay committed rows on the next flush → duplicate transcript rows (A3).
+        idx = self._last_flushed_db_idx
         try:
             # If create_session() failed at startup (e.g. transient lock), the
             # session row may not exist yet.  ensure_session() uses INSERT OR
@@ -3813,6 +3817,7 @@ class AIAgent:
             )
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
+            idx = flush_from
             for msg in messages[flush_from:]:
                 role = msg.get("role", "unknown")
                 content = self._strip_image_parts_for_persistence(msg.get("content"))
@@ -3823,6 +3828,7 @@ class AIAgent:
                     and client_message_id.startswith("steer.")
                     and _has_existing_steer_client_id(client_message_id)
                 ):
+                    idx += 1
                     continue
                 if (
                     role == "user"
@@ -3877,9 +3883,18 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     client_message_id=client_message_id,
                 )
+                idx += 1
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
-            logger.warning("Session DB append_message failed: %s", e)
+            # Commit the cursor up to the last message actually persisted, so a
+            # retry resumes at the failed message instead of re-appending the
+            # rows already committed this batch (duplicate transcript rows — A3).
+            self._last_flushed_db_idx = idx
+            logger.error(
+                "Session DB append_message failed at message %d/%d; flush cursor "
+                "advanced to %d to avoid duplicate re-writes: %s",
+                idx, len(messages), idx, e,
+            )
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
