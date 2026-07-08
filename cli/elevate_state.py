@@ -2449,11 +2449,30 @@ class SessionDB:
         except Exception as exc:
             logger.debug("PG shadow replace_messages failed for %s: %s", session_id, exc)
 
+    def _sqlite_message_count(self, session_id: str) -> int:
+        """Authoritative local message count (index-only COUNT under the lock).
+
+        Used to detect a short/stale PG-first read: a silently-dropped shadow
+        write leaves Postgres behind SQLite, and a PG-first read would otherwise
+        serve the truncated copy to the customer and the agent's context.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row["n"])
+        except (KeyError, TypeError, IndexError):
+            return int(row[0])
+
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by insertion order.
 
         PG-first when ELEVATE_SESSIONDB_READ_FROM_PG=1; SQLite fallback on
-        empty/error so production stays safe during cutover soak.
+        empty/error/short so production stays safe during cutover soak.
         """
         if _read_from_pg():
             try:
@@ -2473,7 +2492,18 @@ class SessionDB:
                                 )
                                 msg["tool_calls"] = []
                         result.append(msg)
-                    return result
+                    # Trust PG only if it is at least as complete as the
+                    # authoritative SQLite copy. A dropped shadow write leaves PG
+                    # short; serve SQLite then. Do NOT fall back when SQLite has
+                    # fewer/zero rows — a foreign session lives only in PG.
+                    sqlite_count = self._sqlite_message_count(session_id)
+                    if sqlite_count <= len(result):
+                        return result
+                    logger.warning(
+                        "get_messages: PG returned %d rows but SQLite has %d for "
+                        "session %s; serving authoritative SQLite (dropped shadow write?)",
+                        len(result), sqlite_count, session_id,
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("get_messages PG read failed, falling back: %s", exc)
         with self._lock:
@@ -2781,6 +2811,18 @@ class SessionDB:
                     "get_messages_as_conversation PG read failed, falling back: %s",
                     exc,
                 )
+        # Fall back to authoritative SQLite when PG is missing OR short. PG-first
+        # can serve a truncated lineage after a dropped shadow write, and an empty
+        # (non-None) PG result must not skip the fallback either.
+        if rows is not None:
+            sqlite_count = sum(self._sqlite_message_count(sid) for sid in session_ids)
+            if sqlite_count > len(rows):
+                logger.warning(
+                    "get_messages_as_conversation: PG returned %d rows but SQLite "
+                    "has %d across %d session(s); serving SQLite",
+                    len(rows), sqlite_count, len(session_ids),
+                )
+                rows = None
         if rows is None:
             with self._lock:
                 placeholders = ",".join("?" for _ in session_ids)
@@ -3367,7 +3409,12 @@ class SessionDB:
         if _read_from_pg():
             try:
                 from elevate_cli.data.chat_sessions import message_count as _pg_message_count
-                return _pg_message_count(session_id)
+                pg_count = _pg_message_count(session_id)
+                if session_id:
+                    # SQLite is authoritative for a specific session; a dropped
+                    # shadow write leaves PG short. Return the larger.
+                    return max(pg_count, self._sqlite_message_count(session_id))
+                return pg_count
             except Exception as exc:  # noqa: BLE001
                 logger.debug("message_count PG read failed, falling back: %s", exc)
         with self._lock:
