@@ -158,7 +158,6 @@ class FactRetriever:
             # Fallback to keyword search on entity name
             return self.search(entity, category=category, limit=limit)
 
-        conn = self.store._conn
 
         # Encode entity as role-bound vector
         role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
@@ -168,10 +167,10 @@ class FactRetriever:
         # Try category-specific bank first, then all facts
         if category:
             bank_name = f"cat:{category}"
-            bank_row = conn.execute(
+            bank_row = self.store._read_one(
                 "SELECT vector FROM memory_banks WHERE bank_name = ?",
                 (bank_name,),
-            ).fetchone()
+            )
             if bank_row:
                 bank_vec = hrr.bytes_to_phases(bank_row["vector"])
                 extracted = hrr.unbind(bank_vec, probe_key)
@@ -187,7 +186,7 @@ class FactRetriever:
             where += " AND category = ?"
             params.append(category)
 
-        rows = conn.execute(
+        rows = self.store._read_all(
             f"""
             SELECT fact_id, content, category, tags, trust_score,
                    retrieval_count, helpful_count, created_at, updated_at,
@@ -196,7 +195,7 @@ class FactRetriever:
             {where}
             """,
             params,
-        ).fetchall()
+        )
 
         if not rows:
             # Final fallback: keyword search
@@ -237,7 +236,6 @@ class FactRetriever:
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
 
-        conn = self.store._conn
 
         # Encode entity as a bare atom (not role-bound — we want ANY structural match)
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
@@ -249,7 +247,7 @@ class FactRetriever:
             where += " AND category = ?"
             params.append(category)
 
-        rows = conn.execute(
+        rows = self.store._read_all(
             f"""
             SELECT fact_id, content, category, tags, trust_score,
                    retrieval_count, helpful_count, created_at, updated_at,
@@ -258,7 +256,7 @@ class FactRetriever:
             {where}
             """,
             params,
-        ).fetchall()
+        )
 
         if not rows:
             return self.search(entity, category=category, limit=limit)
@@ -312,7 +310,6 @@ class FactRetriever:
             query = " ".join(entities)
             return self.search(query, category=category, limit=limit)
 
-        conn = self.store._conn
         role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
 
         # For each entity, compute what the bank "remembers" about it
@@ -330,7 +327,7 @@ class FactRetriever:
             where += " AND category = ?"
             params.append(category)
 
-        rows = conn.execute(
+        rows = self.store._read_all(
             f"""
             SELECT fact_id, content, category, tags, trust_score,
                    retrieval_count, helpful_count, created_at, updated_at,
@@ -339,7 +336,7 @@ class FactRetriever:
             {where}
             """,
             params,
-        ).fetchall()
+        )
 
         if not rows:
             query = " ".join(entities)
@@ -388,7 +385,6 @@ class FactRetriever:
         if not hrr._HAS_NUMPY:
             return []
 
-        conn = self.store._conn
 
         # Get all facts with vectors and their linked entities
         where = "WHERE f.hrr_vector IS NOT NULL"
@@ -397,7 +393,7 @@ class FactRetriever:
             where += " AND f.category = ?"
             params.append(category)
 
-        rows = conn.execute(
+        rows = self.store._read_all(
             f"""
             SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
                    f.created_at, f.updated_at, f.hrr_vector
@@ -405,7 +401,7 @@ class FactRetriever:
             {where}
             """,
             params,
-        ).fetchall()
+        )
 
         if len(rows) < 2:
             return []
@@ -422,14 +418,14 @@ class FactRetriever:
         fact_entities: dict[int, set[str]] = {}
         for row in rows:
             fid = row["fact_id"]
-            entity_rows = conn.execute(
+            entity_rows = self.store._read_all(
                 """
                 SELECT e.name FROM entities e
                 JOIN fact_entities fe ON fe.entity_id = e.entity_id
                 WHERE fe.fact_id = ?
                 """,
                 (fid,),
-            ).fetchall()
+            )
             fact_entities[fid] = {r["name"].lower() for r in entity_rows}
 
         # Compare all pairs: high entity overlap + low content similarity = contradiction
@@ -483,7 +479,6 @@ class FactRetriever:
         limit: int = 10,
     ) -> list[dict]:
         """Score facts by similarity to a target vector."""
-        conn = self.store._conn
 
         where = "WHERE hrr_vector IS NOT NULL AND COALESCE(status, 'active') = 'active'"
         params: list = []
@@ -491,7 +486,7 @@ class FactRetriever:
             where += " AND category = ?"
             params.append(category)
 
-        rows = conn.execute(
+        rows = self.store._read_all(
             f"""
             SELECT fact_id, content, category, tags, trust_score,
                    retrieval_count, helpful_count, created_at, updated_at,
@@ -500,7 +495,7 @@ class FactRetriever:
             {where}
             """,
             params,
-        ).fetchall()
+        )
 
         scored = []
         for row in rows:
@@ -527,14 +522,6 @@ class FactRetriever:
         Uses the store's database connection directly for FTS5 MATCH
         with rank scoring. Normalizes FTS5 rank to [0, 1] range.
         """
-        conn = self.store._conn
-
-        def rollback_quietly() -> None:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-
         def pg_candidates(search_query: str) -> list:
             """Use the Postgres tsvector index created by the memory migration."""
             pg_params: list = [search_query]
@@ -558,9 +545,8 @@ class FactRetriever:
             """
             pg_params.append(limit)
             try:
-                return conn.execute(pg_sql, pg_params).fetchall()
+                return self.store._read_all(pg_sql, pg_params)
             except Exception:
-                rollback_quietly()
                 return []
 
         rows = pg_candidates(query)
@@ -596,9 +582,8 @@ class FactRetriever:
             params.append(limit)
 
             try:
-                rows = conn.execute(sql, params).fetchall()
+                rows = self.store._read_all(sql, params)
             except Exception:
-                rollback_quietly()
                 rows = []
 
         if not rows:
@@ -606,9 +591,8 @@ class FactRetriever:
             if fallback_query and fallback_query != query:
                 fallback_params = [fallback_query, *params[1:]]
                 try:
-                    rows = conn.execute(sql, fallback_params).fetchall()
+                    rows = self.store._read_all(sql, fallback_params)
                 except Exception:
-                    rollback_quietly()
                     rows = []
 
         if not rows:

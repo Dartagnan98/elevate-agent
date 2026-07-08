@@ -491,6 +491,38 @@ class MemoryStore:
         self._init_db()
 
     # ------------------------------------------------------------------
+    # Locked reads
+    # ------------------------------------------------------------------
+    # The FactRetriever runs on a background prefetch daemon thread and shares
+    # this one autocommit=False connection with main-thread writes. Every read
+    # MUST hold _lock, or a reader collides with a concurrent write ("another
+    # operation is in progress") and its error-path rollback aborts the
+    # writer's uncommitted transaction — silent memory loss. Keep the lock
+    # span to execute+fetch only; scoring loops and network calls stay outside.
+
+    def _read_all(self, sql: str, params=None) -> list:
+        with self._lock:
+            try:
+                return self._conn.execute(sql, params or []).fetchall()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+    def _read_one(self, sql: str, params=None):
+        with self._lock:
+            try:
+                return self._conn.execute(sql, params or []).fetchone()
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                raise
+
+    # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
