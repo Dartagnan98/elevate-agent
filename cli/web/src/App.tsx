@@ -87,6 +87,7 @@ import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { SidebarUserPill } from "@/components/SidebarUserPill";
 import { Toast } from "@/components/Toast";
 import { RouteSkeleton } from "@/components/route-skeletons";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useI18n } from "@/i18n";
@@ -1028,24 +1029,68 @@ export default function App() {
                     !isChatRoute && !isConfigRoute && !isAdminRoute && !isLeadsRoute && !isTodayRoute && "elevate-route-transition",
                   )}
                 >
-                  <Suspense
-                    fallback={<RouteBundleFallback />}
+                  <ErrorBoundary
+                    key={pathname}
+                    label="route"
+                    fallback={(error, reset) => (
+                      <div
+                        role="alert"
+                        style={{
+                          padding: "48px 24px",
+                          textAlign: "center",
+                          color: "var(--fg, #14181f)",
+                        }}
+                      >
+                        <p style={{ fontWeight: 650, margin: "0 0 8px" }}>
+                          This page hit an error
+                        </p>
+                        <p
+                          style={{
+                            margin: "0 0 16px",
+                            opacity: 0.7,
+                            fontSize: "13px",
+                            overflowWrap: "anywhere",
+                          }}
+                        >
+                          {error.message || "Unexpected error rendering this view."}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={reset}
+                          style={{
+                            padding: "7px 16px",
+                            borderRadius: "8px",
+                            border: "1px solid var(--border, #c2ccd6)",
+                            background: "var(--accent, #0c7a82)",
+                            color: "#fff",
+                            cursor: "pointer",
+                            fontSize: "13px",
+                          }}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    )}
                   >
-                    <Routes>
-                      {routes.map(({ key, path, element }) => (
-                        <Route key={key} path={path} element={element} />
-                      ))}
-                      <Route
-                        path="*"
-                        element={
-                          <Navigate
-                            to={realEstateDashboard ? "/today" : "/hub"}
-                            replace
-                          />
-                        }
-                      />
-                    </Routes>
-                  </Suspense>
+                    <Suspense
+                      fallback={<RouteBundleFallback />}
+                    >
+                      <Routes>
+                        {routes.map(({ key, path, element }) => (
+                          <Route key={key} path={path} element={element} />
+                        ))}
+                        <Route
+                          path="*"
+                          element={
+                            <Navigate
+                              to={realEstateDashboard ? "/today" : "/hub"}
+                              replace
+                            />
+                          }
+                        />
+                      </Routes>
+                    </Suspense>
+                  </ErrorBoundary>
                 </div>
               </div>
               <PluginSlot name="post-main" />

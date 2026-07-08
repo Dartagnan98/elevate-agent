@@ -3,6 +3,8 @@ import { BrowserRouter } from "react-router-dom";
 import { markStartup } from "./lib/startup-performance";
 import "./index.css";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { GlobalErrorToasts } from "./components/GlobalErrorToasts";
 import { SystemActionsProvider } from "./contexts/SystemActions";
 import { I18nProvider } from "./i18n";
 import { exposePluginSDK } from "./plugins";
@@ -16,13 +18,16 @@ markStartup("web:plugin-sdk-exposed");
 
 markStartup("web:react-render-start");
 createRoot(document.getElementById("root")!).render(
-  <BrowserRouter>
-    <I18nProvider>
-      <ThemeProvider>
-        <SystemActionsProvider>
-          <App />
-        </SystemActionsProvider>
-      </ThemeProvider>
-    </I18nProvider>
-  </BrowserRouter>,
+  <ErrorBoundary label="root">
+    <GlobalErrorToasts />
+    <BrowserRouter>
+      <I18nProvider>
+        <ThemeProvider>
+          <SystemActionsProvider>
+            <App />
+          </SystemActionsProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    </BrowserRouter>
+  </ErrorBoundary>,
 );
