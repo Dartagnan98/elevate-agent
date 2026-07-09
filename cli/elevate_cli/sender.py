@@ -78,6 +78,23 @@ def _stub_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 _DISPATCHERS: dict[str, Dispatcher] = {}
 
 
+def sandbox_enabled() -> bool:
+    """True when outreach must NEVER reach a real recipient.
+
+    Guaranteed-safe kill switch for tests, demos, and dry runs. When set,
+    every channel routes through ``_stub_dispatch`` — no Messages.app send,
+    no Composio ``execute_tool``, no agent dispatcher — regardless of what
+    ``_wire_default_dispatchers`` registered. This is the *only* mode that
+    provides a single, defense-in-depth guarantee across ALL channels;
+    ``ELEVATE_SENDER_DISABLE_AGENT`` alone still leaves native SMS live.
+
+    Enable with ``ELEVATE_OUTREACH_SANDBOX=1`` (aliases: true/yes/on).
+    """
+    return (os.getenv("ELEVATE_OUTREACH_SANDBOX", "") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def register_dispatcher(channel: str, dispatcher: Dispatcher) -> None:
     """Register a channel-specific dispatcher. Phase 5a wires Composio
     toolkits + Twilio through here."""
@@ -85,6 +102,10 @@ def register_dispatcher(channel: str, dispatcher: Dispatcher) -> None:
 
 
 def get_dispatcher(channel: str) -> Dispatcher:
+    # Sandbox is checked at dispatch time (not just wiring time) so it holds
+    # even if a real dispatcher was registered before the flag was set.
+    if sandbox_enabled():
+        return _stub_dispatch
     return _DISPATCHERS.get(channel, _stub_dispatch)
 
 
@@ -718,6 +739,10 @@ def _wire_default_dispatchers() -> None:
     - email / social_dm: low-tier-GPT agent dispatcher.
     Disable both with `ELEVATE_SENDER_DISABLE_AGENT` so harnesses keep the stub.
     """
+    if sandbox_enabled():
+        # Belt-and-suspenders: don't even register real transports. get_dispatcher
+        # also guards, but this keeps _DISPATCHERS clean under sandbox.
+        return
     if os.getenv("ELEVATE_SENDER_DISABLE_AGENT"):
         return
     sms_mode = (os.getenv("ELEVATE_SMS_DISPATCHER") or "native").lower()
