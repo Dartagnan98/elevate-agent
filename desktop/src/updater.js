@@ -40,8 +40,11 @@ function createUpdaterController({
   async function runUpdaterCheck(reason) {
     if (app.isPackaged && !fs.existsSync(updateConfigPath())) {
       const message = "update metadata is not bundled";
+      // Log-only (D5): this is a packaging gap the user CANNOT fix, so don't
+      // strand them behind a permanent "update error" card that never
+      // self-recovers. A build-time assert (finalize-mac-dist) catches a missing
+      // app-update.yml before ship. Leave updateState untouched.
       log.warn(`[updater] skip check (${reason}) — ${message}`);
-      broadcastUpdaterEvent({ status: "error", info: null, progress: null, error: message });
       return { ok: false, message };
     }
 

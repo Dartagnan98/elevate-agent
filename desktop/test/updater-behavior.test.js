@@ -67,16 +67,17 @@ function loadUpdater({
   };
 }
 
-test("missing packaged update metadata is a visible updater failure", async () => {
+test("missing packaged update metadata is log-only, not a permanent error card (D5)", async () => {
   const updater = loadUpdater({ hasMetadata: false });
 
   const result = await updater.handlers.get("updater:check")();
 
   assert.equal(result.ok, false);
   assert.equal(result.message, "update metadata is not bundled");
-  assert.equal(updater.handlers.get("updater:status")().status, "error");
-  assert.equal(updater.sent.at(-1).channel, "updater:event");
-  assert.equal(updater.sent.at(-1).payload.error, "update metadata is not bundled");
+  // A packaging gap the user can't fix must NOT surface a permanent error —
+  // status stays idle and nothing is broadcast to the renderer.
+  assert.equal(updater.handlers.get("updater:status")().status, "idle");
+  assert.equal(updater.sent.length, 0);
   assert.equal(updater.checkCalls, 0);
 });
 

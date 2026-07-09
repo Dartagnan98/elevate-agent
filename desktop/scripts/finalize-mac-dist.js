@@ -95,6 +95,19 @@ for (const name of required) {
   }
 }
 
+// D5: a packaged app MUST carry app-update.yml in Resources, or every client
+// shows a permanent "update metadata is not bundled" state. Catch it here at
+// build time instead of on the customer's machine.
+for (const appDir of ["mac", "mac-arm64"]) {
+  const appPath = path.join(DIST, appDir, "Elevate.app");
+  const updateYml = path.join(appPath, "Contents", "Resources", "app-update.yml");
+  if (fs.existsSync(appPath) && !fs.existsSync(updateYml)) {
+    throw new Error(
+      `[finalize] ${appDir}/Elevate.app missing Contents/Resources/app-update.yml — the auto-updater would break for every client`,
+    );
+  }
+}
+
 const dmgs = required.filter((name) => name.endsWith(".dmg"));
 console.log(`[finalize] signing/notarizing ${dmgs.length} DMG artifact(s) as ${identity}`);
 for (const dmg of dmgs) {
