@@ -1619,19 +1619,29 @@ class SessionDB:
         input ``session_id`` if it isn't part of a compression chain (or if the
         input itself doesn't exist).
         """
-        # PG-first: sessions (and their parent_session_id lineage) are
-        # PG-backed post-cutover. The SQLite walk below reads stale rows when
-        # writes go to PG, so the resume path would never find the compressed
-        # child and would loop re-compacting. Resolve against PG when active.
+        # PG-first: sessions/lineage are PG-backed post-cutover, so PG resolves
+        # the fresh tip. But a silently-dropped shadow write (in EITHER
+        # direction) can leave ONE store missing the newest compression child —
+        # so after PG we CONTINUE the walk against SQLite from PG's tip. This is
+        # direction-agnostic: it never regresses below PG's tip and picks up any
+        # child PG didn't know about (the dropped-shadow case that would
+        # otherwise resume an ended parent and loop re-compacting). Idempotent
+        # when PG is already complete.
+        start = session_id
         if _read_from_pg():
             try:
                 from elevate_cli.data.chat_sessions import (
                     get_compression_tip as _pg_get_compression_tip,
                 )
-                return _pg_get_compression_tip(session_id)
+                pg_tip = _pg_get_compression_tip(session_id)
+                if pg_tip:
+                    start = pg_tip
             except Exception as exc:
                 logger.debug("PG compression-tip lookup failed for %s: %s", session_id, exc)
+        return self._compression_tip_sqlite(start)
 
+    def _compression_tip_sqlite(self, session_id: str) -> Optional[str]:
+        """Walk the compression-continuation chain forward in SQLite."""
         current = session_id
         # Bound the walk defensively — compression chains this deep are
         # pathological and shouldn't happen in practice. 100 = plenty.
