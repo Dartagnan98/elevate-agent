@@ -33,18 +33,50 @@ function createStartupLogger(log, startedAt = Date.now()) {
   };
 }
 
-function installMainCrashCapture({ app, log, formatCrashForLog: crashFormatter = formatCrashForLog }) {
+function installMainCrashCapture({
+  app,
+  log,
+  reportCrash,
+  formatCrashForLog: crashFormatter = formatCrashForLog,
+}) {
+  const canReport = typeof reportCrash === "function";
+
   process.on("uncaughtException", (err) => {
     log.error(`[main:uncaughtException] ${crashFormatter(err)}`);
-    try {
-      app.exit(1);
-    } catch {
-      process.exit(1);
+    const exit = () => {
+      try {
+        app.exit(1);
+      } catch {
+        process.exit(1);
+      }
+    };
+    if (!canReport) {
+      exit();
+      return;
     }
+    // Give the (opt-in) crash report a moment to flush, but NEVER let it hang
+    // the exit — a bounded timeout always wins.
+    let done = false;
+    const exitOnce = () => {
+      if (done) return;
+      done = true;
+      exit();
+    };
+    Promise.resolve()
+      .then(() => reportCrash(err, "uncaughtException"))
+      .catch(() => {})
+      .finally(exitOnce);
+    const timer = setTimeout(exitOnce, 1500);
+    if (timer && typeof timer.unref === "function") timer.unref();
   });
 
   process.on("unhandledRejection", (reason) => {
     log.error(`[main:unhandledRejection] ${crashFormatter(reason)}`);
+    if (canReport) {
+      Promise.resolve()
+        .then(() => reportCrash(reason, "unhandledRejection"))
+        .catch(() => {});
+    }
   });
 }
 

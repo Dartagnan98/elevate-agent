@@ -34,6 +34,7 @@ const desktopMenu = require("./menu");
 const { createSmsOutbox } = require("./sms-outbox");
 const startupLog = require("./startup-log");
 const { createUpdaterController } = require("./updater");
+const { createCrashReporter } = require("./crash-reporter");
 const { createInstallerController } = require("./installer");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
@@ -289,7 +290,13 @@ function formatCrashForLog(reason) {
 }
 
 function installMainCrashCapture() {
-  startupLog.installMainCrashCapture({ app, log, formatCrashForLog });
+  const crashReporter = createCrashReporter({ app, log, version: app.getVersion() });
+  startupLog.installMainCrashCapture({
+    app,
+    log,
+    formatCrashForLog,
+    reportCrash: crashReporter.reportCrash,
+  });
 }
 
 installMainCrashCapture();

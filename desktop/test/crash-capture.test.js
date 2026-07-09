@@ -20,8 +20,15 @@ test("main process crash handlers write supportable log breadcrumbs", () => {
   const startupLog = readStartupLog();
 
   assert.match(main, /function formatCrashForLog\(reason\)/);
-  assert.match(main, /installMainCrashCapture\(\{\s*app,\s*log,\s*formatCrashForLog\s*\}\)/);
+  assert.match(
+    main,
+    /installMainCrashCapture\(\{[\s\S]*?app,[\s\S]*?log,[\s\S]*?formatCrashForLog,[\s\S]*?reportCrash:[\s\S]*?\}\)/,
+  );
   assert.match(main, /installMainCrashCapture\(\);\s*markStartup\("main:module-loaded"\);/);
+  // B4: the opt-in crash reporter is created and wired into the crash path.
+  assert.match(main, /createCrashReporter\(/);
+  assert.match(startupLog, /reportCrash\(err, "uncaughtException"\)/);
+  assert.match(startupLog, /reportCrash\(reason, "unhandledRejection"\)/);
   assert.match(startupLog, /reason && reason\.stack/);
   assert.match(startupLog, /process\.on\("uncaughtException",\s*\(err\) =>/);
   assert.match(startupLog, /\[main:uncaughtException\]/);
