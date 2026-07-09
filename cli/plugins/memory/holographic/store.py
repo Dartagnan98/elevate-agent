@@ -403,6 +403,13 @@ def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
 
+def _strip_value_tokens(text: str) -> str:
+    """Collapse numeric/value tokens so two facts that differ ONLY in a number
+    compare equal (a correction like "$500k" → "$750k"), while genuinely
+    different facts ("red" → "blue") do not."""
+    return re.sub(r"\d[\d,.$%kKmMbB]*", "#", str(text)).strip().lower()
+
+
 def _open_persistent_pg():
     """Open a long-lived psycopg connection to the embedded PG and wrap
     it in the sqlite-compatible ``PgConnection`` shim.
@@ -1167,6 +1174,17 @@ class MemoryStore:
             len(new_content) > len(old_content)
             and fact_quality.key_tokens(old_content) <= fact_quality.key_tokens(new_content)
         )
+        # A same-shape write that changes only a numeric/value token (e.g.
+        # "$500k" → "$750k") is a CORRECTION, not a dup — supersede the old value
+        # instead of silently keeping it and telling the agent it saved. Genuine
+        # non-numeric differences don't strip-equal, so they stay reinforcement
+        # (the caller's dedup threshold already gated what reaches this merge).
+        numeric_correction = (
+            not more_specific
+            and old_content != new_content
+            and _strip_value_tokens(old_content) == _strip_value_tokens(new_content)
+        )
+        should_update = more_specific or numeric_correction
 
         merged_tags = ""
         old_tags = [t.strip() for t in str(existing.get("tags") or "").split(",") if t.strip()]
@@ -1175,7 +1193,7 @@ class MemoryStore:
             merged_tags = ",".join(dict.fromkeys(old_tags + new_tags))
 
         content_updated = False
-        if more_specific:
+        if should_update:
             self._conn.execute(
                 "UPDATE facts SET content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
                 (new_content, merged_tags, fact_id),
