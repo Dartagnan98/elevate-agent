@@ -1,4 +1,5 @@
 const path = require("path");
+const os = require("os");
 
 function createUpdaterController({
   app,
@@ -11,6 +12,8 @@ function createUpdaterController({
   setImmediateImpl = setImmediate,
   setIntervalImpl = setInterval,
   DateImpl = Date,
+  homedir = os.homedir,
+  env = process.env,
 }) {
   let updateState = { status: "idle", info: null, progress: null, error: null };
   let updateCheckInFlight = false;
@@ -92,12 +95,34 @@ function createUpdaterController({
     });
   }
 
+  // Opt-in beta channel: a box joins beta via ELEVATE_UPDATE_CHANNEL=beta or a
+  // ~/.elevate/update-channel file containing "beta". electron-updater then
+  // polls beta-mac.yml instead of latest-mac.yml, so a risky release can soak on
+  // a canary before the whole fleet. Default (and anything unrecognized) = stable.
+  function resolveChannel() {
+    const fromEnv = String(env.ELEVATE_UPDATE_CHANNEL || "").trim().toLowerCase();
+    if (fromEnv === "beta" || fromEnv === "latest") return fromEnv;
+    try {
+      const raw = fs
+        .readFileSync(path.join(homedir(), ".elevate", "update-channel"), "utf8")
+        .trim()
+        .toLowerCase();
+      if (raw === "beta" || raw === "latest") return raw;
+    } catch {
+      // No channel file → stable.
+    }
+    return "latest";
+  }
+
   function kickoffUpdates() {
     if (!app.isPackaged) {
       log.info("[updater] skipped in development build");
       return;
     }
 
+    const channel = resolveChannel();
+    autoUpdater.channel = channel;
+    log.info(`[updater] update channel: ${channel}`);
     runUpdaterCheck("startup");
     // Poll frequently so a freshly-shipped build reaches the device within
     // minutes. autoDownload pulls it silently; the user still applies it via the
@@ -153,6 +178,7 @@ function createUpdaterController({
     kickoffUpdates,
     registerAutoUpdaterEvents,
     registerIpcHandlers,
+    resolveChannel,
     runUpdaterCheck,
   };
 }

@@ -9,7 +9,9 @@ const yaml = require("js-yaml");
 
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
-const FEED = path.join(DIST, "latest-mac.yml");
+const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
+const FEED = path.join(DIST, FEED_NAME);
 const { version } = require(path.join(ROOT, "package.json"));
 
 function appVersion(appPath) {

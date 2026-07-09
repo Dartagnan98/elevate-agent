@@ -7,7 +7,8 @@ const { spawnSync } = require("node:child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const REPO = path.resolve(ROOT, "..");
-const PUBLIC_FEED_URL = "https://api.elevationrealestatehq.com/updates/latest-mac.yml";
+const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+const PUBLIC_FEED_URL = `https://api.elevationrealestatehq.com/updates/${RELEASE_CHANNEL}-mac.yml`;
 const packageJson = require(path.join(ROOT, "package.json"));
 const packageLock = require(path.join(ROOT, "package-lock.json"));
 

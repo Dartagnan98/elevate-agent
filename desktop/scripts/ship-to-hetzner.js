@@ -20,7 +20,9 @@ const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
 
 const DIST = path.resolve(__dirname, "..", "dist");
-const FEED = path.join(DIST, "latest-mac.yml");
+const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
+const FEED = path.join(DIST, FEED_NAME);
 const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
 const HOST = "root@5.78.46.234";
 const REMOTE = "/var/www/elevate-updates/";
@@ -54,7 +56,7 @@ function verifyRemoteFile(name, expectedSize) {
 
 function verifyPublicRelease(feed, expectedVersion) {
   console.log("[ship] verifying public feed and artifacts");
-  const remoteText = curl([`${PUBLIC_URL}/latest-mac.yml`], "fetch public latest-mac.yml");
+  const remoteText = curl([`${PUBLIC_URL}/${FEED_NAME}`], `fetch public ${FEED_NAME}`);
   const remoteFeed = yaml.load(remoteText);
   if (remoteFeed.version !== expectedVersion) {
     throw new Error(`[ship] public feed version ${remoteFeed.version || "missing"} != ${expectedVersion}`);
@@ -136,7 +138,7 @@ try {
   process.exit(1);
 }
 
-const selected = new Set(["latest-mac.yml"]);
+const selected = new Set([FEED_NAME]);
 for (const file of feed.files || []) {
   selected.add(file.url);
   // Intentionally DO NOT ship zip blockmaps. Blockmaps are what enable
