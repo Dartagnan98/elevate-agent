@@ -37,12 +37,15 @@ function makeLifecycle(overrides = {}) {
     },
     kickoffUpdates: () => calls.push(["kickoffUpdates"]),
     loadAppPath: (pathname) => calls.push(["loadAppPath", pathname]),
-    log: { warn: (message) => calls.push(["warn", message]) },
+    log: {
+      warn: (message) => calls.push(["warn", message]),
+      error: (message) => calls.push(["error", message]),
+    },
     mainWindow: () => win,
     markStartup: (name) => calls.push(["mark", name]),
     ownsBackend: () => Boolean(overrides.ownsBackend),
     process: { platform: overrides.platform || "darwin" },
-    startDesktop: async () => calls.push(["startDesktop"]),
+    startDesktop: overrides.startDesktop || (async () => calls.push(["startDesktop"])),
     startPath: "/chat",
     startSmsOutboxWatcher: () => calls.push(["sms"]),
   });
@@ -85,4 +88,34 @@ test("app lifecycle tears down overlay and owned backend before quit", () => {
 
   assert.deepEqual(calls, [["overlay.dispose"]]);
   assert.deepEqual(killed, ["kill"]);
+});
+
+test("app lifecycle kicks off updates before startDesktop (broken build can still update)", async () => {
+  const { lifecycle, calls } = makeLifecycle();
+  lifecycle.registerAppEvents(true);
+  await new Promise((resolve) => setImmediate(resolve)); // flush whenReady microtasks
+
+  const names = calls.map(([name]) => name);
+  const iUpdates = names.indexOf("kickoffUpdates");
+  const iDesktop = names.indexOf("startDesktop");
+  assert.ok(iUpdates >= 0 && iDesktop >= 0, "both kickoffUpdates and startDesktop ran");
+  assert.ok(iUpdates < iDesktop, "kickoffUpdates must run before startDesktop");
+});
+
+test("app lifecycle survives a throwing startDesktop and still updates", async () => {
+  const { lifecycle, calls } = makeLifecycle({
+    startDesktop: async () => {
+      throw new Error("backend boom");
+    },
+  });
+  lifecycle.registerAppEvents(true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const names = calls.map(([name]) => name);
+  assert.ok(names.includes("kickoffUpdates"), "updater still kicked off despite the crash");
+  assert.ok(
+    calls.some(([name, message]) => name === "error" && /startDesktop failed/.test(message)),
+    "the startDesktop failure was logged, not thrown",
+  );
+  assert.ok(!names.includes("sms"), "post-startDesktop steps are skipped after the failure");
 });

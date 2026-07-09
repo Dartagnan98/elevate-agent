@@ -55,10 +55,22 @@ function createAppLifecycle({
             log.warn(`[startup] dock registration failed: ${err && err.message ? err.message : err}`),
           );
       }
-      await startDesktop();
-      startSmsOutboxWatcher();
+      // Start the update poll FIRST so an "alive but broken" build can still
+      // pull its own fix. A startDesktop() throw or hang must never strand the
+      // updater — a shipped build that crashes during backend/window init would
+      // otherwise brick the whole fleet with no self-update path.
       kickoffUpdates();
-      deepLinks.replayPending();
+      try {
+        await startDesktop();
+        startSmsOutboxWatcher();
+        deepLinks.replayPending();
+      } catch (err) {
+        log.error(
+          `[startup] startDesktop failed; updater already polling for a fix: ${
+            err && err.message ? err.message : err
+          }`,
+        );
+      }
     });
 
     app.on("activate", () => {
