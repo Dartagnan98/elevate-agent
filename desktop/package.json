@@ -25,6 +25,7 @@
   "build": {
     "appId": "com.elevationrealestate.elevate",
     "productName": "Elevate",
+    "afterPack": "scripts/after-pack-mac.js",
     "artifactName": "Elevate-${version}-${os}-${arch}.${ext}",
     "protocols": [
       {
