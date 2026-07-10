@@ -2,6 +2,7 @@
 // Local release gate for the Developer ID notarized macOS distribution lane.
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
@@ -109,22 +110,6 @@ function latestFeedVersion(url = PUBLIC_FEED_URL) {
   };
 }
 
-function hasDsStore(relativePath) {
-  const root = path.join(REPO, relativePath);
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!fs.existsSync(current)) continue;
-    const stat = fs.statSync(current);
-    if (stat.isDirectory()) {
-      for (const entry of fs.readdirSync(current)) stack.push(path.join(current, entry));
-    } else if (path.basename(current) === ".DS_Store") {
-      return path.relative(REPO, current);
-    }
-  }
-  return "";
-}
-
 function plistContains(relativePath, key) {
   const text = fs.readFileSync(path.join(REPO, relativePath), "utf8");
   return text.includes(`<key>${key}</key>`);
@@ -153,6 +138,74 @@ function notaryProfileWorks(profile) {
     { timeout: 45_000 }
   );
   return { ok: result.ok, skipped: false, status: result.status };
+}
+
+const RUNTIME_AGENT_PROBE = `
+import sys
+sys.path.insert(0, sys.argv[1])
+import elevate_cli.main
+from run_agent import AIAgent
+AIAgent(
+    model="dependency-smoke",
+    provider="custom",
+    base_url="http://127.0.0.1:9/v1",
+    api_key="dependency-smoke",
+    enabled_toolsets=[],
+    quiet_mode=True,
+    skip_context_files=True,
+    skip_memory=True,
+    persist_session=False,
+)
+`;
+
+function summarizeProbe(result, successDetail) {
+  if (result.status === 0) return { ok: true, detail: successDetail };
+  const text = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  const detail = text
+    ? text.split("\n").filter(Boolean).slice(-8).join(" | ")
+    : result.error?.message || `exit ${result.status}`;
+  return { ok: false, detail };
+}
+
+function probeBundledRuntime(relativePython) {
+  const runtimePython = path.join(REPO, relativePython);
+  const cliRoot = path.join(REPO, "cli");
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-runtime-preflight-"));
+  const env = {
+    ...process.env,
+    HOME: tempHome,
+    ELEVATE_HOME: path.join(tempHome, ".elevate"),
+    NO_COLOR: "1",
+  };
+  for (const key of Object.keys(env)) {
+    if (
+      ["PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"].includes(key)
+      || /(_API_KEY|_TOKEN|_SECRET|_KEY)$/.test(key)
+    ) {
+      delete env[key];
+    }
+  }
+
+  const run = (args) => spawnSync(runtimePython, args, {
+    cwd: tempHome,
+    env,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  try {
+    return {
+      dependencies: summarizeProbe(
+        run(["-I", "-B", "-m", "pip", "check"]),
+        "pip check passed",
+      ),
+      agent: summarizeProbe(
+        run(["-I", "-B", "-c", RUNTIME_AGENT_PROBE, cliRoot]),
+        "backend and AIAgent initialized",
+      ),
+    };
+  } finally {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
 }
 
 record("running on macOS", process.platform === "darwin", process.platform);
@@ -219,11 +272,22 @@ record("app icon present", exists("desktop/assets/icon.icns"));
 record("web dashboard source present", exists("cli/web/package.json"));
 record("arm64 bundled Python present", isExecutable("desktop/runtime/arm64/python/bin/python3.12"));
 record("x64 bundled Python present", isExecutable("desktop/runtime/x64/python/bin/python3.12"));
+const arm64Runtime = probeBundledRuntime("desktop/runtime/arm64/python/bin/python3.12");
+record("arm64 bundled Python dependency closure complete", arm64Runtime.dependencies.ok, arm64Runtime.dependencies.detail);
+record("arm64 bundled backend/agent initializes", arm64Runtime.agent.ok, arm64Runtime.agent.detail);
+const x64Runtime = probeBundledRuntime("desktop/runtime/x64/python/bin/python3.12");
+record("x64 bundled Python dependency closure complete", x64Runtime.dependencies.ok, x64Runtime.dependencies.detail);
+record("x64 bundled backend/agent initializes", x64Runtime.agent.ok, x64Runtime.agent.detail);
 record("WhatsApp bridge script present", exists("cli/scripts/whatsapp-bridge/bridge.js"));
 record("WhatsApp bridge package present", exists("cli/scripts/whatsapp-bridge/package.json"));
 
-const runtimeDsStore = hasDsStore("desktop/runtime");
-record("bundled runtime has no .DS_Store files", !runtimeDsStore, runtimeDsStore || "clean");
+const runtimeResource = (packageJson.build?.extraResources || []).find(
+  (resource) => resource.from === "runtime/${arch}/python",
+);
+record(
+  "bundled runtime excludes .DS_Store files",
+  runtimeResource?.filter?.includes("!**/.DS_Store") === true,
+);
 
 record("Apple Events entitlement present", plistContains("desktop/entitlements.mac.plist", "com.apple.security.automation.apple-events"));
 record("microphone entitlement present", plistContains("desktop/entitlements.mac.plist", "com.apple.security.device.audio-input"));

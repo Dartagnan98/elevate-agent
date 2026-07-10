@@ -51,6 +51,25 @@ BAD_LOG_PATTERNS = (
     "BLANK-TRACE",
     "did-fail-load",
 )
+RUNTIME_AGENT_PROBE = """
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import elevate_cli.main  # noqa: F401
+from run_agent import AIAgent
+
+AIAgent(
+    model="dependency-smoke",
+    provider="custom",
+    base_url="http://127.0.0.1:9/v1",
+    api_key="dependency-smoke",
+    enabled_toolsets=[],
+    quiet_mode=True,
+    skip_context_files=True,
+    skip_memory=True,
+    persist_session=False,
+)
+"""
 
 
 @dataclass
@@ -74,6 +93,7 @@ class SmokeResult:
     telegram_hygiene: dict[str, Any] | None = None
     desktop_compaction: dict[str, Any] | None = None
     installed_app_seal: list[dict[str, Any]] = field(default_factory=list)
+    installed_runtime_dependencies: dict[str, Any] | None = None
     log_hits: list[str] = field(default_factory=list)
     installed_whatsapp_bridge: dict[str, bool] | None = None
     installed_app_version: str | None = None
@@ -278,6 +298,91 @@ def _command_output(completed: subprocess.CompletedProcess[str]) -> str:
     if len(text) > 4000:
         return text[-4000:]
     return text
+
+
+def run_bundled_runtime_dependency_smoke(
+    *,
+    runtime_python: Path,
+    installed_cli: Path,
+    timeout: float,
+    result: SmokeResult,
+) -> None:
+    """Prove the bundled interpreter can satisfy and initialize core runtime code."""
+
+    inventory: dict[str, Any] = {
+        "python": str(runtime_python),
+        "cli": str(installed_cli),
+        "checks": [],
+    }
+    result.installed_runtime_dependencies = inventory
+
+    if not runtime_python.is_file():
+        result.fail(f"bundled Python missing: {runtime_python}")
+        return
+    if not installed_cli.is_dir():
+        result.fail(f"installed CLI missing: {installed_cli}")
+        return
+
+    with TemporaryDirectory(prefix="elevate-runtime-dependency-") as tmp:
+        env = os.environ.copy()
+        for key in list(env):
+            if key in {"PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"} or key.endswith(
+                ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
+            ):
+                env.pop(key, None)
+        env.update(
+            {
+                "HOME": tmp,
+                "ELEVATE_HOME": str(Path(tmp) / ".elevate"),
+                "NO_COLOR": "1",
+            }
+        )
+        commands = [
+            (
+                "pip_check",
+                [str(runtime_python), "-I", "-B", "-m", "pip", "check"],
+            ),
+            (
+                "backend_agent_init",
+                [
+                    str(runtime_python),
+                    "-I",
+                    "-B",
+                    "-c",
+                    RUNTIME_AGENT_PROBE,
+                    str(installed_cli),
+                ],
+            ),
+        ]
+
+        for name, command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=tmp,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=min(max(timeout, 1.0), 60.0),
+                    check=False,
+                )
+                output = _command_output(completed)
+                ok = completed.returncode == 0
+                status = completed.returncode
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                output = str(exc)
+                ok = False
+                status = None
+
+            inventory["checks"].append(
+                {"name": name, "ok": ok, "status": status, "output": output}
+            )
+            if not ok:
+                summary = " | ".join(output.splitlines()[-8:])
+                result.fail(f"bundled Python {name} failed: {summary}")
+
+    if inventory["checks"] and all(item["ok"] for item in inventory["checks"]):
+        result.pass_check("bundled Python dependency closure and backend/agent initialization pass")
 
 
 def run_installed_app_seal(
@@ -1273,6 +1378,16 @@ def main(argv: list[str]) -> int:
             )
         else:
             result.pass_check(f"installed app version matches {args.expected_app_version}")
+
+    run_bundled_runtime_dependency_smoke(
+        runtime_python=(
+            args.installed_app
+            / "Contents/Resources/runtime/python/bin/python3.12"
+        ),
+        installed_cli=installed_cli,
+        timeout=args.timeout,
+        result=result,
+    )
 
     if not args.skip_seal:
         run_installed_app_seal(

@@ -70,6 +70,85 @@ def test_installed_app_seal_passes_when_codesign_and_spctl_pass(monkeypatch, tmp
     assert "installed app seal valid (codesign + spctl)" in result.checks
 
 
+def test_bundled_runtime_dependency_smoke_uses_isolated_python(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    runtime_python = tmp_path / "runtime/python/bin/python3.12"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    installed_cli = tmp_path / "cli"
+    installed_cli.mkdir()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    result = smoke.SmokeResult()
+    smoke.run_bundled_runtime_dependency_smoke(
+        runtime_python=runtime_python,
+        installed_cli=installed_cli,
+        timeout=5.0,
+        result=result,
+    )
+
+    assert [call[0][1:5] for call in calls] == [
+        ["-I", "-B", "-m", "pip"],
+        ["-I", "-B", "-c", smoke.RUNTIME_AGENT_PROBE],
+    ]
+    assert calls[1][0][-1] == str(installed_cli)
+    assert calls[0][1]["env"]["ELEVATE_HOME"].endswith("/.elevate")
+    assert "PYTHONPATH" not in calls[0][1]["env"]
+    assert result.ok is True
+    assert result.installed_runtime_dependencies is not None
+    assert [item["name"] for item in result.installed_runtime_dependencies["checks"]] == [
+        "pip_check",
+        "backend_agent_init",
+    ]
+    assert "bundled Python dependency closure and backend/agent initialization pass" in result.checks
+
+
+def test_bundled_runtime_dependency_smoke_reports_missing_transitive_dependency(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    runtime_python = tmp_path / "runtime/python/bin/python3.12"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_text("", encoding="utf-8")
+    installed_cli = tmp_path / "cli"
+    installed_cli.mkdir()
+    responses = iter(
+        [
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="requests requires urllib3, which is not installed.\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'urllib3'\n",
+            ),
+        ]
+    )
+    monkeypatch.setattr(smoke.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+
+    result = smoke.SmokeResult()
+    smoke.run_bundled_runtime_dependency_smoke(
+        runtime_python=runtime_python,
+        installed_cli=installed_cli,
+        timeout=5.0,
+        result=result,
+    )
+
+    assert result.ok is False
+    assert result.failures == [
+        "bundled Python pip_check failed: requests requires urllib3, which is not installed.",
+        "bundled Python backend_agent_init failed: ModuleNotFoundError: No module named 'urllib3'",
+    ]
+
+
 def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     smoke = _load_smoke_script()
 
@@ -141,8 +220,14 @@ def test_main_records_selected_dashboard_port(monkeypatch, tmp_path):
         "[2026-06-19 00:00:00.000] [info] [startup] 42ms backend:port-selected 9121\n",
         encoding="utf-8",
     )
+    dependency_probe = {}
 
     monkeypatch.setattr(smoke, "read_recent_log_hits", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        smoke,
+        "run_bundled_runtime_dependency_smoke",
+        lambda **kwargs: dependency_probe.update(kwargs),
+    )
 
     rc = smoke.main(
         [
@@ -160,6 +245,10 @@ def test_main_records_selected_dashboard_port(monkeypatch, tmp_path):
 
     assert rc == 0
     assert '"dashboard_port": 9121' in out.read_text(encoding="utf-8")
+    assert dependency_probe["runtime_python"] == (
+        app / "Contents/Resources/runtime/python/bin/python3.12"
+    )
+    assert dependency_probe["installed_cli"] == app / "Contents/Resources/cli"
 
 
 def test_installed_dashboard_assets_extract_index_and_chat(tmp_path):
@@ -249,6 +338,7 @@ def test_expected_app_version_mismatch_fails_main(monkeypatch, tmp_path):
 
     monkeypatch.setattr(smoke, "read_installed_app_version", lambda _app: "1.2.57")
     monkeypatch.setattr(smoke, "read_recent_log_hits", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(smoke, "run_bundled_runtime_dependency_smoke", lambda **_kwargs: None)
 
     rc = smoke.main(
         [
