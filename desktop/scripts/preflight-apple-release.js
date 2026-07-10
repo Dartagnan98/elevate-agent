@@ -165,13 +165,28 @@ record(
 );
 
 let feed = latestFeedVersion();
-if (!feed.version && RELEASE_CHANNEL === "beta" && feed.status === 404) {
-  feed = latestFeedVersion(STABLE_FEED_URL);
+let baselineDetail = feed.version || feed.error;
+if (RELEASE_CHANNEL === "beta") {
+  const betaFeed = feed;
+  const stableFeed = latestFeedVersion(STABLE_FEED_URL);
+  if (!stableFeed.version) {
+    feed = stableFeed;
+    baselineDetail = `stable ${stableFeed.error}`;
+  } else if (betaFeed.version) {
+    feed = compareSemver(betaFeed.version, stableFeed.version) >= 0 ? betaFeed : stableFeed;
+    baselineDetail = `max(beta ${betaFeed.version}, latest ${stableFeed.version})`;
+  } else if (betaFeed.status === 404) {
+    feed = stableFeed;
+    baselineDetail = `latest ${stableFeed.version}; beta not published yet`;
+  } else {
+    feed = betaFeed;
+    baselineDetail = `beta ${betaFeed.error}`;
+  }
 }
 record(
   `package version is newer than public ${RELEASE_CHANNEL} baseline`,
   Boolean(feed.version) && compareSemver(packageJson.version, feed.version) > 0,
-  feed.version ? `${packageJson.version} > ${feed.version}` : feed.error
+  feed.version ? `${packageJson.version} > ${feed.version} (${baselineDetail})` : baselineDetail
 );
 
 record("xcrun available", commandExists("xcrun", ["--version"]));

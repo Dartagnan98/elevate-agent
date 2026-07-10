@@ -61,7 +61,7 @@ Gates are ordered by *what they protect*, not just severity:
 
 - [ ] **B2 · Beta / stable release channels** — P2 · 1.5–2.5d · risk MED · owner: infra (Will)
   - Files: `desktop/src/updater.js` (`resolveChannel()` + set `autoUpdater.channel` before first check), `desktop/scripts/{merge-mac-feed,finalize-mac-dist,ship-to-hetzner}.js` (FEED name from `ELEVATE_RELEASE_CHANNEL`).
-  - Do: one build → one notarized artifact set; channel = **which feed yml a box points at**. Publish `beta-mac.yml` beside `latest-mac.yml`; opt a box into beta via `~/.elevate/update-channel` (or env); soak; promote same artifacts to latest. Foundation + the real backstop for B3.
+  - Do: publish `beta-mac.yml` beside `latest-mac.yml`; stamp beta packages so a realtor can install from the beta link without a Terminal opt-in step; soak; then cut a higher-version `latest` build from the approved source. Beta-stamped artifacts are beta-only and must not be promoted into the stable feed. See `beta-release-runbook.md`. Foundation + the real backstop for B3.
   - Test: `updater-behavior.test.js` — `resolveChannel` returns beta from env / file, latest when absent.
 
 - [ ] **B3 · Crash-on-launch update guard + documented rollback** — P1 · 1–1.5d · risk MED · owner: infra (Will) · soft-dep: B2 (both edit updater first-check path)

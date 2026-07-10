@@ -95,6 +95,38 @@ function hashFile(filePath) {
   return crypto.createHash("sha512").update(fs.readFileSync(filePath)).digest("base64");
 }
 
+function hashFileHex(filePath) {
+  return crypto.createHash("sha512").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function refuseRemoteArtifactCollisions(names) {
+  console.log("[ship] checking remote artifact names for byte collisions");
+  for (const name of names) {
+    const remotePath = `${REMOTE}${name}`;
+    const result = spawnSync(
+      "ssh",
+      [HOST, `if [ -e ${shellQuote(remotePath)} ]; then sha512sum ${shellQuote(remotePath)}; else echo MISSING; fi`],
+      { encoding: "utf8" },
+    );
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || "").trim();
+      throw new Error(`[ship] could not inspect remote ${name}${detail ? `: ${detail}` : ""}`);
+    }
+    const output = (result.stdout || "").trim();
+    if (output === "MISSING") continue;
+    const remoteHash = output.split(/\s+/)[0]?.toLowerCase();
+    const localHash = hashFileHex(path.join(DIST, name));
+    if (remoteHash !== localHash) {
+      throw new Error(`[ship] refusing to overwrite remote ${name} with different bytes`);
+    }
+    console.log(`[ship] remote ${name} already has identical bytes`);
+  }
+}
+
 function verifyLocalRelease(feed, expectedVersion) {
   if (feed.version !== expectedVersion) {
     throw new Error(`[ship] local feed version ${feed.version || "missing"} != ${expectedVersion}`);
@@ -172,6 +204,13 @@ if (matches.length === 0) {
   process.exit(1);
 }
 
+try {
+  refuseRemoteArtifactCollisions(matches);
+} catch (err) {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+}
+
 console.log(`[ship] uploading ${matches.length} artifact files to ${HOST}:${REMOTE}`);
 for (const name of matches) {
   const size = (fs.statSync(path.join(DIST, name)).size / (1024 * 1024)).toFixed(1);
@@ -193,15 +232,17 @@ if (result.status !== 0) {
   process.exit(result.status || 1);
 }
 
-// Fix ownership on the remote so nginx (www-data) can read.
+// Fix ownership only on the files this release uploaded. A beta release must
+// not mutate stable feed, alias, or artifact metadata.
 const chown = spawnSync(
   "ssh",
-  [HOST, `chown www-data:www-data ${REMOTE}* && ls -lh ${REMOTE}`],
+  [HOST, `chown www-data:www-data ${matches.map((name) => shellQuote(`${REMOTE}${name}`)).join(" ")}`],
   { stdio: "inherit" },
 );
 
 if (chown.status !== 0) {
-  console.error("[ship] chown failed — may need to fix permissions manually");
+  console.error("[ship] chown failed");
+  process.exit(chown.status || 1);
 }
 
 // Purge any zip blockmaps already on the server. While a blockmap for the
@@ -228,13 +269,22 @@ for (const arch of ["arm64", "x64"]) {
   const src = `Elevate-${PKG_VERSION}-mac-${arch}.dmg`;
   if (!fs.existsSync(path.join(DIST, src))) continue;
   const dst = `Elevate-${RELEASE_CHANNEL}-mac-${arch}.dmg`;
+  const tempDst = `.${dst}.tmp-${process.pid}`;
   const alias = spawnSync(
     "ssh",
-    [HOST, `cp -f ${REMOTE}${src} ${REMOTE}${dst} && chown www-data:www-data ${REMOTE}${dst}`],
+    [
+      HOST,
+      `cp -f ${shellQuote(`${REMOTE}${src}`)} ${shellQuote(`${REMOTE}${tempDst}`)} && ` +
+        `chown www-data:www-data ${shellQuote(`${REMOTE}${tempDst}`)} && ` +
+        `mv -f ${shellQuote(`${REMOTE}${tempDst}`)} ${shellQuote(`${REMOTE}${dst}`)}`,
+    ],
     { stdio: "inherit" },
   );
-  if (alias.status === 0) console.log(`[ship] fresh-download alias ${dst} -> ${src}`);
-  else console.error(`[ship] failed to refresh alias ${dst}`);
+  if (alias.status !== 0) {
+    console.error(`[ship] failed to refresh alias ${dst}`);
+    process.exit(alias.status || 1);
+  }
+  console.log(`[ship] fresh-download alias ${dst} -> ${src}`);
 }
 
 // The current remote pruner is stable-feed aware only. Never run it from a beta
