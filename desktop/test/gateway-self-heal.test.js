@@ -17,7 +17,7 @@ test("gateway probe detects loaded and running launchd states", () => {
   const gateway = fs.readFileSync(gatewayPath, "utf8");
   const block = functionBlock(gateway, "probeGateway");
 
-  assert.match(block, /"launchctl",\s*\[\s*"print",\s*`gui\/\$\{uid\}\/ai\.elevate\.gateway`\s*\]/s);
+  assert.match(block, /"launchctl",\s*\[\s*"print",\s*`gui\/\$\{uid\}\/\$\{gatewayLabel\}`\s*\]/s);
   assert.match(block, /const loaded = probe\.status === 0/);
   assert.match(block, /\\bpid = \\d\+/);
   assert.match(block, /state = running/);
@@ -87,7 +87,7 @@ function fakeSpawn(behavior) {
   return { spawn, calls };
 }
 
-function buildSelfHeal(spawn, logs) {
+function buildSelfHeal(spawn, logs, overrides = {}) {
   return createGatewaySelfHeal({
     app: { getVersion: () => "0.0.0-test" },
     appendBackendLog: (line) => logs.push(line),
@@ -98,6 +98,8 @@ function buildSelfHeal(spawn, logs) {
     path: require("node:path"),
     process: { platform: "darwin", getuid: () => 501 },
     spawn,
+    elevateHome: overrides.elevateHome,
+    gatewayLabel: overrides.gatewayLabel,
   });
 }
 
@@ -107,6 +109,21 @@ test("probeGateway parses launchctl print output asynchronously", async () => {
   const pending = heal.probeGateway(501);
   assert.equal(typeof pending.then, "function", "probeGateway must not block");
   assert.deepEqual(await pending, { loaded: true, running: true });
+});
+
+test("Beta gateway uses its own state root and launchd label", async () => {
+  const { spawn, calls } = fakeSpawn(() => ({ status: 0, stdout: "pid = 4242\n" }));
+  const heal = buildSelfHeal(spawn, [], {
+    elevateHome: "/Users/tester/.elevate-beta",
+    gatewayLabel: "ai.elevate.gateway-1234abcd",
+  });
+
+  assert.equal(
+    heal.gatewayVersionMarkerPath(),
+    "/Users/tester/.elevate-beta/.gateway_version",
+  );
+  await heal.probeGateway(501);
+  assert.deepEqual(calls[0].args, ["print", "gui/501/ai.elevate.gateway-1234abcd"]);
 });
 
 test("ensureGatewayInstalled runs install without throwing when nothing is loaded", async () => {

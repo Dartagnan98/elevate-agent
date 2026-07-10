@@ -1118,13 +1118,16 @@ SERVICE_DESCRIPTION = "Elevate Gateway - Messaging Platform Integration"
 def _profile_suffix() -> str:
     """Derive a service-name suffix from the current ELEVATE_HOME.
 
-    Returns ``""`` for the default root, the profile name for
-    ``<root>/profiles/<name>``, or a short hash for any other path.
+    Beta uses the reserved ``beta`` suffix so its service can coexist with
+    Stable. Otherwise returns ``""`` for the default root, the profile name
+    for ``<root>/profiles/<name>``, or a short hash for any other path.
     Works correctly in Docker (ELEVATE_HOME=/opt/data) and standard deployments.
     """
     import hashlib
     import re
     from elevate_constants import get_default_elevate_root
+    if os.environ.get("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+        return "beta"
     home = get_elevate_home().resolve()
     default = get_default_elevate_root().resolve()
     if home == default:
@@ -2550,6 +2553,13 @@ def generate_launchd_plist() -> str:
         pass
     pycache_dir = str(pycache_dir.resolve())
     label = get_launchd_label()
+    release_channel = os.environ.get("ELEVATE_RELEASE_CHANNEL", "").strip().lower()
+    release_channel_xml = (
+        "        <key>ELEVATE_RELEASE_CHANNEL</key>\n"
+        f"        <string>{release_channel}</string>\n"
+        if release_channel in {"latest", "beta"}
+        else ""
+    )
     profile_arg = _profile_arg(elevate_home)
     # Build a sane PATH for the launchd plist.  launchd provides only a
     # minimal default (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
@@ -2611,7 +2621,7 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>ELEVATE_HOME</key>
         <string>{elevate_home}</string>
-        <key>PYTHONPYCACHEPREFIX</key>
+{release_channel_xml}        <key>PYTHONPYCACHEPREFIX</key>
         <string>{pycache_dir}</string>
     </dict>
     

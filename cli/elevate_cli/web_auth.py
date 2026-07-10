@@ -10,6 +10,7 @@ import urllib.parse
 from pathlib import Path
 
 from fastapi import HTTPException, Request
+from elevate_constants import get_elevate_home
 
 
 # The CMA PDF download route accepts the session token via ?token= because
@@ -23,16 +24,15 @@ def load_session_token() -> str:
     if env:
         return env.strip()
     try:
-        path = os.path.join(os.path.expanduser("~"), ".elevate", "dashboard-session-token")
-        if os.path.exists(path):
-            existing = open(path, encoding="utf-8").read().strip()
+        path = get_elevate_home() / "dashboard-session-token"
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
             if existing:
                 return existing
         token = secrets.token_urlsafe(32)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(token)
-        os.chmod(path, 0o600)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(token, encoding="utf-8")
+        path.chmod(0o600)
         return token
     except Exception:
         return secrets.token_urlsafe(32)

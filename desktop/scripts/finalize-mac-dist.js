@@ -9,6 +9,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
+const { resolveReleaseProfile } = require("../src/release-profile");
 
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
@@ -19,6 +20,7 @@ if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
 const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
 const FEED = path.join(DIST, FEED_NAME);
 const packageJson = require(path.join(ROOT, "package.json"));
+const APP_BUNDLE_NAME = resolveReleaseProfile(RELEASE_CHANNEL).appBundleName;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -102,11 +104,11 @@ for (const name of required) {
 // shows a permanent "update metadata is not bundled" state. Catch it here at
 // build time instead of on the customer's machine.
 for (const appDir of ["mac", "mac-arm64"]) {
-  const appPath = path.join(DIST, appDir, "Elevate.app");
+  const appPath = path.join(DIST, appDir, APP_BUNDLE_NAME);
   const updateYml = path.join(appPath, "Contents", "Resources", "app-update.yml");
   if (fs.existsSync(appPath) && !fs.existsSync(updateYml)) {
     throw new Error(
-      `[finalize] ${appDir}/Elevate.app missing Contents/Resources/app-update.yml — the auto-updater would break for every client`,
+      `[finalize] ${appDir}/${APP_BUNDLE_NAME} missing Contents/Resources/app-update.yml — the auto-updater would break for every client`,
     );
   }
 }

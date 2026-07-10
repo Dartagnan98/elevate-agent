@@ -11,10 +11,11 @@ function createMenu({
   openLoginWindow,
   shell,
   startPath,
+  productName = "Elevate",
 }) {
   const template = [
     {
-      label: "Elevate",
+      label: productName,
       submenu: [
         { role: "about" },
         { type: "separator" },
@@ -38,7 +39,7 @@ function createMenu({
         },
         { type: "separator" },
         {
-          label: "Quit Elevate",
+          label: `Quit ${productName}`,
           accelerator: "CmdOrCtrl+Q",
           click: () => app.quit(),
         },

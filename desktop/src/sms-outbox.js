@@ -3,7 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-function createSmsOutbox({ log }) {
+function createSmsOutbox({ log, elevateHome = path.join(os.homedir(), ".elevate") }) {
   let smsImsgPath = null;
 
   function resolveImsg() {
@@ -32,7 +32,7 @@ function createSmsOutbox({ log }) {
   }
 
   function startSmsOutboxWatcher() {
-    const dir = path.join(os.homedir(), ".elevate", "sms-outbox");
+    const dir = path.join(elevateHome, "sms-outbox");
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     const inFlight = new Set();
 

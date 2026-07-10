@@ -8,6 +8,8 @@ function createGatewaySelfHeal({
   path,
   process,
   spawn,
+  elevateHome = path.join(os.homedir(), ".elevate"),
+  gatewayLabel = "ai.elevate.gateway",
 }) {
   // Async replacement for the old injected spawnSync — resolves with the
   // same result shape ({status, signal, stdout, stderr, error}) so the
@@ -57,7 +59,7 @@ function createGatewaySelfHeal({
   }
 
   function gatewayVersionMarkerPath() {
-    return path.join(os.homedir(), ".elevate", ".gateway_version");
+    return path.join(elevateHome, ".gateway_version");
   }
 
   function readGatewayVersionMarker() {
@@ -70,7 +72,7 @@ function createGatewaySelfHeal({
 
   function writeGatewayVersionMarker(version) {
     try {
-      fs.mkdirSync(path.join(os.homedir(), ".elevate"), { recursive: true });
+      fs.mkdirSync(elevateHome, { recursive: true });
       fs.writeFileSync(gatewayVersionMarkerPath(), `${version}\n`, "utf8");
     } catch (e) {
       appendBackendLog(`[gateway] version marker write failed: ${e}\n`);
@@ -79,7 +81,7 @@ function createGatewaySelfHeal({
 
   function existingGatewayMissingResource() {
     try {
-      const statusPath = path.join(os.homedir(), ".elevate", "gateway_state.json");
+      const statusPath = path.join(elevateHome, "gateway_state.json");
       const payload = JSON.parse(fs.readFileSync(statusPath, "utf8"));
       const platforms = payload && typeof payload === "object" ? payload.platforms : null;
       if (!platforms || typeof platforms !== "object") return "";
@@ -106,7 +108,7 @@ function createGatewaySelfHeal({
   async function kickstartGateway(uid) {
     const res = await run(
       "launchctl",
-      ["kickstart", "-k", `gui/${uid}/ai.elevate.gateway`],
+      ["kickstart", "-k", `gui/${uid}/${gatewayLabel}`],
       { timeout: 15000 },
     );
     const out = String(res.stdout || res.stderr || "").trim().slice(-300);
@@ -117,7 +119,7 @@ function createGatewaySelfHeal({
   async function probeGateway(uid) {
     const probe = await run(
       "launchctl",
-      ["print", `gui/${uid}/ai.elevate.gateway`],
+      ["print", `gui/${uid}/${gatewayLabel}`],
       { timeout: 8000 },
     );
     const out = String(probe.stdout || "");
@@ -147,7 +149,7 @@ function createGatewaySelfHeal({
         os.homedir(),
         "Library",
         "LaunchAgents",
-        "ai.elevate.gateway.plist",
+        `${gatewayLabel}.plist`,
       );
       const uid = typeof process.getuid === "function" ? process.getuid() : "";
       const { loaded, running } = await probeGateway(uid);

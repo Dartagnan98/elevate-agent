@@ -56,3 +56,16 @@ test("deep link open-url handler prevents default browser handling", () => {
   assert.equal(prevented, true);
   assert.deepEqual(win.calls, ["restore", "show", "focus"]);
 });
+
+test("Beta registers its own protocol scheme", () => {
+  const schemes = [];
+  const deepLinks = createDeepLinks({
+    app: { setAsDefaultProtocolClient: (scheme) => schemes.push(scheme) },
+    mainWindow: () => null,
+    openLoginWindow() {},
+    protocolScheme: "elevate-beta",
+  });
+
+  deepLinks.registerProtocolClient();
+  assert.deepEqual(schemes, ["elevate-beta"]);
+});

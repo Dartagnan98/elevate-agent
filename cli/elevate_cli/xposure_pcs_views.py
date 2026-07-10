@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from elevate_cli.data.connection import connect
+from elevate_constants import get_elevate_home
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,10 @@ SOURCE_ID = "xposure-pcs-views"
 
 _DEFAULT_LOOKBACK_DAYS = 90
 _DEFAULT_BATCH = int(os.getenv("ELEVATE_PCS_VIEWS_BATCH", "80") or "80")
-_SNAPSHOT = Path(os.path.expanduser(
-    "~/.elevate/snapshots/pcs-listing-views.jsonl"
-))
+
+
+def _snapshot_path() -> Path:
+    return get_elevate_home() / "snapshots" / "pcs-listing-views.jsonl"
 
 # Side-channel file the Gmail MFA poller writes into. Shared with the
 # xposure-pcs connector so a single MFA round-trip can satisfy both
@@ -77,7 +79,7 @@ _MFA_FILE = "/tmp/xposure-mfa.txt"
 
 
 def _write_target_email_file(emails: list[str]) -> Path:
-    target_dir = Path(os.path.expanduser("~/.elevate/tmp/xposure-pcs-views"))
+    target_dir = get_elevate_home() / "tmp" / "xposure-pcs-views"
     target_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = target_dir / f"target-emails-{stamp}.txt"
@@ -92,7 +94,7 @@ def _local_cdp_writer_command(target_file: Path) -> str:
     return (
         f"{_local_python_prefix()} -m elevate_cli.xposure_pcs_views_cdp_writer "
         f"--emails-file {shlex.quote(str(target_file))} "
-        f"--snapshot {shlex.quote(str(_SNAPSHOT))}"
+        f"--snapshot {shlex.quote(str(_snapshot_path()))}"
     )
 
 
@@ -281,7 +283,7 @@ def build_agent_session_prompt(
         username=os.environ.get("MLS_USERNAME", "").strip() or "<missing MLS_USERNAME>",
         password=os.environ.get("MLS_PASSWORD", "").strip() or "<missing MLS_PASSWORD>",
         email_list=email_list,
-        snapshot_path=str(_SNAPSHOT),
+        snapshot_path=str(_snapshot_path()),
         target_file=str(target_file),
         writer_command=writer_command,
         mfa_file=_MFA_FILE,
@@ -336,10 +338,10 @@ def _run_scraper(emails: list[str], *, skip: bool, headless: bool = False) -> di
     ``{ok, skipped, snapshot_count, stdout_tail, stderr_tail}``.
 
     ``snapshot_count`` is the number of *new* JSONL lines appended to \
-    ``_SNAPSHOT`` during this run (computed by diffing pre/post line count).
+    the profile-scoped snapshot during this run (computed by diffing pre/post line count).
     """
     if skip:
-        return {"ok": True, "skipped": True, "snapshot_count": _count_jsonl_lines(_SNAPSHOT),
+        return {"ok": True, "skipped": True, "snapshot_count": _count_jsonl_lines(_snapshot_path()),
                 "stdout_tail": "", "stderr_tail": ""}
 
     if not emails:
@@ -363,15 +365,16 @@ def _run_scraper(emails: list[str], *, skip: bool, headless: bool = False) -> di
             "snapshot_count": 0, "stdout_tail": "", "stderr_tail": "",
         }
 
-    _SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
-    pre_lines = _count_jsonl_lines(_SNAPSHOT)
+    snapshot = _snapshot_path()
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    pre_lines = _count_jsonl_lines(snapshot)
 
     target_file = _write_target_email_file(emails)
     prompt = _AGENT_PROMPT_TEMPLATE.format(
         username=username,
         password=password,
         email_list="\n".join(emails),
-        snapshot_path=str(_SNAPSHOT),
+        snapshot_path=str(snapshot),
         target_file=str(target_file),
         writer_command=_local_cdp_writer_command(target_file),
         mfa_file=_MFA_FILE,
@@ -407,7 +410,7 @@ def _run_scraper(emails: list[str], *, skip: bool, headless: bool = False) -> di
     finally:
         stop_poller.set()
 
-    post_lines = _count_jsonl_lines(_SNAPSHOT)
+    post_lines = _count_jsonl_lines(snapshot)
     snapshot_count = max(0, post_lines - pre_lines)
     response_tail = (response or "")[-1000:]
 
@@ -673,7 +676,7 @@ def run_views_sync(
             "scraper": scraper,
         }
 
-    new_records = _read_recent_records(_SNAPSHOT, scraper["snapshot_count"])
+    new_records = _read_recent_records(_snapshot_path(), scraper["snapshot_count"])
     if dry_run:
         return {
             "ok": True,

@@ -1,6 +1,6 @@
 "use strict";
 
-function createDeepLinks({ app, mainWindow, openLoginWindow }) {
+function createDeepLinks({ app, mainWindow, openLoginWindow, protocolScheme = "elevate" }) {
   let pendingDeepLink = null;
 
   function handleDeepLink(url) {
@@ -25,7 +25,7 @@ function createDeepLinks({ app, mainWindow, openLoginWindow }) {
   }
 
   function registerProtocolClient() {
-    app.setAsDefaultProtocolClient("elevate");
+    app.setAsDefaultProtocolClient(protocolScheme);
   }
 
   function replayPending() {

@@ -52,6 +52,7 @@ function makeController(overrides = {}) {
     markStartup: (name, detail = "") => marks.push([name, detail]),
     path,
     process: { platform: "darwin" },
+    productName: overrides.productName,
     resetDashboardLoadRetry: () => marks.push(["reset"]),
     scheduleDashboardLoadRetry: (reason) => marks.push(["retry", reason]),
     setMainWindow: (win) => {
@@ -80,6 +81,12 @@ test("main window uses hardened renderer options and clears singleton on close",
   win.emit("closed");
   assert.equal(getStoredWindow(), null);
   assert.deepEqual(marks[0], ["window:create", ""]);
+});
+
+test("Beta main window keeps its visible Beta identity", () => {
+  const { win } = makeController({ productName: "Elevate Beta" });
+
+  assert.equal(win.options.title, "Elevate Beta");
 });
 
 test("main window retries dashboard loads and records renderer crashes", () => {

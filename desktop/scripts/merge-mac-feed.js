@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
+const { resolveReleaseProfile } = require("../src/release-profile");
 
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
@@ -15,6 +16,7 @@ if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
 }
 const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
 const FEED = path.join(DIST, FEED_NAME);
+const APP_BUNDLE_NAME = resolveReleaseProfile(RELEASE_CHANNEL).appBundleName;
 const { version } = require(path.join(ROOT, "package.json"));
 
 function appVersion(appPath) {
@@ -30,8 +32,8 @@ function appVersion(appPath) {
 }
 
 for (const appPath of [
-  path.join(DIST, "mac", "Elevate.app"),
-  path.join(DIST, "mac-arm64", "Elevate.app"),
+  path.join(DIST, "mac", APP_BUNDLE_NAME),
+  path.join(DIST, "mac-arm64", APP_BUNDLE_NAME),
 ]) {
   const actual = appVersion(appPath);
   if (actual !== version) {

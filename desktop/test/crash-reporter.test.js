@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const { createCrashReporter } = require("../src/crash-reporter");
 
-function makeReporter({ env = {}, hasFile = false, fetchImpl } = {}) {
+function makeReporter({ env = {}, hasFile = false, fetchImpl, elevateHome, checkedPaths } = {}) {
   const calls = [];
   const reporter = createCrashReporter({
     app: { getVersion: () => "1.2.63" },
@@ -16,7 +16,11 @@ function makeReporter({ env = {}, hasFile = false, fetchImpl } = {}) {
       }),
     homedir: () => "/home/test",
     env,
-    fs: { existsSync: () => hasFile },
+    fs: { existsSync: (filePath) => {
+      if (checkedPaths) checkedPaths.push(filePath);
+      return hasFile;
+    } },
+    elevateHome,
     version: "1.2.63",
     now: () => 1700000000000,
   });
@@ -29,6 +33,18 @@ test("crash reporter is opt-out by default (sends nothing)", async () => {
   assert.equal(result.sent, false);
   assert.equal(result.reason, "opt-out");
   assert.equal(calls.length, 0);
+});
+
+test("Beta crash consent is read from the Beta state root", () => {
+  const checkedPaths = [];
+  const { reporter } = makeReporter({
+    hasFile: true,
+    elevateHome: "/home/test/.elevate-beta",
+    checkedPaths,
+  });
+
+  assert.equal(reporter.optedIn(), true);
+  assert.deepEqual(checkedPaths, ["/home/test/.elevate-beta/crash-reports"]);
 });
 
 test("crash reporter opts in via env or the ~/.elevate/crash-reports file", () => {

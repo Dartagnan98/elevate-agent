@@ -45,6 +45,7 @@ function makeLifecycle(overrides = {}) {
     markStartup: (name) => calls.push(["mark", name]),
     ownsBackend: () => Boolean(overrides.ownsBackend),
     process: { platform: overrides.platform || "darwin" },
+    protocolScheme: overrides.protocolScheme,
     startDesktop: overrides.startDesktop || (async () => calls.push(["startDesktop"])),
     startPath: "/chat",
     startSmsOutboxWatcher: () => calls.push(["sms"]),
@@ -61,6 +62,20 @@ test("app lifecycle hands second instances to the primary window", () => {
 
   assert.deepEqual(win.calls, ["restore", "show", "focus"]);
   assert.deepEqual(calls.filter(([name]) => name === "deepLink"), [["deepLink", "elevate://signin"]]);
+});
+
+test("Beta single-instance handoff only accepts the Beta protocol", () => {
+  const { app, calls, lifecycle } = makeLifecycle({
+    window: makeWindow(),
+    protocolScheme: "elevate-beta",
+  });
+  lifecycle.registerSingleInstance();
+
+  app.emit("second-instance", null, ["elevate://signin", "elevate-beta://signin"]);
+  assert.deepEqual(
+    calls.filter(([name]) => name === "deepLink"),
+    [["deepLink", "elevate-beta://signin"]],
+  );
 });
 
 test("app lifecycle activate reuses windows or recreates dashboard", () => {

@@ -17,13 +17,13 @@ test("sms outbox producer and desktop watcher share request/result files", () =>
   const sms = read(smsPath);
   const sender = read(senderPath);
 
-  assert.match(sender, /_SMS_OUTBOX_DIR = os\.path\.expanduser\("~\/\.elevate\/sms-outbox"\)/);
-  assert.match(sender, /req_path = os\.path\.join\(_SMS_OUTBOX_DIR, f"\{rid\}\.req\.json"\)/);
-  assert.match(sender, /res_path = os\.path\.join\(_SMS_OUTBOX_DIR, f"\{rid\}\.res\.json"\)/);
+  assert.match(sender, /return str\(get_elevate_home\(\) \/ "sms-outbox"\)/);
+  assert.match(sender, /req_path = os\.path\.join\(outbox_dir, f"\{rid\}\.req\.json"\)/);
+  assert.match(sender, /res_path = os\.path\.join\(outbox_dir, f"\{rid\}\.res\.json"\)/);
   assert.match(sender, /os\.replace\(tmp, req_path\)/);
   assert.match(sender, /return \(124, "", "app-send timed out \(Elevate app not draining sms-outbox\?\)"\)/);
 
-  assert.match(sms, /const dir = path\.join\(os\.homedir\(\), "\.elevate", "sms-outbox"\)/);
+  assert.match(sms, /const dir = path\.join\(elevateHome, "sms-outbox"\)/);
   assert.match(sms, /f\.endsWith\("\.req\.json"\)/);
   assert.match(sms, /const resPath = path\.join\(dir, `\$\{id\}\.res\.json`\)/);
   assert.match(main, /startSmsOutboxWatcher\(\)/);

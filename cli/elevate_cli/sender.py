@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from elevate_cli import outreach_db
+from elevate_constants import get_elevate_home
 
 
 _log = logging.getLogger(__name__)
@@ -347,7 +348,10 @@ def _outreach_default_transport() -> str:
 
 
 _IDS_CAP_SRC = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools", "ids-capability.swift")
-_IDS_CAP_BIN = os.path.expanduser("~/.elevate/bin/ids-capability")
+
+
+def _ids_capability_bin_path() -> str:
+    return str(get_elevate_home() / "bin" / "ids-capability")
 
 
 def _ids_capability_bin() -> str | None:
@@ -361,20 +365,21 @@ def _ids_capability_bin() -> str | None:
     override = os.getenv("ELEVATE_IDS_CAPABILITY_BIN")
     if override:
         return override if (os.path.isfile(override) and os.access(override, os.X_OK)) else None
-    if os.path.isfile(_IDS_CAP_BIN) and os.access(_IDS_CAP_BIN, os.X_OK):
-        return _IDS_CAP_BIN
+    binary = _ids_capability_bin_path()
+    if os.path.isfile(binary) and os.access(binary, os.X_OK):
+        return binary
     swiftc = shutil.which("swiftc")
     if not swiftc or not os.path.isfile(_IDS_CAP_SRC):
         return None
     try:
-        os.makedirs(os.path.dirname(_IDS_CAP_BIN), exist_ok=True)
+        os.makedirs(os.path.dirname(binary), exist_ok=True)
         r = subprocess.run(
-            [swiftc, "-O", _IDS_CAP_SRC, "-o", _IDS_CAP_BIN],
+            [swiftc, "-O", _IDS_CAP_SRC, "-o", binary],
             capture_output=True, text=True, timeout=120, check=False,
         )
-        if r.returncode == 0 and os.path.isfile(_IDS_CAP_BIN):
-            os.chmod(_IDS_CAP_BIN, 0o755)
-            return _IDS_CAP_BIN
+        if r.returncode == 0 and os.path.isfile(binary):
+            os.chmod(binary, 0o755)
+            return binary
         _log.warning("ids-capability build failed: %s", (r.stderr or "")[:200])
     except Exception as exc:  # noqa: BLE001
         _log.warning("ids-capability build error: %s", exc)
@@ -510,7 +515,8 @@ def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tu
     return (str(row[0] or ""), int(row[1] or 0))
 
 
-_SMS_OUTBOX_DIR = os.path.expanduser("~/.elevate/sms-outbox")
+def _sms_outbox_dir() -> str:
+    return str(get_elevate_home() / "sms-outbox")
 
 
 def _imsg_send_via_app(phone: str, draft: str, svc: str) -> tuple[int, str, str]:
@@ -525,10 +531,11 @@ def _imsg_send_via_app(phone: str, draft: str, svc: str) -> tuple[int, str, str]
     """
     import time as _time
 
-    os.makedirs(_SMS_OUTBOX_DIR, exist_ok=True)
+    outbox_dir = _sms_outbox_dir()
+    os.makedirs(outbox_dir, exist_ok=True)
     rid = uuid.uuid4().hex
-    req_path = os.path.join(_SMS_OUTBOX_DIR, f"{rid}.req.json")
-    res_path = os.path.join(_SMS_OUTBOX_DIR, f"{rid}.res.json")
+    req_path = os.path.join(outbox_dir, f"{rid}.req.json")
+    res_path = os.path.join(outbox_dir, f"{rid}.res.json")
     tmp = req_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"to": phone, "text": draft, "service": svc}, fh)
@@ -668,8 +675,6 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
         "sender.messages_native phone=%s detected=%s force_sms=%s",
         phone, detected, force_sms,
     )
-    started = time.time()
-
     def _attempt(service_type: str) -> tuple[str, dict[str, Any]] | None:
         send_start = time.time()
         rc, stdout, stderr = _osa_send_via(phone, draft, service_type)

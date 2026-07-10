@@ -14,14 +14,17 @@ function createLauncherTools({
   path,
   process,
   repoRoot,
+  elevateHome = path.join(home, ".elevate"),
+  pythonCacheDir = path.join(home, "Library", "Caches", "Elevate", "python-pycache"),
+  workspace = path.join(home, "Elevation"),
 }) {
   function envWithPath(extra = {}) {
-    const pythonCacheDir = path.join(home, "Library", "Caches", "Elevate", "python-pycache");
     const env = { ...process.env };
     // CPython treats any non-empty value, including "0", as true here.
     delete env.PYTHONDONTWRITEBYTECODE;
     env.PATH = process.env.PATH ? `${defaultPath}:${process.env.PATH}` : defaultPath;
     env.PYTHONPYCACHEPREFIX = process.env.PYTHONPYCACHEPREFIX || pythonCacheDir;
+    env.ELEVATE_HOME = elevateHome;
     return { ...env, ...extra };
   }
 
@@ -79,20 +82,20 @@ function createLauncherTools({
       );
       const bundledCli = path.join(process.resourcesPath, "cli");
       if (fileExists(bundledPython) && fileExists(bundledCli)) {
-        const userWorkspace = path.join(os.homedir(), "Elevation");
         try {
-          fs.mkdirSync(userWorkspace, { recursive: true });
+          fs.mkdirSync(workspace, { recursive: true });
         } catch {
           /* best-effort */
         }
         return {
           command: bundledPython,
           args: ["-m", "elevate_cli.main", ...args],
-          cwd: userWorkspace,
+          cwd: workspace,
           extraEnv: {
             PYTHONPATH: bundledCli,
             PYTHONNOUSERSITE: "1",
-            ELEVATE_WORKSPACE: userWorkspace,
+            ELEVATE_HOME: elevateHome,
+            ELEVATE_WORKSPACE: workspace,
           },
         };
       }

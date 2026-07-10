@@ -173,13 +173,14 @@ test("updater install failures are visible and can be retried", async () => {
   assert.equal(updater.checkCalls, 1);
 });
 
-function makeController({ env = {}, fileContent, autoUpdater, packagedChannel = "" } = {}) {
+function makeController({ env = {}, fileContent, autoUpdater, packagedChannel = "", stateRoot, readPaths } = {}) {
   return createUpdaterController({
     app: { isPackaged: true, on() {} },
     autoUpdater: autoUpdater || { on() {}, async checkForUpdates() { return {}; }, quitAndInstall() {} },
     fs: {
       existsSync: () => true,
-      readFileSync: () => {
+      readFileSync: (filePath) => {
+        if (readPaths) readPaths.push(filePath);
         if (fileContent === undefined) throw new Error("ENOENT");
         return fileContent;
       },
@@ -191,11 +192,12 @@ function makeController({ env = {}, fileContent, autoUpdater, packagedChannel = 
     homedir: () => "/home/test",
     env,
     packagedChannel,
+    stateRoot,
     setIntervalImpl: () => ({ unref() {} }),
   });
 }
 
-test("resolveChannel: explicit choice wins, packaged beta stays beta, latest is default", () => {
+test("resolveChannel: packaged lanes are pinned while untagged builds retain explicit opt-in", () => {
   assert.equal(makeController({ env: { ELEVATE_UPDATE_CHANNEL: "beta" } }).resolveChannel(), "beta");
   assert.equal(makeController({ env: { ELEVATE_UPDATE_CHANNEL: "BETA " } }).resolveChannel(), "beta");
   assert.equal(makeController({ fileContent: "beta\n" }).resolveChannel(), "beta");
@@ -210,8 +212,29 @@ test("resolveChannel: explicit choice wins, packaged beta stays beta, latest is 
   );
   assert.equal(
     makeController({ fileContent: "latest", packagedChannel: "beta" }).resolveChannel(),
+    "beta",
+  );
+  assert.equal(
+    makeController({ env: { ELEVATE_UPDATE_CHANNEL: "latest" }, packagedChannel: "beta" }).resolveChannel(),
+    "beta",
+  );
+  assert.equal(
+    makeController({ env: { ELEVATE_UPDATE_CHANNEL: "beta" }, packagedChannel: "latest" }).resolveChannel(),
     "latest",
   );
+});
+
+test("Stable update-channel override is read from the supplied state root", () => {
+  const readPaths = [];
+  assert.equal(
+    makeController({
+      fileContent: "beta",
+      stateRoot: "/home/test/.elevate-isolated",
+      readPaths,
+    }).resolveChannel(),
+    "beta",
+  );
+  assert.deepEqual(readPaths, ["/home/test/.elevate-isolated/update-channel"]);
 });
 
 test("kickoffUpdates sets autoUpdater.channel from the resolved channel", () => {

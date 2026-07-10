@@ -14,14 +14,13 @@ import json
 import os
 import random
 import re
-import uuid
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 
 from elevate_cli import outreach_db
 from elevate_cli.config import load_env
+from elevate_constants import get_elevate_home
 
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
@@ -38,7 +37,7 @@ LANE_BRIEFS = {
 
 
 def _voice_anchor() -> str:
-    soul = Path.home() / ".elevate" / "SOUL.md"
+    soul = get_elevate_home() / "SOUL.md"
     if soul.exists():
         try:
             text = soul.read_text(encoding="utf-8")

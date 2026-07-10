@@ -26,7 +26,7 @@ test("computer-use overlay is shown inactive and only while flag is fresh", () =
   const main = read(mainPath);
   const overlay = read(overlayManagerPath);
 
-  assert.match(main, /const COMPUTER_USE_FLAG = path\.join\(HOME, "\.elevate", "computer-use-active"\)/);
+  assert.match(main, /const COMPUTER_USE_FLAG = RUNTIME_PATHS\.computerUseFlag/);
   assert.match(main, /const COMPUTER_USE_FRESH_MS = 6000/);
   assert.match(overlay, /fresh = Date\.now\(\) - stat\.mtimeMs < freshMs/);
   assert.match(overlay, /setOverlayVisible\(fresh\)/);

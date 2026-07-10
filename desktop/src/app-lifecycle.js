@@ -15,6 +15,7 @@ function createAppLifecycle({
   markStartup,
   ownsBackend,
   process,
+  protocolScheme = "elevate",
   startDesktop,
   startPath,
   startSmsOutboxWatcher,
@@ -26,7 +27,7 @@ function createAppLifecycle({
       return false;
     }
 
-    // Hand off duplicate launches and elevate:// argv links to the primary app.
+    // Hand off duplicate launches and protocol argv links to the primary app.
     app.on("second-instance", (_event, argv) => {
       const win = mainWindow();
       if (win && !win.isDestroyed()) {
@@ -36,7 +37,7 @@ function createAppLifecycle({
       }
       app.focus({ steal: true });
       const deepLink = argv.find(
-        (arg) => typeof arg === "string" && arg.startsWith("elevate://"),
+        (arg) => typeof arg === "string" && arg.startsWith(`${protocolScheme}://`),
       );
       if (deepLink) deepLinks.handleDeepLink(deepLink);
     });

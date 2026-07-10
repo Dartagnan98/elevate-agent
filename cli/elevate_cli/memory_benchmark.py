@@ -320,7 +320,9 @@ def run_holographic_memory_benchmark(
             plugin_config = {}
         plugin_config = dict(plugin_config)
         if not plugin_config.get("db_path"):
-            plugin_config["db_path"] = "~/.elevate/memory_store.db"
+            from elevate_constants import get_elevate_home
+
+            plugin_config["db_path"] = str(get_elevate_home() / "memory_store.db")
 
         from plugins.memory.holographic import HolographicMemoryProvider
 

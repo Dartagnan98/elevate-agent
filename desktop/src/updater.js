@@ -15,6 +15,7 @@ function createUpdaterController({
   homedir = os.homedir,
   env = process.env,
   packagedChannel = "",
+  stateRoot,
 }) {
   let updateState = { status: "idle", info: null, progress: null, error: null };
   let updateCheckInFlight = false;
@@ -99,24 +100,24 @@ function createUpdaterController({
     });
   }
 
-  // Opt-in beta channel: a box joins beta via ELEVATE_UPDATE_CHANNEL=beta or a
-  // ~/.elevate/update-channel file containing "beta". electron-updater then
-  // polls beta-mac.yml instead of latest-mac.yml, so a risky release can soak on
-  // a canary before the whole fleet. Default (and anything unrecognized) = stable.
+  // Current packaged apps are pinned to their build lane. The environment/file
+  // override remains only for development and older builds that predate bundled
+  // release metadata; a Stable app must not install the separately identified
+  // Beta bundle (or vice versa).
   function resolveChannel() {
+    const fromPackage = String(packagedChannel || "").trim().toLowerCase();
+    if (fromPackage === "beta" || fromPackage === "latest") return fromPackage;
     const fromEnv = String(env.ELEVATE_UPDATE_CHANNEL || "").trim().toLowerCase();
     if (fromEnv === "beta" || fromEnv === "latest") return fromEnv;
     try {
       const raw = fs
-        .readFileSync(path.join(homedir(), ".elevate", "update-channel"), "utf8")
+        .readFileSync(path.join(stateRoot || path.join(homedir(), ".elevate"), "update-channel"), "utf8")
         .trim()
         .toLowerCase();
       if (raw === "beta" || raw === "latest") return raw;
     } catch {
-      // No explicit channel file; fall through to the packaged release lane.
+      // No explicit channel file; fall through to the Stable default.
     }
-    const fromPackage = String(packagedChannel || "").trim().toLowerCase();
-    if (fromPackage === "beta" || fromPackage === "latest") return fromPackage;
     return "latest";
   }
 

@@ -21,11 +21,12 @@ function createCrashReporter({
   version,
   timeline = () => [],
   now = () => Date.now(),
+  elevateHome,
 } = {}) {
   function optedIn() {
     if (String(env.ELEVATE_CRASH_REPORTS || "").trim() === "1") return true;
     try {
-      return fs.existsSync(path.join(homedir(), ".elevate", "crash-reports"));
+      return fs.existsSync(path.join(elevateHome || path.join(homedir(), ".elevate"), "crash-reports"));
     } catch {
       return false;
     }

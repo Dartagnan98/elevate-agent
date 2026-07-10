@@ -191,7 +191,9 @@ def find_sqlite_backups(root: Path | None = None) -> list[Path]:
     siblings — only the explicitly named backup variants.
     """
     if root is None:
-        root = Path.home() / ".elevate"
+        from elevate_constants import get_elevate_home
+
+        root = get_elevate_home()
     if not root.exists():
         return []
 

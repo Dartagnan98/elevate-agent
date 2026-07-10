@@ -27,6 +27,9 @@ function makeTools(overrides = {}) {
     path,
     process: fakeProcess,
     repoRoot: () => "/repo",
+    elevateHome: overrides.elevateHome,
+    pythonCacheDir: overrides.pythonCacheDir,
+    workspace: overrides.workspace,
   });
 }
 
@@ -35,6 +38,7 @@ test("launcher env keeps bytecode cache outside the app bundle", () => {
 
   assert.equal(env.PYTHONDONTWRITEBYTECODE, undefined);
   assert.equal(env.PYTHONPYCACHEPREFIX, "/Users/tester/Library/Caches/Elevate/python-pycache");
+  assert.equal(env.ELEVATE_HOME, "/Users/tester/.elevate");
   assert.equal(env.PATH, "/opt/homebrew/bin:/usr/local/bin:/usr/bin");
   assert.equal(env.EXTRA, "1");
 });
@@ -78,4 +82,30 @@ test("launcher uses bundled runtime when packaged resources exist", () => {
   assert.equal(launcher.cwd, "/Users/tester/Elevation");
   assert.equal(launcher.extraEnv.PYTHONPATH, "/Applications/Elevate.app/Contents/Resources/cli");
   assert.deepEqual(created, ["/Users/tester/Elevation"]);
+});
+
+test("Beta launcher scopes backend state, cache, and workspace", () => {
+  const created = [];
+  const launcher = makeTools({
+    packaged: true,
+    resourcesPath: "/Applications/Elevate Beta.app/Contents/Resources",
+    elevateHome: "/Users/tester/.elevate-beta",
+    pythonCacheDir: "/Users/tester/Library/Caches/Elevate Beta/python-pycache",
+    workspace: "/Users/tester/Elevation Beta",
+    fileExists: (filePath) =>
+      filePath.endsWith("runtime/python/bin/python3.12") || filePath.endsWith("/cli"),
+    fs: { mkdirSync: (dir) => created.push(dir) },
+  });
+
+  const env = launcher.envWithPath();
+  const command = launcher.resolveElevateLauncher();
+  assert.equal(env.ELEVATE_HOME, "/Users/tester/.elevate-beta");
+  assert.equal(
+    env.PYTHONPYCACHEPREFIX,
+    "/Users/tester/Library/Caches/Elevate Beta/python-pycache",
+  );
+  assert.equal(command.cwd, "/Users/tester/Elevation Beta");
+  assert.equal(command.extraEnv.ELEVATE_HOME, "/Users/tester/.elevate-beta");
+  assert.equal(command.extraEnv.ELEVATE_WORKSPACE, "/Users/tester/Elevation Beta");
+  assert.deepEqual(created, ["/Users/tester/Elevation Beta"]);
 });

@@ -36,10 +36,31 @@ const startupLog = require("./startup-log");
 const { createUpdaterController } = require("./updater");
 const { createCrashReporter } = require("./crash-reporter");
 const { createInstallerController } = require("./installer");
+const {
+  applyElectronProfile,
+  resolveReleaseProfile,
+  resolveRuntimePaths,
+} = require("./release-profile");
 const packageMetadata = require("../package.json");
 
+const HOME = os.homedir();
+const RELEASE_PROFILE = resolveReleaseProfile(
+  packageMetadata.elevateReleaseChannel || process.env.ELEVATE_RELEASE_CHANNEL,
+);
+const RUNTIME_PATHS = resolveRuntimePaths({
+  profile: RELEASE_PROFILE,
+  home: HOME,
+  env: process.env,
+});
+process.env.ELEVATE_HOME = RUNTIME_PATHS.elevateHome;
+process.env.ELEVATE_RELEASE_CHANNEL = RELEASE_PROFILE.channel;
+if (RELEASE_PROFILE.isBeta) {
+  process.env.PYTHONPYCACHEPREFIX = RUNTIME_PATHS.pythonCache;
+}
+applyElectronProfile({ app, fs, profile: RELEASE_PROFILE, paths: RUNTIME_PATHS });
+
 // Send autoUpdater logs to a file so we can debug what the user saw.
-// Tail with: tail -f ~/Library/Logs/Elevate/main.log
+// Beta uses its own app log root; Stable keeps Electron's existing default.
 log.transports.file.level = "info";
 autoUpdater.logger = log;
 autoUpdater.autoDownload = true; // download in background as soon as available
@@ -64,14 +85,15 @@ autoUpdater.autoInstallOnAppQuit = process.platform !== "darwin";
 // forcing it sidesteps the whole class of failure.
 autoUpdater.disableDifferentialDownload = true;
 
-const PREFERRED_PORT = Number(process.env.ELEVATE_DESKTOP_PORT || 9119);
+const PREFERRED_PORT = Number(
+  process.env.ELEVATE_DESKTOP_PORT || RELEASE_PROFILE.preferredPort,
+);
 const HOST = "127.0.0.1";
-const HOME = os.homedir();
 const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/chat";
 const DASHBOARD_LOAD_RETRY_LIMIT = 3;
 const DASHBOARD_LOAD_RETRY_DELAY_MS = 750;
 const HQ_BASE_URL = (process.env.ELEVATE_BACKEND_URL || "https://api.elevationrealestatehq.com").replace(/\/+$/, "");
-const LICENSE_PATH = path.join(HOME, ".elevate", "license.json");
+const LICENSE_PATH = RUNTIME_PATHS.licensePath;
 // Refresh access tokens with this much headroom before expiry. Mirrors
 // REFRESH_MARGIN_SECONDS in elevate_cli/license.py so the two stay in sync.
 const ACCESS_REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -79,7 +101,7 @@ const EMBEDDED_CHAT =
   process.env.ELEVATE_DESKTOP_EMBEDDED_CHAT !== "0" &&
   process.env.ELEVATE_DASHBOARD_TUI !== "0";
 const DEFAULT_PATH = [
-  path.join(HOME, ".elevate", "bin"),
+  path.join(RUNTIME_PATHS.elevateHome, "bin"),
   path.join(HOME, ".local", "bin"),
   "/opt/homebrew/bin",
   "/usr/local/bin",
@@ -94,7 +116,10 @@ const auth = createDesktopAuth({
   licensePath: LICENSE_PATH,
   log,
 });
-const smsOutbox = createSmsOutbox({ log });
+const smsOutbox = createSmsOutbox({
+  log,
+  elevateHome: RUNTIME_PATHS.elevateHome,
+});
 
 let mainWindow = null;
 let backendProcess = null;
@@ -102,7 +127,7 @@ let backendProcess = null;
 // The computer-use tool touches this file on every action. The desktop app
 // polls its mtime and shows the screen-edge glow while it is fresh, so the
 // user always sees when the agent is driving their Mac.
-const COMPUTER_USE_FLAG = path.join(HOME, ".elevate", "computer-use-active");
+const COMPUTER_USE_FLAG = RUNTIME_PATHS.computerUseFlag;
 const COMPUTER_USE_FRESH_MS = 6000;
 const computerUseOverlay = createComputerUseOverlay({
   BrowserWindow,
@@ -132,6 +157,9 @@ const launcherTools = createLauncherTools({
   path,
   process,
   repoRoot,
+  elevateHome: RUNTIME_PATHS.elevateHome,
+  pythonCacheDir: RUNTIME_PATHS.pythonCache,
+  workspace: RUNTIME_PATHS.workspace,
 });
 const backendPorts = createBackendPortController({
   backendBundleMatches,
@@ -158,6 +186,8 @@ const gatewaySelfHeal = createGatewaySelfHeal({
   path,
   process,
   spawn,
+  elevateHome: RUNTIME_PATHS.elevateHome,
+  gatewayLabel: RUNTIME_PATHS.gatewayLabel,
 });
 const backendRunner = createBackendRunner({
   backendMatchesDesktopMode,
@@ -187,8 +217,9 @@ const updater = createUpdaterController({
   ipcMain,
   log,
   mainWindow: () => mainWindow,
-  packagedChannel: packageMetadata.elevateReleaseChannel,
+  packagedChannel: RELEASE_PROFILE.channel,
   resourcesPath: () => process.resourcesPath,
+  stateRoot: RUNTIME_PATHS.elevateHome,
 });
 const installer = createInstallerController({
   appendBackendLog,
@@ -207,6 +238,7 @@ const deepLinks = createDeepLinks({
   app,
   mainWindow: () => mainWindow,
   openLoginWindow,
+  protocolScheme: RELEASE_PROFILE.protocolScheme,
 });
 const dashboardNavigation = createDashboardNavigation({
   appRoot: __dirname,
@@ -234,6 +266,7 @@ const mainWindowController = createMainWindowController({
   markStartup,
   path,
   process,
+  productName: RELEASE_PROFILE.productName,
   resetDashboardLoadRetry,
   scheduleDashboardLoadRetry,
   setMainWindow: (win) => {
@@ -257,12 +290,11 @@ const appLifecycle = createAppLifecycle({
   markStartup,
   ownsBackend: () => ownsBackend,
   process,
+  protocolScheme: RELEASE_PROFILE.protocolScheme,
   startDesktop,
   startPath: START_PATH,
   startSmsOutboxWatcher,
 });
-
-app.setName("Elevate");
 
 const isPrimaryInstance = appLifecycle.registerSingleInstance();
 
@@ -292,7 +324,12 @@ function formatCrashForLog(reason) {
 }
 
 function installMainCrashCapture() {
-  const crashReporter = createCrashReporter({ app, log, version: app.getVersion() });
+  const crashReporter = createCrashReporter({
+    app,
+    elevateHome: RUNTIME_PATHS.elevateHome,
+    log,
+    version: app.getVersion(),
+  });
   startupLog.installMainCrashCapture({
     app,
     log,
@@ -562,6 +599,7 @@ function createMenu() {
     openLoginWindow,
     shell,
     startPath: START_PATH,
+    productName: RELEASE_PROFILE.productName,
   });
 }
 

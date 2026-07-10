@@ -16,6 +16,11 @@ const PUBLIC_FEED_URL = `https://api.elevationrealestatehq.com/updates/${RELEASE
 const STABLE_FEED_URL = "https://api.elevationrealestatehq.com/updates/latest-mac.yml";
 const packageJson = require(path.join(ROOT, "package.json"));
 const packageLock = require(path.join(ROOT, "package-lock.json"));
+const createBuilderConfig = require(path.join(ROOT, "electron-builder.config.js"));
+const { resolveReleaseProfile } = require(path.join(ROOT, "src", "release-profile.js"));
+const releaseProfile = resolveReleaseProfile(RELEASE_CHANNEL);
+const stableProfile = resolveReleaseProfile("latest");
+const effectiveBuild = createBuilderConfig();
 
 const checks = [];
 
@@ -215,6 +220,31 @@ record(
   "package root version matches lockfile package",
   packageJson.version === packageLock.packages?.[""]?.version,
   `${packageJson.version} / ${packageLock.packages?.[""]?.version || "missing"}`
+);
+record(
+  "release build identity matches selected channel",
+  effectiveBuild.productName === releaseProfile.productName
+    && effectiveBuild.appId === releaseProfile.appId
+    && effectiveBuild.extraMetadata?.name === releaseProfile.packageName
+    && effectiveBuild.extraMetadata?.elevateReleaseChannel === releaseProfile.channel
+    && effectiveBuild.protocols?.[0]?.schemes?.[0] === releaseProfile.protocolScheme
+    && effectiveBuild.publish?.every((entry) => entry.channel === releaseProfile.channel),
+  `${releaseProfile.productName} / ${releaseProfile.appId} / ${releaseProfile.protocolScheme}://`,
+);
+record(
+  "Beta install identity and runtime defaults are isolated from Stable",
+  !releaseProfile.isBeta || [
+    "productName",
+    "appBundleName",
+    "appId",
+    "packageName",
+    "protocolScheme",
+    "elevateHomeName",
+    "workspaceName",
+    "preferredPort",
+    "gatewayLabel",
+  ].every((key) => releaseProfile[key] !== stableProfile[key]),
+  releaseProfile.isBeta ? `${releaseProfile.elevateHomeName} / port ${releaseProfile.preferredPort}` : "Stable lane",
 );
 
 let feed = latestFeedVersion();
