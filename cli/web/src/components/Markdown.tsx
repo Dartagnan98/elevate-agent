@@ -498,7 +498,7 @@ function parseInline(text: string): InlineNode[] {
   // any run of 1+ backticks so collapsed ```fences``` (whose newlines were
   // eaten) still render as a box instead of leaking stray backticks.
   const pattern =
-    /(```+[^`]*?```+|``[^`]+?``|`[^`]+?`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|((?:\/|~\/|\.{1,2}\/)[\w.@-]+(?:\/[\w.@-]+)*\/?|[\w@.-]+(?:\/[\w@.-]+){2,}\/?|[\w@.-]+\/[\w@.-]*\.[a-zA-Z0-9]{1,8})|(\n)/g;
+    /(```+[^`]*?```+|``[^`]+?``|`[^`]+?`)|(\[([^\]]+)\]\(([^)]+)\))|(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(\bhttps?:\/\/[^\s<>)\]]+)|(?<![\w@.-])((?:\/|~\/|\.{1,2}\/)[\w.@-]+(?:\/[\w.@-]+)*\/?|[\w@.-]+(?:\/[\w.@-]+)*\/[\w@.-]*\.[a-zA-Z0-9]{1,8})|(\n)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
