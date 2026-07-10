@@ -30,7 +30,10 @@ test("gateway self-heal kickstarts a loaded but dead service", () => {
 
   assert.match(block, /if \(fileExists\(plist\) && loaded && !running\)/);
   assert.match(block, /loaded but NOT running -> kickstart/);
-  assert.match(block, /if \(kickstartGateway\(uid\) && probeGateway\(uid\)\.running\) return/);
+  assert.match(
+    block,
+    /if \(\(await kickstartGateway\(uid\)\) && \(await probeGateway\(uid\)\)\.running\) return/,
+  );
 });
 
 test("gateway self-heal installs missing service and direct-bootstraps as fallback", () => {
@@ -59,4 +62,66 @@ test("desktop schedules gateway self-heal for adopted and spawned dashboards", (
     block.lastIndexOf("scheduleGatewaySelfHeal(launcher, baseEnv)") >
       block.indexOf("backend:ready"),
   );
+});
+
+// C5 behavioral coverage: the heal chain must run through async spawn (never
+// blocking the main thread) while preserving the spawnSync result shape.
+const { EventEmitter } = require("node:events");
+const { createGatewaySelfHeal } = require("../src/gateway-self-heal");
+
+function fakeSpawn(behavior) {
+  const calls = [];
+  const spawn = (command, args) => {
+    calls.push({ command, args });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("close", null, "SIGTERM");
+    process.nextTick(() => {
+      const b = behavior(command, args) || {};
+      if (b.stdout) child.stdout.emit("data", b.stdout);
+      child.emit("close", b.status ?? 0, null);
+    });
+    return child;
+  };
+  return { spawn, calls };
+}
+
+function buildSelfHeal(spawn, logs) {
+  return createGatewaySelfHeal({
+    app: { getVersion: () => "0.0.0-test" },
+    appendBackendLog: (line) => logs.push(line),
+    envWithPath: (env) => env,
+    fileExists: () => false,
+    fs: require("node:fs"),
+    os: require("node:os"),
+    path: require("node:path"),
+    process: { platform: "darwin", getuid: () => 501 },
+    spawn,
+  });
+}
+
+test("probeGateway parses launchctl print output asynchronously", async () => {
+  const { spawn } = fakeSpawn(() => ({ status: 0, stdout: "pid = 4242\n" }));
+  const heal = buildSelfHeal(spawn, []);
+  const pending = heal.probeGateway(501);
+  assert.equal(typeof pending.then, "function", "probeGateway must not block");
+  assert.deepEqual(await pending, { loaded: true, running: true });
+});
+
+test("ensureGatewayInstalled runs install without throwing when nothing is loaded", async () => {
+  const logs = [];
+  const { spawn, calls } = fakeSpawn((command) =>
+    command === "launchctl" ? { status: 113 } : { status: 0, stdout: "installed" },
+  );
+  const heal = buildSelfHeal(spawn, logs);
+  await heal.ensureGatewayInstalled(
+    { command: "elevate", args: ["dashboard"], cwd: "/tmp" },
+    {},
+  );
+  assert.ok(
+    calls.some((c) => c.command === "elevate" && c.args.includes("install")),
+    "install command must run",
+  );
+  assert.ok(logs.some((l) => l.includes("-> installing")));
 });

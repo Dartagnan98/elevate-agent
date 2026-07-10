@@ -7,17 +7,52 @@ function createGatewaySelfHeal({
   os,
   path,
   process,
-  spawnSync,
+  spawn,
 }) {
+  // Async replacement for the old injected spawnSync — resolves with the
+  // same result shape ({status, signal, stdout, stderr, error}) so the
+  // heal chain reads identically but never blocks Electron's main thread
+  // (the install step alone could freeze IPC/menus for up to 90s).
+  function run(command, args, { cwd, env, timeout = 90000 } = {}) {
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(command, args, { cwd, env });
+      } catch (error) {
+        resolve({ status: null, signal: null, stdout: "", stderr: "", error });
+        return;
+      }
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          /* already gone */
+        }
+      }, timeout);
+      const settle = (status, signal, error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ status, signal: signal || null, stdout, stderr, error });
+      };
+      if (child.stdout) child.stdout.on("data", (d) => { stdout += d; });
+      if (child.stderr) child.stderr.on("data", (d) => { stderr += d; });
+      child.on("error", (error) => settle(null, null, error));
+      child.on("close", (status, signal) => settle(status, signal));
+    });
+  }
+
   function runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs = 90000 } = {}) {
     const idx = launcher.args.indexOf("dashboard");
     const prefix = idx >= 0 ? launcher.args.slice(0, idx) : [];
     const args = [...prefix, "gateway", ...gwArgs];
-    return spawnSync(launcher.command, args, {
+    return run(launcher.command, args, {
       cwd: launcher.cwd,
       env: envWithPath({ ...baseEnv, ...(launcher.extraEnv || {}) }),
       timeout: timeoutMs,
-      encoding: "utf8",
     });
   }
 
@@ -68,48 +103,44 @@ function createGatewaySelfHeal({
     return "";
   }
 
-  function kickstartGateway(uid) {
-    const res = spawnSync(
+  async function kickstartGateway(uid) {
+    const res = await run(
       "launchctl",
       ["kickstart", "-k", `gui/${uid}/ai.elevate.gateway`],
-      { encoding: "utf8", timeout: 15000 },
+      { timeout: 15000 },
     );
     const out = String(res.stdout || res.stderr || "").trim().slice(-300);
     appendBackendLog(`[gateway] kickstart rc=${res.status}\n${out}\n`);
     return res.status === 0;
   }
 
-  function probeGateway(uid) {
-    try {
-      const probe = spawnSync(
-        "launchctl",
-        ["print", `gui/${uid}/ai.elevate.gateway`],
-        { encoding: "utf8", timeout: 8000 },
-      );
-      const out = String(probe.stdout || "");
-      const loaded = probe.status === 0;
-      const running =
-        loaded && (/\bpid = \d+/.test(out) || /state = running/.test(out));
-      return { loaded, running };
-    } catch {
-      return { loaded: false, running: false };
-    }
+  async function probeGateway(uid) {
+    const probe = await run(
+      "launchctl",
+      ["print", `gui/${uid}/ai.elevate.gateway`],
+      { timeout: 8000 },
+    );
+    const out = String(probe.stdout || "");
+    const loaded = probe.status === 0;
+    const running =
+      loaded && (/\bpid = \d+/.test(out) || /state = running/.test(out));
+    return { loaded, running };
   }
 
-  function bootstrapGatewayDirect(uid, plist) {
-    const bs = spawnSync(
+  async function bootstrapGatewayDirect(uid, plist) {
+    const bs = await run(
       "launchctl",
       ["bootstrap", `gui/${uid}`, plist],
-      { encoding: "utf8", timeout: 15000 },
+      { timeout: 15000 },
     );
     appendBackendLog(
       `[gateway] direct bootstrap rc=${bs.status} ${String(bs.stdout || bs.stderr || "").trim().slice(-200)}\n`,
     );
-    if (!probeGateway(uid).running) kickstartGateway(uid);
-    return probeGateway(uid).running;
+    if (!(await probeGateway(uid)).running) await kickstartGateway(uid);
+    return (await probeGateway(uid)).running;
   }
 
-  function ensureGatewayInstalled(launcher, baseEnv) {
+  async function ensureGatewayInstalled(launcher, baseEnv) {
     if (process.platform !== "darwin") return;
     try {
       const plist = path.join(
@@ -119,27 +150,27 @@ function createGatewaySelfHeal({
         "ai.elevate.gateway.plist",
       );
       const uid = typeof process.getuid === "function" ? process.getuid() : "";
-      const { loaded, running } = probeGateway(uid);
+      const { loaded, running } = await probeGateway(uid);
       const appVersion = app.getVersion();
       if (fileExists(plist) && loaded && !running) {
         appendBackendLog(
           "[gateway] self-heal: loaded but NOT running -> kickstart\n",
         );
-        if (kickstartGateway(uid) && probeGateway(uid).running) return;
+        if ((await kickstartGateway(uid)) && (await probeGateway(uid)).running) return;
       } else if (fileExists(plist) && loaded) {
         const lastVersion = readGatewayVersionMarker();
         if (lastVersion !== appVersion) {
           appendBackendLog(
             `[gateway] version change ${lastVersion || "(none)"} -> ${appVersion}; reinstalling to load new code + refresh plist env\n`,
           );
-          const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
+          const reinstall = await runGatewayCommand(launcher, baseEnv, ["install"]);
           const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
           appendBackendLog(`[gateway] version-change reinstall rc=${reinstall.status}\n${rout}\n`);
           if (reinstall.status === 0) {
-            if (kickstartGateway(uid)) {
+            if (await kickstartGateway(uid)) {
               writeGatewayVersionMarker(appVersion);
             }
-          } else if (kickstartGateway(uid)) {
+          } else if (await kickstartGateway(uid)) {
             writeGatewayVersionMarker(appVersion);
           }
         } else {
@@ -148,14 +179,14 @@ function createGatewaySelfHeal({
             appendBackendLog(
               `[gateway] self-heal: packaged resource recovered (${missingResource}); reinstalling gateway\n`,
             );
-            const reinstall = runGatewayCommand(launcher, baseEnv, ["install"]);
+            const reinstall = await runGatewayCommand(launcher, baseEnv, ["install"]);
             const rout = String(reinstall.stdout || reinstall.stderr || "").trim().slice(-300);
             appendBackendLog(`[gateway] recovered-resource reinstall rc=${reinstall.status}\n${rout}\n`);
             if (reinstall.status === 0) {
-              if (kickstartGateway(uid)) {
+              if (await kickstartGateway(uid)) {
                 writeGatewayVersionMarker(appVersion);
               }
-            } else if (kickstartGateway(uid)) {
+            } else if (await kickstartGateway(uid)) {
               writeGatewayVersionMarker(appVersion);
             }
           } else {
@@ -169,15 +200,15 @@ function createGatewaySelfHeal({
       appendBackendLog(
         `[gateway] self-heal: plist=${fileExists(plist)} loaded=${loaded} running=${running} -> installing\n`,
       );
-      const res = runGatewayCommand(launcher, baseEnv, ["install"]);
+      const res = await runGatewayCommand(launcher, baseEnv, ["install"]);
       const out = String(res.stdout || res.stderr || "").trim().slice(-400);
       appendBackendLog(`[gateway] self-heal install rc=${res.status}\n${out}\n`);
       if (res.status === 0) writeGatewayVersionMarker(appVersion);
-      if (!probeGateway(uid).running && fileExists(plist)) {
+      if (!(await probeGateway(uid)).running && fileExists(plist)) {
         appendBackendLog(
           "[gateway] self-heal: install did not yield a running job; direct launchctl bootstrap fallback\n",
         );
-        const revived = bootstrapGatewayDirect(uid, plist);
+        const revived = await bootstrapGatewayDirect(uid, plist);
         appendBackendLog(
           `[gateway] self-heal: direct bootstrap ${revived ? "revived the gateway" : "FAILED — gateway still down"}\n`,
         );

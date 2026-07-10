@@ -26,9 +26,9 @@ function createBackendRunner({
 
   function scheduleGatewaySelfHeal(launcher, baseEnv) {
     if (!launcher) return;
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
-        ensureGatewayInstalled(launcher, baseEnv);
+        await ensureGatewayInstalled(launcher, baseEnv);
       } catch (e) {
         appendBackendLog(`[gateway] self-heal threw: ${e}\n`);
       }
