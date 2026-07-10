@@ -323,7 +323,7 @@ def run_installed_app_seal(
                 command,
                 text=True,
                 capture_output=True,
-                timeout=min(max(timeout, 1.0), 60.0),
+                timeout=min(max(timeout, 1.0), 600.0),
                 check=False,
             )
         except FileNotFoundError:
@@ -1201,6 +1201,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected", default="installed compaction smoke ok")
     parser.add_argument("--expected-app-version")
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--seal-timeout",
+        type=float,
+        default=600.0,
+        help="Maximum seconds for each codesign or Gatekeeper assessment.",
+    )
     parser.add_argument("--skip-parity", action="store_true")
     parser.add_argument(
         "--skip-seal",
@@ -1271,7 +1277,7 @@ def main(argv: list[str]) -> int:
     if not args.skip_seal:
         run_installed_app_seal(
             installed_app=args.installed_app,
-            timeout=args.timeout,
+            timeout=args.seal_timeout,
             result=result,
         )
 

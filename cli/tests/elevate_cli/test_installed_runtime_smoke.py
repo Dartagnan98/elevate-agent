@@ -76,6 +76,13 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
 
 
+def test_installed_runtime_smoke_allows_slow_gatekeeper_assessment():
+    smoke = _load_smoke_script()
+
+    assert smoke.parse_args([]).seal_timeout == 600.0
+    assert smoke.parse_args(["--seal-timeout", "45"]).seal_timeout == 45.0
+
+
 def test_installed_runtime_smoke_discovers_selected_dashboard_port(tmp_path):
     smoke = _load_smoke_script()
     log = tmp_path / "main.log"
