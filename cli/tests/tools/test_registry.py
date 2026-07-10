@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tools.registry import ToolRegistry, _module_registers_tools, discover_builtin_tools
 
 
@@ -46,6 +48,60 @@ class TestRegisterAndDispatch:
         )
         result = json.loads(reg.dispatch("echo", {"msg": "hi"}))
         assert result == {"msg": "hi"}
+
+    def test_normalizes_one_legacy_openai_wrapper(self):
+        reg = ToolRegistry()
+        inner = {
+            "name": "legacy",
+            "description": "Legacy action tool",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            },
+        }
+        reg.register(
+            name="legacy",
+            toolset="core",
+            schema={"type": "function", "function": inner},
+            handler=_dummy_handler,
+        )
+
+        assert reg.get_schema("legacy") == inner
+        definition = reg.get_definitions({"legacy"})[0]
+        assert "function" not in definition["function"]
+        assert definition["function"]["parameters"]["required"] == ["action"]
+
+    def test_rejects_more_than_one_function_wrapper(self):
+        reg = ToolRegistry()
+        nested = {
+            "type": "function",
+            "function": {
+                "type": "function",
+                "function": _make_schema("nested"),
+            },
+        }
+
+        with pytest.raises(ValueError, match=r"nested function\.function"):
+            reg.register(
+                name="nested",
+                toolset="core",
+                schema=nested,
+                handler=_dummy_handler,
+            )
+
+    def test_rejects_required_fields_missing_from_properties(self):
+        reg = ToolRegistry()
+        schema = _make_schema("broken")
+        schema["parameters"]["required"] = ["action"]
+
+        with pytest.raises(ValueError, match="requires undeclared parameter"):
+            reg.register(
+                name="broken",
+                toolset="core",
+                schema=schema,
+                handler=_dummy_handler,
+            )
 
 
 class TestGetDefinitions:
@@ -110,6 +166,76 @@ class TestGetDefinitions:
         defs = reg.get_definitions({"first", "second"})
         assert len(defs) == 2
         assert calls["count"] == 1
+
+    def test_real_estate_tool_schemas_survive_provider_conversion(self):
+        import model_tools  # noqa: F401  (populates the built-in registry)
+        from agent.anthropic_adapter import convert_tools_to_anthropic
+        from agent.bedrock_adapter import convert_tools_to_converse
+        from agent.codex_responses_adapter import _responses_tools
+        from agent.gemini_cloudcode_adapter import _translate_tools_to_gemini as cloudcode_tools
+        from agent.gemini_native_adapter import _translate_tools_to_gemini as native_tools
+        from tools.registry import registry
+        from tools.schema_sanitizer import sanitize_tool_schemas
+
+        names = {
+            "admin_deal",
+            "admin_profile",
+            "agent_bus",
+            "agent_handoff",
+            "deals_overview",
+            "elevate_db",
+            "lead_status",
+            "leads_overview",
+            "working_state",
+        }
+        definitions = sanitize_tool_schemas(registry.get_definitions(names, quiet=True))
+        canonical = {item["function"]["name"]: item["function"] for item in definitions}
+
+        assert set(canonical) == names
+        for name, function in canonical.items():
+            assert "function" not in function
+            assert function.get("description"), f"{name} lost its description"
+            assert function["parameters"].get("properties"), f"{name} lost its parameters"
+
+        provider_payloads = {
+            "chat-completions": canonical,
+            "codex-responses": {item["name"]: item for item in _responses_tools(definitions)},
+            "anthropic": {
+                item["name"]: {
+                    "description": item["description"],
+                    "parameters": item["input_schema"],
+                }
+                for item in convert_tools_to_anthropic(definitions)
+            },
+            "bedrock": {
+                item["toolSpec"]["name"]: {
+                    "description": item["toolSpec"]["description"],
+                    "parameters": item["toolSpec"]["inputSchema"]["json"],
+                }
+                for item in convert_tools_to_converse(definitions)
+            },
+            "gemini-native": {
+                item["name"]: item
+                for item in native_tools(definitions)[0]["functionDeclarations"]
+            },
+            "gemini-cloudcode": {
+                item["name"]: item
+                for item in cloudcode_tools(definitions)[0]["functionDeclarations"]
+            },
+        }
+
+        for provider, payload in provider_payloads.items():
+            assert set(payload) == names, f"{provider} lost a tool"
+            for name, expected in canonical.items():
+                actual = payload[name]
+                parameters = actual.get("parameters", {})
+                assert actual.get("description"), f"{provider}:{name} lost its description"
+                assert set(parameters.get("properties", {})) == set(
+                    expected["parameters"]["properties"]
+                ), f"{provider}:{name} lost parameter properties"
+                assert parameters.get("required", []) == expected["parameters"].get(
+                    "required", []
+                ), f"{provider}:{name} changed required fields"
 
 
 class TestUnknownToolDispatch:

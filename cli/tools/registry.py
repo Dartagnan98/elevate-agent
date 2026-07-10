@@ -26,6 +26,38 @@ from typing import Callable, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
+def _normalize_function_schema(name: str, schema: dict) -> dict:
+    """Store one canonical inner function schema.
+
+    Most callers register ``{name, description, parameters}``, but a small
+    legacy set passes the complete OpenAI ``{type, function}`` envelope.  The
+    registry owns that envelope, so unwrap it once and reject deeper nesting
+    instead of emitting ``function.function`` to providers.
+    """
+    if not isinstance(schema, dict):
+        raise TypeError(f"Tool '{name}' schema must be a dict")
+
+    if schema.get("type") == "function" or "function" in schema:
+        if schema.get("type") != "function" or not isinstance(schema.get("function"), dict):
+            raise ValueError(f"Tool '{name}' has an invalid function wrapper")
+        schema = schema["function"]
+
+    if "function" in schema:
+        raise ValueError(f"Tool '{name}' schema contains nested function.function")
+
+    normalized = dict(schema)
+    parameters = normalized.get("parameters")
+    if isinstance(parameters, dict) and isinstance(parameters.get("required"), list):
+        properties = parameters.get("properties")
+        property_names = set(properties) if isinstance(properties, dict) else set()
+        missing = [field for field in parameters["required"] if field not in property_names]
+        if missing:
+            raise ValueError(
+                f"Tool '{name}' requires undeclared parameter(s): {', '.join(map(str, missing))}"
+            )
+    return normalized
+
+
 def _is_registry_register_call(node: ast.AST) -> bool:
     """Return True when *node* is a ``registry.register(...)`` call expression."""
     if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
@@ -287,6 +319,7 @@ class ToolRegistry:
                         name, toolset, existing.toolset,
                     )
                     return
+            schema = _normalize_function_schema(name, schema)
             self._tools[name] = ToolEntry(
                 name=name,
                 toolset=toolset,
