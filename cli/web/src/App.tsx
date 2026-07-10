@@ -1121,7 +1121,7 @@ function coalesceInFlight<T>(
   return request;
 }
 
-export const __appTestables = { coalesceInFlight };
+export const __appTestables = { coalesceInFlight, sessionStatusPresentation };
 
 function readStoredSessionIds(key: string): string[] {
   if (typeof window === "undefined") return [];
@@ -2662,6 +2662,28 @@ function SessionSection({
 
 const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 
+function sessionStatusPresentation({
+  lastActive,
+  unread,
+  running,
+  needsApproval,
+  nowMs = Date.now(),
+}: {
+  lastActive: number;
+  unread: boolean;
+  running?: boolean;
+  needsApproval?: boolean;
+  nowMs?: number;
+}): { label: string; tone: "warning" | "idle" | "ok" } {
+  if (needsApproval) return { label: "Needs your input", tone: "warning" };
+  if (running) return { label: "Running", tone: "ok" };
+  if (unread) return { label: "Needs attention", tone: "warning" };
+  if (!lastActive || nowMs - lastActive * 1000 > SESSION_IDLE_MS) {
+    return { label: "Inactive", tone: "idle" };
+  }
+  return { label: "Idle", tone: "idle" };
+}
+
 function SessionStatusDot({
   lastActive,
   unread,
@@ -2673,30 +2695,15 @@ function SessionStatusDot({
   running?: boolean;
   needsApproval?: boolean;
 }) {
-  let tone: "warning" | "idle" | "ok";
-  let label: string;
   // Precedence: needs-input (amber) beats working (the agent has PAUSED for the
-  // user, so showing "working" dots would be misleading) which beats
-  // unread/idle/done.
-  if (needsApproval) {
-    tone = "warning";
-    label = "Needs your input";
-  } else if (running) {
-    tone = "ok";
-    label = "Running";
-  } else if (unread) {
-    tone = "warning";
-    label = "Needs attention";
-  } else if (
-    !lastActive ||
-    Date.now() - lastActive * 1000 > SESSION_IDLE_MS
-  ) {
-    tone = "idle";
-    label = "Inactive";
-  } else {
-    tone = "ok";
-    label = "Done";
-  }
+  // user, so showing "working" dots would be misleading) which beats unread
+  // and neutral idle. Recency proves activity, never successful completion.
+  const { label, tone } = sessionStatusPresentation({
+    lastActive,
+    needsApproval,
+    running,
+    unread,
+  });
   // While a chat is actively running a turn (and not paused for input), show
   // three sequenced dots (the "working" indicator) instead of a single dot.
   if (running && !needsApproval) {
@@ -2759,6 +2766,12 @@ const SessionListItem = memo(function SessionListItem({
   const renameRef = useRef<HTMLInputElement>(null);
   const title = displayTitle ?? sessionTitle(session);
   const running = isFreshActiveSession(session) && !needsApproval;
+  const statusPresentation = sessionStatusPresentation({
+    lastActive: session.last_active,
+    needsApproval,
+    running,
+    unread,
+  });
 
   useEffect(() => {
     if (isRenaming) renameRef.current?.focus();
@@ -2794,7 +2807,9 @@ const SessionListItem = memo(function SessionListItem({
       role="button"
       tabIndex={0}
       title={title}
-      data-status={needsApproval ? "needs-perms" : unread ? "needs-perms" : running ? "working" : Date.now() - sessionActivitySeconds(session) * 1000 > SESSION_IDLE_MS ? "inactive" : "done"}
+      data-status={
+        needsApproval || unread ? "needs-perms" : running ? "working" : "inactive"
+      }
       className={cn(
         "session-row",
         active && "active",
@@ -2820,7 +2835,7 @@ const SessionListItem = memo(function SessionListItem({
         <span className="title">{title}</span>
         <span className="age">{compactSessionAge(sessionActivitySeconds(session))}</span>
         <span className="sr-only">
-          {title} · {running ? "running, " : ""}
+          {title} · {statusPresentation.label}, {" "}
           {session.source ?? "local"} {timeAgo(sessionActivitySeconds(session))}
         </span>
       </NavLink>

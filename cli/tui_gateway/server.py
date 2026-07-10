@@ -1766,9 +1766,20 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     if duration_s is not None:
         payload["duration_s"] = duration_s
     _record_tool_completion_friction(sid, name, result, duration_s)
-    summary = _tool_summary(name, result, duration_s)
-    if summary:
-        payload["summary"] = summary
+    try:
+        from agent.display import _detect_tool_failure
+
+        failed, failure_suffix = _detect_tool_failure(name, result)
+    except Exception:
+        failed, failure_suffix = False, ""
+    if failed:
+        payload["error"] = f"{name} failed{failure_suffix}"
+        dur = _fmt_tool_duration(duration_s)
+        payload["summary"] = f"Failed in {dur}" if dur else "Failed"
+    else:
+        summary = _tool_summary(name, result, duration_s)
+        if summary:
+            payload["summary"] = summary
     try:
         from agent.display import render_edit_diff_with_delta
 

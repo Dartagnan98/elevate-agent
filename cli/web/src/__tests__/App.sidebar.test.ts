@@ -32,4 +32,15 @@ describe("sidebar session loading", () => {
     finish();
     await third;
   });
+
+  it("never calls a recently idle session Done", () => {
+    const status = __appTestables.sessionStatusPresentation({
+      lastActive: 1_000,
+      nowMs: 1_001_000,
+      unread: false,
+    });
+
+    expect(status).toEqual({ label: "Idle", tone: "idle" });
+    expect(status.label).not.toBe("Done");
+  });
 });

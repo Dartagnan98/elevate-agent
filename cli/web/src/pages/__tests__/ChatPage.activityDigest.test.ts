@@ -430,6 +430,83 @@ describe("server/cache transcript merge", () => {
   });
 });
 
+describe("terminal truth containment", () => {
+  it("rehydrates failed tools and keeps their assistant turn errored", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      {
+        content: "",
+        role: "assistant",
+        tool_calls: [
+          {
+            function: { arguments: '{"cmd":"false"}', name: "terminal" },
+            id: "call-1",
+          },
+        ],
+      },
+      {
+        content: '{"exit_code":1,"output":"command failed"}',
+        role: "tool",
+        tool_call_id: "call-1",
+        tool_name: "terminal",
+      },
+      {
+        content: "The command did not finish successfully.",
+        finish_reason: "stop",
+        role: "assistant",
+      },
+    ]);
+
+    expect(hydrated).toHaveLength(1);
+    expect(hydrated[0].status).toBe("error");
+    expect(hydrated[0].tools?.[0]).toMatchObject({
+      error: "terminal failed [exit 1]",
+      status: "error",
+    });
+  });
+
+  it("never rehydrates a tool call with no stored result as done", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      {
+        content: "",
+        role: "assistant",
+        tool_calls: [
+          {
+            function: { arguments: '{"path":"missing.pdf"}', name: "read_file" },
+            id: "call-missing",
+          },
+        ],
+      },
+      { content: "The tool result was lost.", role: "assistant" },
+    ]);
+
+    expect(hydrated[0].status).toBe("error");
+    expect(hydrated[0].tools?.[0]).toMatchObject({
+      error: "read_file result missing",
+      status: "error",
+    });
+  });
+
+  it("keeps persisted and live terminal states distinct from clean completion", () => {
+    const [failed, interrupted] = __chatPageTestables.normalizeStoredTranscript([
+      { content: "Provider failed.", finish_reason: "error", role: "assistant" },
+      { content: "Stopped by user.", finish_reason: "interrupted", role: "assistant" },
+    ]);
+
+    expect(failed.status).toBe("error");
+    expect(interrupted.status).toBe("interrupted");
+    expect(
+      __chatPageTestables.turnCompletionPresentation("complete", false, true),
+    ).toMatchObject({
+      messageStatus: "error",
+      statusText: "Finished with issues",
+      unfinishedToolStatus: "error",
+    });
+    expect(
+      __chatPageTestables.turnCompletionPresentation("interrupted"),
+    ).toMatchObject({ messageStatus: "interrupted", statusText: "Interrupted" });
+  });
+});
+
 describe("background task ordering", () => {
   it("orders finished subagents by completion time instead of start time", () => {
     const sorted = __chatPageTestables.sortBackgroundTasksForDisplay([

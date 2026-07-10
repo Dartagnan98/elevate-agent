@@ -2440,6 +2440,8 @@ export interface SessionMessage {
   timestamp?: number;
   /** Per-turn output tokens, persisted on the assistant message (may be null). */
   token_count?: number | null;
+  /** Persisted provider/agent terminal reason when available. */
+  finish_reason?: string | null;
   /** Persisted model reasoning, so replay can rebuild the thinking trace. */
   reasoning?: string | null;
   reasoning_content?: string | null;

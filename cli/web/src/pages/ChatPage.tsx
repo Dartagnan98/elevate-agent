@@ -57,6 +57,7 @@ import {
   parseObjectPayload,
   reconcileWithServerTruth,
   repairOutOfOrderUserTurns,
+  settledChatStatusText,
   shouldKeepTranscriptMessage,
   type ChatTimelineRole,
 } from "@/lib/chatTimeline";
@@ -1105,6 +1106,67 @@ function eventMillis(ev: GatewayEvent, fallback = Date.now()): number {
   return timestampMillis(compactToolPayload(ev.payload).ts, fallback);
 }
 
+function storedToolError(
+  name: string,
+  result?: StoredSessionMessage,
+): string | undefined {
+  if (!result) return `${name} result missing`;
+  const content = typeof result?.content === "string" ? result.content.trim() : "";
+  if (!content) return `${name} returned no result`;
+  const parsed = parseObjectPayload(content);
+  if (name === "terminal" && typeof parsed?.exit_code === "number" && parsed.exit_code !== 0) {
+    return `terminal failed [exit ${parsed.exit_code}]`;
+  }
+  if (parsed?.error) return String(parsed.error).slice(0, 1000);
+  if (parsed?.success === false) return `${name} reported failure`;
+  const status = String(parsed?.status ?? "").toLowerCase();
+  if (["cancelled", "canceled", "error", "failed", "interrupted"].includes(status)) {
+    return `${name} ${status}`;
+  }
+  if (/^(?:error\b|\[tool execution (?:cancelled|canceled)\b)/i.test(content)) {
+    return content.slice(0, 1000);
+  }
+  return undefined;
+}
+
+function turnCompletionPresentation(
+  rawStatus: string,
+  stopForced = false,
+  hasToolError = false,
+): {
+  messageStatus: "complete" | "error" | "interrupted";
+  statusText: "Error" | "Finished with issues" | "Interrupted" | "Ready";
+  unfinishedToolStatus: "done" | "error";
+} {
+  const status = rawStatus.trim().toLowerCase();
+  if (stopForced || ["cancelled", "canceled", "interrupted"].includes(status)) {
+    return {
+      messageStatus: "interrupted",
+      statusText: "Interrupted",
+      unfinishedToolStatus: "error",
+    };
+  }
+  if (["error", "failed", "failure"].includes(status)) {
+    return {
+      messageStatus: "error",
+      statusText: "Error",
+      unfinishedToolStatus: "error",
+    };
+  }
+  if (hasToolError) {
+    return {
+      messageStatus: "error",
+      statusText: "Finished with issues",
+      unfinishedToolStatus: "error",
+    };
+  }
+  return {
+    messageStatus: "complete",
+    statusText: "Ready",
+    unfinishedToolStatus: "done",
+  };
+}
+
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
   const list = messages ?? [];
   const total = list.length;
@@ -1146,6 +1208,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     if (m.role === "assistant" && m.tool_calls?.length) {
       m.tool_calls.forEach((call, ci) => {
         const result = call.id ? toolResults.get(call.id) : undefined;
+        const error = storedToolError(call.function?.name || result?.tool_name || "tool", result);
         pendingTools.push({
           kind: "tool",
           id: call.id || `stored-${index}-${ci}`,
@@ -1153,7 +1216,8 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
           name: call.function?.name || result?.tool_name || "tool",
           context: cutArgs(call.function?.arguments),
           summary: cutResult(typeof result?.content === "string" ? result.content : null),
-          status: "done",
+          error: cutResult(error),
+          status: error ? "error" : "done",
           startedAt: createdAt,
           completedAt: result ? timestampMillis(result.timestamp, createdAt) : createdAt,
         });
@@ -1178,7 +1242,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       createdAt,
       id: messageId,
       role: m.role,
-      status: "complete" as const,
+      status: turnCompletionPresentation(m.finish_reason ?? "complete").messageStatus,
       title: m.tool_name,
     };
     // Surface the persisted per-turn token count on the assistant turn so the
@@ -1210,6 +1274,12 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     }
     if (m.role === "assistant" && pendingTools.length) {
       chat.tools = pendingTools.map((t) => ({ ...t, messageId }));
+      if (
+        chat.status !== "interrupted" &&
+        pendingTools.some((tool) => tool.status === "error")
+      ) {
+        chat.status = "error";
+      }
       pendingTools = [];
     }
     if (
@@ -1333,7 +1403,9 @@ export const __chatPageTestables = {
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   settleQueuedDelivery,
+  storedToolError,
   toolTarget,
+  turnCompletionPresentation,
 };
 
 function sessionMessageStorageKey(sessionId: string): string {
@@ -3096,6 +3168,7 @@ export default function ChatPage() {
   // Live mirrors of tools/activityTrace so the message.complete handler
   // can snapshot the finished turn without a stale-closure read.
   const toolsRef = useRef<ToolEntry[]>([]);
+  const turnHasToolErrorRef = useRef(false);
   const activityTraceRef = useRef<ActivityTrace[]>([]);
   const lastToolActivityAtRef = useRef(0);
   // Cumulative session usage mirror + the output-token baseline captured
@@ -3336,14 +3409,19 @@ export default function ChatPage() {
         const resp = await api.getSessionMessages(resumeId);
         if (cancelled) return;
         const hydrated = normalizeStoredTranscript(resp.messages);
-        setMessages((prev) =>
-          mergeServerWithCache(hydrated, prev.length ? prev : hydrated, false),
-        );
-        if (!hasPendingTurn(hydrated)) {
-          stop();
-          setBusy(false);
-          setStatusText("Ready");
-        }
+        setMessages((prev) => {
+          const merged = mergeServerWithCache(
+            hydrated,
+            prev.length ? prev : hydrated,
+            false,
+          );
+          if (!hasPendingTurn(merged)) {
+            stop();
+            setBusy(false);
+            setStatusText(settledChatStatusText(merged));
+          }
+          return merged;
+        });
       } catch {
         /* transient (gateway busy / race) — keep polling */
       }
@@ -4652,7 +4730,7 @@ export default function ChatPage() {
             setBusy(true);
             setStatusText("Resuming work...");
           } else {
-            setStatusText("Ready");
+            setStatusText(settledChatStatusText(restoredCached));
           }
         } else {
           // No cache for THIS session (e.g. drilling into a subagent that was
@@ -4808,7 +4886,7 @@ export default function ChatPage() {
                 // server transcript ends at the goal (last msg = user), so
                 // hasPendingTurn stays true and it keeps the working indicator.
                 setBusy(false);
-                setStatusText("Ready");
+                setStatusText(settledChatStatusText(merged));
               } else {
                 setBusy(true);
                 setStatusText(isSubagentView ? "Subagent working…" : "Resuming work...");
@@ -4994,6 +5072,7 @@ export default function ChatPage() {
         const name = String(payload.name ?? "");
         if (!toolId && !name) return;
         const completedAt = timestampMillis(payload.completed_at, at);
+        if (payload.error) turnHasToolErrorRef.current = true;
 
         setTools((prev) => {
           const hasToolId = toolId
@@ -5192,6 +5271,7 @@ export default function ChatPage() {
           return;
         }
         lastToolActivityAtRef.current = 0;
+        turnHasToolErrorRef.current = false;
         stretchStartRef.current = at;
         contentStartRef.current = 0;
         setSubagents((prev) => prev.filter((subagent) => subagent.status === "running").slice(-8));
@@ -5312,15 +5392,21 @@ export default function ChatPage() {
         const evMsgId = eventString(ev, "message_id");
         const liveMsgId = liveGatewayMsgIdRef.current;
         if (evMsgId && liveMsgId && evMsgId !== liveMsgId) {
+          const lateToolError = toolsRef.current.some(
+            (tool) =>
+              tool.messageId === evMsgId &&
+              (tool.status === "error" || tool.status === "running"),
+          );
           setMessages((prev) =>
             prev.map((m) =>
               m.id === evMsgId
                 ? {
                     ...m,
-                    status:
-                      status === "interrupted"
-                        ? ("interrupted" as const)
-                        : ("complete" as const),
+                    status: turnCompletionPresentation(
+                      status,
+                      false,
+                      lateToolError,
+                    ).messageStatus,
                   }
                 : m,
             ),
@@ -5356,16 +5442,31 @@ export default function ChatPage() {
         }
 
         // Snapshot the finished turn's tools + reasoning traces onto the
-        // message so the activity digest survives a session resume. Any
-        // tool still "running" at message.complete is coerced to "done"
-        // (the turn is over — nothing is actually still executing).
+        // message so the activity digest survives a session resume. A running
+        // tool can only become done when the turn itself completed cleanly.
+        const hasToolError =
+          turnHasToolErrorRef.current ||
+          toolsRef.current.some(
+            (tool) =>
+              tool.messageId === messageId &&
+              (tool.status === "error" || tool.status === "running"),
+          );
+        const completion = turnCompletionPresentation(
+          status,
+          stopForced,
+          hasToolError,
+        );
         const turnTools = toolsRef.current
           .filter((tool) => tool.messageId === messageId)
           .map((tool) =>
             tool.status === "running"
               ? {
                   ...tool,
-                  status: "done" as const,
+                  error:
+                    completion.unfinishedToolStatus === "error"
+                      ? tool.error ?? "Tool did not complete before the turn ended"
+                      : tool.error,
+                  status: completion.unfinishedToolStatus,
                   completedAt: tool.completedAt ?? at,
                 }
               : tool,
@@ -5404,8 +5505,7 @@ export default function ChatPage() {
             ...message,
             content: finalContent,
             completedAt: at,
-            status:
-              stopForced || status === "interrupted" ? "interrupted" : "complete",
+            status: completion.messageStatus,
             warning: warning || undefined,
             tools: turnTools.length ? turnTools : message.tools,
             traces: turnTraces.length ? turnTraces : message.traces,
@@ -5424,22 +5524,14 @@ export default function ChatPage() {
         setTools([]);
         setActivityTrace([]);
         currentAssistantRef.current = null;
+        turnHasToolErrorRef.current = false;
         setBusy(false);
-        setSubagents((prev) =>
-          prev.map((subagent) =>
-            subagent.status === "running"
-              ? {
-                  ...subagent,
-                  completedAt: at,
-                  status: status === "interrupted" ? "error" : "done",
-                }
-              : subagent,
-          ),
-        );
-        if (status === "interrupted") {
+        // A parent turn ending says nothing about child completion. Child cards
+        // settle only from subagent.complete or the durable child-session rows.
+        if (completion.messageStatus === "interrupted") {
           setQueuedInputs([]);
         }
-        setStatusText(status === "interrupted" ? "Interrupted" : "Ready");
+        setStatusText(completion.statusText);
       }),
     );
     unsubs.push(
@@ -6243,10 +6335,13 @@ export default function ChatPage() {
           currentAssistantRef.current = null;
           setTools([]);
           setActivityTrace([]);
-          setMessages((prev) => markStreamingTurnsInterrupted(prev));
+          setMessages((prev) => {
+            const interrupted = markStreamingTurnsInterrupted(prev);
+            setStatusText(settledChatStatusText(interrupted));
+            return interrupted;
+          });
           clearActiveTurnSnapshot(persistedSessionIdRef.current ?? resumeId);
           setBusy(false);
-          setStatusText("Ready");
         }
       })
       .catch((error: Error) => {
@@ -6767,7 +6862,7 @@ export default function ChatPage() {
         if (!found) {
           setLiveSubagent(null);
           setBusy(false);
-          setStatusText("Ready");
+          setStatusText("Error");
           appendMessage("system", "That subagent is no longer running.", {
             status: "error",
           });
@@ -7195,7 +7290,11 @@ export default function ChatPage() {
             misses += 1;
             if (misses >= 2) {
               setBusy(false);
-              setStatusText("Ready");
+              setMessages((prev) => {
+                const interrupted = markStreamingTurnsInterrupted(prev);
+                setStatusText(settledChatStatusText(interrupted));
+                return interrupted;
+              });
             }
           } else {
             misses = 0;
@@ -7212,7 +7311,11 @@ export default function ChatPage() {
             misses += 1;
             if (misses >= 2) {
               setBusy(false);
-              setStatusText("Ready");
+              setMessages((prev) => {
+                const interrupted = markStreamingTurnsInterrupted(prev);
+                setStatusText(settledChatStatusText(interrupted));
+                return interrupted;
+              });
             }
           }
           /* other errors: transient (gateway busy/race) — keep polling */

@@ -161,6 +161,12 @@ function messageFingerprint(m: ChatTimelineMessage): string {
   return `${m.role}:${c}`;
 }
 
+function isFailureStatus(
+  status: ChatTimelineMessage["status"],
+): status is "error" | "interrupted" {
+  return status === "error" || status === "interrupted";
+}
+
 function hasCompletedAssistantBeforeNextUser<T extends ChatTimelineMessage>(
   messages: T[],
   afterIndex: number,
@@ -229,6 +235,14 @@ export function mergeServerWithCache<T extends ChatTimelineMessage>(
       match?.attachments?.length
     ) {
       next = { ...next, attachments: match.attachments } as T;
+    }
+    if (
+      match &&
+      isFailureStatus(match.status) &&
+      !isFailureStatus(next.status) &&
+      next.status !== "streaming"
+    ) {
+      next = { ...next, status: match.status } as T;
     }
     const hasSnapshot =
       !!next.tools?.length ||
@@ -411,6 +425,19 @@ export function hasPendingTurn(messages: ChatTimelineMessage[]): boolean {
     if (msg.role === "user") return true;
   }
   return false;
+}
+
+export function settledChatStatusText(
+  messages: ChatTimelineMessage[],
+): "Error" | "Interrupted" | "Ready" {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.status === "error") return "Error";
+    if (message.status === "interrupted") return "Interrupted";
+    if (message.role === "assistant") return "Ready";
+    if (message.role === "user") return "Interrupted";
+  }
+  return "Ready";
 }
 
 export function markStreamingTurnsInterrupted<T extends ChatTimelineMessage>(

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   mergeServerWithCache,
+  settledChatStatusText,
   type ChatTimelineMessage,
 } from "../chatTimeline";
 
@@ -29,5 +30,28 @@ describe("chat timeline merge", () => {
     const merged = mergeServerWithCache(server, cached, false);
 
     expect(merged.map((item) => item.id)).toEqual(["u1", "assistant-live"]);
+  });
+
+  it("does not let a server refresh erase a cached terminal failure", () => {
+    const server = [message({ content: "The request failed.", id: "server-a1" })];
+    const cached = [
+      message({ content: "The request failed.", id: "cached-a1", status: "error" }),
+    ];
+
+    expect(mergeServerWithCache(server, cached)[0].status).toBe("error");
+  });
+});
+
+describe("settled chat status", () => {
+  it("never reports Ready for a failed, interrupted, or unanswered turn", () => {
+    expect(settledChatStatusText([message({ status: "error" })])).toBe("Error");
+    expect(settledChatStatusText([message({ status: "interrupted" })])).toBe(
+      "Interrupted",
+    );
+    expect(
+      settledChatStatusText([
+        message({ content: "Please finish this", role: "user", status: "complete" }),
+      ]),
+    ).toBe("Interrupted");
   });
 });

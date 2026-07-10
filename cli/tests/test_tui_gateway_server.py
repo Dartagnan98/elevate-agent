@@ -284,6 +284,38 @@ def test_successful_browser_tool_records_no_friction(monkeypatch):
     assert [call[0] for call in calls] == []
 
 
+def test_tool_complete_emits_detected_failure(monkeypatch):
+    server._sessions["sid"] = _session(
+        tool_started_at={"tool-1": 10.0},
+        running_tools={"tool-1": {"name": "terminal"}},
+    )
+    monkeypatch.setattr(server.time, "time", lambda: 12.0)
+    try:
+        with patch("tui_gateway.server._emit") as emit:
+            server._on_tool_complete(
+                "sid",
+                "tool-1",
+                "terminal",
+                {},
+                json.dumps({"exit_code": 2, "output": "command failed"}),
+            )
+    finally:
+        server._sessions.pop("sid", None)
+
+    emit.assert_called_once_with(
+        "tool.complete",
+        "sid",
+        {
+            "tool_id": "tool-1",
+            "name": "terminal",
+            "completed_at": 12.0,
+            "duration_s": 2.0,
+            "error": "terminal failed [exit 2]",
+            "summary": "Failed in 2.0s",
+        },
+    )
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
