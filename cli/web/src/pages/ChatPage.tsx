@@ -1324,6 +1324,7 @@ export const __chatPageTestables = {
   mergeServerWithCache,
   repairOutOfOrderUserTurns,
   normalizeStoredTranscript,
+  queueAfterConnectionReset,
   resolveActivityDigestVisibility,
   routePromptForAgent,
   shouldClearUsageForStatus,
@@ -1331,6 +1332,7 @@ export const __chatPageTestables = {
   shouldHandlePreviewShortcut,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
+  settleQueuedDelivery,
   toolTarget,
 };
 
@@ -1935,6 +1937,22 @@ function normalizeStoredQueue(value: unknown): QueuedInput[] {
   return out.slice(-5);
 }
 
+function queueAfterConnectionReset(
+  current: QueuedInput[],
+  restored: QueuedInput[],
+  reconnecting: boolean,
+): QueuedInput[] {
+  return reconnecting ? current : restored;
+}
+
+function settleQueuedDelivery(
+  items: QueuedInput[],
+  queuedId: string,
+  acknowledged: boolean,
+): QueuedInput[] {
+  return acknowledged ? items.filter((item) => item.id !== queuedId) : items;
+}
+
 function restoreQueue(sessionId: string | null | undefined): QueuedInput[] {
   if (!sessionId) return [];
   const entry = readQueueCache()[sessionId];
@@ -2507,7 +2525,7 @@ function routePromptForAgent(
     .join("\n\n");
 }
 
-const PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS = 20_000;
+const PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS = 40_000;
 
 function nowLabel(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -4600,7 +4618,13 @@ export default function ChatPage() {
       setLiveSubagent(null);
       setActivityTrace(activeTurnSnapshot?.traces ?? []);
       lastToolActivityAtRef.current = 0;
-      setQueuedInputs(resumeId ? restoreQueue(resumeId) : []);
+      setQueuedInputs((current) =>
+        queueAfterConnectionReset(
+          current,
+          resumeId ? restoreQueue(resumeId) : [],
+          reconnectRunRef.current,
+        ),
+      );
       setPendingPrompt(null);
       setPromptValue("");
       setBusy(false);
@@ -5873,7 +5897,6 @@ export default function ChatPage() {
         setBanner(message);
         appendMessage("system", message, { createdAt: at, status: "error" });
         setBusy(false);
-        setQueuedInputs([]);
         clearActiveTurnSnapshot(persistedSessionIdRef.current ?? ev.session_id);
         setSubagents((prev) =>
           prev.map((subagent) =>
@@ -6614,13 +6637,13 @@ export default function ChatPage() {
       userMessageId?: string,
     ) => {
       const effectiveSessionId = targetSessionId ?? sessionId;
-      if (!effectiveSessionId) return;
+      if (!effectiveSessionId) return false;
 
       const readyAttachments = attachments.filter((item) => item.status === "ready" && item.path);
       const stillUploading = attachments.some((item) => item.status === "uploading");
       if (stillUploading) {
         setBanner("Wait for attachments to finish uploading before sending.");
-        return;
+        return false;
       }
 
       const messageAttachments: ChatMessageAttachment[] = readyAttachments.map(
@@ -6638,7 +6661,10 @@ export default function ChatPage() {
         effectiveUserMessageId = appendMessage(
           "user",
           text,
-          messageAttachments.length ? { attachments: messageAttachments } : {},
+          {
+            ...(messageAttachments.length ? { attachments: messageAttachments } : {}),
+            ...(userMessageId ? { id: userMessageId } : {}),
+          },
         );
       }
       setBusy(true);
@@ -6681,13 +6707,24 @@ export default function ChatPage() {
           payload.user_message_id = effectiveUserMessageId;
         }
 
-        await gw.request("prompt.submit", payload, PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS);
+        const accepted = await gw.request<{ status?: string }>(
+          "prompt.submit",
+          payload,
+          PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS,
+        );
+        if (accepted?.status === "sign_in_required") {
+          setBusy(false);
+          setStatusText("Sign in required");
+          return false;
+        }
         setAttachments([]);
+        return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         appendMessage("system", message, { status: "error" });
         setBusy(false);
         setStatusText("Error");
+        return false;
       }
     },
     [appendMessage, attachments, gw, rememberSessionAgent, resumeId, sessionId],
@@ -7114,16 +7151,25 @@ export default function ChatPage() {
     if (!next) return;
 
     queueDispatchRef.current = true;
-    setQueuedInputs((prev) => prev.filter((item) => item.id !== next.id));
+    const alreadyShown = messages.some((message) => message.id === next.id);
     void submitGatewayPrompt(
       next.text,
       next.routedText,
       next.agentId,
       "Sending queued follow-up...",
-    ).finally(() => {
-      queueDispatchRef.current = false;
-    });
-  }, [busy, queuedInputs, sessionId, state, submitGatewayPrompt]);
+      undefined,
+      alreadyShown,
+      next.id,
+    )
+      .then((acknowledged) => {
+        setQueuedInputs((items) =>
+          settleQueuedDelivery(items, next.id, acknowledged),
+        );
+      })
+      .finally(() => {
+        queueDispatchRef.current = false;
+      });
+  }, [busy, messages, queuedInputs, sessionId, state, submitGatewayPrompt]);
 
   // Busy self-heal watchdog. The async-delegation / re-wake turn flow can leave
   // `busy` stuck true when a terminal message.complete is missed (turn

@@ -131,6 +131,35 @@ describe("GatewayClient", () => {
     expect(client.state).toBe("open");
   });
 
+  it("does not reject replacement requests when the stale socket closes", async () => {
+    const client = new GatewayClient();
+    const connected = client.connect();
+    const firstSocket = FakeWebSocket.instances[0];
+    firstSocket.readyState = FakeWebSocket.OPEN;
+    firstSocket.emit("open");
+    await connected;
+
+    const staleRequest = client.request("session.list", {}, 1_000);
+    firstSocket.readyState = FakeWebSocket.CLOSED;
+
+    const reconnected = client.connect();
+    const secondSocket = FakeWebSocket.instances[1];
+    secondSocket.readyState = FakeWebSocket.OPEN;
+    secondSocket.emit("open");
+    await reconnected;
+
+    const currentRequest = client.request("prompt.submit", {}, 1_000);
+    const currentMessage = JSON.parse(secondSocket.sent[0]);
+    firstSocket.emit("close", { code: 1006, reason: "stale" });
+
+    await expect(staleRequest).rejects.toThrow(/code=1006, reason=stale/);
+    expect(client.state).toBe("open");
+    secondSocket.emit("message", {
+      data: JSON.stringify({ id: currentMessage.id, result: { ok: true } }),
+    });
+    await expect(currentRequest).resolves.toEqual({ ok: true });
+  });
+
   it("rejects pending requests with websocket close code and reason", async () => {
     const client = new GatewayClient();
     const connected = client.connect();

@@ -777,52 +777,7 @@ def list_session_summaries(
             """,
             tuple(params),
         ).fetchall()
-    sessions = [dict(r) for r in rows]
-    if include_children:
-        for s in sessions:
-            ident = resolve_canonical_session_identity(str(s.get("id") or ""))
-            s.update(ident)
-        return sessions
-
-    projected: List[Dict[str, Any]] = []
-    for s in sessions:
-        ident = resolve_canonical_session_identity(str(s.get("id") or ""))
-        active_id = ident.get("active_session_id")
-        if active_id and active_id != s.get("id"):
-            active = get_session(str(active_id))
-            if active:
-                merged = dict(s)
-                for key in (
-                    "id", "ended_at", "end_reason", "message_count",
-                    "tool_call_count", "title", "model", "system_prompt",
-                ):
-                    if key in active:
-                        merged[key] = active[key]
-                with connect() as conn:
-                    meta = conn.execute(
-                        """
-                        SELECT
-                          COALESCE(
-                            (SELECT SUBSTRING(REGEXP_REPLACE(m.content, E'[\\n\\r]', ' ', 'g'), 1, 63)
-                             FROM chat_messages m
-                             WHERE m.session_id = ? AND m.role = 'user' AND m.content IS NOT NULL
-                             ORDER BY m.timestamp, m.id LIMIT 1),
-                            ''
-                          ) AS preview,
-                          COALESCE(
-                            (SELECT MAX(m2.timestamp) FROM chat_messages m2 WHERE m2.session_id = ?),
-                            ?
-                          ) AS last_active
-                        """,
-                        (active_id, active_id, active.get("started_at")),
-                    ).fetchone()
-                if meta:
-                    merged["preview"] = meta["preview"]
-                    merged["last_active"] = meta["last_active"]
-                s = merged
-        s.update(ident)
-        projected.append(s)
-    return projected
+    return [dict(r) for r in rows]
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
