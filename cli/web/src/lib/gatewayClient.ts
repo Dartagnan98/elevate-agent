@@ -146,8 +146,11 @@ export class GatewayClient {
     }
 
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    // Token via subprotocol, not the URL — it never lands in proxy/tunnel logs
+    // or browser history (C6). Server: chat_websockets._ws_auth_token.
     const ws = new WebSocket(
-      `${scheme}//${location.host}/api/ws?token=${encodeURIComponent(resolved)}`,
+      `${scheme}//${location.host}/api/ws`,
+      ["elevate.auth.v1", resolved],
     );
     this.ws = ws;
 

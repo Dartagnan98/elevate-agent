@@ -109,10 +109,14 @@ class WSTransport:
         self._closed = True
 
 
-async def handle_ws(ws: Any) -> None:
-    """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``."""
+async def handle_ws(ws: Any, subprotocol: Any = None) -> None:
+    """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``.
+
+    ``subprotocol`` is echoed on accept — browsers fail the handshake (1006) if
+    a subprotocol the client offered (used to carry the auth token off the URL)
+    isn't echoed. Defaults None for non-browser callers (entry.py)."""
     try:
-        await ws.accept()
+        await ws.accept(subprotocol=subprotocol)
     except RuntimeError as exc:
         _log.debug("ws accept failed before connection opened: %s", exc)
         return
