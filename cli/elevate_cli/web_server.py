@@ -542,6 +542,40 @@ mount_spa(app)
 install_cloud_skill_lifecycle(app, log=_log)
 
 
+def _kickoff_drift_backfill() -> None:
+    """C2: heal SQLite→PG drift at startup, off the serve path.
+
+    Safe direction only (insert missing PG rows, never delete), on a
+    daemon thread so a slow/absent PG can't delay or fail startup. The
+    ``before`` cutoff keeps live writes out of the scan (see
+    ``_backfill_messages``).
+    """
+    import threading
+    import time
+
+    cutoff = time.time()
+
+    def _run() -> None:
+        try:
+            from elevate_cli.data import sessiondb_shadow
+            from elevate_cli.data._pg_drift_reconcile import reconcile_missing_in_pg
+
+            if not sessiondb_shadow._shadow_enabled():
+                return
+            result = reconcile_missing_in_pg(before=cutoff)
+            healed = result["sessions_inserted"] + result["messages_inserted"]
+            if healed:
+                _log.warning("sessiondb drift healed at startup: %s", result)
+            else:
+                _log.info("sessiondb drift check at startup: converged")
+        except FileNotFoundError:
+            pass  # fresh install — no SQLite DB yet, nothing to reconcile
+        except Exception as exc:
+            _log.warning("sessiondb drift backfill skipped: %s", exc)
+
+    threading.Thread(target=_run, name="pg-drift-backfill", daemon=True).start()
+
+
 def start_server(
     host: str = "127.0.0.1",
     port: int = 9119,
@@ -553,6 +587,7 @@ def start_server(
     """Start the web UI server."""
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+    _kickoff_drift_backfill()
 
     print(f"  Elevate Web UI → http://{host}:{port}")
     run_dashboard_server(

@@ -8,9 +8,14 @@ test rows with no SQLite source-of-truth).
 Behaviour
 ---------
 * **Missing in PG** → backfill from SQLite into ``chat_sessions`` /
-  ``chat_messages`` using ``ON CONFLICT DO NOTHING``. Idempotent.
-* **Missing in SQLite** → DELETE from the PG twin. Only safe because PG
-  is still the shadow side; nothing reads from these orphan rows yet.
+  ``chat_messages`` using ``ON CONFLICT DO NOTHING``. Idempotent. This is
+  the safe direction and also runs automatically at dashboard startup via
+  :func:`reconcile_missing_in_pg`.
+* **Missing in SQLite** → DELETE from the PG twin. SQLite is the write
+  source of truth, so converging PG to it is correct by policy — but with
+  ``ELEVATE_SESSIONDB_READ_FROM_PG`` defaulting on, reads DO come from PG
+  now, so the delete direction stays manual-only (this script), never
+  automatic.
 * ``chat_state_meta`` is upserted by ``set_meta`` on every write and has
   no orphan path; we still surface diff counts for it in the report.
 
@@ -74,7 +79,8 @@ def _sqlite_has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
 def _backfill_sessions(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
     """Copy every SQLite session row into PG (ON CONFLICT DO NOTHING).
 
-    Returns the number of rows inserted (best-effort count from rowcount).
+    Returns the number of rows actually inserted (rowcount is 0 for
+    conflict no-ops), so the count doubles as a drift metric.
     """
     # Only select columns that actually exist on the SQLite side so a
     # schema lag on older DBs doesn't break the script.
@@ -96,13 +102,14 @@ def _backfill_sessions(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
     inserted = 0
     for row in cur:
         values = _pg_row(tuple(row[c] for c in available))
-        pg_conn.execute(insert_sql, values)
-        inserted += 1
+        inserted += max(pg_conn.execute(insert_sql, values).rowcount, 0)
     pg_conn.commit()
     return inserted
 
 
-def _backfill_messages(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
+def _backfill_messages(
+    sqlite_conn: sqlite3.Connection, pg_conn, *, before: float | None = None
+) -> int:
     """Backfill messages missing in PG without duplicating tool-call rows.
 
     chat_messages has no full natural unique key (only a partial unique
@@ -111,6 +118,10 @@ def _backfill_messages(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
     do the missing-set computation in Python: pull every PG signature
     keyed on (session_id, role, timestamp, content, tool_call_id),
     iterate SQLite, and only insert what's actually absent.
+
+    ``before`` bounds the SQLite scan to rows older than that epoch —
+    the startup path passes its own start time so a live write landing
+    in both stores mid-scan can't be re-inserted as a duplicate.
     """
     available = tuple(
         c for c in _MESSAGE_BACKFILL_COLS if _sqlite_has_column(sqlite_conn, "messages", c)
@@ -139,7 +150,12 @@ def _backfill_messages(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
         for r in pg_cur.fetchall()
     }
 
-    cur = sqlite_conn.execute(f"SELECT {cols_sql} FROM messages")
+    if before is not None:
+        cur = sqlite_conn.execute(
+            f"SELECT {cols_sql} FROM messages WHERE timestamp < ?", (before,)
+        )
+    else:
+        cur = sqlite_conn.execute(f"SELECT {cols_sql} FROM messages")
     inserted = 0
     for row in cur:
         key = (
@@ -229,6 +245,31 @@ def _delete_orphan_pg_sessions(sqlite_conn: sqlite3.Connection, pg_conn) -> int:
         )
     pg_conn.commit()
     return len(orphans)
+
+
+def reconcile_missing_in_pg(
+    sqlite_path: Path | None = None, *, before: float | None = None
+) -> dict[str, Any]:
+    """Safe-direction reconcile: backfill rows missing in PG. Never deletes.
+
+    This is the automatic path (dashboard startup). The orphan-delete
+    direction stays manual-only via :func:`run` — PG is read-first now,
+    so an automatic delete on a transient SQLite misread would be
+    user-visible data loss.
+    """
+    path = sqlite_path or DEFAULT_DB_PATH
+    sqlite_conn = _open_sqlite(path)
+    try:
+        with pg_connection.connect() as pg_conn:
+            return {
+                "sqlite_path": str(path),
+                "sessions_inserted": _backfill_sessions(sqlite_conn, pg_conn),
+                "messages_inserted": _backfill_messages(
+                    sqlite_conn, pg_conn, before=before
+                ),
+            }
+    finally:
+        sqlite_conn.close()
 
 
 def run(sqlite_path: Path | None = None, *, dry_run: bool = False) -> dict[str, Any]:
