@@ -1,6 +1,6 @@
 {
   "name": "@elevationrealestate/elevate-desktop",
-  "version": "1.2.64",
+  "version": "1.2.65",
   "description": "Elevate desktop app shell.",
   "private": true,
   "main": "src/main.js",
@@ -12,7 +12,7 @@
     "start": "electron .",
     "build:web": "npm --prefix ../cli/web run build",
     "pack:mac": "npm run build:web && electron-builder --mac dir",
-    "build:mac": "npm run build:web && export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; export ELEVATE_RELEASE_CHANNEL=${ELEVATE_RELEASE_CHANNEL:-latest}; electron-builder --mac dmg zip --x64 --publish never -c.extraMetadata.elevateReleaseChannel=$ELEVATE_RELEASE_CHANNEL && electron-builder --mac dmg zip --arm64 --publish never -c.extraMetadata.elevateReleaseChannel=$ELEVATE_RELEASE_CHANNEL && npm run merge:mac-feed",
+    "build:mac": "npm run build:web && export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; export ELEVATE_RELEASE_CHANNEL=${ELEVATE_RELEASE_CHANNEL:-latest}; if [ \"$ELEVATE_RELEASE_CHANNEL\" = \"beta\" ]; then ELEVATE_DMG_TITLE=\"Elevate Beta\"; else ELEVATE_DMG_TITLE=\"Elevate\"; fi; electron-builder --mac dmg zip --x64 --publish never -c.extraMetadata.elevateReleaseChannel=$ELEVATE_RELEASE_CHANNEL \"-c.dmg.title=$ELEVATE_DMG_TITLE\" && electron-builder --mac dmg zip --arm64 --publish never -c.extraMetadata.elevateReleaseChannel=$ELEVATE_RELEASE_CHANNEL \"-c.dmg.title=$ELEVATE_DMG_TITLE\" && npm run merge:mac-feed",
     "preflight:apple": "node scripts/preflight-apple-release.js",
     "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
