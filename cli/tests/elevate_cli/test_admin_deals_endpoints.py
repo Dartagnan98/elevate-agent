@@ -1538,3 +1538,284 @@ def test_plugin_api_routes_require_session_token():
     unauthed = TestClient(app)
     resp = unauthed.get("/api/plugins/example/status")
     assert resp.status_code in (401, 403)
+
+
+def _configure_document_pack(pack_root: Path, *, realtor: str = "Current Realtor", brokerage: str = "Current Brokerage"):
+    with connect() as conn:
+        update_admin_setup(
+            conn,
+            profile={"realtorLegalName": realtor, "brokerageName": brokerage},
+            items=[
+                {
+                    "key": "forms_provider",
+                    "status": "configured",
+                    "provider": "test document pack",
+                    "value": {"documentPackRoot": str(pack_root)},
+                }
+            ],
+        )
+
+
+def test_offer_kit_path_is_contained_in_beta_root(monkeypatch, tmp_path):
+    from elevate_cli.web_routes.admin_deals import _offer_kit_path
+
+    beta_root = tmp_path / "Elevate Beta"
+    monkeypatch.setenv("ELEVATE_HOME", str(beta_root))
+
+    path = _offer_kit_path("../../outside-deal", "../outside-document")
+
+    assert path.is_relative_to(beta_root.resolve())
+    assert path.parent == (beta_root / "cache" / "documents" / "admin_artifacts" / "offer-kits").resolve()
+
+
+def test_offer_kit_path_rejects_symlink_escape(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+    from elevate_cli.web_routes.admin_deals import _offer_kit_path
+
+    beta_root = tmp_path / "Elevate Beta"
+    outside = tmp_path / "outside"
+    beta_root.mkdir()
+    outside.mkdir()
+    (beta_root / "cache").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("ELEVATE_HOME", str(beta_root))
+
+    with pytest.raises(HTTPException) as raised:
+        _offer_kit_path("deal", "document")
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail["code"] == "document_artifact_outside_profile"
+
+
+def test_offer_kit_build_does_not_mark_missing_pdfs_ready(client):
+    from elevate_constants import get_elevate_home
+    from elevate_cli.data import get_deal
+
+    deal = _create(title="Truthful offer kit", side="buyer", dispatch_initial_stage=False)
+    response = client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build")
+
+    assert response.status_code == 200, response.text
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    docs = stored["extraToggles"]["offerKit"]["documents"]
+    assert docs
+    assert all(doc["ready"] is False for doc in docs)
+    assert all(Path(doc["filePath"]).is_relative_to(get_elevate_home().resolve()) for doc in docs)
+
+
+def test_generate_uses_current_admin_identity_and_file_backed_ready(client, monkeypatch, tmp_path):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    from elevate_constants import get_elevate_home
+    from elevate_cli.data import get_deal
+
+    pack = tmp_path / "configured-pack"
+    forms = pack / "knowledge" / "deals" / "forms"
+    forms.mkdir(parents=True)
+    engine = forms / "fill-form-generic.py"
+    template = forms / "cps-residential-fillable-template.pdf"
+    engine.write_text("# configured test engine\n", encoding="utf-8")
+    template.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    _configure_document_pack(pack, realtor="Profile Realtor", brokerage="Profile Brokerage")
+    deal = _create(title="Identity form", side="buyer", dispatch_initial_stage=False)
+    built = client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build")
+    assert built.status_code == 200, built.text
+
+    captured = {}
+    captured_path = None
+
+    def fake_run(args, **kwargs):
+        nonlocal captured_path
+        captured_path = Path(args[2])
+        captured.update(json.loads(Path(args[2]).read_text(encoding="utf-8")))
+        Path(args[4]).write_bytes(b"%PDF-1.4\n%%EOF\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    response = client.post(f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/generate")
+
+    assert response.status_code == 200, response.text
+    assert captured["agentName"] == "Profile Realtor"
+    assert captured["officeName"] == "Profile Brokerage"
+    assert captured_path.is_relative_to(get_elevate_home().resolve())
+    assert not captured_path.exists()
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    cps = stored["extraToggles"]["offerKit"]["documents"][0]
+    assert cps["ready"] is True
+    assert Path(cps["filePath"]).is_file()
+
+
+def test_missing_engine_fails_closed_without_ready_pdf(client, tmp_path):
+    from elevate_cli.data import get_deal
+
+    pack = tmp_path / "pack-without-engine"
+    forms = pack / "knowledge" / "deals" / "forms"
+    forms.mkdir(parents=True)
+    (forms / "cps-residential-fillable-template.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    _configure_document_pack(pack)
+    deal = _create(title="Missing engine", side="buyer", dispatch_initial_stage=False)
+    built = client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build")
+    assert built.status_code == 200, built.text
+
+    response = client.post(f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/generate")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "document_asset_missing"
+    assert response.json()["detail"]["asset"] == "formEngine"
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    assert stored["extraToggles"]["offerKit"]["documents"][0]["ready"] is False
+
+
+def test_missing_listing_pull_asset_does_not_claim_started(client, tmp_path):
+    from elevate_cli.data import get_deal
+
+    pack = tmp_path / "pack-without-listing-pull"
+    pack.mkdir()
+    _configure_document_pack(pack)
+    deal = _create(title="Missing listing pull", side="buyer", dispatch_initial_stage=False)
+
+    response = client.post(
+        f"/api/admin/deals/{deal['id']}/pull-listing",
+        json={"mls": "1234567"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "document_asset_missing"
+    assert response.json()["detail"]["asset"] == "listingPull"
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    assert "listingPullStatus" not in stored["extraToggles"]
+
+
+def test_generate_does_not_treat_stale_pdf_as_new_output(client, monkeypatch, tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    from elevate_cli.data import get_deal
+
+    pack = tmp_path / "configured-pack"
+    forms = pack / "knowledge" / "deals" / "forms"
+    forms.mkdir(parents=True)
+    (forms / "fill-form-generic.py").write_text("# configured test engine\n", encoding="utf-8")
+    (forms / "cps-residential-fillable-template.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    _configure_document_pack(pack)
+    deal = _create(title="Stale generated form", side="buyer", dispatch_initial_stage=False)
+    assert client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build").status_code == 200
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    output = Path(stored["extraToggles"]["offerKit"]["documents"][0]["filePath"])
+    output.write_bytes(b"stale prior output")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    response = client.post(
+        f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/generate"
+    )
+
+    assert response.status_code == 500
+    assert "did not produce a valid new PDF" in response.json()["detail"]
+    assert output.read_bytes() == b"stale prior output"
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+    assert stored["extraToggles"]["offerKit"]["documents"][0]["ready"] is False
+
+
+def test_kit_document_serve_rejects_path_outside_profile(client, tmp_path):
+    import json
+
+    deal = _create(title="Contained kit file", side="buyer", dispatch_initial_stage=False)
+    assert client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build").status_code == 200
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-1.4\nprivate\n%%EOF\n")
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT extra_toggles_json FROM deals WHERE id=?", (deal["id"],)
+        ).fetchone()
+        toggles = json.loads(row["extra_toggles_json"])
+        toggles["offerKit"]["documents"][0]["filePath"] = str(outside)
+        conn.execute(
+            "UPDATE deals SET extra_toggles_json=? WHERE id=?",
+            (json.dumps(toggles), deal["id"]),
+        )
+
+    response = client.get(
+        f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "document_artifact_outside_profile"
+
+
+def test_approve_rejects_missing_document(client):
+    deal = _create(title="Missing approval PDF", side="buyer", dispatch_initial_stage=False)
+    assert client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build").status_code == 200
+
+    response = client.post(
+        f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/approve",
+        json={"status": "approved"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "kit document not generated yet"
+
+
+def test_upload_rejects_non_pdf_without_adding_ready_document(client):
+    import base64
+    from elevate_cli.data import get_deal
+
+    deal = _create(title="Invalid PDF upload", side="buyer", dispatch_initial_stage=False)
+    assert client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build").status_code == 200
+    with connect() as conn:
+        before = get_deal(conn, deal["id"])
+    before_count = len(before["extraToggles"]["offerKit"]["documents"])
+
+    response = client.post(
+        f"/api/admin/deals/{deal['id']}/kit-doc/add",
+        json={
+            "filename": "not-really.pdf",
+            "contentB64": base64.b64encode(b"plain text").decode("ascii"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "uploaded file is not a PDF"
+    with connect() as conn:
+        after = get_deal(conn, deal["id"])
+    assert len(after["extraToggles"]["offerKit"]["documents"]) == before_count
+
+
+def test_field_edit_invalidates_generated_document(client):
+    import json
+    from elevate_cli.data import get_deal
+
+    deal = _create(title="Edited generated form", side="buyer", dispatch_initial_stage=False)
+    assert client.post(f"/api/admin/deals/{deal['id']}/offer-kit/build").status_code == 200
+    with connect() as conn:
+        stored = get_deal(conn, deal["id"])
+        toggles = stored["extraToggles"]
+        cps = toggles["offerKit"]["documents"][0]
+        Path(cps["filePath"]).write_bytes(b"%PDF-1.4\n%%EOF\n")
+        cps["ready"] = True
+        cps["status"] = "approved"
+        conn.execute(
+            "UPDATE deals SET extra_toggles_json=? WHERE id=?",
+            (json.dumps(toggles), deal["id"]),
+        )
+
+    response = client.post(
+        f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential/field",
+        json={"key": "price", "value": "750000"},
+    )
+
+    assert response.status_code == 200, response.text
+    with connect() as conn:
+        updated = get_deal(conn, deal["id"])
+    docs = updated["extraToggles"]["offerKit"]["documents"]
+    assert all(doc["ready"] is False and doc["status"] == "draft" for doc in docs)
+    served = client.get(f"/api/admin/deals/{deal['id']}/kit-doc/cps-residential")
+    assert served.status_code == 409
+    assert served.json()["detail"] == "regenerate this document before opening it"

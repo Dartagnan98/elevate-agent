@@ -3,8 +3,11 @@
 import logging
 import os
 import re
+import shutil
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from elevate_constants import get_elevate_home
 from fastapi import APIRouter, HTTPException
@@ -225,6 +228,313 @@ _BUYER_EXTRA_RE = re.compile(
     re.I,
 )
 _BUYER_ROLE_RE = re.compile(r"(buyer|purchaser|tenant)", re.I)
+
+_DOCUMENT_SETUP_READY = {"configured", "connected", "manual"}
+_DOCUMENT_ASSET_DEFAULTS = {
+    "formEngine": "knowledge/deals/forms/fill-form-generic.py",
+    "cpsAssembler": "knowledge/deals/forms/assemble-cps-terms.py",
+    "clauseLibrary": "knowledge/deals/forms/webforms-clauses.json",
+    "listingPull": "scripts/pull-listing-by-mls.js",
+    "cpsGather": "scripts/cps-prep-package.sh",
+    "cpsGenerate": "scripts/cps-generate.py",
+    "offerForms": "scripts/offer-prep-forms.py",
+    "offerPackage": "scripts/offer-prep-package.py",
+    "dealDocuments": "scripts/deal-docs-list.py",
+    "buyerAgency": "scripts/buyer-agency-fill.py",
+    "cmaRunner": "scripts/cma-phase-runner.py",
+    "cmaCaptureProspecting": "scripts/capture-prospecting.sh",
+}
+_DOCUMENT_TEMPLATE_DEFAULTS = {
+    "cps-residential": "knowledge/deals/forms/cps-residential-fillable-template.pdf",
+    "cps-addendum": "knowledge/deals/forms/cps-addendum-template.pdf",
+    "disclosure-remuneration": "knowledge/deals/forms/disclosure-remuneration-template.pdf",
+    "privacy-notice": "knowledge/deals/forms/privacy-notice-template.pdf",
+    "bcfsa-disclosure": "knowledge/deals/forms/bcfsa-disclosure-template.pdf",
+    "condition-waiver": "knowledge/deals/forms/condition-waiver-template.pdf",
+    "subject-removal": "knowledge/deals/forms/subject-removal-template.pdf",
+}
+
+
+def _document_setup_error(code: str, message: str, **details: Any) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": code,
+            "message": message,
+            "setupKey": "forms_provider",
+            **details,
+        },
+    )
+
+
+def _document_setup_snapshot() -> Dict[str, Any]:
+    from elevate_cli.data import connect, get_admin_setup
+
+    with connect() as conn:
+        return get_admin_setup(conn)
+
+
+def _document_identity(snapshot: Mapping[str, Any] | None = None) -> tuple[str, str]:
+    current = snapshot or _document_setup_snapshot()
+    raw_profile = current.get("profile")
+    profile = raw_profile if isinstance(raw_profile, Mapping) else {}
+    realtor = str(profile.get("realtorLegalName") or profile.get("licenseName") or "").strip()
+    brokerage = str(profile.get("brokerageName") or "").strip()
+    missing = [
+        field
+        for field, value in (("realtorLegalName", realtor), ("brokerageName", brokerage))
+        if not value
+    ]
+    if missing:
+        _document_setup_error(
+            "document_identity_incomplete",
+            "Complete the realtor legal name and brokerage name in Admin Setup before generating forms.",
+            missingFields=missing,
+        )
+    return realtor, brokerage
+
+
+def _document_pack_config(
+    snapshot: Mapping[str, Any] | None = None,
+) -> tuple[Path, Mapping[str, Any]]:
+    current = snapshot or _document_setup_snapshot()
+    raw_items = current.get("items")
+    items = raw_items if isinstance(raw_items, list) else []
+    item = next(
+        (entry for entry in items if isinstance(entry, Mapping) and entry.get("key") == "forms_provider"),
+        {},
+    )
+    raw_value = item.get("value") if isinstance(item, Mapping) else None
+    value = raw_value if isinstance(raw_value, Mapping) else {}
+    configured_root = value.get("documentPackRoot") or value.get("packRoot")
+    explicit_root = os.environ.get("ELEVATE_DOCUMENT_PACK_ROOT", "").strip()
+    root_value = configured_root or explicit_root
+    if not root_value:
+        _document_setup_error(
+            "document_pack_not_configured",
+            "Configure forms_provider.value.documentPackRoot in Admin Setup, or set ELEVATE_DOCUMENT_PACK_ROOT, before using document tools.",
+        )
+    if configured_root and str(item.get("status") or "") not in _DOCUMENT_SETUP_READY:
+        _document_setup_error(
+            "document_pack_not_verified",
+            "Mark the Forms provider configured after verifying its documentPackRoot.",
+        )
+    root = Path(str(root_value)).expanduser()
+    if not root.is_absolute():
+        root = get_elevate_home() / root
+    root = root.resolve()
+    if not root.is_dir():
+        _document_setup_error(
+            "document_pack_missing",
+            f"The configured document pack root does not exist: {root}",
+            configuredPath=str(root),
+        )
+    return root, value
+
+
+def _document_asset(
+    asset_key: str,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
+    template_id: str | None = None,
+) -> Path:
+    root, config = _document_pack_config(snapshot)
+    raw_assets = config.get("assets")
+    assets = raw_assets if isinstance(raw_assets, Mapping) else {}
+    if template_id is not None:
+        raw_templates = config.get("templates")
+        templates = raw_templates if isinstance(raw_templates, Mapping) else {}
+        configured = templates.get(template_id)
+        default = _DOCUMENT_TEMPLATE_DEFAULTS.get(template_id)
+        label = f"template {template_id}"
+    else:
+        configured = assets.get(asset_key) or config.get(asset_key)
+        default = _DOCUMENT_ASSET_DEFAULTS.get(asset_key)
+        label = asset_key
+    if not configured and not default:
+        _document_setup_error(
+            "document_asset_not_configured",
+            f"No document-pack mapping exists for {label}.",
+            asset=label,
+        )
+    candidate = Path(str(configured or default)).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        _document_setup_error(
+            "document_asset_outside_pack",
+            f"The configured {label} must remain inside the verified document pack root.",
+            asset=label,
+            configuredPath=str(candidate),
+        )
+    if not candidate.is_file():
+        _document_setup_error(
+            "document_asset_missing",
+            f"The configured {label} file is missing: {candidate}",
+            asset=label,
+            configuredPath=str(candidate),
+        )
+    return candidate
+
+
+def _artifact_slug(value: Any, fallback: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "")).strip("-.") or fallback
+
+
+def _profile_artifact_dir(*parts: str) -> Path:
+    profile_root = get_elevate_home().expanduser().resolve()
+    path = profile_root.joinpath(*parts).resolve()
+    try:
+        path.relative_to(profile_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "document_artifact_outside_profile",
+                "message": "The document artifact directory must remain inside the current Elevate profile.",
+            },
+        )
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _is_pdf(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size <= 5:
+            return False
+        with path.open("rb") as handle:
+            return handle.read(5) == b"%PDF-"
+    except OSError:
+        return False
+
+
+def _offer_kit_path(deal_id: str, doc_id: str) -> Path:
+    root = _profile_artifact_dir("cache", "documents", "admin_artifacts", "offer-kits")
+    return (
+        root
+        / f"{_artifact_slug(deal_id, 'deal')}-{_artifact_slug(doc_id, 'document')}.pdf"
+    ).resolve()
+
+
+def _verified_offer_kit_path(
+    deal_id: str,
+    doc_id: str,
+    stored_path: Any,
+    *,
+    require_file: bool = False,
+) -> Path:
+    """Resolve a stored kit artifact only when it belongs to this profile."""
+    expected = _offer_kit_path(deal_id, doc_id)
+    candidate = Path(str(stored_path or "")).expanduser()
+    if not candidate.is_absolute():
+        candidate = get_elevate_home() / candidate
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        candidate = Path()
+    if candidate != expected:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "document_artifact_outside_profile",
+                "message": "Regenerate this document inside the current Elevate profile before opening or approving it.",
+            },
+        )
+    if require_file and not _is_pdf(expected):
+        raise HTTPException(status_code=404, detail="kit document not generated yet")
+    return expected
+
+
+def _document_log_path(name: str) -> Path:
+    root = _profile_artifact_dir("cache", "documents", "admin_artifacts", "logs")
+    return (root / _artifact_slug(name, "document-tool.log")).resolve()
+
+
+def _document_subprocess_env(*, clean_python: bool = False) -> Dict[str, str]:
+    blocked = {
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "VIRTUAL_ENV",
+        "PYTHONNOUSERSITE",
+    }
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not clean_python or key not in blocked
+    }
+    env["HOME"] = str(Path.home().expanduser().resolve())
+    env["PATH"] = env.get("PATH") or "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    return env
+
+
+def _document_runtime(kind: str, snapshot: Mapping[str, Any] | None = None) -> str:
+    root, config = _document_pack_config(snapshot)
+    defaults = {"python": "python3", "bash": "bash"}
+    config_keys = {"python": "pythonExecutable", "bash": "bashExecutable"}
+    env_keys = {"python": "ELEVATE_DOCUMENT_PYTHON", "bash": "ELEVATE_DOCUMENT_BASH"}
+    raw_runtimes = config.get("runtimes")
+    runtimes = raw_runtimes if isinstance(raw_runtimes, Mapping) else {}
+    configured = (
+        runtimes.get(kind)
+        or config.get(config_keys[kind])
+        or os.environ.get(env_keys[kind], "").strip()
+    )
+    command = str(configured or defaults[kind])
+    if Path(command).is_absolute() or os.sep in command:
+        candidate = Path(command).expanduser()
+        relative_to_pack = not candidate.is_absolute()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        if relative_to_pack:
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                _document_setup_error(
+                    "document_runtime_outside_pack",
+                    f"The configured {kind} runtime must remain inside the document pack.",
+                    runtime=kind,
+                    configuredPath=str(candidate),
+                )
+    else:
+        found = shutil.which(command)
+        candidate = Path(found).resolve() if found else Path()
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        _document_setup_error(
+            "document_runtime_missing",
+            f"Configure an executable {kind} runtime for the document pack.",
+            runtime=kind,
+            configuredPath=str(candidate) if candidate != Path() else command,
+        )
+    return str(candidate)
+
+
+@contextmanager
+def _document_payload(payload: Mapping[str, Any], prefix: str):
+    import json
+    import tempfile
+
+    root = _profile_artifact_dir("cache", "documents", "admin_artifacts", "payloads")
+    with tempfile.NamedTemporaryFile(
+        "w",
+        prefix=f"{_artifact_slug(prefix, 'payload')}-",
+        suffix=".json",
+        dir=root,
+        delete=False,
+    ) as handle:
+        json.dump(payload, handle)
+        path = Path(handle.name)
+    try:
+        yield str(path)
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def _collapse_contact_name(item: Dict[str, Any]) -> str | None:
@@ -680,13 +990,18 @@ def create_admin_deals_router(
             doc = next((d for d in docs if d.get("id") == doc_id), None)
             if not doc:
                 raise HTTPException(status_code=404, detail="kit document not found")
-            file_path = doc.get("filePath")
-            if not file_path or not os.path.exists(file_path):
-                raise HTTPException(status_code=404, detail="kit document not generated yet")
+            file_path = _verified_offer_kit_path(
+                deal_id,
+                doc_id,
+                doc.get("filePath"),
+                require_file=True,
+            )
+            if not doc.get("ready"):
+                raise HTTPException(status_code=409, detail="regenerate this document before opening it")
             return FileResponse(
-                file_path,
+                str(file_path),
                 media_type="application/pdf",
-                filename=os.path.basename(file_path),
+                filename=file_path.name,
                 content_disposition_type="attachment" if download else "inline",
             )
         except HTTPException:
@@ -703,6 +1018,8 @@ def create_admin_deals_router(
             from elevate_cli.data import connect
 
             new_status = (body.status or "approved").strip() or "approved"
+            if new_status not in {"approved", "draft"}:
+                raise HTTPException(status_code=400, detail="status must be approved or draft")
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
@@ -716,6 +1033,18 @@ def create_admin_deals_router(
                 found = False
                 for d in docs:
                     if d.get("id") == doc_id:
+                        if new_status == "approved":
+                            _verified_offer_kit_path(
+                                deal_id,
+                                doc_id,
+                                d.get("filePath"),
+                                require_file=True,
+                            )
+                            if not d.get("ready"):
+                                raise HTTPException(
+                                    status_code=409,
+                                    detail="regenerate this document before approving it",
+                                )
                         d["status"] = new_status
                         found = True
                         break
@@ -751,8 +1080,9 @@ def create_admin_deals_router(
                 raw = row["extra_toggles_json"]
                 toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
                 kit = toggles.get("offerKit") or {}
+                docs = kit.get("documents") or []
                 found = False
-                for d in (kit.get("documents") or []):
+                for d in docs:
                     if d.get("id") == doc_id:
                         flds = d.get("fields") or {}
                         flds[body.key] = body.value or ""
@@ -761,6 +1091,11 @@ def create_admin_deals_router(
                         break
                 if not found:
                     raise HTTPException(status_code=404, detail="kit document not found")
+                for d in docs:
+                    if doc_id == "cps-residential" or d.get("id") == doc_id:
+                        d["ready"] = False
+                        d["status"] = "draft"
+                kit["documents"] = docs
                 toggles["offerKit"] = kit
                 conn.execute(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
@@ -784,17 +1119,12 @@ def create_admin_deals_router(
             import tempfile
             from elevate_cli.data import connect
 
-            FORMS = "/Users/admin/skyleigh-tools/knowledge/deals/forms"
-            ENGINE = f"{FORMS}/fill-form-generic.py"
-            TEMPLATES = {
-                "cps-residential": f"{FORMS}/cps-residential-fillable-template.pdf",
-                "cps-addendum": f"{FORMS}/cps-addendum-template.pdf",
-                "disclosure-remuneration": f"{FORMS}/disclosure-remuneration-template.pdf",
-                "privacy-notice": f"{FORMS}/privacy-notice-template.pdf",
-                "bcfsa-disclosure": f"{FORMS}/bcfsa-disclosure-template.pdf",
-                "condition-waiver": f"{FORMS}/condition-waiver-template.pdf",
-                "subject-removal": f"{FORMS}/subject-removal-template.pdf",
-            }
+            snapshot = _document_setup_snapshot()
+            realtor_name, brokerage_name = _document_identity(snapshot)
+            engine = _document_asset("formEngine", snapshot=snapshot)
+            if doc_id not in _DOCUMENT_TEMPLATE_DEFAULTS:
+                raise HTTPException(status_code=400, detail="no template wired for this document yet")
+            template = _document_asset("template", snapshot=snapshot, template_id=doc_id)
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
@@ -808,9 +1138,6 @@ def create_admin_deals_router(
                 doc = next((d for d in docs if d.get("id") == doc_id), None)
                 if not doc:
                     raise HTTPException(status_code=404, detail="kit document not found")
-            if doc_id not in TEMPLATES:
-                raise HTTPException(status_code=400, detail="no template wired for this document yet")
-            template = TEMPLATES[doc_id]
             # Canonical data lives on the CPS doc's fields; every form fills from it.
             cps = next((d for d in docs if d.get("id") == "cps-residential"), {}) or {}
             cf = cps.get("fields") or {}
@@ -836,7 +1163,7 @@ def create_admin_deals_router(
                 "seller2": sellers[1] if len(sellers) > 1 else "",
                 "p_streetnum": pnum, "p_street": pstreet, "p_city": pcity, "p_state": pstate, "p_zip": pzip,
                 "mls": str(toggles.get("mlsNumber") or toggles.get("mls") or ""),
-                "agentName": "Skyleigh McCallum", "officeName": "Forever Real Estate Group",
+                "agentName": realtor_name, "officeName": brokerage_name,
                 "price": cf.get("price", ""), "priceWords": cf.get("priceWords", ""),
                 "deposit": cf.get("deposit", ""), "depositHolder": cf.get("depositHolder", ""),
                 "completionDate": cf.get("completionDate", ""), "possessionDate": cf.get("possessionDate", ""),
@@ -855,40 +1182,61 @@ def create_admin_deals_router(
                     "vars": {**(toggles.get("cpsVars") or {}), "subject_removal_date": toggles.get("subjectRemovalDate") or ""},
                     "custom": toggles.get("cpsCustomClauses") or [],
                 }
-                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as af:
-                    _json.dump(asm_input, af)
-                    asm_path = af.name
-                asm = subprocess.run(
-                    ["/usr/bin/python3", f"{FORMS}/assemble-cps-terms.py", asm_path],
-                    capture_output=True, text=True, timeout=30,
-                    env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": "/Users/admin"},
-                )
-                try:
-                    os.unlink(asm_path)
-                except Exception:
-                    pass
-                if asm.returncode == 0 and asm.stdout.strip():
-                    context["conditions"] = asm.stdout.strip()
-            out_path = doc.get("filePath") or (
-                f"/Users/admin/.elevate/cache/documents/admin_artifacts/offer-kits/{deal_id}-{doc_id}.pdf"
-            )
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
-                _json.dump(context, tf)
-                ctx_path = tf.name
-            # Clean env: the app sets PYTHON* vars that point /usr/bin/python3 at the
-            # app runtime (no pypdf). HOME must be set so it finds user-site pypdf.
-            proc = subprocess.run(
-                ["/usr/bin/python3", ENGINE, ctx_path, template, out_path],
-                capture_output=True, text=True, timeout=60,
-                env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": "/Users/admin"},
-            )
+                assembler = _document_asset("cpsAssembler", snapshot=snapshot)
+                with _document_payload(asm_input, "cps-terms") as asm_path:
+                    asm = subprocess.run(
+                        [_document_runtime("python", snapshot), str(assembler), asm_path],
+                        capture_output=True, text=True, timeout=30,
+                        env=_document_subprocess_env(clean_python=True),
+                    )
+                if asm.returncode != 0 or not asm.stdout.strip():
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"clause assembly failed: {(asm.stderr or '')[:300]}",
+                    )
+                context["conditions"] = asm.stdout.strip()
+            out_path = _offer_kit_path(deal_id, doc_id)
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{out_path.stem}-",
+                suffix=".pdf",
+                dir=out_path.parent,
+                delete=False,
+            ) as staged:
+                staged_path = Path(staged.name)
             try:
-                os.unlink(ctx_path)
-            except Exception:
+                staged_path.unlink()
+            except OSError:
                 pass
-            if proc.returncode != 0:
-                raise HTTPException(status_code=500, detail=f"fill failed: {(proc.stderr or '')[:300]}")
+            # Clean env: the app sets PYTHON* vars that can point the configured
+            # app runtime (no pypdf). HOME must be set so it finds user-site pypdf.
+            try:
+                with _document_payload(context, "form-context") as ctx_path:
+                    proc = subprocess.run(
+                        [
+                            _document_runtime("python", snapshot),
+                            str(engine),
+                            ctx_path,
+                            str(template),
+                            str(staged_path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        env=_document_subprocess_env(clean_python=True),
+                    )
+                if proc.returncode != 0:
+                    raise HTTPException(status_code=500, detail=f"fill failed: {(proc.stderr or '')[:300]}")
+                if not _is_pdf(staged_path):
+                    raise HTTPException(
+                        status_code=500,
+                        detail="fill engine exited successfully but did not produce a valid new PDF",
+                    )
+                os.replace(staged_path, out_path)
+            finally:
+                try:
+                    staged_path.unlink()
+                except OSError:
+                    pass
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
@@ -898,7 +1246,7 @@ def create_admin_deals_router(
                 kit = toggles.get("offerKit") or {}
                 for d in (kit.get("documents") or []):
                     if d.get("id") == doc_id:
-                        d["filePath"] = out_path
+                        d["filePath"] = str(out_path)
                         d["ready"] = True
                         d["status"] = "draft"
                 toggles["offerKit"] = kit
@@ -906,7 +1254,7 @@ def create_admin_deals_router(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
                     (_json.dumps(toggles), deal_id),
                 )
-            return {"id": doc_id, "generated": True}
+            return {"id": doc_id, "generated": True, "filePath": str(out_path)}
         except HTTPException:
             raise
         except Exception as exc:
@@ -922,7 +1270,6 @@ def create_admin_deals_router(
             import json as _json
             from elevate_cli.data import connect
 
-            KITDIR = "/Users/admin/.elevate/cache/documents/admin_artifacts/offer-kits"
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json, listing_address FROM deals WHERE id=?", (deal_id,)
@@ -954,21 +1301,41 @@ def create_admin_deals_router(
                     "conditions": str(toggles.get("subjectConditions") or ""),
                 }
                 existing = toggles.get("offerKit") or {}
-                ex_cps = next((d for d in (existing.get("documents") or []) if d.get("id") == "cps-residential"), None)
-                cps_path = (ex_cps or {}).get("filePath") or f"{KITDIR}/{deal_id}-cps-residential.pdf"
+                existing_docs = {
+                    d.get("id"): d
+                    for d in (existing.get("documents") or [])
+                    if isinstance(d, dict) and d.get("id")
+                }
+                ex_cps = existing_docs.get("cps-residential") or {}
                 fields = dict(seeded)
-                for k, v in ((ex_cps or {}).get("fields") or {}).items():
+                for k, v in (ex_cps.get("fields") or {}).items():
                     if v:
                         fields[k] = v  # keep existing operator edits
+
+                def catalog_doc(doc_id: str, name: str, *, cps_fields: bool = False) -> Dict[str, Any]:
+                    previous = existing_docs.get(doc_id) or {}
+                    path = _offer_kit_path(deal_id, doc_id)
+                    item: Dict[str, Any] = {
+                        "id": doc_id,
+                        "name": name,
+                        "status": previous.get("status", "draft"),
+                        "fillable": True,
+                        "ready": bool(previous.get("ready")) and _is_pdf(path),
+                        "filePath": str(path),
+                    }
+                    if cps_fields:
+                        item["fields"] = fields
+                    return item
+
                 kit = {
                     "createdAt": existing.get("createdAt") or "",
                     "documents": [
-                        {"id": "cps-residential", "name": "CPS - Residential", "status": (ex_cps or {}).get("status", "draft"), "fillable": True, "ready": True, "filePath": cps_path, "fields": fields},
-                        {"id": "cps-addendum", "name": "CPS - Addendum / Amendment", "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-cps-addendum.pdf"},
-                        {"id": "disclosure-remuneration", "name": "Disclosure of Remuneration (RECBC 5-11)", "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-disclosure-remuneration.pdf"},
-                        {"id": "privacy-notice", "name": "Privacy Notice and Consent", "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-privacy-notice.pdf"},
-                        {"id": "bcfsa-disclosure", "name": "BCFSA - Disclosure of Representation", "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-bcfsa-disclosure.pdf"},
-                        {"id": "condition-waiver", "name": "Notice of Condition Waiver / Declaration of Fulfillment", "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-condition-waiver.pdf"},
+                        catalog_doc("cps-residential", "CPS - Residential", cps_fields=True),
+                        catalog_doc("cps-addendum", "CPS - Addendum / Amendment"),
+                        catalog_doc("disclosure-remuneration", "Disclosure of Remuneration (RECBC 5-11)"),
+                        catalog_doc("privacy-notice", "Privacy Notice and Consent"),
+                        catalog_doc("bcfsa-disclosure", "BCFSA - Disclosure of Representation"),
+                        catalog_doc("condition-waiver", "Notice of Condition Waiver / Declaration of Fulfillment"),
                     ],
                 }
                 toggles["offerKit"] = kit
@@ -993,8 +1360,6 @@ def create_admin_deals_router(
             import re as _re
             from elevate_cli.data import connect
 
-            KITDIR = "/Users/admin/.elevate/cache/documents/admin_artifacts/offer-kits"
-            os.makedirs(KITDIR, exist_ok=True)
             with connect() as conn:
                 row = conn.execute(
                     "SELECT extra_toggles_json FROM deals WHERE id=?", (deal_id,)
@@ -1019,16 +1384,21 @@ def create_admin_deals_router(
                         data = _b64.b64decode(body.contentB64)
                     except Exception:
                         raise HTTPException(status_code=400, detail="bad file content")
-                    out_path = f"{KITDIR}/{deal_id}-{doc_id}.pdf"
-                    with open(out_path, "wb") as fh:
+                    if not data.startswith(b"%PDF-"):
+                        raise HTTPException(status_code=400, detail="uploaded file is not a PDF")
+                    out_path = _offer_kit_path(deal_id, doc_id)
+                    with out_path.open("wb") as fh:
                         fh.write(data)
-                    docs.append({"id": doc_id, "name": fname, "status": "draft", "fillable": False, "ready": True, "filePath": out_path})
+                    ready = _is_pdf(out_path)
+                    docs.append({"id": doc_id, "name": fname, "status": "draft", "fillable": False, "ready": ready, "filePath": str(out_path)})
                 elif body.templateId:
                     tid = body.templateId.strip()
                     if any(d.get("id") == tid for d in docs):
                         raise HTTPException(status_code=400, detail="already in kit")
+                    _document_asset("template", template_id=tid)
                     cps = next((d for d in docs if d.get("id") == "cps-residential"), {}) or {}
-                    docs.append({"id": tid, "name": (body.name or tid), "status": "draft", "fillable": True, "ready": True, "filePath": f"{KITDIR}/{deal_id}-{tid}.pdf", "fields": dict(cps.get("fields") or {})})
+                    out_path = _offer_kit_path(deal_id, tid)
+                    docs.append({"id": tid, "name": (body.name or tid), "status": "draft", "fillable": True, "ready": _is_pdf(out_path), "filePath": str(out_path), "fields": dict(cps.get("fields") or {})})
                 else:
                     raise HTTPException(status_code=400, detail="need a file or templateId")
                 kit["documents"] = docs
@@ -1065,21 +1435,31 @@ def create_admin_deals_router(
                     raise HTTPException(status_code=404, detail="deal not found")
                 raw = row["extra_toggles_json"]
                 toggles = raw if isinstance(raw, dict) else (_json.loads(raw) if raw and str(raw).strip() else {})
+            script = _document_asset("listingPull")
+            node = shutil.which("node")
+            if not node:
+                _document_setup_error(
+                    "document_runtime_missing",
+                    "Install Node.js or configure it on PATH before pulling listing documents.",
+                    runtime="node",
+                )
+            log_path = _document_log_path("pull-listing.log")
+            with log_path.open("a", encoding="utf-8") as log:
+                process = subprocess.Popen(
+                    [node, str(script), deal_id, mls],
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=_document_subprocess_env(),
+                    start_new_session=True,
+                )
+            with connect() as conn:
                 toggles["mlsNumber"] = mls
                 toggles["listingPullStatus"] = "pulling"
                 conn.execute(
                     "UPDATE deals SET extra_toggles_json=? WHERE id=?",
                     (_json.dumps(toggles), deal_id),
                 )
-            script = "/Users/admin/skyleigh-tools/scripts/pull-listing-by-mls.js"
-            if os.path.exists(script):
-                log = open("/Users/admin/.elevate/cache/pull-listing.log", "a")
-                subprocess.Popen(
-                    ["/usr/local/bin/node", script, deal_id, mls],
-                    stdout=log, stderr=subprocess.STDOUT,
-                    env={"PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME": "/Users/admin"},
-                )
-            return {"started": True, "mls": mls}
+            return {"started": True, "mls": mls, "pid": process.pid}
         except HTTPException:
             raise
         except Exception as exc:
@@ -1093,10 +1473,10 @@ def create_admin_deals_router(
         # rewrites the file — no rebuild needed.
         try:
             import json as _json
-            path = "/Users/admin/skyleigh-tools/knowledge/deals/forms/webforms-clauses.json"
-            if not os.path.exists(path):
-                return {"folders": {"system": [], "office": [], "personal": []}, "counts": {}}
-            return _json.loads(open(path).read())
+            path = _document_asset("clauseLibrary")
+            return _json.loads(path.read_text(encoding="utf-8"))
+        except HTTPException:
+            raise
         except Exception as exc:
             _log.exception("GET /api/admin/clause-library failed")
             raise HTTPException(status_code=500, detail=f"Clause library failed: {exc}")
@@ -1351,9 +1731,9 @@ def create_admin_deals_router(
             return {}
     # Gather the listing's MLS sheet + Docs-tab documents from Xposure into the
     # buyer deal's Drive folder, then assemble a CPS draft on the actual BCREA
-    # form + Schedule A. Both call scripts in ~/skyleigh-tools (separate repo),
-    # spawned with /usr/bin/python3 because the PDF deps (reportlab/pypdf/fitz)
-    # are --user installs the dashboard's default python can't see.
+    # form + Schedule A. Both call scripts from the configured document pack,
+    # spawned with the configured Python because PDF dependencies may not exist
+    # may be user installs the dashboard's default python can't see.
 
     @router.post("/api/admin/offer-prep/gather")
     def post_offer_prep_gather(body: _GatherCpsBody):
@@ -1367,16 +1747,14 @@ def create_admin_deals_router(
             mls = (body.mls or "").strip()
             if not mls.isdigit() or not (6 <= len(mls) <= 9):
                 raise HTTPException(status_code=400, detail="Enter a valid MLS number")
-            script = os.path.expanduser("~/skyleigh-tools/scripts/cps-prep-package.sh")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="CPS gather script not found")
-            args = ["/bin/bash", script, mls]
+            script = _document_asset("cpsGather")
+            args = [_document_runtime("bash"), str(script), mls]
             if body.dry_run:
                 args.append("--dry-run")
             # DEAL_ID lets the gather write the extracted legal/PID back onto the
             # deal once the title finishes downloading, so Generate has them no
             # matter the timing.
-            gather_env = {**os.environ, "DEAL_ID": (body.deal_id or "")}
+            gather_env = {**_document_subprocess_env(), "DEAL_ID": (body.deal_id or "")}
             _sp.Popen(
                 args,
                 stdout=_sp.DEVNULL,
@@ -1399,7 +1777,6 @@ def create_admin_deals_router(
         subjects + clauses), then file the draft into the deal folder.
         Synchronous (no browser), returns the result + Drive URL."""
         import json as _json
-        import re as _re
         import subprocess as _sp
 
         try:
@@ -1414,32 +1791,26 @@ def create_admin_deals_router(
                 "address": (body.address or "Property"), "dealId": (body.deal_id or "deal"),
                 "dryRun": body.dry_run, "deal": deal_facts,
             }
-            pf = f"/tmp/cps-gen-payload-{body.deal_id or 'x'}.json"
-            with open(pf, "w") as f:
-                _json.dump(payload, f)
-            script = os.path.expanduser("~/skyleigh-tools/scripts/cps-generate.py")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="CPS generate script not found")
-            # /usr/bin/python3 has reportlab/pypdf/fitz as --user installs; the
-            # dashboard hides them with PYTHONNOUSERSITE + a bundle PYTHONPATH/
-            # PYTHONHOME. Strip those and point at the user site-packages.
-            child_env = {k: v for k, v in os.environ.items()
-                         if k not in ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE",
-                                      "VIRTUAL_ENV", "PYTHONNOUSERSITE")}
-            child_env["PYTHONPATH"] = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-            r = _sp.run(["/usr/bin/python3", script, pf], capture_output=True,
-                        text=True, timeout=120, env=child_env)
+            script = _document_asset("cpsGenerate")
+            # Strip the dashboard's bundled PYTHON* overrides for the configured
+            # document runtime.
+            child_env = _document_subprocess_env(clean_python=True)
+            with _document_payload(payload, "cps-generate") as pf:
+                r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                            text=True, timeout=120, env=child_env)
             result: Dict[str, Any] = {}
             for line in reversed((r.stdout or "").strip().splitlines()):
                 try:
-                    result = _json.loads(line); break
+                    result = _json.loads(line)
+                    break
                 except Exception:
                     continue
-            if not result.get("ok"):
+            if r.returncode != 0 or not result.get("ok"):
                 _log.error("CPS generate produced no PDF: %s | %s", (r.stdout or "")[-300:], (r.stderr or "")[-300:])
                 raise HTTPException(status_code=500, detail="Generation failed to produce a PDF")
-            _log.info("CPS draft generated for %s (dry_run=%s, saved=%s)", result.get("address"), body.dry_run, "save" in result)
-            return {"ok": True, "address": result.get("address"), "saved": ("save" in result),
+            saved = bool(result.get("save") or result.get("saved"))
+            _log.info("CPS draft generated for %s (dry_run=%s, saved=%s)", result.get("address"), body.dry_run, saved)
+            return {"ok": True, "address": result.get("address"), "saved": saved,
                     "url": result.get("url"), "dryRun": body.dry_run}
         except HTTPException:
             raise
@@ -1453,7 +1824,6 @@ def create_admin_deals_router(
         Disclosure of Remuneration) from the deal facts and file it into the
         deal folder. Synchronous; returns the result + Drive URL."""
         import json as _json
-        import re as _re
         import subprocess as _sp
 
         try:
@@ -1467,30 +1837,25 @@ def create_admin_deals_router(
                 "dealId": (body.deal_id or "deal"), "dryRun": body.dry_run,
                 "deal": deal_facts,
             }
-            pf = f"/tmp/offer-form-payload-{body.deal_id or 'x'}-{form}.json"
-            with open(pf, "w") as f:
-                _json.dump(payload, f)
-            script = os.path.expanduser("~/skyleigh-tools/scripts/offer-prep-forms.py")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="Offer-prep forms script not found")
-            child_env = {k: v for k, v in os.environ.items()
-                         if k not in ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE",
-                                      "VIRTUAL_ENV", "PYTHONNOUSERSITE")}
-            child_env["PYTHONPATH"] = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-            r = _sp.run(["/usr/bin/python3", script, pf], capture_output=True,
-                        text=True, timeout=120, env=child_env)
+            script = _document_asset("offerForms")
+            child_env = _document_subprocess_env(clean_python=True)
+            with _document_payload(payload, f"offer-form-{form}") as pf:
+                r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                            text=True, timeout=120, env=child_env)
             result: Dict[str, Any] = {}
             for line in reversed((r.stdout or "").strip().splitlines()):
                 try:
-                    result = _json.loads(line); break
+                    result = _json.loads(line)
+                    break
                 except Exception:
                     continue
-            if not result.get("ok"):
+            if r.returncode != 0 or not result.get("ok"):
                 _log.error("offer form %s produced no PDF: %s | %s", form, (r.stdout or "")[-300:], (r.stderr or "")[-300:])
                 raise HTTPException(status_code=500, detail="Form generation failed")
             _log.info("offer-prep form %s generated for %s (dry_run=%s)", form, result.get("address"), body.dry_run)
             return {"ok": True, "form": form, "address": result.get("address"),
-                    "saved": ("save" in result), "url": result.get("url"), "dryRun": body.dry_run}
+                    "saved": bool(result.get("save") or result.get("saved")),
+                    "url": result.get("url"), "dryRun": body.dry_run}
         except HTTPException:
             raise
         except Exception as exc:
@@ -1503,7 +1868,6 @@ def create_admin_deals_router(
         Remuneration merged into one PDF — and file it to the deal folder for
         preview. Returns the Drive URL."""
         import json as _json
-        import re as _re
         import subprocess as _sp
 
         try:
@@ -1517,25 +1881,19 @@ def create_admin_deals_router(
                 "address": (body.address or "Property"), "dealId": (body.deal_id or "deal"),
                 "dryRun": body.dry_run, "deal": deal_facts, "forms": body.forms,
             }
-            pf = f"/tmp/offer-package-payload-{body.deal_id or 'x'}.json"
-            with open(pf, "w") as f:
-                _json.dump(payload, f)
-            script = os.path.expanduser("~/skyleigh-tools/scripts/offer-prep-package.py")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="Offer-prep package script not found")
-            child_env = {k: v for k, v in os.environ.items()
-                         if k not in ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE",
-                                      "VIRTUAL_ENV", "PYTHONNOUSERSITE")}
-            child_env["PYTHONPATH"] = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-            r = _sp.run(["/usr/bin/python3", script, pf], capture_output=True,
-                        text=True, timeout=180, env=child_env)
+            script = _document_asset("offerPackage")
+            child_env = _document_subprocess_env(clean_python=True)
+            with _document_payload(payload, "offer-package") as pf:
+                r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                            text=True, timeout=180, env=child_env)
             result: Dict[str, Any] = {}
             for line in reversed((r.stdout or "").strip().splitlines()):
                 try:
-                    result = _json.loads(line); break
+                    result = _json.loads(line)
+                    break
                 except Exception:
                     continue
-            if not result.get("ok"):
+            if r.returncode != 0 or not result.get("ok"):
                 _log.error("offer package produced no PDF: %s | %s", (r.stdout or "")[-300:], (r.stderr or "")[-300:])
                 raise HTTPException(status_code=500, detail="Package build failed")
             _log.info("offer package built for %s (%s docs, dry_run=%s)", result.get("address"), result.get("count"), body.dry_run)
@@ -1548,10 +1906,7 @@ def create_admin_deals_router(
             raise HTTPException(status_code=500, detail=f"Package build failed: {exc}")
 
     def _user_site_env():
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE", "VIRTUAL_ENV", "PYTHONNOUSERSITE")}
-        env["PYTHONPATH"] = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-        return env
+        return _document_subprocess_env(clean_python=True)
 
     @router.get("/api/admin/deals/{deal_id}/documents")
     def get_deal_documents(deal_id: str):
@@ -1570,18 +1925,22 @@ def create_admin_deals_router(
             empty = {"ok": True, "folderId": None, "folderUrl": None, "files": []}
             if not address:
                 return empty
-            script = os.path.expanduser("~/skyleigh-tools/scripts/deal-docs-list.py")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="docs-list script not found")
-            r = _sp.run(["/usr/bin/python3", script, "--address", address],
+            script = _document_asset("dealDocuments")
+            r = _sp.run([_document_runtime("python"), str(script), "--address", address],
                         capture_output=True, text=True, timeout=60, env=_user_site_env())
+            result: Dict[str, Any] = {}
             for line in reversed((r.stdout or "").strip().splitlines()):
                 try:
-                    return _json.loads(line)
+                    parsed = _json.loads(line)
+                    if isinstance(parsed, dict):
+                        result = parsed
+                        break
                 except Exception:
                     continue
-            _log.warning("deal documents: no JSON from docs-list: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
-            return empty
+            if r.returncode != 0 or not result:
+                _log.warning("deal documents failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+                raise HTTPException(status_code=500, detail="Document listing did not complete")
+            return result
         except HTTPException:
             raise
         except Exception as exc:
@@ -1604,24 +1963,21 @@ def create_admin_deals_router(
             address = str(facts.get("listingAddress") or "Property").split(",")[0].strip() or "Property"
             payload: Dict[str, Any] = {"address": address, "dealId": deal_id, "dryRun": False, "deal": facts}
             if form == "agency":
-                script = os.path.expanduser("~/skyleigh-tools/scripts/buyer-agency-fill.py")
+                script = _document_asset("buyerAgency")
             else:
                 payload["form"] = form
-                script = os.path.expanduser("~/skyleigh-tools/scripts/offer-prep-forms.py")
-            if not os.path.exists(script):
-                raise HTTPException(status_code=500, detail="onboarding form script not found")
-            pf = f"/tmp/onboarding-{deal_id}-{form}.json"
-            with open(pf, "w") as f:
-                _json.dump(payload, f)
-            r = _sp.run(["/usr/bin/python3", script, pf], capture_output=True,
-                        text=True, timeout=120, env=_user_site_env())
+                script = _document_asset("offerForms")
+            with _document_payload(payload, f"onboarding-{form}") as pf:
+                r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                            text=True, timeout=120, env=_user_site_env())
             result: Dict[str, Any] = {}
             for line in reversed((r.stdout or "").strip().splitlines()):
                 try:
-                    result = _json.loads(line); break
+                    result = _json.loads(line)
+                    break
                 except Exception:
                     continue
-            if not result.get("ok"):
+            if r.returncode != 0 or not result.get("ok"):
                 _log.error("onboarding %s produced no PDF: %s | %s", form, (r.stdout or "")[-300:], (r.stderr or "")[-300:])
                 raise HTTPException(status_code=500, detail="Onboarding doc generation failed")
             return {"ok": True, "form": form, "url": result.get("url")}
@@ -1653,35 +2009,34 @@ def create_admin_deals_router(
             # --- Deterministic draft prep: fill the 3 docs + merge one preview ---
             prefilled: List[Dict[str, str]] = []
             preview_pdf = None
+            agency_script = _document_asset("buyerAgency")
+            offer_forms_script = _document_asset("offerForms")
             try:
                 forms_seq = [
-                    ("agency", os.path.expanduser("~/skyleigh-tools/scripts/buyer-agency-fill.py"), None),
-                    ("dorts", os.path.expanduser("~/skyleigh-tools/scripts/offer-prep-forms.py"), "dorts"),
-                    ("pnc", os.path.expanduser("~/skyleigh-tools/scripts/offer-prep-forms.py"), "pnc"),
+                    ("agency", agency_script, None),
+                    ("dorts", offer_forms_script, "dorts"),
+                    ("pnc", offer_forms_script, "pnc"),
                 ]
                 for key, script, formarg in forms_seq:
-                    if not os.path.exists(script):
-                        continue
                     pl: Dict[str, Any] = {"address": address, "dealId": deal_id, "dryRun": True, "deal": facts}
                     if formarg:
                         pl["form"] = formarg
-                    pf = f"/tmp/onboarding-sign-{deal_id}-{key}.json"
-                    with open(pf, "w") as f:
-                        _json.dump(pl, f)
-                    r = _sp.run(["/usr/bin/python3", script, pf], capture_output=True,
-                                text=True, timeout=120, env=_user_site_env())
+                    with _document_payload(pl, f"onboarding-sign-{key}") as pf:
+                        r = _sp.run([_document_runtime("python"), str(script), pf], capture_output=True,
+                                    text=True, timeout=120, env=_user_site_env())
                     res: Dict[str, Any] = {}
                     for line in reversed((r.stdout or "").strip().splitlines()):
                         try:
-                            res = _json.loads(line); break
+                            res = _json.loads(line)
+                            break
                         except Exception:
                             continue
-                    if res.get("ok") and res.get("pdf") and os.path.exists(res["pdf"]):
-                        prefilled.append({"form": key, "pdf": res["pdf"]})
+                    pdf = Path(str(res.get("pdf") or "")).expanduser()
+                    if r.returncode == 0 and res.get("ok") and _is_pdf(pdf):
+                        prefilled.append({"form": key, "pdf": str(pdf)})
                 if len(prefilled) == 3:
-                    pv_dir = str(get_elevate_home() / "uploads" / "onboarding-previews")
-                    os.makedirs(pv_dir, exist_ok=True)
-                    preview_path = f"{pv_dir}/{deal_id}-onboarding-preview.pdf"
+                    pv_dir = _profile_artifact_dir("uploads", "onboarding-previews")
+                    preview_path = pv_dir / f"{_artifact_slug(deal_id, 'deal')}-onboarding-preview.pdf"
                     merge_src = (
                         "import sys\n"
                         "from pypdf import PdfReader, PdfWriter\n"
@@ -1692,11 +2047,11 @@ def create_admin_deals_router(
                         "with open(sys.argv[1], 'wb') as fh:\n"
                         "    w.write(fh)\n"
                     )
-                    mr = _sp.run(["/usr/bin/python3", "-c", merge_src, preview_path] + [d["pdf"] for d in prefilled],
+                    mr = _sp.run([_document_runtime("python"), "-c", merge_src, str(preview_path)] + [d["pdf"] for d in prefilled],
                                  capture_output=True, text=True, timeout=60,
-                                 env={"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": "/Users/admin"})
-                    if mr.returncode == 0 and os.path.exists(preview_path):
-                        preview_pdf = preview_path
+                                 env=_document_subprocess_env(clean_python=True))
+                    if mr.returncode == 0 and _is_pdf(preview_path):
+                        preview_pdf = str(preview_path)
             except Exception:
                 _log.exception("onboarding draft prep failed; falling back to agent dispatch")
                 prefilled = []
@@ -1758,7 +2113,8 @@ def create_admin_deals_router(
             raise HTTPException(status_code=500, detail=f"Send for signatures failed: {exc}")
 
     # --- CMA wizard (listing side): checkpointed phase runner + comp review ---
-    _CMA_RUNNER = os.path.expanduser("~/skyleigh-tools/scripts/cma-phase-runner.py")
+    def _cma_runner() -> Path:
+        return _document_asset("cmaRunner")
 
     def _cma_addr(deal_id):
         facts = _cps_deal_facts(deal_id)
@@ -1767,15 +2123,20 @@ def create_admin_deals_router(
     def _cma_call(addr, args, timeout=60):
         import json as _json
         import subprocess as _sp
-        r = _sp.run(["/usr/bin/python3", _CMA_RUNNER, "--address", addr] + args,
+        runner = _cma_runner()
+        r = _sp.run([_document_runtime("python"), str(runner), "--address", addr] + args,
                     capture_output=True, text=True, timeout=timeout, env=_user_site_env())
+        if r.returncode != 0:
+            raise HTTPException(status_code=500, detail="CMA runner failed")
         for line in reversed((r.stdout or "").strip().splitlines()):
             try:
-                return _json.loads(line)
+                result = _json.loads(line)
+                if isinstance(result, dict):
+                    return result
             except Exception:
                 continue
         _log.warning("cma-runner no JSON (%s): %s | %s", args, (r.stdout or "")[-200:], (r.stderr or "")[-200:])
-        return {}
+        raise HTTPException(status_code=500, detail="CMA runner returned no result")
 
     @router.get("/api/admin/deals/{deal_id}/cma/phases")
     def get_cma_phases(deal_id: str):
@@ -1801,7 +2162,8 @@ def create_admin_deals_router(
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
             import subprocess as _sp
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", body.phase],
+            runner = _cma_runner()
+            _sp.Popen([_document_runtime("python"), str(runner), "--address", addr, "--phase", body.phase],
                       env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                       start_new_session=True)
             return {"ok": True, "started": True, "phase": body.phase}
@@ -1838,7 +2200,8 @@ def create_admin_deals_router(
             addr = _cma_addr(deal_id)
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
-            import re as _re, subprocess as _sp
+            import re as _re
+            import subprocess as _sp
             text = body.instructions or ""
             env = _user_site_env()
             anchor = ""
@@ -1858,9 +2221,12 @@ def create_admin_deals_router(
             if picked:
                 env["CMA_AREAS"] = ",".join(picked)
             env["CMA_MAX_COMPS"] = "10"
-            _sp.run(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--reset-downstream"],
-                    env=env, capture_output=True, timeout=30)
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--phase", "collect"],
+            runner = _cma_runner()
+            reset = _sp.run([_document_runtime("python"), str(runner), "--address", addr, "--reset-downstream"],
+                            env=env, capture_output=True, timeout=30)
+            if reset.returncode != 0:
+                raise HTTPException(status_code=500, detail="CMA reset failed; collect was not started")
+            _sp.Popen([_document_runtime("python"), str(runner), "--address", addr, "--phase", "collect"],
                       env=env, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
             return {"ok": True, "started": True, "areas": env.get("CMA_AREAS"),
                     "anchor": env.get("CMA_VALUE_ANCHOR"), "instructions": text}
@@ -1875,7 +2241,7 @@ def create_admin_deals_router(
         """Serve a comp's first captured photo (comp-N-photo-00.jpg) for the
         Comparables-step thumbnail. 404 if that comp has no photo (placeholder)."""
         import glob as _glob
-        base = os.path.join(os.path.dirname(_CMA_RUNNER), "screenshots", "comp-photos")
+        base = str(_cma_runner().parent / "screenshots" / "comp-photos")
         cand = os.path.join(base, f"comp-{comp_num}-photo-00.jpg")
         if not os.path.exists(cand):
             hits = sorted(_glob.glob(os.path.join(base, f"comp-{comp_num}-photo-*.jpg")))
@@ -1911,7 +2277,8 @@ def create_admin_deals_router(
             if not addr:
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
             import subprocess as _sp
-            _sp.Popen(["/usr/bin/python3", _CMA_RUNNER, "--address", addr, "--reprice",
+            runner = _cma_runner()
+            _sp.Popen([_document_runtime("python"), str(runner), "--address", addr, "--reprice",
                        "--price", body.price or "", "--rationale", body.rationale or ""],
                       env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
             return {"ok": True, "started": True, "price": body.price}
@@ -1934,9 +2301,9 @@ def create_admin_deals_router(
                 raise HTTPException(status_code=400, detail="No listing address on this deal")
             if not (body.mls or "").strip():
                 raise HTTPException(status_code=400, detail="Pick an active listing first")
-            import os as _os, subprocess as _sp
-            script = _os.path.join(_os.path.dirname(_CMA_RUNNER), "capture-prospecting.sh")
-            _sp.Popen(["/bin/bash", script, body.mls, addr],
+            import subprocess as _sp
+            script = _document_asset("cmaCaptureProspecting")
+            _sp.Popen([_document_runtime("bash"), str(script), body.mls, addr],
                       env=_user_site_env(), stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
             return {"ok": True, "started": True, "mls": body.mls}
         except HTTPException:

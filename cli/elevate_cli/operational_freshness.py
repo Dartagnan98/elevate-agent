@@ -17,15 +17,12 @@ STATE_DIR = get_elevate_home() / "state" / "cron-health"
 STATE_PATH = STATE_DIR / "operational-freshness-latest.json"
 ALERT_KEY_PATH = STATE_DIR / "operational-freshness-alert-key.txt"
 
-SYNC_LABELS = [
-    "ai.elevate.gateway",
-    "ai.elevate.sync-crm",
-    "ai.elevate.sync-apple-messages",
-    "ai.elevate.sync-xposure-pcs",
-    "ai.elevate.sync-xposure-pcs-views",
-    "ai.elevate.sync-social",
-    "ai.elevate.review-contacts",
-]
+def _sync_labels() -> list[str]:
+    """Return launchd labels for the current Elevate profile."""
+    from elevate_cli.gateway import get_launchd_label
+    from elevate_cli.sync_scheduler import jobs
+
+    return list(dict.fromkeys([get_launchd_label(), *(job.label for job in jobs())]))
 
 
 def _utc_now() -> str:
@@ -93,6 +90,7 @@ def _cron_failures() -> list[dict[str, str]]:
 
 
 def _launchd_snapshot() -> dict[str, Any]:
+    sync_labels = _sync_labels()
     try:
         output = subprocess.run(
             ["launchctl", "list"],
@@ -110,7 +108,7 @@ def _launchd_snapshot() -> dict[str, Any]:
         if len(parts) != 3:
             continue
         pid, status, label = parts
-        if label not in SYNC_LABELS:
+        if label not in sync_labels:
             continue
         labels[label] = {
             "loaded": True,
@@ -118,7 +116,7 @@ def _launchd_snapshot() -> dict[str, Any]:
             "pid": None if pid == "-" else pid,
             "lastExitStatus": status,
         }
-    for label in SYNC_LABELS:
+    for label in sync_labels:
         labels.setdefault(label, {"loaded": False, "running": False, "pid": None, "lastExitStatus": None})
     return {"labels": labels, "error": "" if output.returncode == 0 else output.stderr.strip()[:240]}
 
