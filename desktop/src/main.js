@@ -8,7 +8,7 @@ const {
   shell,
   screen,
 } = require("electron");
-const { execFileSync, spawn, spawnSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -156,7 +156,7 @@ const gatewaySelfHeal = createGatewaySelfHeal({
   os,
   path,
   process,
-  spawnSync,
+  spawn,
 });
 const backendRunner = createBackendRunner({
   backendMatchesDesktopMode,
@@ -397,7 +397,7 @@ function resolveElevateLauncher() {
 
 // Run an `elevate gateway <...>` command using the SAME resolved CLI launcher as
 // the dashboard (just swap the "dashboard" subcommand for "gateway"). Returns the
-// spawnSync result (status/stdout/stderr captured).
+// spawn result promise (status/stdout/stderr captured).
 function runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs = 90000 } = {}) {
   return gatewaySelfHeal.runGatewayCommand(launcher, baseEnv, gwArgs, { timeoutMs });
 }
@@ -460,7 +460,7 @@ function bootstrapGatewayDirect(uid, plist) {
 // update) is restarted ONCE so the new bundled code seeds the current fleet +
 // migrations. Best-effort, non-blocking, logged. macOS only.
 function ensureGatewayInstalled(launcher, baseEnv) {
-  gatewaySelfHeal.ensureGatewayInstalled(launcher, baseEnv);
+  return gatewaySelfHeal.ensureGatewayInstalled(launcher, baseEnv);
 }
 
 function request(pathname, timeoutMs = 2000, port = backendPort) {
