@@ -155,9 +155,12 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
     }
 
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const qs = new URLSearchParams({ token, channel });
+    // channel stays in the query (not secret); the token rides the subprotocol
+    // so it never lands in proxy/tunnel logs (C6).
+    const qs = new URLSearchParams({ channel });
     const ws = new WebSocket(
       `${proto}//${window.location.host}/api/events?${qs.toString()}`,
+      ["elevate.auth.v1", token],
     );
 
     // `unmounting` suppresses the banner during cleanup — `ws.close()`

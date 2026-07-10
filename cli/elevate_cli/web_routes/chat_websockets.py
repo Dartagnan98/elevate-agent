@@ -26,6 +26,28 @@ _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
 _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+
+# Dashboard WS auth: prefer the token carried in the WebSocket subprotocol so it
+# stays OUT of the request URL — full URLs (including ?token=) land in proxy /
+# tunnel access logs and browser history, and one of these tokens grants a PTY
+# shell. The ?token= query is kept as a fallback for older clients. C6.
+_WS_AUTH_PROTO = "elevate.auth.v1"
+
+
+def _ws_auth_token(ws) -> str:
+    offered = list(ws.scope.get("subprotocols") or [])
+    if _WS_AUTH_PROTO in offered:
+        for proto in offered:
+            if proto and proto != _WS_AUTH_PROTO:
+                return proto
+    return ws.query_params.get("token", "")
+
+
+def _ws_accept_subprotocol(ws):
+    """Echo the auth marker on accept when the client offered it — a browser
+    FAILS the handshake (close 1006) if a subprotocol it offered isn't echoed
+    back. None when the client used the ?token= fallback (no subprotocol)."""
+    return _WS_AUTH_PROTO if _WS_AUTH_PROTO in (ws.scope.get("subprotocols") or []) else None
 _event_channels: dict[str, set] = {}
 _event_lock = asyncio.Lock()
 
@@ -126,7 +148,7 @@ def create_chat_websocket_router(
             return
 
         # --- auth + loopback check (before accept so we can close cleanly) ---
-        token = ws.query_params.get("token", "")
+        token = _ws_auth_token(ws)
         expected = session_token()
         if not hmac.compare_digest(token.encode(), expected.encode()):
             await ws.close(code=4401)
@@ -137,7 +159,7 @@ def create_chat_websocket_router(
             await ws.close(code=4403)
             return
 
-        await ws.accept()
+        await ws.accept(subprotocol=_ws_accept_subprotocol(ws))
 
         # --- license gate ---------------------------------------------------
         # The chat refuses to start until the user has signed in. We render a
@@ -257,7 +279,7 @@ def create_chat_websocket_router(
             await ws.close(code=4403)
             return
 
-        token = ws.query_params.get("token", "")
+        token = _ws_auth_token(ws)
         if not hmac.compare_digest(token.encode(), session_token().encode()):
             await ws.close(code=4401)
             return
@@ -270,7 +292,7 @@ def create_chat_websocket_router(
         from tui_gateway.ws import handle_ws
 
         try:
-            await handle_ws(ws)
+            await handle_ws(ws, subprotocol=_ws_accept_subprotocol(ws))
         except RuntimeError as exc:
             _log.debug("Chat sidecar websocket closed before handshake completed: %s", exc)
 
@@ -293,7 +315,7 @@ def create_chat_websocket_router(
             await ws.close(code=4403)
             return
 
-        token = ws.query_params.get("token", "")
+        token = _ws_auth_token(ws)
         if not hmac.compare_digest(token.encode(), session_token().encode()):
             await ws.close(code=4401)
             return
@@ -308,7 +330,7 @@ def create_chat_websocket_router(
             await ws.close(code=4400)
             return
 
-        await ws.accept()
+        await ws.accept(subprotocol=_ws_accept_subprotocol(ws))
 
         try:
             while True:
@@ -323,7 +345,7 @@ def create_chat_websocket_router(
             await ws.close(code=4403)
             return
 
-        token = ws.query_params.get("token", "")
+        token = _ws_auth_token(ws)
         if not hmac.compare_digest(token.encode(), session_token().encode()):
             await ws.close(code=4401)
             return
@@ -338,7 +360,7 @@ def create_chat_websocket_router(
             await ws.close(code=4400)
             return
 
-        await ws.accept()
+        await ws.accept(subprotocol=_ws_accept_subprotocol(ws))
 
         async with _event_lock:
             _event_channels.setdefault(channel, set()).add(ws)
