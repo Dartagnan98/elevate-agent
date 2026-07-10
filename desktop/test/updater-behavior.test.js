@@ -173,7 +173,7 @@ test("updater install failures are visible and can be retried", async () => {
   assert.equal(updater.checkCalls, 1);
 });
 
-function makeController({ env = {}, fileContent, autoUpdater } = {}) {
+function makeController({ env = {}, fileContent, autoUpdater, packagedChannel = "" } = {}) {
   return createUpdaterController({
     app: { isPackaged: true, on() {} },
     autoUpdater: autoUpdater || { on() {}, async checkForUpdates() { return {}; }, quitAndInstall() {} },
@@ -190,20 +190,27 @@ function makeController({ env = {}, fileContent, autoUpdater } = {}) {
     resourcesPath: () => "/tmp/elevate-updater-test",
     homedir: () => "/home/test",
     env,
+    packagedChannel,
     setIntervalImpl: () => ({ unref() {} }),
   });
 }
 
-test("resolveChannel: beta via env or file, latest by default; env wins", () => {
+test("resolveChannel: explicit choice wins, packaged beta stays beta, latest is default", () => {
   assert.equal(makeController({ env: { ELEVATE_UPDATE_CHANNEL: "beta" } }).resolveChannel(), "beta");
   assert.equal(makeController({ env: { ELEVATE_UPDATE_CHANNEL: "BETA " } }).resolveChannel(), "beta");
   assert.equal(makeController({ fileContent: "beta\n" }).resolveChannel(), "beta");
   assert.equal(makeController({ fileContent: "latest" }).resolveChannel(), "latest");
+  assert.equal(makeController({ packagedChannel: "beta" }).resolveChannel(), "beta");
+  assert.equal(makeController({ packagedChannel: "latest" }).resolveChannel(), "latest");
   assert.equal(makeController({ fileContent: "garbage" }).resolveChannel(), "latest");
   assert.equal(makeController({}).resolveChannel(), "latest");
   assert.equal(
     makeController({ env: { ELEVATE_UPDATE_CHANNEL: "beta" }, fileContent: "latest" }).resolveChannel(),
     "beta",
+  );
+  assert.equal(
+    makeController({ fileContent: "latest", packagedChannel: "beta" }).resolveChannel(),
+    "latest",
   );
 });
 
@@ -211,8 +218,10 @@ test("kickoffUpdates sets autoUpdater.channel from the resolved channel", () => 
   const autoUpdater = { on() {}, async checkForUpdates() { return {}; }, quitAndInstall() {} };
   makeController({ fileContent: "beta", autoUpdater }).kickoffUpdates();
   assert.equal(autoUpdater.channel, "beta");
+  assert.equal(autoUpdater.allowDowngrade, false);
 
   const stable = { on() {}, async checkForUpdates() { return {}; }, quitAndInstall() {} };
   makeController({ autoUpdater: stable }).kickoffUpdates();
   assert.equal(stable.channel, "latest");
+  assert.equal(stable.allowDowngrade, false);
 });

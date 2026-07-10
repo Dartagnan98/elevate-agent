@@ -21,6 +21,9 @@ const yaml = require("js-yaml");
 
 const DIST = path.resolve(__dirname, "..", "dist");
 const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
+  throw new Error(`[ship] unsupported release channel: ${RELEASE_CHANNEL}`);
+}
 const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
 const FEED = path.join(DIST, FEED_NAME);
 const PKG_VERSION = require(path.resolve(__dirname, "..", "package.json")).version;
@@ -79,7 +82,7 @@ function verifyPublicRelease(feed, expectedVersion) {
 
   for (const arch of ["arm64", "x64"]) {
     const src = `Elevate-${expectedVersion}-mac-${arch}.dmg`;
-    const alias = `Elevate-latest-mac-${arch}.dmg`;
+    const alias = `Elevate-${RELEASE_CHANNEL}-mac-${arch}.dmg`;
     const localDmg = path.join(DIST, src);
     if (fs.existsSync(localDmg)) {
       verifyRemoteFile(alias, fs.statSync(localDmg).size);
@@ -123,7 +126,7 @@ if (!fs.existsSync(DIST)) {
 }
 
 if (!fs.existsSync(FEED)) {
-  console.error(`[ship] no latest-mac.yml at ${FEED} — did the build run?`);
+  console.error(`[ship] no ${FEED_NAME} at ${FEED} — did the build run?`);
   process.exit(1);
 }
 
@@ -138,7 +141,7 @@ try {
   process.exit(1);
 }
 
-const selected = new Set([FEED_NAME]);
+const selected = new Set();
 for (const file of feed.files || []) {
   selected.add(file.url);
   // Intentionally DO NOT ship zip blockmaps. Blockmaps are what enable
@@ -161,14 +164,15 @@ for (const name of fs.readdirSync(DIST)) {
   if (name.endsWith(".dmg") && name.includes(`-${PKG_VERSION}-`)) selected.add(name);
 }
 
-const matches = Array.from(selected).filter((name) => fs.existsSync(path.join(DIST, name)));
+const matches = Array.from(selected)
+  .filter((name) => fs.existsSync(path.join(DIST, name)));
 
 if (matches.length === 0) {
   console.error(`[ship] no matching artifacts in ${DIST}`);
   process.exit(1);
 }
 
-console.log(`[ship] uploading ${matches.length} files to ${HOST}:${REMOTE}`);
+console.log(`[ship] uploading ${matches.length} artifact files to ${HOST}:${REMOTE}`);
 for (const name of matches) {
   const size = (fs.statSync(path.join(DIST, name)).size / (1024 * 1024)).toFixed(1);
   console.log(`  - ${name} (${size} MB)`);
@@ -204,24 +208,26 @@ if (chown.status !== 0) {
 // current feed version exists, old (pre-flag) clients keep attempting the
 // differential path that corrupts the signature. Removing them forces the
 // full-zip fallback so stuck clients recover on their next poll.
-const dropBlockmaps = spawnSync(
-  "ssh",
-  [HOST, `rm -f ${REMOTE}*.zip.blockmap && echo "[remote] blockmaps purged"`],
-  { stdio: "inherit" },
-);
-if (dropBlockmaps.status !== 0) {
-  console.error("[ship] blockmap purge failed — remove them manually so old clients fall back to full download");
-  process.exit(dropBlockmaps.status || 1);
+if (RELEASE_CHANNEL === "latest") {
+  const dropBlockmaps = spawnSync(
+    "ssh",
+    [HOST, `rm -f ${REMOTE}*.zip.blockmap && echo "[remote] blockmaps purged"`],
+    { stdio: "inherit" },
+  );
+  if (dropBlockmaps.status !== 0) {
+    console.error("[ship] blockmap purge failed — remove them manually so old clients fall back to full download");
+    process.exit(dropBlockmaps.status || 1);
+  }
+} else {
+  console.log("[ship] left stable blockmaps untouched for beta channel");
 }
 
-// Refresh the stable "latest" fresh-download aliases so a single permanent URL
-// always serves the newest DMG — e.g. https://api.elevationrealestatehq.com/
-// updates/Elevate-latest-mac-arm64.dmg — so the public download link never needs
-// a per-release change again.
+// Refresh this channel's permanent fresh-download aliases. Beta releases must
+// never overwrite the stable Elevate-latest-* links.
 for (const arch of ["arm64", "x64"]) {
   const src = `Elevate-${PKG_VERSION}-mac-${arch}.dmg`;
   if (!fs.existsSync(path.join(DIST, src))) continue;
-  const dst = `Elevate-latest-mac-${arch}.dmg`;
+  const dst = `Elevate-${RELEASE_CHANNEL}-mac-${arch}.dmg`;
   const alias = spawnSync(
     "ssh",
     [HOST, `cp -f ${REMOTE}${src} ${REMOTE}${dst} && chown www-data:www-data ${REMOTE}${dst}`],
@@ -231,10 +237,38 @@ for (const arch of ["arm64", "x64"]) {
   else console.error(`[ship] failed to refresh alias ${dst}`);
 }
 
-// Prune old build artifacts on the remote — keep last 3 versioned builds.
-// Script lives at /root/prune-elevate-updates.sh on ctrl-flow.
-const prune = spawnSync("ssh", [HOST, "bash /root/prune-elevate-updates.sh"], { stdio: "inherit" });
-if (prune.status !== 0) console.warn("[ship] artifact prune exited non-zero — disk may be growing");
+// The current remote pruner is stable-feed aware only. Never run it from a beta
+// release, where newer beta versions could delete artifacts still referenced by
+// the stable feed.
+if (RELEASE_CHANNEL === "latest") {
+  const prune = spawnSync("ssh", [HOST, "bash /root/prune-elevate-updates.sh"], { stdio: "inherit" });
+  if (prune.status !== 0) console.warn("[ship] artifact prune exited non-zero — disk may be growing");
+} else {
+  console.log("[ship] skipped stable artifact pruning for beta channel");
+}
+
+// Publish metadata only after every artifact and channel alias is in place.
+// The remote rename is atomic, so clients never see a half-published release.
+const tempFeedName = `.${FEED_NAME}.tmp-${process.pid}`;
+const feedUpload = spawnSync(
+  "rsync",
+  ["-avh", "--progress", FEED, `${HOST}:${REMOTE}${tempFeedName}`],
+  { stdio: "inherit" },
+);
+if (feedUpload.status !== 0) {
+  console.error(`[ship] feed upload failed with exit ${feedUpload.status}`);
+  process.exit(feedUpload.status || 1);
+}
+const publishFeed = spawnSync(
+  "ssh",
+  [HOST, `chown www-data:www-data ${REMOTE}${tempFeedName} && mv -f ${REMOTE}${tempFeedName} ${REMOTE}${FEED_NAME}`],
+  { stdio: "inherit" },
+);
+if (publishFeed.status !== 0) {
+  console.error(`[ship] atomic ${FEED_NAME} publish failed`);
+  process.exit(publishFeed.status || 1);
+}
+console.log(`[ship] published ${FEED_NAME} after artifacts`);
 
 try {
   verifyPublicRelease(feed, PKG_VERSION);

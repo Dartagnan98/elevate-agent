@@ -8,7 +8,11 @@ const { spawnSync } = require("node:child_process");
 const ROOT = path.resolve(__dirname, "..");
 const REPO = path.resolve(ROOT, "..");
 const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
+  throw new Error(`[preflight] unsupported release channel: ${RELEASE_CHANNEL}`);
+}
 const PUBLIC_FEED_URL = `https://api.elevationrealestatehq.com/updates/${RELEASE_CHANNEL}-mac.yml`;
+const STABLE_FEED_URL = "https://api.elevationrealestatehq.com/updates/latest-mac.yml";
 const packageJson = require(path.join(ROOT, "package.json"));
 const packageLock = require(path.join(ROOT, "package-lock.json"));
 
@@ -80,18 +84,29 @@ function currentNodeVersionAtLeast(major, minor) {
   return parts[1] >= minor;
 }
 
-function latestFeedVersion() {
+function latestFeedVersion(url = PUBLIC_FEED_URL) {
   const result = spawnSync(
     "curl",
-    ["--fail", "--silent", "--show-error", "--location", "--max-time", "20", PUBLIC_FEED_URL],
+    ["--silent", "--show-error", "--location", "--max-time", "20", "--write-out", "\n%{http_code}", url],
     { cwd: ROOT, encoding: "utf8", timeout: 30_000 },
   );
   if (result.status !== 0) {
-    return { version: null, error: (result.stderr || result.stdout || "").trim() || `curl exited ${result.status}` };
+    return {
+      version: null,
+      error: (result.stderr || result.stdout || "").trim() || `curl exited ${result.status}`,
+      status: 0,
+    };
   }
-  const text = result.stdout || "";
+  const output = result.stdout || "";
+  const split = output.lastIndexOf("\n");
+  const text = split >= 0 ? output.slice(0, split) : output;
+  const status = Number.parseInt(split >= 0 ? output.slice(split + 1) : "0", 10) || 0;
   const match = text.match(/^version:\s*([^\s]+)/m);
-  return { version: match ? match[1].trim() : null, error: match ? "" : "missing version" };
+  return {
+    version: status === 200 && match ? match[1].trim() : null,
+    error: status === 200 && !match ? "missing version" : `HTTP ${status}`,
+    status,
+  };
 }
 
 function hasDsStore(relativePath) {
@@ -149,9 +164,12 @@ record(
   `${packageJson.version} / ${packageLock.packages?.[""]?.version || "missing"}`
 );
 
-const feed = latestFeedVersion();
+let feed = latestFeedVersion();
+if (!feed.version && RELEASE_CHANNEL === "beta" && feed.status === 404) {
+  feed = latestFeedVersion(STABLE_FEED_URL);
+}
 record(
-  "package version is newer than public update feed",
+  `package version is newer than public ${RELEASE_CHANNEL} baseline`,
   Boolean(feed.version) && compareSemver(packageJson.version, feed.version) > 0,
   feed.version ? `${packageJson.version} > ${feed.version}` : feed.error
 );

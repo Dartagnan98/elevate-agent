@@ -36,6 +36,7 @@ const startupLog = require("./startup-log");
 const { createUpdaterController } = require("./updater");
 const { createCrashReporter } = require("./crash-reporter");
 const { createInstallerController } = require("./installer");
+const packageMetadata = require("../package.json");
 
 // Send autoUpdater logs to a file so we can debug what the user saw.
 // Tail with: tail -f ~/Library/Logs/Elevate/main.log
@@ -186,6 +187,7 @@ const updater = createUpdaterController({
   ipcMain,
   log,
   mainWindow: () => mainWindow,
+  packagedChannel: packageMetadata.elevateReleaseChannel,
   resourcesPath: () => process.resourcesPath,
 });
 const installer = createInstallerController({

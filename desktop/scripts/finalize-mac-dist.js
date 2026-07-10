@@ -13,6 +13,9 @@ const yaml = require("js-yaml");
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
 const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim().toLowerCase();
+if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
+  throw new Error(`[finalize] unsupported release channel: ${RELEASE_CHANNEL}`);
+}
 const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
 const FEED = path.join(DIST, FEED_NAME);
 const packageJson = require(path.join(ROOT, "package.json"));

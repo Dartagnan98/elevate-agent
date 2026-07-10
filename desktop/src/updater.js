@@ -14,6 +14,7 @@ function createUpdaterController({
   DateImpl = Date,
   homedir = os.homedir,
   env = process.env,
+  packagedChannel = "",
 }) {
   let updateState = { status: "idle", info: null, progress: null, error: null };
   let updateCheckInFlight = false;
@@ -112,8 +113,10 @@ function createUpdaterController({
         .toLowerCase();
       if (raw === "beta" || raw === "latest") return raw;
     } catch {
-      // No channel file → stable.
+      // No explicit channel file; fall through to the packaged release lane.
     }
+    const fromPackage = String(packagedChannel || "").trim().toLowerCase();
+    if (fromPackage === "beta" || fromPackage === "latest") return fromPackage;
     return "latest";
   }
 
@@ -125,6 +128,9 @@ function createUpdaterController({
 
     const channel = resolveChannel();
     autoUpdater.channel = channel;
+    // electron-updater enables downgrades whenever channel is assigned. Keep a
+    // beta install from falling back to an older stable build.
+    autoUpdater.allowDowngrade = false;
     log.info(`[updater] update channel: ${channel}`);
     runUpdaterCheck("startup");
     // Poll frequently so a freshly-shipped build reaches the device within
