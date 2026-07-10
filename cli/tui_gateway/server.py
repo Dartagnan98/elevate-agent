@@ -2794,6 +2794,22 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
+
+    # A returned persisted_session_id is a durability promise. Commit and read
+    # back the existing SessionDB row before exposing either identity or the
+    # in-memory gateway session to callers.
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5006)
+    try:
+        db.create_session(key, source="tui", model=_resolve_model())
+        persisted = db.get_session(key)
+    except Exception as exc:
+        logger.warning("session.create persistence failed: %s", exc)
+        return _err(rid, 5006, f"session persistence failed: {exc}")
+    if not isinstance(persisted, dict) or persisted.get("id") != key:
+        return _err(rid, 5006, "session persistence failed: durable row missing")
+
     _enable_gateway_prompts()
 
     ready = threading.Event()
@@ -2848,9 +2864,6 @@ def _(rid, params: dict) -> dict:
             finally:
                 _clear_session_context(tokens)
 
-            db = _get_db()
-            if db is not None:
-                db.create_session(key, source="tui", model=_resolve_model())
             session["agent"] = agent
 
             try:
@@ -2904,9 +2917,8 @@ def _(rid, params: dict) -> dict:
 
     threading.Thread(target=_build, daemon=True).start()
 
-    # A newly generated root session has no lineage to resolve. Returning its
-    # known identity directly keeps session.create independent of DB reads, so
-    # the client can submit its first prompt even while session-list reads lag.
+    # The durable root row was verified above and has no lineage to resolve, so
+    # its canonical identity is deterministic without another lineage query.
     identity_payload = {
         "requested_session_id": key,
         "lineage_root_id": key,

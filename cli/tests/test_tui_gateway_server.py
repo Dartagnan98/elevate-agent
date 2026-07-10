@@ -1904,10 +1904,14 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     # Stub everything _build touches
     monkeypatch.setattr(server, "_make_agent", _slow_make_agent)
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
+    rows = {}
     monkeypatch.setattr(
         server,
         "_get_db",
-        lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
+        lambda: types.SimpleNamespace(
+            create_session=lambda key, **_kw: rows.setdefault(key, {"id": key}),
+            get_session=lambda key: rows.get(key),
+        ),
     )
     monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
@@ -2001,10 +2005,14 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
     monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
     monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
+    rows = {}
     monkeypatch.setattr(
         server,
         "_get_db",
-        lambda: types.SimpleNamespace(create_session=lambda *a, **kw: None),
+        lambda: types.SimpleNamespace(
+            create_session=lambda key, **_kw: rows.setdefault(key, {"id": key}),
+            get_session=lambda key: rows.get(key),
+        ),
     )
     monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
@@ -2138,47 +2146,86 @@ def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
     assert server._db_error == "locking protocol"
 
 
-def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
-    class _FakeWorker:
-        def __init__(self, key, model):
-            self.key = key
-
-        def close(self):
-            return None
-
-    class _FakeAgent:
-        def __init__(self):
-            self.model = "x"
-            self.provider = "openrouter"
-            self.base_url = ""
-            self.api_key = ""
-
-    emits = []
-
-    monkeypatch.setattr(server, "_make_agent", lambda sid, key: _FakeAgent())
-    monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
+def test_session_create_rejects_when_state_db_is_unavailable(monkeypatch):
+    before = set(server._sessions)
     monkeypatch.setattr(server, "_get_db", lambda: None)
-    monkeypatch.setattr(server, "_session_info", lambda _a: {"model": "x"})
-    monkeypatch.setattr(server, "_probe_credentials", lambda _a: None)
-    monkeypatch.setattr(server, "_wire_callbacks", lambda _sid: None)
-    monkeypatch.setattr(server, "_emit", lambda *a, **kw: emits.append(a))
-
-    import tools.approval as _approval
-    monkeypatch.setattr(_approval, "register_gateway_notify", lambda key, cb: None)
-    monkeypatch.setattr(_approval, "load_permanent_allowlist", lambda: None)
+    monkeypatch.setattr(server, "_db_error", "locking protocol")
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("agent must not start")),
+    )
 
     resp = server.handle_request(
         {"id": "1", "method": "session.create", "params": {"cols": 80}}
     )
-    sid = resp["result"]["session_id"]
-    session = server._sessions[sid]
-    session["agent_ready"].wait(timeout=2.0)
 
-    assert session["agent_error"] is None
-    assert session["agent"] is not None
-    assert not any(args and args[0] == "error" for args in emits)
+    assert "result" not in resp
+    assert resp["error"]["code"] == 5006
+    assert "state.db unavailable: locking protocol" in resp["error"]["message"]
+    assert "session_id" not in json.dumps(resp)
+    assert set(server._sessions) == before
 
-    server._sessions.pop(sid, None)
+
+def test_session_create_rejects_when_create_session_raises(monkeypatch):
+    before = set(server._sessions)
+    agent_starts = []
+
+    def create_session(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: types.SimpleNamespace(create_session=create_session),
+    )
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *_args: agent_starts.append(True),
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.create", "params": {"cols": 80}}
+    )
+
+    assert "result" not in resp
+    assert resp["error"] == {
+        "code": 5006,
+        "message": "session persistence failed: disk full",
+    }
+    assert "session_id" not in json.dumps(resp)
+    assert set(server._sessions) == before
+    assert agent_starts == []
+
+
+def test_session_create_rejects_when_durable_row_is_missing(monkeypatch):
+    before = set(server._sessions)
+    monkeypatch.setattr(
+        server,
+        "_get_db",
+        lambda: types.SimpleNamespace(
+            create_session=lambda *_args, **_kwargs: "unverified",
+            get_session=lambda _key: None,
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("agent must not start")),
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.create", "params": {"cols": 80}}
+    )
+
+    assert "result" not in resp
+    assert resp["error"] == {
+        "code": 5006,
+        "message": "session persistence failed: durable row missing",
+    }
+    assert "session_id" not in json.dumps(resp)
+    assert set(server._sessions) == before
 
 
 def test_session_list_returns_clean_error_when_state_db_is_unavailable(monkeypatch):

@@ -76,8 +76,15 @@ def test_session_create_returns_known_identity_without_resolving_it(monkeypatch)
     release_identity_lookup = threading.Event()
 
     class FakeDB:
-        def create_session(self, *_args, **_kwargs):
-            return None
+        def __init__(self):
+            self.rows = {}
+
+        def create_session(self, session_id, *_args, **_kwargs):
+            self.rows[session_id] = {"id": session_id}
+            return session_id
+
+        def get_session(self, session_id):
+            return self.rows.get(session_id)
 
         def resolve_canonical_session_identity(self, session_id):
             identity_calls.append(session_id)
@@ -102,7 +109,8 @@ def test_session_create_returns_known_identity_without_resolving_it(monkeypatch)
     monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
     monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "compact")
     monkeypatch.setattr(server, "_make_agent", lambda _sid, _key: FakeAgent())
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    fake_db = FakeDB()
+    monkeypatch.setattr(server, "_get_db", lambda: fake_db)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
     monkeypatch.setattr(server, "_session_info", lambda _agent: {"model": "test-model"})
     monkeypatch.setattr(server, "_probe_credentials", lambda _agent: None)
@@ -128,6 +136,7 @@ def test_session_create_returns_known_identity_without_resolving_it(monkeypatch)
         assert result["active_session_id"] == key
         assert result["session_kind"] == "chat"
         assert result["is_compression_tip"] is True
+        assert fake_db.get_session(key) == {"id": key}
         assert identity_calls == []
         assert server._sessions[sid]["agent_ready"].wait(timeout=2)
     finally:
