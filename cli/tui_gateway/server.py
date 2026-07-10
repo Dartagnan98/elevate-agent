@@ -2893,7 +2893,10 @@ def _(rid, params: dict) -> dict:
 
     threading.Thread(target=_build, daemon=True).start()
 
-    identity_payload = _session_identity_for(_get_db(), key) if _get_db() is not None else {
+    # A newly generated root session has no lineage to resolve. Returning its
+    # known identity directly keeps session.create independent of DB reads, so
+    # the client can submit its first prompt even while session-list reads lag.
+    identity_payload = {
         "requested_session_id": key,
         "lineage_root_id": key,
         "active_session_id": key,

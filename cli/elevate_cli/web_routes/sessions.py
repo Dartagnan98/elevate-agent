@@ -27,7 +27,7 @@ def create_sessions_router(
     _log = log or logging.getLogger(__name__)
 
     @router.get("/api/sessions")
-    async def get_sessions(
+    def get_sessions(
         limit: int = 20,
         offset: int = 0,
         include_total: bool = True,
@@ -81,7 +81,7 @@ def create_sessions_router(
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @router.get("/api/sessions/search")
-    async def search_sessions(q: str = "", limit: int = 20):
+    def search_sessions(q: str = "", limit: int = 20):
         """Full-text search across session message content using FTS5."""
         if not q or not q.strip():
             return {"results": []}

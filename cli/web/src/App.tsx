@@ -1108,9 +1108,20 @@ const PINNED_SESSIONS_KEY = "elevate.sidebar.pinnedSessions";
 const UNREAD_SESSIONS_KEY = "elevate.sidebar.unreadSessions";
 const ARCHIVED_SESSIONS_KEY = "elevate.sidebar.archivedSessions";
 const SIDEBAR_SESSION_PAGE_LIMIT = 200;
-const SIDEBAR_SESSION_SCAN_LIMIT = 1400;
-const SIDEBAR_CHAT_TARGET = 48;
-const SIDEBAR_CRON_RUN_TARGET = 48;
+
+function coalesceInFlight<T>(
+  ref: { current: Promise<T> | null },
+  start: () => Promise<T>,
+): Promise<T> {
+  if (ref.current) return ref.current;
+  const request = start().finally(() => {
+    if (ref.current === request) ref.current = null;
+  });
+  ref.current = request;
+  return request;
+}
+
+export const __appTestables = { coalesceInFlight };
 
 function readStoredSessionIds(key: string): string[] {
   if (typeof window === "undefined") return [];
@@ -1426,6 +1437,7 @@ function DesktopSidebar({
   const optimisticSessionsRef = useRef<Map<string, { session: SessionInfo; ts: number }>>(
     new Map(),
   );
+  const sessionsLoadRef = useRef<Promise<void> | null>(null);
   const localActiveTurnsRef = useRef<Map<string, LocalActiveTurn>>(new Map());
   const [cronJobs, setCronJobs] = useState<CronJob[]>([]);
   const [automationsOpen, setAutomationsOpen] = useState<boolean>(() => {
@@ -1554,81 +1566,55 @@ function DesktopSidebar({
     }
   }, [desktopUpdate?.status, desktopUpdater, runAction, showToast, updateStatus?.available]);
 
-  const loadSessions = useCallback(async (options?: { refresh?: boolean }) => {
-    try {
-      const nowSec = Date.now() / 1000;
-      const byId = new Map<string, SessionInfo>();
-      let chatCount = 0;
-      let cronRunCount = 0;
-      let hiddenAutomationCount = 0;
-
-      for (
-        let offset = 0;
-        offset < SIDEBAR_SESSION_SCAN_LIMIT;
-        offset += SIDEBAR_SESSION_PAGE_LIMIT
-      ) {
-        const resp = await api.getSessions(SIDEBAR_SESSION_PAGE_LIMIT, offset, {
+  const loadSessions = useCallback((options?: { refresh?: boolean }) =>
+    coalesceInFlight(sessionsLoadRef, async () => {
+      try {
+        const nowSec = Date.now() / 1000;
+        const byId = new Map<string, SessionInfo>();
+        const resp = await api.getSessions(SIDEBAR_SESSION_PAGE_LIMIT, 0, {
           includeTotal: false,
           refresh: options?.refresh,
         });
         const page = resp.sessions ?? [];
-        if (page.length === 0) break;
-
         for (const session of page) {
-          if (isDetachedAutomationSession(session)) {
-            hiddenAutomationCount += 1;
-            continue;
-          }
+          if (isDetachedAutomationSession(session)) continue;
           if (!isSidebarRelevantSession(session, nowSec)) continue;
           if (!byId.has(session.id)) byId.set(session.id, session);
         }
 
-        const loaded = Array.from(byId.values());
-        chatCount = loaded.filter((session) => !isCronSession(session)).length;
-        cronRunCount = loaded.filter(isCronSession).length;
+        let loadedSessions = Array.from(byId.values());
 
-        const hasEnoughVisibleRows =
-          chatCount >= SIDEBAR_CHAT_TARGET &&
-          (hiddenAutomationCount === 0 || cronRunCount >= SIDEBAR_CRON_RUN_TARGET);
-        const noMorePages = page.length < SIDEBAR_SESSION_PAGE_LIMIT;
-        if (hasEnoughVisibleRows || noMorePages) {
-          break;
-        }
-      }
-
-      let loadedSessions = Array.from(byId.values());
-
-      // Preserve optimistically-inserted new chats the server list doesn't
-      // carry yet. Once the server returns the id, drop the optimistic copy
-      // (server wins); after a short grace window give up either way so a
-      // failed send can't leave a ghost row.
-      const optimistic = optimisticSessionsRef.current;
-      if (optimistic.size) {
-        const OPTIMISTIC_GRACE_MS = 30_000;
-        const now = Date.now();
-        const survivors: SessionInfo[] = [];
-        for (const [sid, entry] of optimistic) {
-          if (byId.has(sid)) {
-            optimistic.delete(sid); // server caught up — its copy is in loadedSessions
-          } else if (now - entry.ts < OPTIMISTIC_GRACE_MS) {
-            survivors.push(entry.session); // keep showing until the server has it
-          } else {
-            optimistic.delete(sid); // grace elapsed — stop forcing it
+        // Preserve optimistically-inserted new chats the server list doesn't
+        // carry yet. Once the server returns the id, drop the optimistic copy
+        // (server wins); after a short grace window give up either way so a
+        // failed send can't leave a ghost row.
+        const optimistic = optimisticSessionsRef.current;
+        if (optimistic.size) {
+          const OPTIMISTIC_GRACE_MS = 30_000;
+          const now = Date.now();
+          const survivors: SessionInfo[] = [];
+          for (const [sid, entry] of optimistic) {
+            if (byId.has(sid)) {
+              optimistic.delete(sid); // server caught up — its copy is in loadedSessions
+            } else if (now - entry.ts < OPTIMISTIC_GRACE_MS) {
+              survivors.push(entry.session); // keep showing until the server has it
+            } else {
+              optimistic.delete(sid); // grace elapsed — stop forcing it
+            }
           }
+          if (survivors.length) loadedSessions = [...survivors, ...loadedSessions];
         }
-        if (survivors.length) loadedSessions = [...survivors, ...loadedSessions];
-      }
 
-      loadedSessions = applyLocalActiveTurns(loadedSessions, localActiveTurnsRef.current);
-      setSessions(loadedSessions);
-      writeCachedSessions(loadedSessions);
-      setSessionError(false);
-    } catch {
-      setSessionError(true);
-    } finally {
-      setSessionsLoading(false);
-    }
-  }, []);
+        loadedSessions = applyLocalActiveTurns(loadedSessions, localActiveTurnsRef.current);
+        setSessions(loadedSessions);
+        writeCachedSessions(loadedSessions);
+        setSessionError(false);
+      } catch {
+        setSessionError(true);
+      } finally {
+        setSessionsLoading(false);
+      }
+    }), []);
 
   const loadCronJobs = useCallback((options?: { refresh?: boolean }) => {
     api
@@ -1746,7 +1732,9 @@ function DesktopSidebar({
           return [optimistic, ...prev];
         });
       }
-      loadSessions({ refresh: true });
+      if (event.type === "elevate:agent-turn-complete") {
+        loadSessions({ refresh: true });
+      }
     };
     const onApproval = (e: Event) => {
       const detail = (e as CustomEvent<{ sessionId?: string; pending?: boolean }>)

@@ -55,6 +55,7 @@ export type ConnectionState =
 interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
+  socket: WebSocket;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -159,6 +160,7 @@ export class GatewayClient {
     // after the open promise resolves can race past it and drop the
     // initial skin payload.
     ws.addEventListener("message", (ev) => {
+      if (this.ws !== ws) return;
       try {
         this.dispatch(JSON.parse(ev.data));
       } catch {
@@ -167,14 +169,18 @@ export class GatewayClient {
     });
 
     ws.addEventListener("close", (ev) => {
-      this.setState("closed");
-      this.rejectAllPending(webSocketClosedError(ev));
+      if (this.ws === ws) this.setState("closed");
+      this.rejectPendingForSocket(ws, webSocketClosedError(ev));
     });
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const onOpen = () => {
         ws.removeEventListener("error", onError);
         ws.removeEventListener("close", onClose);
+        if (this.ws !== ws) {
+          reject(new Error("WebSocket connection superseded"));
+          return;
+        }
         this.connectPromise = null;
         this.setState("open");
         resolve();
@@ -182,15 +188,19 @@ export class GatewayClient {
       const onError = () => {
         ws.removeEventListener("open", onOpen);
         ws.removeEventListener("close", onClose);
-        this.connectPromise = null;
-        this.setState("error");
+        if (this.ws === ws) {
+          this.connectPromise = null;
+          this.setState("error");
+        }
         reject(new Error("WebSocket connection failed"));
       };
       const onClose = (ev: CloseEvent) => {
         ws.removeEventListener("open", onOpen);
         ws.removeEventListener("error", onError);
-        this.connectPromise = null;
-        this.setState("closed");
+        if (this.ws === ws) {
+          this.connectPromise = null;
+          this.setState("closed");
+        }
         reject(webSocketClosedError(ev));
       };
       ws.addEventListener("open", onOpen, { once: true });
@@ -242,14 +252,24 @@ export class GatewayClient {
     this.pending.clear();
   }
 
+  private rejectPendingForSocket(socket: WebSocket, err: Error) {
+    for (const [id, pending] of this.pending) {
+      if (pending.socket !== socket) continue;
+      clearTimeout(pending.timer);
+      pending.reject(err);
+      this.pending.delete(id);
+    }
+  }
+
   /** Send a JSON-RPC request. Rejects on error response or timeout. */
   request<T = unknown>(
     method: string,
     params: Record<string, unknown> = {},
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    if (!this.ws || this._state !== "open" || this.ws.readyState !== WebSocket.OPEN) {
-      if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+    const ws = this.ws;
+    if (!ws || this._state !== "open" || ws.readyState !== WebSocket.OPEN) {
+      if (ws && ws.readyState !== WebSocket.OPEN) {
         this.setState("closed");
       }
       return Promise.reject(
@@ -271,11 +291,12 @@ export class GatewayClient {
       this.pending.set(id, {
         resolve: (v) => resolve(v as T),
         reject,
+        socket: ws,
         timer,
       });
 
       try {
-        this.ws!.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(id);
