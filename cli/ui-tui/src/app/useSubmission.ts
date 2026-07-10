@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 import { type MutableRefObject, useCallback, useRef } from 'react'
 
 import { attachedImageNotice } from '../domain/messages.js'
@@ -57,6 +59,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       const startSubmit = (displayText: string, submitText: string) => {
         const live = getUiState()
         const sid = live.sid
+        const userMessageId = `user-${randomUUID()}`
 
         if (!sid) {
           return sys('session not ready yet')
@@ -94,7 +97,11 @@ export function useSubmission(opts: UseSubmissionOptions) {
         turnController.bufRef = ''
         turnController.interrupted = false
 
-        gw.request<PromptSubmitResponse>('prompt.submit', { session_id: sid, text: submitText }).catch((e: Error) => {
+        gw.request<PromptSubmitResponse>('prompt.submit', {
+          session_id: sid,
+          text: submitText,
+          user_message_id: userMessageId
+        }).catch((e: Error) => {
           sys(`error: ${e.message}`)
           patchUiState({ busy: false, status: 'ready' })
         })

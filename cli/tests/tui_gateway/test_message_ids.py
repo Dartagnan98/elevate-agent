@@ -25,6 +25,19 @@ class TestWireMessageId:
     def test_mints_are_unique(self):
         assert server._wire_message_id() != server._wire_message_id()
 
+    def test_prompt_request_id_is_a_stable_fallback(self):
+        first = server._prompt_user_message_id({"request_id": "retry-42"})
+        second = server._prompt_user_message_id({"request_id": "retry-42"})
+
+        assert first == second
+        assert first.startswith("request.")
+        assert server._WIRE_MESSAGE_ID_RE.match(first)
+
+    def test_prompt_client_message_id_wins_over_request_id(self):
+        assert server._prompt_user_message_id(
+            {"user_message_id": "user-1", "request_id": "retry-42"}
+        ) == "user-1"
+
 
 class TestHistoryToMessages:
     def test_copies_client_message_id_to_wire(self):

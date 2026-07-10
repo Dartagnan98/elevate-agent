@@ -179,7 +179,13 @@ export interface SessionSteerResponse {
 // ── Prompt / submission ──────────────────────────────────────────────
 
 export interface PromptSubmitResponse {
-  ok?: boolean
+  duplicate?: boolean
+  message_id?: string
+  recovered?: boolean
+  started?: boolean
+  status?: 'duplicate' | 'sign_in_required' | 'streaming'
+  terminal_status?: 'complete' | 'error' | 'interrupted'
+  user_message_id?: string
 }
 
 export interface BackgroundStartResponse {

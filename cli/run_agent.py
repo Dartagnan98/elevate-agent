@@ -23,6 +23,7 @@ Usage:
 import asyncio
 import base64
 import concurrent.futures
+import contextvars
 import copy
 import hashlib
 import json
@@ -3782,25 +3783,27 @@ class AIAgent:
             return
         self._apply_persist_user_message_override(messages)
         self._ensure_client_message_ids(messages)
-        existing_steer_client_ids: set[str] | None = None
+        existing_user_client_ids: set[str] | None = None
 
-        def _has_existing_steer_client_id(client_message_id: str) -> bool:
-            nonlocal existing_steer_client_ids
-            if existing_steer_client_ids is None:
-                existing_steer_client_ids = set()
+        def _has_existing_user_client_id(client_message_id: str) -> bool:
+            nonlocal existing_user_client_ids
+            if existing_user_client_ids is None:
+                existing_user_client_ids = set()
                 try:
                     for row in self._session_db.get_messages(self.session_id):
-                        row_id = row.get("client_message_id") if isinstance(row, dict) else None
-                        if isinstance(row_id, str) and row_id.startswith("steer."):
-                            existing_steer_client_ids.add(row_id)
+                        if not isinstance(row, dict) or row.get("role") != "user":
+                            continue
+                        row_id = row.get("client_message_id")
+                        if isinstance(row_id, str) and row_id:
+                            existing_user_client_ids.add(row_id)
                 except Exception as exc:
                     logger.debug(
-                        "Session DB steer duplicate lookup failed for %s: %s",
+                        "Session DB user-message duplicate lookup failed for %s: %s",
                         self.session_id,
                         exc,
                     )
-                    existing_steer_client_ids = set()
-            return client_message_id in existing_steer_client_ids
+                    existing_user_client_ids = set()
+            return client_message_id in existing_user_client_ids
 
         # Cursor of the last fully-handled message (appended or intentionally
         # skipped). Advanced per-message so a mid-batch append failure can't
@@ -3825,8 +3828,8 @@ class AIAgent:
                 if (
                     role == "user"
                     and isinstance(client_message_id, str)
-                    and client_message_id.startswith("steer.")
-                    and _has_existing_steer_client_id(client_message_id)
+                    and client_message_id
+                    and _has_existing_user_client_id(client_message_id)
                 ):
                     idx += 1
                     continue
@@ -9737,7 +9740,8 @@ class AIAgent:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for i, (tc, name, args) in enumerate(parsed_calls):
-                    f = executor.submit(_run_tool, i, tc, name, args)
+                    ctx = contextvars.copy_context()
+                    f = executor.submit(ctx.run, _run_tool, i, tc, name, args)
                     futures.append(f)
 
                 # Wait for all to complete with periodic heartbeats so the

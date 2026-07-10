@@ -7,6 +7,7 @@ stable id minted at append time; legacy rows hydrate with a deterministic
 """
 
 import sqlite3
+import time
 
 import pytest
 
@@ -26,6 +27,24 @@ def _raw_row(db, session_id, *, index=0):
     )
     rows = cur.fetchall()
     return rows[index]
+
+
+def _receipt_count(db, session_id):
+    row = db._conn.execute(
+        "SELECT COUNT(*) FROM prompt_receipts WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return row[0]
+
+
+def _prepare_receipt(db, session_id, *, message_id="user-1", content="first"):
+    return db.prepare_prompt_receipt(
+        session_id,
+        content,
+        assistant_message_id="assistant-1",
+        client_message_id=message_id,
+        payload={"text": content},
+    )
 
 
 class TestAppendMessageMint:
@@ -64,6 +83,179 @@ class TestAppendMessageMint:
         row = _raw_row(db, "s1")
         assert row["platform_message_id"] == "tg-777"
         assert row["client_message_id"] == "ours-1"
+
+
+class TestPromptReceipt:
+    def test_retry_returns_original_row_without_duplicate(self, db):
+        db.create_session(session_id="s1", source="tui")
+        payload = {"text": "send the offer", "persist_user_message": None}
+
+        first = db.prepare_prompt_receipt(
+            "s1",
+            "send the offer",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload=payload,
+        )
+        retry = db.prepare_prompt_receipt(
+            "s1",
+            "send the offer",
+            assistant_message_id="ignored-on-retry",
+            client_message_id="user-1",
+            payload=payload,
+        )
+
+        assert (first["inserted"], retry["inserted"]) == (True, False)
+        assert retry["assistant_message_id"] == "assistant-1"
+        assert retry["status"] == "pending"
+        assert len(db.get_messages("s1")) == 1
+        assert db.get_session("s1")["message_count"] == 1
+
+    def test_retry_id_cannot_alias_different_prompt(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+        )
+
+        with pytest.raises(ValueError, match="different prompt"):
+            db.prepare_prompt_receipt(
+                "s1",
+                "second",
+                assistant_message_id="assistant-2",
+                client_message_id="user-1",
+                payload={"text": "second"},
+            )
+
+    def test_claim_is_single_owner_and_terminal(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+        )
+
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is False
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="complete"
+        ) is True
+        assert db.get_recoverable_prompt_receipt("s1") is None
+
+    def test_dead_owner_claim_can_be_recovered_once(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+        )
+        db.claim_prompt_receipt("s1", "user-1", owner_id="old-owner")
+
+        assert db.claim_prompt_receipt(
+            "s1",
+            "user-1",
+            owner_id="new-owner",
+            reclaim_owner_id="old-owner",
+        ) is True
+        assert db.claim_prompt_receipt(
+            "s1",
+            "user-1",
+            owner_id="third-owner",
+            reclaim_owner_id="old-owner",
+        ) is False
+
+
+class TestPromptReceiptLifecycle:
+    def test_clear_removes_receipts_and_allows_same_id_again(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+
+        db.clear_messages("s1")
+
+        assert db.get_messages("s1") == []
+        assert db.get_session("s1")["message_count"] == 0
+        assert _receipt_count(db, "s1") == 0
+
+        retry = _prepare_receipt(db, "s1")
+        assert retry["inserted"] is True
+        assert len(db.get_messages("s1")) == 1
+        assert _receipt_count(db, "s1") == 1
+
+    def test_replace_invalidates_terminal_receipt_without_duplicate_user(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="complete"
+        ) is True
+
+        history = [
+            {"role": "user", "content": "first", "client_message_id": "user-1"}
+        ]
+        db.replace_messages("s1", history)
+
+        assert _receipt_count(db, "s1") == 0
+        recreated = _prepare_receipt(db, "s1")
+        assert recreated["inserted"] is True
+        assert len(db.get_messages("s1")) == 1
+        assert _receipt_count(db, "s1") == 1
+
+    def test_delete_session_with_pending_receipt(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+
+        assert db.delete_session("s1") is True
+        assert db.get_session("s1") is None
+        assert _receipt_count(db, "s1") == 0
+
+    def test_prune_session_with_terminal_receipt(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="complete"
+        ) is True
+        db.end_session("s1", end_reason="done")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 100 * 86400, "s1"),
+        )
+        db._conn.commit()
+
+        assert db.prune_sessions(older_than_days=90) == 1
+        assert db.get_session("s1") is None
+        assert _receipt_count(db, "s1") == 0
+
+    def test_ghost_prune_removes_orphaned_receipt(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        db.end_session("s1", end_reason="done")
+        db._conn.execute("DELETE FROM messages WHERE session_id = ?", ("s1",))
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ?, message_count = 0 WHERE id = ?",
+            (time.time() - 2 * 86400, "s1"),
+        )
+        db._conn.commit()
+
+        assert db.prune_empty_ghost_sessions() == 1
+        assert db.get_session("s1") is None
+        assert _receipt_count(db, "s1") == 0
+
+    def test_receipt_foreign_key_cascades_on_direct_session_delete(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        db._conn.execute("DELETE FROM messages WHERE session_id = ?", ("s1",))
+        db._conn.execute("DELETE FROM sessions WHERE id = ?", ("s1",))
+        db._conn.commit()
+
+        assert _receipt_count(db, "s1") == 0
 
 
 class TestSchemaReconcile:

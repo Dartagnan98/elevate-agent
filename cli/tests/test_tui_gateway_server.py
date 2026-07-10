@@ -16,6 +16,9 @@ from tui_gateway import server
 def _allow_prompt_submit_without_license(monkeypatch):
     """Unit tests in this file exercise gateway RPC behavior behind the gate."""
     monkeypatch.setattr(server, "_license_signed_in", lambda: True)
+    server._active_prompt_claims.clear()
+    yield
+    server._active_prompt_claims.clear()
 
 
 class _ChunkyStdout:
@@ -332,6 +335,65 @@ def _session(agent=None, **extra):
         "tool_progress_mode": "all",
         **extra,
     }
+
+
+class _PromptReceiptDB:
+    def __init__(self):
+        self.rows = {}
+
+    def prepare_prompt_receipt(
+        self,
+        session_id,
+        content,
+        *,
+        assistant_message_id,
+        client_message_id,
+        payload,
+    ):
+        key = (session_id, client_message_id)
+        existing = self.rows.get(key)
+        if existing is not None:
+            if existing["content"] != content:
+                raise ValueError("client_message_id already belongs to a different prompt")
+            return {**existing, "inserted": False}
+        row = {
+            "assistant_message_id": assistant_message_id,
+            "client_message_id": client_message_id,
+            "content": content,
+            "owner_id": None,
+            "payload": payload,
+            "status": "pending",
+        }
+        self.rows[key] = row
+        return {**row, "inserted": True}
+
+    def claim_prompt_receipt(
+        self, session_id, client_message_id, *, owner_id, reclaim_owner_id=None
+    ):
+        row = self.rows[(session_id, client_message_id)]
+        allowed = row["status"] == "pending" or (
+            row["status"] == "running" and row["owner_id"] == reclaim_owner_id
+        )
+        if not allowed:
+            return False
+        row["status"] = "running"
+        row["owner_id"] = owner_id
+        return True
+
+    def finish_prompt_receipt(
+        self, session_id, client_message_id, *, owner_id, status
+    ):
+        row = self.rows[(session_id, client_message_id)]
+        if row["status"] != "running" or row["owner_id"] != owner_id:
+            return False
+        row["status"] = status
+        return True
+
+
+def _install_prompt_receipt_db(monkeypatch):
+    db = _PromptReceiptDB()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    return db
 
 
 def test_reasoning_callbacks_honor_show_reasoning_toggle():
@@ -807,6 +869,7 @@ def test_session_compress_uses_compress_helper(monkeypatch):
 def test_prompt_submit_sets_approval_session_key(monkeypatch):
     from tools.approval import get_current_session_key
 
+    _install_prompt_receipt_db(monkeypatch)
     captured = {}
 
     class _Agent:
@@ -846,6 +909,7 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
 
 
 def test_prompt_submit_expands_context_refs(monkeypatch):
+    _install_prompt_receipt_db(monkeypatch)
     captured = {}
 
     class _Agent:
@@ -903,6 +967,7 @@ def test_prompt_submit_expands_context_refs(monkeypatch):
 
 
 def test_prompt_submit_forwards_persist_user_message(monkeypatch):
+    _install_prompt_receipt_db(monkeypatch)
     captured = {}
 
     class _Agent:
@@ -958,6 +1023,7 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
 
 
 def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
+    _install_prompt_receipt_db(monkeypatch)
     captured = {}
 
     class _Agent:
@@ -1005,6 +1071,282 @@ def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
         assert server._sessions["sid"]["running"] is False
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
+    from elevate_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("session-key", source="tui")
+    calls = {"runs": 0}
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, **kwargs):
+            calls["runs"] += 1
+            return {
+                "final_response": "",
+                "messages": [
+                    *(conversation_history or []),
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "client_message_id": kwargs["user_message_id"],
+                    },
+                ],
+            }
+
+    class _DeferredThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            rows = db.get_messages("session-key")
+            assert [(row["role"], row["content"]) for row in rows] == [
+                ("user", "prepare the listing"),
+            ]
+            assert db.get_recoverable_prompt_receipt("session-key")["status"] == "pending"
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server.threading, "Thread", _DeferredThread)
+    monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *args: None)
+    monkeypatch.setattr(server, "_emit", lambda *args: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+    request = {
+        "method": "prompt.submit",
+        "params": {
+            "session_id": "sid",
+            "text": "prepare the listing",
+            "user_message_id": "user-receipt-1",
+        },
+    }
+    try:
+        first = server.handle_request({"id": "rpc-1", **request})
+
+        assert first["result"]["status"] == "streaming"
+        assert calls["runs"] == 0
+        assert db.get_messages("session-key")[0]["client_message_id"] == "user-receipt-1"
+
+        # Simulate a process crash after commit but before the worker target ran:
+        # all in-memory ack/claim state disappears, while state.db survives.
+        server._sessions.pop("sid", None)
+        server._active_prompt_claims.clear()
+        monkeypatch.setattr(
+            server,
+            "_PROMPT_EXECUTION_OWNER",
+            f"{os.getpid()}:restarted-runtime",
+        )
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        server._sessions["sid"] = _session(
+            agent=_Agent(),
+            history=db.get_messages_as_conversation("session-key"),
+        )
+
+        assert server._recover_pending_prompt("sid", server._sessions["sid"]) is True
+        assert calls["runs"] == 1
+        assert len(db.get_messages("session-key")) == 1
+        assert db.get_recoverable_prompt_receipt("session-key") is None
+    finally:
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_prompt_submit_persistence_failure_does_not_start_work(monkeypatch):
+    class _FailingDB:
+        def prepare_prompt_receipt(self, *args, **kwargs):
+            raise OSError("disk unavailable")
+
+    class _ForbiddenThread:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("worker must not be created")
+
+    emitted = []
+    server._sessions["sid"] = _session(attached_images=["keep.png"])
+    monkeypatch.setattr(server, "_get_db", lambda: _FailingDB())
+    monkeypatch.setattr(server.threading, "Thread", _ForbiddenThread)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    try:
+        resp = server.handle_request(
+            {
+                "id": "rpc-1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "prepare the listing",
+                    "user_message_id": "user-receipt-1",
+                },
+            }
+        )
+
+        assert resp["error"]["code"] == 5009
+        assert "prompt persistence failed" in resp["error"]["message"]
+        assert server._sessions["sid"]["running"] is False
+        assert server._sessions["sid"]["attached_images"] == ["keep.png"]
+        assert emitted == []
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_concurrent_duplicates_execute_once(monkeypatch, tmp_path):
+    from elevate_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("session-key", source="tui")
+    calls = {"runs": 0}
+    agent_started = threading.Event()
+    release_agent = threading.Event()
+    agent_done = threading.Event()
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, **kwargs):
+            calls["runs"] += 1
+            agent_started.set()
+            assert release_agent.wait(timeout=5)
+            agent_done.set()
+            return {
+                "final_response": "",
+                "messages": [
+                    *(conversation_history or []),
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "client_message_id": kwargs["user_message_id"],
+                    },
+                ],
+            }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *args: None)
+    monkeypatch.setattr(server, "_emit", lambda *args: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+    request = {
+        "method": "prompt.submit",
+        "params": {
+            "session_id": "sid",
+            "text": "prepare the listing",
+            "user_message_id": "user-retry-1",
+        },
+    }
+    barrier = threading.Barrier(3)
+    responses = []
+
+    def _submit(request_id):
+        barrier.wait(timeout=5)
+        responses.append(server.handle_request({"id": request_id, **request}))
+
+    submitters = [
+        threading.Thread(target=_submit, args=(f"rpc-{index}",))
+        for index in range(2)
+    ]
+    try:
+        for submitter in submitters:
+            submitter.start()
+        barrier.wait(timeout=5)
+        for submitter in submitters:
+            submitter.join(timeout=5)
+
+        assert agent_started.wait(timeout=5)
+        assert len(responses) == 2
+        assert all(response["result"]["status"] == "streaming" for response in responses)
+        assert sorted(response["result"]["duplicate"] for response in responses) == [
+            False,
+            True,
+        ]
+        assert calls["runs"] == 1
+        rows = db.get_messages("session-key")
+        assert len(rows) == 1
+        assert rows[0]["client_message_id"] == "user-retry-1"
+    finally:
+        release_agent.set()
+        agent_done.wait(timeout=5)
+        deadline = time.time() + 5
+        while db.get_recoverable_prompt_receipt("session-key") and time.time() < deadline:
+            time.sleep(0.01)
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_prompt_submit_terminalization_failure_can_be_recovered(monkeypatch, tmp_path):
+    from elevate_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session("session-key", source="tui")
+    calls = {"finishes": 0, "runs": 0}
+    real_finish = db.finish_prompt_receipt
+
+    def _finish_once_fails(*args, **kwargs):
+        calls["finishes"] += 1
+        if calls["finishes"] == 1:
+            return False
+        return real_finish(*args, **kwargs)
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, **kwargs):
+            calls["runs"] += 1
+            return {
+                "final_response": "",
+                "messages": [
+                    *(conversation_history or []),
+                    {
+                        "role": "user",
+                        "content": prompt,
+                        "client_message_id": kwargs["user_message_id"],
+                    },
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    db.finish_prompt_receipt = _finish_once_fails
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *args: None)
+    monkeypatch.setattr(server, "_emit", lambda *args: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+    request = {
+        "method": "prompt.submit",
+        "params": {
+            "session_id": "sid",
+            "text": "prepare the listing",
+            "user_message_id": "user-terminalize-1",
+        },
+    }
+    try:
+        first = server.handle_request({"id": "rpc-1", **request})
+        assert first["result"]["status"] == "streaming"
+        assert db.get_recoverable_prompt_receipt("session-key")["status"] == "running"
+        assert ("session-key", "user-terminalize-1") not in server._active_prompt_claims
+
+        retry = server.handle_request({"id": "rpc-2", **request})
+
+        assert retry["result"]["status"] == "streaming"
+        assert retry["result"]["recovered"] is True
+        terminal_retry = server.handle_request({"id": "rpc-3", **request})
+        assert terminal_retry["result"]["status"] == "duplicate"
+        assert terminal_retry["result"]["terminal_status"] == "complete"
+        assert calls == {"finishes": 2, "runs": 2}
+        assert len(db.get_messages("session-key")) == 1
+        assert db.get_recoverable_prompt_receipt("session-key") is None
+    finally:
+        server._sessions.pop("sid", None)
+        db.close()
 
 
 def test_image_attach_appends_local_image(monkeypatch):
@@ -1445,6 +1787,7 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
     must attach a 'warning' to message.complete when history was
     mutated externally during the turn (instead of silently dropping
     the agent's output)."""
+    _install_prompt_receipt_db(monkeypatch)
     # Agent bumps history_version itself mid-run to simulate an external
     # mutation slipping past the guards.
     session_ref = {"s": None}
@@ -1511,6 +1854,8 @@ def test_prompt_submit_history_version_mismatch_surfaces_warning(monkeypatch):
 
 def test_prompt_submit_history_version_match_persists_normally(monkeypatch):
     """Regression guard: the backstop does not affect the happy path."""
+
+    _install_prompt_receipt_db(monkeypatch)
 
     class _Agent:
         def run_conversation(

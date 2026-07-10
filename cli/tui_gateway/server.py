@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agent.cwd import safe_getcwd
+from agent.memory_manager import sanitize_context
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -135,6 +136,9 @@ _pending: dict[str, tuple[str, threading.Event]] = {}
 _answers: dict[str, str] = {}
 _db = None
 _db_error: str | None = None
+_PROMPT_EXECUTION_OWNER = f"{os.getpid()}:{uuid.uuid4().hex}"
+_prompt_claims_lock = threading.RLock()
+_active_prompt_claims: dict[tuple[str, str], dict] = {}
 _stdout_lock = threading.Lock()
 _cfg_lock = threading.Lock()
 _cfg_cache: dict | None = None
@@ -3104,6 +3108,8 @@ def _(rid, params: dict) -> dict:
             replay_events.extend(child_replay_events)
             replay_events.sort(key=_event_ts)
             replay_seq = max(replay_seq, child_replay_seq)
+        if not existing_session.get("running"):
+            _recover_pending_prompt(existing_sid, existing_session)
         with existing_session.get("history_lock", threading.Lock()):
             history = list(existing_session.get("history", []))
         messages = _history_to_messages(history) if include_messages else None
@@ -3129,6 +3135,7 @@ def _(rid, params: dict) -> dict:
             result["messages"] = messages
         return _ok(rid, result)
 
+    recoverable_prompt = None
     try:
         # Compaction redesign: a new-style session (compaction_cursor set on its
         # row) is NEVER rotated. Its transcript is the full append-only history;
@@ -3175,6 +3182,9 @@ def _(rid, params: dict) -> dict:
         identity_payload = _session_identity_for(db, target)
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
+        get_recoverable = getattr(db, "get_recoverable_prompt_receipt", None)
+        if callable(get_recoverable):
+            recoverable_prompt = get_recoverable(target)
         messages = _history_to_messages(history) if include_messages else None
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
@@ -3246,6 +3256,7 @@ def _(rid, params: dict) -> dict:
 
             _wire_callbacks(sid)
             _emit("session.info", sid, _session_info(agent))
+            _recover_pending_prompt(sid, session)
         except Exception as e:
             session["agent_error"] = str(e)
             _emit("error", sid, {"message": f"agent init failed: {e}"})
@@ -3275,7 +3286,9 @@ def _(rid, params: dict) -> dict:
         "message_count": len(messages) if messages is not None else len(history),
         "agent_ready": False,
         "info": _light_session_info(),
-        "running": child_replay_running,
+        "running": bool(
+            session.get("running") or child_replay_running or recoverable_prompt
+        ),
         "replay_events": child_replay_events,
         "replay_seq": child_replay_seq,
         "running_tools": [],
@@ -4200,6 +4213,123 @@ def _wire_message_id(candidate: object = None) -> str:
     return uuid.uuid4().hex
 
 
+def _prompt_user_message_id(params: dict) -> str:
+    """Resolve the durable idempotency key for a submitted user prompt."""
+    candidate = params.get("user_message_id")
+    if isinstance(candidate, str) and _WIRE_MESSAGE_ID_RE.match(candidate):
+        return candidate
+    request_id = params.get("request_id")
+    if request_id is not None and str(request_id).strip():
+        digest = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"elevate:prompt.submit:{request_id}",
+        ).hex
+        return f"request.{digest}"
+    return _wire_message_id()
+
+
+def _prompt_owner_alive(
+    owner_id: object, claim_key: Optional[tuple[str, str]] = None
+) -> bool:
+    """Best-effort liveness check for a durable prompt claim owner."""
+    if not isinstance(owner_id, str) or not owner_id:
+        return False
+    if owner_id == _PROMPT_EXECUTION_OWNER:
+        if claim_key is None:
+            return False
+        with _prompt_claims_lock:
+            return claim_key in _active_prompt_claims
+    try:
+        pid = int(owner_id.split(":", 1)[0])
+    except (TypeError, ValueError):
+        return False
+    # A different boot id with our PID represents a prior process instance
+    # (or a restart simulated in tests), not a live competing worker.
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _trim_recovered_prompt_from_history(session: dict, client_message_id: str) -> None:
+    """Avoid feeding a cold-resumed pending prompt to the model twice."""
+    history = session.get("history")
+    if not isinstance(history, list) or not history:
+        return
+    tail = history[-1]
+    if (
+        isinstance(tail, dict)
+        and tail.get("role") == "user"
+        and tail.get("client_message_id") == client_message_id
+    ):
+        session["history"] = history[:-1]
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+
+def _recover_pending_prompt(sid: str, session: dict) -> bool:
+    """Restart a persisted-but-nonterminal prompt after reconnect/restart."""
+    if session.get("running"):
+        return False
+    db = _get_db()
+    get_receipt = getattr(db, "get_recoverable_prompt_receipt", None)
+    submit = _methods.get("prompt.submit")
+    if not callable(get_receipt) or submit is None:
+        return False
+    session_key = str(session.get("session_key") or sid)
+    try:
+        receipt = get_receipt(session_key)
+    except Exception as exc:
+        logger.warning("prompt receipt recovery lookup failed for %s: %s", session_key, exc)
+        return False
+    if not isinstance(receipt, dict):
+        return False
+    receipt_claim_key = (session_key, str(receipt.get("client_message_id") or ""))
+    if receipt.get("status") == "running" and _prompt_owner_alive(
+        receipt.get("owner_id"), receipt_claim_key
+    ):
+        return False
+    payload = receipt.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    params = {
+        "session_id": sid,
+        "text": payload.get("text", ""),
+        "user_message_id": receipt.get("client_message_id"),
+    }
+    if isinstance(payload.get("persist_user_message"), str):
+        params["persist_user_message"] = payload["persist_user_message"]
+    if payload.get("agent_id"):
+        params["agent_id"] = payload["agent_id"]
+    result = submit(f"recover_{uuid.uuid4().hex[:8]}", params)
+    if isinstance(result, dict) and result.get("error"):
+        logger.warning(
+            "prompt receipt recovery submit failed for %s: %s",
+            session_key,
+            (
+                result["error"].get("message")
+                if isinstance(result["error"], dict)
+                else result["error"]
+            ),
+        )
+        return False
+    result_payload = result.get("result") if isinstance(result, dict) else None
+    if not isinstance(result_payload, dict) or result_payload.get("status") != "streaming":
+        return False
+    logger.info(
+        "recovered pending prompt receipt session=%s message=%s",
+        session_key,
+        receipt.get("client_message_id"),
+    )
+    return True
+
+
 def _emit_sign_in_nag(sid: str) -> None:
     """Render the sign-in CTA as an assistant turn in the dashboard chat."""
     body = (
@@ -4577,7 +4707,17 @@ def _(rid, params: dict) -> dict:
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
+    if isinstance(text, str):
+        text = re.sub(r"[\ud800-\udfff]", "\ufffd", text)
     persist_user_message = params.get("persist_user_message")
+    receipt_text = (
+        persist_user_message
+        if isinstance(persist_user_message, str)
+        else _content_to_text(text)
+    )
+    receipt_text = sanitize_context(
+        re.sub(r"[\ud800-\udfff]", "\ufffd", receipt_text)
+    )
     agent_id = str(params.get("agent_id") or "").strip()
     # Stable per-message identity for this round trip. The client may mint the
     # user-message id (so its optimistic bubble and the persisted row share an
@@ -4586,7 +4726,7 @@ def _(rid, params: dict) -> dict:
     # both (see turn loop). Holder dict so the _stream closure reads the
     # CURRENT round's id.
     turn_ids = {
-        "user": _wire_message_id(params.get("user_message_id")),
+        "user": _prompt_user_message_id(params),
         "assistant": _wire_message_id(),
     }
     session, err = _sess(params, rid)
@@ -4617,40 +4757,187 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4290, decision.message)
     except Exception as exc:
         logger.debug("prompt guardrails skipped: %s", exc)
+
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5009)
+
+    session_key = str(session.get("session_key") or sid)
+    claim_key = (session_key, turn_ids["user"])
+    receipt_inserted = False
+    reclaim_owner_id = None
     with session["history_lock"]:
+        last_ack = session.get("last_prompt_ack")
+        if (
+            isinstance(last_ack, dict)
+            and last_ack.get("user_message_id") == turn_ids["user"]
+        ):
+            if last_ack.get("text") != receipt_text:
+                return _err(
+                    rid,
+                    4091,
+                    "user_message_id already belongs to a different prompt",
+                )
+            if session.get("running"):
+                return _ok(
+                    rid,
+                    {
+                        "status": "streaming",
+                        "duplicate": True,
+                        "started": False,
+                        "user_message_id": turn_ids["user"],
+                        "message_id": last_ack.get("message_id"),
+                    },
+                )
         if session.get("running"):
             return _err(rid, 4009, "session busy")
+
+        submitted_payload = {
+            "agent_id": agent_id,
+            "attached_files": list(session.get("attached_files", [])),
+            "attached_images": list(session.get("attached_images", [])),
+            "attached_videos": list(session.get("attached_videos", [])),
+            "persist_user_message": (
+                receipt_text
+                if isinstance(persist_user_message, str)
+                else None
+            ),
+            "text": text,
+        }
+        with _prompt_claims_lock:
+            active = _active_prompt_claims.get(claim_key)
+            if isinstance(active, dict):
+                if active.get("text") != receipt_text:
+                    return _err(
+                        rid,
+                        4091,
+                        "user_message_id already belongs to a different prompt",
+                    )
+                return _ok(
+                    rid,
+                    {
+                        "status": "streaming",
+                        "duplicate": True,
+                        "started": False,
+                        "user_message_id": turn_ids["user"],
+                        "message_id": active.get("message_id"),
+                    },
+                )
+            try:
+                receipt = db.prepare_prompt_receipt(
+                    session_key,
+                    receipt_text,
+                    assistant_message_id=turn_ids["assistant"],
+                    client_message_id=turn_ids["user"],
+                    payload=submitted_payload,
+                )
+            except ValueError as exc:
+                return _err(rid, 4091, str(exc))
+            except Exception as exc:
+                logger.warning("prompt.submit receipt persistence failed: %s", exc)
+                return _err(rid, 5009, f"prompt persistence failed: {exc}")
+
+            receipt_inserted = bool(receipt.get("inserted"))
+            receipt_status = str(receipt.get("status") or "")
+            receipt_owner = receipt.get("owner_id")
+            turn_ids["assistant"] = str(
+                receipt.get("assistant_message_id") or turn_ids["assistant"]
+            )
+            if receipt_status in {"complete", "error", "interrupted"}:
+                return _ok(
+                    rid,
+                    {
+                        "status": "duplicate",
+                        "duplicate": True,
+                        "started": False,
+                        "terminal_status": receipt_status,
+                        "user_message_id": turn_ids["user"],
+                        "message_id": turn_ids["assistant"],
+                    },
+                )
+            if receipt_status == "running" and _prompt_owner_alive(
+                receipt_owner, claim_key
+            ):
+                return _ok(
+                    rid,
+                    {
+                        "status": "streaming",
+                        "duplicate": True,
+                        "started": False,
+                        "user_message_id": turn_ids["user"],
+                        "message_id": turn_ids["assistant"],
+                    },
+                )
+            if receipt_status not in {"pending", "running"}:
+                return _err(rid, 5009, f"invalid prompt receipt status: {receipt_status}")
+            if receipt_status == "running":
+                reclaim_owner_id = str(receipt_owner or "") or None
+
+            canonical_payload = receipt.get("payload")
+            if not isinstance(canonical_payload, dict):
+                return _err(rid, 5009, "prompt persistence failed: invalid receipt payload")
+            _active_prompt_claims[claim_key] = {
+                "message_id": turn_ids["assistant"],
+                "text": receipt_text,
+            }
+
+        if not receipt_inserted:
+            _trim_recovered_prompt_from_history(session, turn_ids["user"])
         session["running"] = True
-        images = list(session.get("attached_images", []))
-        session["attached_images"] = []
-        videos = list(session.get("attached_videos", []))
-        session["attached_videos"] = []
-        files = list(session.get("attached_files", []))
-        session["attached_files"] = []
-    # Server-initiated wake turns (a finished delegation being evaluated) have
-    # no client-side optimistic bubble — without this the "sub-agent completed"
-    # card only appeared after a rehydrate. Emit the stored marker as a live
-    # user-message event FIRST (so the card paints inline, in sequence, before
-    # the evaluation streams under it). Same wire id as the persisted row, so
-    # the rehydrate merge dedups instead of doubling.
-    if isinstance(persist_user_message, str) and persist_user_message.startswith(
-        _SUBAGENT_RESULT_MARKER
-    ):
-        _emit(
-            "message.user",
-            sid,
-            {"message_id": turn_ids["user"], "text": persist_user_message},
+        session["last_prompt_ack"] = {
+            "message_id": turn_ids["assistant"],
+            "text": receipt_text,
+            "user_message_id": turn_ids["user"],
+        }
+        text = canonical_payload.get("text", text)
+        canonical_persist = canonical_payload.get("persist_user_message")
+        persist_user_message = (
+            canonical_persist if isinstance(canonical_persist, str) else None
         )
-    _emit(
-        "message.start",
-        sid,
-        {"message_id": turn_ids["assistant"], "user_message_id": turn_ids["user"]},
-    )
+        agent_id = str(canonical_payload.get("agent_id") or "").strip()
+        images = list(canonical_payload.get("attached_images") or [])
+        session["attached_images"] = []
+        videos = list(canonical_payload.get("attached_videos") or [])
+        session["attached_videos"] = []
+        files = list(canonical_payload.get("attached_files") or [])
+        session["attached_files"] = []
+
+    receipt_user_id = turn_ids["user"]
+    receipt_assistant_id = turn_ids["assistant"]
 
     def run():
         approval_token = None
+        claimed = False
+        receipt_terminal_status = "error"
         session_tokens = []
         try:
+            claimed = db.claim_prompt_receipt(
+                session_key,
+                receipt_user_id,
+                owner_id=_PROMPT_EXECUTION_OWNER,
+                reclaim_owner_id=reclaim_owner_id,
+            )
+            if not claimed:
+                return
+            # Server-initiated wake turns have no optimistic user bubble. Emit
+            # their stored marker only after this worker owns the durable claim.
+            if (
+                isinstance(persist_user_message, str)
+                and persist_user_message.startswith(_SUBAGENT_RESULT_MARKER)
+            ):
+                _emit(
+                    "message.user",
+                    sid,
+                    {"message_id": receipt_user_id, "text": persist_user_message},
+                )
+            _emit(
+                "message.start",
+                sid,
+                {
+                    "message_id": receipt_assistant_id,
+                    "user_message_id": receipt_user_id,
+                },
+            )
             wait_err = _wait_agent(session, rid)
             if wait_err:
                 error = wait_err.get("error") if isinstance(wait_err, dict) else None
@@ -4885,6 +5172,7 @@ def _(rid, params: dict) -> dict:
                 else:
                     raw = str(result)
                     status = "complete"
+                receipt_terminal_status = status
 
                 followup = None
                 if isinstance(result, dict) and status != "interrupted":
@@ -5046,6 +5334,28 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 pass
             _clear_session_context(session_tokens)
+            if claimed:
+                try:
+                    if not db.finish_prompt_receipt(
+                        session_key,
+                        receipt_user_id,
+                        owner_id=_PROMPT_EXECUTION_OWNER,
+                        status=receipt_terminal_status,
+                    ):
+                        logger.error(
+                            "prompt receipt terminalization lost ownership "
+                            "session=%s message=%s",
+                            session_key,
+                            receipt_user_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "prompt receipt terminalization failed session=%s message=%s",
+                        session_key,
+                        receipt_user_id,
+                    )
+            with _prompt_claims_lock:
+                _active_prompt_claims.pop(claim_key, None)
             # Turn over — drop any running-tool snapshot so a later resume
             # doesn't rebuild stale cards (e.g. a tool that errored out without
             # a tool.complete frame).  This is idempotent because final visible
@@ -5057,15 +5367,27 @@ def _(rid, params: dict) -> dict:
     # Capture round-0 ids BEFORE starting the worker: followup rounds re-mint
     # turn_ids in the background thread, and the ack must always describe the
     # submitted turn, not whatever round happens to be live at return time.
-    ack_user_id = turn_ids["user"]
-    ack_assistant_id = turn_ids["assistant"]
-    threading.Thread(target=run, daemon=True).start()
+    ack_user_id = receipt_user_id
+    ack_assistant_id = receipt_assistant_id
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception as exc:
+        with _prompt_claims_lock:
+            _active_prompt_claims.pop(claim_key, None)
+        _mark_session_idle(session)
+        return _err(
+            rid,
+            5033,
+            f"prompt saved but worker did not start; retry the same message: {exc}",
+        )
     # Echo the ids so the client can stamp its optimistic user bubble and
     # pre-bind the assistant message without waiting for message.start.
     return _ok(
         rid,
         {
             "status": "streaming",
+            "duplicate": not receipt_inserted,
+            "recovered": not receipt_inserted,
             "user_message_id": ack_user_id,
             "message_id": ack_assistant_id,
         },

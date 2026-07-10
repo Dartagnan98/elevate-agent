@@ -1747,6 +1747,43 @@ class TestConcurrentToolExecution:
                 mock_con.assert_called_once()
                 mock_seq.assert_not_called()
 
+    def test_disjoint_writes_keep_plan_mode_in_concurrent_workers(
+        self, agent, monkeypatch
+    ):
+        """Concurrent workers must inherit the turn's read-only session context."""
+        from tools import approval
+
+        tc1 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"src/a.py","content":"print(1)"}',
+            call_id="c1",
+        )
+        tc2 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"src/b.py","content":"print(2)"}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        session_key = "test-concurrent-plan-mode"
+        monkeypatch.setattr(approval, "_config_pmode_cache", "bypassPermissions")
+        agent._checkpoint_mgr.enabled = False
+        token = approval.set_current_session_key(session_key)
+        approval.set_session_permission_mode(session_key, "plan")
+
+        try:
+            with patch("run_agent.handle_function_call") as mock_handler:
+                agent._execute_tool_calls(mock_msg, messages, "task-1")
+        finally:
+            approval.reset_current_session_key(token)
+            approval.clear_session(session_key)
+
+        mock_handler.assert_not_called()
+        assert [message["tool_call_id"] for message in messages] == ["c1", "c2"]
+        for message in messages:
+            error = json.loads(message["content"])["error"]
+            assert "BLOCKED (plan mode)" in error
+
     def test_overlapping_write_batch_forces_sequential(self, agent):
         """Writes to the same file must stay ordered."""
         tc1 = _mock_tool_call(

@@ -95,15 +95,15 @@ def test_steer_display_content_persists_user_text_only():
     assert agent._session_db.rows[0]["content"] == "focus on seller objections"
 
 
-def test_flush_skips_duplicate_persisted_steer_client_message_id():
+def test_flush_skips_duplicate_persisted_user_client_message_id():
     class FakeDB:
         def __init__(self):
             self.rows = [
                 {
                     "session_id": "child-1",
                     "role": "user",
-                    "content": "focus on seller objections",
-                    "client_message_id": "steer.abc123",
+                    "content": "prepare the listing",
+                    "client_message_id": "user-receipt-1",
                 }
             ]
             self.appended = []
@@ -129,11 +129,8 @@ def test_flush_skips_duplicate_persisted_steer_client_message_id():
     messages = [
         {
             "role": "user",
-            "content": "User follow-up received while you were already working:\n"
-            "- focus on seller objections\n"
-            "Fold this into the current task before continuing.",
-            "client_message_id": "steer.abc123",
-            "_display_content": "focus on seller objections",
+            "content": "prepare the listing",
+            "client_message_id": "user-receipt-1",
         }
     ]
 

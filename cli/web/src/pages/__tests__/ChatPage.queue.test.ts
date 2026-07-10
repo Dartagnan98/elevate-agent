@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { __chatPageTestables } from "../ChatPage";
+import source from "../ChatPage.tsx?raw";
 
 type QueuedInput = Parameters<
   typeof __chatPageTestables.queueAfterConnectionReset
@@ -18,6 +19,21 @@ function queued(id: string): QueuedInput {
 }
 
 describe("chat prompt queue", () => {
+  it("recognizes terminal duplicate acknowledgements that need hydration", () => {
+    expect(
+      __chatPageTestables.terminalDuplicatePromptStatus({
+        status: "duplicate",
+        terminal_status: "error",
+      }),
+    ).toBe("error");
+    expect(
+      __chatPageTestables.terminalDuplicatePromptStatus({ status: "streaming" }),
+    ).toBeNull();
+    expect(source).toMatch(
+      /if \(terminalStatus\) \{[\s\S]*setBusy\(false\);[\s\S]*setVersion\(\(value\) => value \+ 1\);/,
+    );
+  });
+
   it("keeps a draft queue across a reconnect", () => {
     const current = [queued("queued-1")];
 

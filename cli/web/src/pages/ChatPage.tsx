@@ -1403,6 +1403,7 @@ export const __chatPageTestables = {
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   settleQueuedDelivery,
+  terminalDuplicatePromptStatus,
   storedToolError,
   toolTarget,
   turnCompletionPresentation,
@@ -2023,6 +2024,13 @@ function settleQueuedDelivery(
   acknowledged: boolean,
 ): QueuedInput[] {
   return acknowledged ? items.filter((item) => item.id !== queuedId) : items;
+}
+
+function terminalDuplicatePromptStatus(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const ack = value as { status?: unknown; terminal_status?: unknown };
+  if (ack.status !== "duplicate") return null;
+  return typeof ack.terminal_status === "string" ? ack.terminal_status : "complete";
 }
 
 function restoreQueue(sessionId: string | null | undefined): QueuedInput[] {
@@ -6796,13 +6804,17 @@ export default function ChatPage() {
           persistedSessionIdRef.current ?? resumeId ?? effectiveSessionId,
           agentId,
         );
-        // Persist the on-screen bubble's id so a reload hydrates the same id
-        // (store dedup). Gateway validates [A-Za-z0-9._-]{1,64} else mints.
-        if (TRANSCRIPT_STORE_ENABLED && effectiveUserMessageId) {
+        // Persist the on-screen bubble's id before the gateway acknowledges the
+        // turn. It also serves as the retry idempotency key, even while the
+        // external transcript-store flag is off.
+        if (effectiveUserMessageId) {
           payload.user_message_id = effectiveUserMessageId;
         }
 
-        const accepted = await gw.request<{ status?: string }>(
+        const accepted = await gw.request<{
+          status?: string;
+          terminal_status?: string;
+        }>(
           "prompt.submit",
           payload,
           PROMPT_SUBMIT_ACCEPT_TIMEOUT_MS,
@@ -6811,6 +6823,14 @@ export default function ChatPage() {
           setBusy(false);
           setStatusText("Sign in required");
           return false;
+        }
+        const terminalStatus = terminalDuplicatePromptStatus(accepted);
+        if (terminalStatus) {
+          setAttachments([]);
+          setBusy(false);
+          setStatusText(`Already ${terminalStatus} — refreshing chat`);
+          setVersion((value) => value + 1);
+          return true;
         }
         setAttachments([]);
         return true;
@@ -6933,6 +6953,7 @@ export default function ChatPage() {
         const req: Record<string, unknown> = {
           session_id: sessionId,
           text: payload,
+          user_message_id: id("user"),
         };
         // Persist the command WITH its arguments so the reloaded transcript
         // shows what was actually asked. A bare `/${commandName}` collapses

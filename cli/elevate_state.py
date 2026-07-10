@@ -35,7 +35,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_elevate_home() / "state.db"
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -253,6 +253,21 @@ CREATE TABLE IF NOT EXISTS messages (
     platform_message_id TEXT,
     client_message_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS prompt_receipts (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_message_id TEXT NOT NULL,
+    assistant_message_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    owner_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_id, client_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_receipts_recovery
+ON prompt_receipts(session_id, status, created_at);
 
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
@@ -1154,6 +1169,10 @@ class SessionDB:
             ids = [r[0] if isinstance(r, (tuple, list)) else r["id"] for r in rows]
             if ids:
                 placeholders = ",".join("?" * len(ids))
+                conn.execute(
+                    f"DELETE FROM prompt_receipts WHERE session_id IN ({placeholders})",
+                    ids,
+                )
                 conn.execute(
                     f"DELETE FROM sessions WHERE id IN ({placeholders})", ids
                 )
@@ -2244,6 +2263,211 @@ class SessionDB:
             logger.debug("PG shadow append_message failed for %s: %s", session_id, exc)
         return result
 
+    @staticmethod
+    def _decode_prompt_receipt(row: sqlite3.Row) -> Dict[str, Any]:
+        receipt = dict(row)
+        try:
+            receipt["payload"] = json.loads(receipt.pop("payload_json"))
+        except (json.JSONDecodeError, TypeError):
+            receipt["payload"] = {}
+            receipt.pop("payload_json", None)
+        return receipt
+
+    def prepare_prompt_receipt(
+        self,
+        session_id: str,
+        transcript_content: str,
+        *,
+        assistant_message_id: str,
+        client_message_id: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Atomically persist a user row and a pending execution receipt.
+
+        Replays return the original receipt and never add another user row.
+        The caller-provided message id may not be reused for different visible
+        content. ``payload`` is the canonical execution input used for crash
+        recovery (routed text, agent lane, and attachment queues).
+        """
+        if not client_message_id or not assistant_message_id:
+            raise ValueError("client and assistant message ids are required")
+
+        stored_content = self._encode_content(transcript_content)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        now = time.time()
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT * FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            if existing is not None:
+                existing_message = conn.execute(
+                    "SELECT role, content FROM messages "
+                    "WHERE session_id = ? AND client_message_id = ? "
+                    "ORDER BY id LIMIT 1",
+                    (session_id, client_message_id),
+                ).fetchone()
+                if (
+                    existing_message is None
+                    or existing_message["role"] != "user"
+                    or existing_message["content"] != stored_content
+                ):
+                    raise ValueError(
+                        "client_message_id already belongs to a different prompt"
+                    )
+                return existing, False, False
+
+            existing_message = conn.execute(
+                "SELECT id, role, content FROM messages "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "ORDER BY id LIMIT 1",
+                (session_id, client_message_id),
+            ).fetchone()
+            message_inserted = existing_message is None
+            if existing_message is not None:
+                if (
+                    existing_message["role"] != "user"
+                    or existing_message["content"] != stored_content
+                ):
+                    raise ValueError(
+                        "client_message_id already belongs to a different prompt"
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, role, content, timestamp, client_message_id) "
+                    "VALUES (?, 'user', ?, ?, ?)",
+                    (session_id, stored_content, now, client_message_id),
+                )
+                conn.execute(
+                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
+                    (session_id,),
+                )
+
+            conn.execute(
+                "INSERT INTO prompt_receipts "
+                "(session_id, client_message_id, assistant_message_id, payload_json, "
+                "status, owner_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)",
+                (
+                    session_id,
+                    client_message_id,
+                    assistant_message_id,
+                    payload_json,
+                    now,
+                    now,
+                ),
+            )
+            receipt = conn.execute(
+                "SELECT * FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            return receipt, True, message_inserted
+
+        row, receipt_inserted, message_inserted = self._execute_write(_do)
+        if message_inserted:
+            try:
+                from elevate_cli.data.sessiondb_shadow import shadow_append_message
+
+                shadow_append_message(
+                    session_id,
+                    "user",
+                    content=stored_content if isinstance(stored_content, str) else None,
+                    client_message_id=client_message_id,
+                    timestamp=now,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "PG shadow prompt receipt append failed for %s: %s",
+                    session_id,
+                    exc,
+                )
+        receipt = self._decode_prompt_receipt(row)
+        receipt["inserted"] = receipt_inserted
+        return receipt
+
+    def claim_prompt_receipt(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        owner_id: str,
+        reclaim_owner_id: Optional[str] = None,
+    ) -> bool:
+        """Claim a pending prompt immediately before agent execution."""
+        now = time.time()
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT status, owner_id FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            if row is None:
+                return False
+            allowed = row["status"] == "pending" or (
+                row["status"] == "running"
+                and reclaim_owner_id is not None
+                and row["owner_id"] == reclaim_owner_id
+            )
+            if not allowed:
+                return False
+            cursor = conn.execute(
+                "UPDATE prompt_receipts SET status = 'running', owner_id = ?, updated_at = ? "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "AND status = ? AND owner_id IS ?",
+                (
+                    owner_id,
+                    now,
+                    session_id,
+                    client_message_id,
+                    row["status"],
+                    row["owner_id"],
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def finish_prompt_receipt(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        owner_id: str,
+        status: str,
+    ) -> bool:
+        """Terminalize a claimed prompt without letting another owner overwrite it."""
+        if status not in {"complete", "error", "interrupted"}:
+            raise ValueError(f"invalid prompt receipt status: {status}")
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE prompt_receipts SET status = ?, updated_at = ? "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "AND status = 'running' AND owner_id = ?",
+                (status, time.time(), session_id, client_message_id, owner_id),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def get_recoverable_prompt_receipt(
+        self, session_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the oldest pending/running prompt for cold-resume recovery."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM prompt_receipts WHERE session_id = ? "
+                "AND status IN ('pending', 'running') "
+                "ORDER BY created_at, client_message_id LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return self._decode_prompt_receipt(row) if row is not None else None
+
     # ------------------------------------------------------------------
     # Per-turn usage ledger (gateway/usage_ledger.py + agent/insights.py)
     # ------------------------------------------------------------------
@@ -2376,6 +2600,11 @@ class SessionDB:
             })
 
         def _do(conn):
+            # A transcript rewrite invalidates execution/idempotency state from
+            # the prior history, including pending receipts left by a crash.
+            conn.execute(
+                "DELETE FROM prompt_receipts WHERE session_id = ?", (session_id,)
+            )
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
@@ -3464,6 +3693,9 @@ class SessionDB:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
             conn.execute(
+                "DELETE FROM prompt_receipts WHERE session_id = ?", (session_id,)
+            )
+            conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )
             conn.execute(
@@ -3524,6 +3756,9 @@ class SessionDB:
                 "WHERE parent_session_id = ?",
                 (session_id,),
             )
+            conn.execute(
+                "DELETE FROM prompt_receipts WHERE session_id = ?", (session_id,)
+            )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             return True
@@ -3577,6 +3812,9 @@ class SessionDB:
             )
 
             for sid in session_ids:
+                conn.execute(
+                    "DELETE FROM prompt_receipts WHERE session_id = ?", (sid,)
+                )
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
                 removed_ids.append(sid)
