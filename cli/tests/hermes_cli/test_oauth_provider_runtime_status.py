@@ -123,6 +123,13 @@ def test_oauth_wizard_selections_materialize_to_runtime_provider_ids():
     assert _WIZARD_PROVIDER_TO_CONFIG["gemini"] == "google-gemini-cli"
     assert _WIZARD_PROVIDER_TO_CONFIG["minimax"] == "minimax-oauth"
     assert _wizard_runtime_provider("xai", {"runtimeProvider": "xai"}) == "xai"
+    assert _wizard_runtime_provider("qwen", {"runtimeProvider": "qwen"}) == "alibaba"
+    assert (
+        _wizard_runtime_provider(
+            "azure_openai", {"runtimeProvider": "azure_openai"}
+        )
+        == "azure-foundry"
+    )
     assert (
         _wizard_runtime_provider("xai", {"runtimeProvider": "xai-oauth"})
         == "xai-oauth"

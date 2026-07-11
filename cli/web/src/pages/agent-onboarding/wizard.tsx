@@ -50,7 +50,8 @@ import {
 import {
   isPrimaryModelReady,
   isOAuthProviderUsable,
-  resolvePrimaryRuntimeProvider,
+  primaryProviderUsesEnvKey,
+  resolveConfiguredPrimaryRuntimeProvider,
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
 
@@ -288,6 +289,9 @@ export function AgentOnboardingWizard({
   const [showMissing, setShowMissing] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[] | null>(null);
+  const [configuredApiKeyEnvNames, setConfiguredApiKeyEnvNames] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const primaryItem = useMemo(
     () => setup.items.find((item) => item.key === "model_primary"),
     [setup.items],
@@ -350,13 +354,25 @@ export function AgentOnboardingWizard({
   }, [oauthProviders]);
   const anyProviderConnected = connectedProviderIds.size > 0;
 
+  const handleApiKeyEnvStateChange = useCallback((envKeys: string[]) => {
+    setConfiguredApiKeyEnvNames(new Set(envKeys));
+  }, []);
+  const handleApiKeyError = useCallback((message: string) => setError(message), []);
+  const primaryDirectSecretPresent = Boolean(draft.primaryApiKey.trim()) ||
+    primaryProviderUsesEnvKey(draft.primaryProvider, configuredApiKeyEnvNames) ||
+    (
+      draft.primarySecretPresent &&
+      resolvePrimaryWizardProvider(primaryItem?.provider ?? "") === draft.primaryProvider
+    );
+
   const catalogProviderId = useMemo(
-    () => resolvePrimaryRuntimeProvider(
-      draft.primaryProvider,
-      oauthProviders,
+    () => resolveConfiguredPrimaryRuntimeProvider({
+      selectedProvider: draft.primaryProvider,
+      hasDirectSecret: primaryDirectSecretPresent,
+      providers: oauthProviders,
       existingRuntimeProvider,
-    ),
-    [draft.primaryProvider, oauthProviders, existingRuntimeProvider],
+    }),
+    [draft.primaryProvider, oauthProviders, existingRuntimeProvider, primaryDirectSecretPresent],
   );
 
   // Live model catalog for the chosen provider. Refetches whenever the
@@ -469,7 +485,7 @@ export function AgentOnboardingWizard({
       const primaryReady = isPrimaryModelReady({
         selectedProvider: draft.primaryProvider,
         selectedModel: draft.primaryModel,
-        hasSecret: Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent,
+        hasSecret: primaryDirectSecretPresent,
         oauthProviders,
         existingPrimary: primaryItem,
       });
@@ -510,7 +526,14 @@ export function AgentOnboardingWizard({
       }
     }
     return null;
-  }, [step.id, draft, anyProviderConnected, oauthProviders, primaryItem]);
+  }, [
+    step.id,
+    draft,
+    anyProviderConnected,
+    oauthProviders,
+    primaryItem,
+    primaryDirectSecretPresent,
+  ]);
 
   const canAdvance = missingMessage == null;
 
@@ -523,7 +546,7 @@ export function AgentOnboardingWizard({
     setError(null);
     try {
       const updated = await api.updateAgentSetup(
-        buildItemUpdates(draft, oauthProviders, primaryItem),
+        buildItemUpdates(draft, oauthProviders, primaryItem, primaryDirectSecretPresent),
       );
       onSetupUpdated(updated);
     } catch (err) {
@@ -532,13 +555,15 @@ export function AgentOnboardingWizard({
     } finally {
       setSaving(false);
     }
-  }, [draft, oauthProviders, onSetupUpdated, primaryItem]);
+  }, [draft, oauthProviders, onSetupUpdated, primaryItem, primaryDirectSecretPresent]);
 
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
     try {
-      await api.updateAgentSetup(buildItemUpdates(draft, oauthProviders, primaryItem));
+      await api.updateAgentSetup(
+        buildItemUpdates(draft, oauthProviders, primaryItem, primaryDirectSecretPresent),
+      );
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
     } catch (err) {
@@ -549,7 +574,14 @@ export function AgentOnboardingWizard({
     playOnboardingChime();
     setCompleting(false);
     onFinish();
-  }, [draft, oauthProviders, onSetupUpdated, onFinish, primaryItem]);
+  }, [
+    draft,
+    oauthProviders,
+    onSetupUpdated,
+    onFinish,
+    primaryItem,
+    primaryDirectSecretPresent,
+  ]);
 
   const handleNext = useCallback(async () => {
     if (busy) return;
@@ -647,8 +679,9 @@ export function AgentOnboardingWizard({
                   hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Saves to your current Elevate profile."
                 >
                   <ApiKeysPanel
-                    onError={(msg) => setError(msg)}
+                    onError={handleApiKeyError}
                     onSuccess={() => undefined}
+                    onEnvStateChange={handleApiKeyEnvStateChange}
                   />
                 </WizardSection>
 
@@ -692,7 +725,7 @@ export function AgentOnboardingWizard({
                         { value: "huggingface", label: "Hugging Face (add key in Settings)" },
                         { value: "ollama-cloud", label: "Ollama Cloud (add key in Settings)" },
                         { value: "openrouter", label: "OpenRouter (add key in Settings)" },
-                        { value: "azure_openai", label: "Azure OpenAI (add key in Settings)" },
+                        { value: "azure_openai", label: "Azure Foundry (add key below)" },
                       ]}
                     />
                     <WizardModelPicker
@@ -1809,19 +1842,6 @@ const API_KEY_FIELDS: ApiKeyField[] = [
     placeholder: "sk-ant-...",
   },
   {
-    envKey: "AZURE_OPENAI_API_KEY",
-    label: "Azure OpenAI",
-    description: "Enterprise/region-locked OpenAI deployments.",
-    docsUrl: "https://learn.microsoft.com/azure/ai-services/openai/",
-    placeholder: "azure key",
-  },
-  {
-    envKey: "AZURE_OPENAI_ENDPOINT",
-    label: "Azure endpoint",
-    description: "https://{resource}.openai.azure.com",
-    placeholder: "https://your-resource.openai.azure.com",
-  },
-  {
     envKey: "VOYAGE_API_KEY",
     label: "Voyage AI",
     description: "Voyage embeddings — small + high-quality.",
@@ -1989,6 +2009,12 @@ const API_KEY_FIELDS: ApiKeyField[] = [
     placeholder: "azure foundry key",
   },
   {
+    envKey: "AZURE_FOUNDRY_BASE_URL",
+    label: "Azure Foundry endpoint",
+    description: "The base URL for your Azure AI deployment.",
+    placeholder: "https://your-resource.services.ai.azure.com",
+  },
+  {
     envKey: "GITHUB_TOKEN",
     label: "GitHub Copilot",
     description: "Copilot models via GITHUB_TOKEN / gh auth token.",
@@ -2003,9 +2029,11 @@ const API_KEY_FIELDS: ApiKeyField[] = [
 function ApiKeysPanel({
   onError,
   onSuccess,
+  onEnvStateChange,
 }: {
   onError: (msg: string) => void;
   onSuccess: (msg: string) => void;
+  onEnvStateChange: (envKeys: string[]) => void;
 }) {
   type EnvMap = Record<string, { is_set: boolean; redacted_value: string | null }>;
   const [envMap, setEnvMap] = useState<EnvMap>({});
@@ -2027,12 +2055,17 @@ function ApiKeysPanel({
         };
       }
       setEnvMap(next);
+      onEnvStateChange(
+        Object.entries(next)
+          .filter(([, state]) => state.is_set)
+          .map(([envKey]) => envKey),
+      );
     } catch (e) {
       onError(errorMessage(e, "Could not load env keys"));
     } finally {
       setLoading(false);
     }
-  }, [onError]);
+  }, [onError, onEnvStateChange]);
 
   useEffect(() => {
     void refresh();

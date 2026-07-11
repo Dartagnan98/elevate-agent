@@ -286,8 +286,9 @@ export function buildItemUpdates(
   draft: AgentSetupDraft,
   oauthProviders: OAuthProvider[] | null = [],
   existingPrimary?: AgentSetupItem,
+  primarySecretPresent = draft.primarySecretPresent,
 ): AgentSetupItemUpdate[] {
-  const primaryHasSecret = Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
+  const primaryHasSecret = Boolean(draft.primaryApiKey.trim()) || primarySecretPresent;
   const primaryReady = isPrimaryModelReady({
     selectedProvider: draft.primaryProvider,
     selectedModel: draft.primaryModel,
@@ -345,7 +346,7 @@ export function buildItemUpdates(
         model: draft.primaryModel.trim(),
         runtimeProvider: primaryRuntimeProvider,
         apiKey: draft.primaryApiKey,
-        usesEnvSecret: !draft.primaryApiKey.trim() && draft.primarySecretPresent,
+        usesEnvSecret: !draft.primaryApiKey.trim() && primarySecretPresent,
       },
     },
     {
@@ -794,7 +795,7 @@ export function AgentSetupLaunch({
             { value: "anthropic", label: "Anthropic (Claude)" },
             { value: "openai", label: "OpenAI" },
             { value: "openrouter", label: "OpenRouter" },
-            { value: "azure_openai", label: "Azure OpenAI" },
+            { value: "azure_openai", label: "Azure Foundry" },
           ]}
         />
         <FieldRow

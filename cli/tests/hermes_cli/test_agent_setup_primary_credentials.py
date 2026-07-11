@@ -3,7 +3,10 @@
 import pytest
 
 from elevate_cli.data import agent_setup
-from elevate_cli.web_routes.admin_setup import _wizard_runtime_provider
+from elevate_cli.web_routes.admin_setup import (
+    _materialize_agent_setup_secrets,
+    _wizard_runtime_provider,
+)
 
 
 _KEY_NAMES = {
@@ -25,6 +28,8 @@ _KEY_NAMES = {
     "KIMI_API_KEY",
     "KIMI_CODING_API_KEY",
     "CUSTOM_LLM_KEY",
+    "AZURE_FOUNDRY_API_KEY",
+    "AZURE_FOUNDRY_BASE_URL",
 }
 
 
@@ -78,6 +83,7 @@ def test_config_pin_without_matching_credential_is_selection_only(monkeypatch, p
         ("zai", "GLM_API_KEY"),
         ("kimi-coding", "KIMI_API_KEY"),
         ("openrouter", "OPENROUTER_API_KEY"),
+        ("alibaba", "DASHSCOPE_API_KEY"),
     ],
 )
 def test_matching_provider_env_key_promotes_configured(monkeypatch, provider, env_name):
@@ -88,6 +94,45 @@ def test_matching_provider_env_key_promotes_configured(monkeypatch, provider, en
     assert item["value"]["secretPresent"] is True
     assert item["value"]["secretSource"] == "env"
     assert item["value"]["runtimeProvider"] == provider
+
+
+def test_azure_foundry_requires_runtime_key_and_base_url(monkeypatch):
+    key_only = _detect(
+        monkeypatch,
+        provider="azure-foundry",
+        env={"AZURE_FOUNDRY_API_KEY": "azure-key"},
+    )
+    ready = _detect(
+        monkeypatch,
+        provider="azure-foundry",
+        env={
+            "AZURE_FOUNDRY_API_KEY": "azure-key",
+            "AZURE_FOUNDRY_BASE_URL": "https://example.services.ai.azure.com",
+        },
+    )
+
+    assert key_only["status"] == "missing"
+    assert ready["status"] == "configured"
+    assert ready["value"]["runtimeProvider"] == "azure-foundry"
+
+
+def test_fresh_gemini_key_seeds_a_primary_model_without_existing_config(monkeypatch):
+    from elevate_cli import auth, config
+
+    for name in _KEY_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(config, "load_config", lambda: {"model": {}})
+    monkeypatch.setattr(config, "load_env", lambda: {"GEMINI_API_KEY": "gemini-key"})
+    monkeypatch.setattr(auth, "get_auth_status", lambda provider_id=None: {"logged_in": False})
+    monkeypatch.setattr(auth, "get_codex_auth_status", lambda: {"logged_in": False})
+
+    item = agent_setup._detect_runtime_credentials()["model_primary"]
+
+    assert item["status"] == "configured"
+    assert item["provider"] == "gemini"
+    assert item["value"]["model"] == "gemini-2.5-flash"
+    assert item["value"]["runtimeProvider"] == "gemini"
+    assert item["value"]["secretPresent"] is True
 
 
 def test_unrelated_openai_and_anthropic_keys_do_not_override_gemini(monkeypatch):
@@ -168,6 +213,49 @@ def test_pasted_openai_key_materializes_direct_provider_not_codex_oauth():
     assert _wizard_runtime_provider(
         "openai", {"runtimeProvider": "openai"}
     ) == "openai"
+
+
+@pytest.mark.parametrize(
+    ("wizard_provider", "runtime_provider", "env_name"),
+    [
+        ("qwen", "alibaba", "DASHSCOPE_API_KEY"),
+        ("azure_openai", "azure-foundry", "AZURE_FOUNDRY_API_KEY"),
+    ],
+)
+def test_direct_key_provider_materializes_to_supported_runtime_and_env(
+    monkeypatch,
+    wizard_provider,
+    runtime_provider,
+    env_name,
+):
+    writes = []
+    monkeypatch.setattr(
+        "elevate_cli.web_routes.admin_setup.save_env_value",
+        lambda key, value: writes.append((key, value)),
+    )
+
+    safe = _materialize_agent_setup_secrets(
+        [
+            {
+                "key": "model_primary",
+                "status": "configured",
+                "provider": wizard_provider,
+                "value": {
+                    "model": "test-model",
+                    "runtimeProvider": wizard_provider,
+                    "apiKey": "provider-secret",
+                },
+            }
+        ]
+    )
+
+    assert writes == [(env_name, "provider-secret")]
+    assert safe[0]["value"]["apiKey"] == ""
+    assert _wizard_runtime_provider(wizard_provider, safe[0]["value"]) == runtime_provider
+    assert (
+        _wizard_runtime_provider(wizard_provider, {"usesEnvSecret": True})
+        == runtime_provider
+    )
 
 
 def test_codex_oauth_only_promotes_matching_codex_config(monkeypatch):

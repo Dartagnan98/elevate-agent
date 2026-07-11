@@ -63,8 +63,10 @@ _PRIMARY_PROVIDER_ENV_NAMES: dict[str, tuple[str, ...]] = {
     "nvidia": ("NVIDIA_API_KEY",),
     "huggingface": ("HF_TOKEN",),
     "ollama-cloud": ("OLLAMA_API_KEY",),
-    "azure_openai": ("AZURE_OPENAI_API_KEY",),
+    "azure_openai": ("AZURE_FOUNDRY_API_KEY",),
+    "azure-foundry": ("AZURE_FOUNDRY_API_KEY",),
     "qwen": ("DASHSCOPE_API_KEY",),
+    "alibaba": ("DASHSCOPE_API_KEY",),
 }
 
 
@@ -473,7 +475,10 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     anthropic_token = _get("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     openai_key = _get("OPENAI_API_KEY")
-    gemini_key = _get("GEMINI_API_KEY", "GOOGLE_API_KEY", "NANO_BANANA_API_KEY")
+    primary_gemini_key = _get(
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"
+    )
+    gemini_key = primary_gemini_key or _get("NANO_BANANA_API_KEY")
     voyage_key = _get("VOYAGE_API_KEY")
     telegram_token = _get("TELEGRAM_BOT_TOKEN")
     telegram_chat = _get("TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID")
@@ -517,6 +522,14 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
             runtime_provider = _auth.resolve_provider(provider)
         except Exception:
             runtime_provider = str(getattr(provider_def, "id", "") or provider).strip().lower()
+
+        def _runtime_prerequisites_ready() -> bool:
+            if runtime_provider != "azure-foundry":
+                return True
+            return bool(
+                str(_cfg_model.get("base_url") or "").strip()
+                or _get("AZURE_FOUNDRY_BASE_URL")
+            )
 
         provider_config = _auth.PROVIDER_REGISTRY.get(runtime_provider)
         auth_type = (
@@ -569,12 +582,16 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
             seen.add(name)
             secret = _get(name)
             if secret and _auth.has_usable_secret(secret):
-                return "env", secret
+                return ("env", secret) if _runtime_prerequisites_ready() else None
 
         for entry in config_entries:
             secret = str(entry.get("api_key") or "").strip()
             if secret and _auth.has_usable_secret(secret):
-                return "config_inline", secret
+                return (
+                    ("config_inline", secret)
+                    if _runtime_prerequisites_ready()
+                    else None
+                )
 
         if runtime_provider == "anthropic":
             try:
@@ -645,6 +662,19 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
                 "secretPresent": True,
                 "secretSource": "env",
                 "secretPreview": _token_preview(openai_key),
+            },
+        }
+    elif primary_gemini_key:
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": "gemini",
+            "value": {
+                "model": "gemini-2.5-flash",
+                "runtimeProvider": "gemini",
+                "apiKey": "",
+                "secretPresent": True,
+                "secretSource": "env",
+                "secretPreview": _token_preview(primary_gemini_key),
             },
         }
 

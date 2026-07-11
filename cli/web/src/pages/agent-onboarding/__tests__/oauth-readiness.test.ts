@@ -5,6 +5,7 @@ import {
   hasUsablePrimaryOAuth,
   isPrimaryModelReady,
   isUsableSecretPresence,
+  primaryProviderUsesEnvKey,
   resolveConfiguredPrimaryRuntimeProvider,
   resolvePrimaryRuntimeProvider,
   resolvePrimaryWizardProvider,
@@ -116,6 +117,8 @@ describe("agent onboarding OAuth readiness", () => {
     ["xai-oauth", "xai"],
     ["google-gemini-cli", "gemini"],
     ["minimax-oauth", "minimax"],
+    ["alibaba", "qwen"],
+    ["azure-foundry", "azure_openai"],
     ["claude-code", "anthropic"],
   ])("maps runtime provider %s back to wizard option %s", (runtime, wizard) => {
     expect(resolvePrimaryWizardProvider(runtime)).toBe(wizard);
@@ -143,6 +146,36 @@ describe("agent onboarding OAuth readiness", () => {
         ],
       }),
     ).toBe("openai");
+  });
+
+  it.each([
+    ["qwen", "alibaba"],
+    ["azure_openai", "azure-foundry"],
+  ])("canonicalizes direct %s credentials to runtime provider %s", (selected, runtime) => {
+    expect(
+      resolveConfiguredPrimaryRuntimeProvider({
+        selectedProvider: selected,
+        hasDirectSecret: true,
+        providers: [],
+      }),
+    ).toBe(runtime);
+  });
+
+  it("matches raw key state to the selected provider regardless of save order", () => {
+    const envKeys = new Set([
+      "GEMINI_API_KEY",
+      "DASHSCOPE_API_KEY",
+      "AZURE_FOUNDRY_API_KEY",
+      "AZURE_FOUNDRY_BASE_URL",
+    ]);
+
+    expect(primaryProviderUsesEnvKey("gemini", envKeys)).toBe(true);
+    expect(primaryProviderUsesEnvKey("qwen", envKeys)).toBe(true);
+    expect(primaryProviderUsesEnvKey("azure_openai", envKeys)).toBe(true);
+    expect(primaryProviderUsesEnvKey("deepseek", envKeys)).toBe(false);
+    expect(
+      primaryProviderUsesEnvKey("azure_openai", new Set(["AZURE_FOUNDRY_API_KEY"])),
+    ).toBe(false);
   });
 
   it("preserves only the unchanged configured model while OAuth status is unavailable", () => {
@@ -194,10 +227,12 @@ describe("agent onboarding OAuth readiness", () => {
     expect(serializer).toContain("primaryProvider: resolvePrimaryWizardProvider(");
     expect(wizard).toContain("oauthProviders.filter(isOAuthProviderUsable)");
     expect(wizard).toContain("const primaryReady = isPrimaryModelReady({");
-    expect(wizard).toContain("resolvePrimaryRuntimeProvider(");
-    expect(wizard.match(/buildItemUpdates\(draft, oauthProviders, primaryItem\)/g)).toHaveLength(2);
+    expect(wizard).toContain("resolveConfiguredPrimaryRuntimeProvider({");
+    expect(wizard.match(/buildItemUpdates\(draft, oauthProviders, primaryItem, primaryDirectSecretPresent\)/g)).toHaveLength(2);
     expect(wizard).toContain('setup.items.find((item) => item.key === "model_primary")');
     expect(wizard).not.toContain("setOauthProviders([])");
+    expect(wizard).toContain("onEnvStateChange={handleApiKeyEnvStateChange}");
+    expect(wizard).toContain("primaryProviderUsesEnvKey(draft.primaryProvider");
     expect(serializer.match(/buildItemUpdates\(draft, oauthProviders, primaryItem\)/g)).toHaveLength(2);
     expect(serializer).toContain("api.getOAuthProviders()");
   });

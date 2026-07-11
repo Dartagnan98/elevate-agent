@@ -179,11 +179,19 @@ _WIZARD_PROVIDER_TO_CONFIG = {
     "minimax": "minimax-oauth",
     "azure_openai": "azure-foundry",
 }
+_DIRECT_KEY_PROVIDER_TO_CONFIG = {
+    "qwen": "alibaba",
+    "azure_openai": "azure-foundry",
+}
 
 
 def _wizard_runtime_provider(provider: str, value: Dict[str, Any]) -> str:
+    if value.get("usesEnvSecret") and provider in _DIRECT_KEY_PROVIDER_TO_CONFIG:
+        return _DIRECT_KEY_PROVIDER_TO_CONFIG[provider]
     runtime_provider = str(value.get("runtimeProvider") or "").strip()
-    return runtime_provider or _WIZARD_PROVIDER_TO_CONFIG.get(provider, provider)
+    if runtime_provider:
+        return _DIRECT_KEY_PROVIDER_TO_CONFIG.get(runtime_provider, runtime_provider)
+    return _WIZARD_PROVIDER_TO_CONFIG.get(provider, provider)
 
 
 _WIZARD_MEMORY_TO_CONFIG = {
@@ -204,7 +212,7 @@ _PRIMARY_KEY_ENV = {
     "nvidia": "NVIDIA_API_KEY",
     "huggingface": "HF_TOKEN",
     "ollama-cloud": "OLLAMA_API_KEY",
-    "azure_openai": "AZURE_OPENAI_API_KEY",
+    "azure_openai": "AZURE_FOUNDRY_API_KEY",
     "qwen": "DASHSCOPE_API_KEY",
 }
 _EMBEDDING_KEY_ENV = {

@@ -8,8 +8,31 @@ const PRIMARY_OAUTH_RUNTIME_PROVIDER: Record<string, string> = {
   minimax: "minimax-oauth",
 };
 
-const PRIMARY_OAUTH_WIZARD_PROVIDER: Record<string, string> = Object.fromEntries(
-  Object.entries(PRIMARY_OAUTH_RUNTIME_PROVIDER).map(([wizard, runtime]) => [runtime, wizard]),
+const PRIMARY_DIRECT_RUNTIME_PROVIDER: Record<string, string> = {
+  qwen: "alibaba",
+  azure_openai: "azure-foundry",
+};
+
+const PRIMARY_DIRECT_ENV: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  xai: "XAI_API_KEY",
+  minimax: "MINIMAX_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+  zai: "GLM_API_KEY",
+  "kimi-coding": "KIMI_API_KEY",
+  nvidia: "NVIDIA_API_KEY",
+  huggingface: "HF_TOKEN",
+  "ollama-cloud": "OLLAMA_API_KEY",
+  qwen: "DASHSCOPE_API_KEY",
+  azure_openai: "AZURE_FOUNDRY_API_KEY",
+};
+
+const PRIMARY_RUNTIME_WIZARD_PROVIDER: Record<string, string> = Object.fromEntries(
+  [...Object.entries(PRIMARY_OAUTH_RUNTIME_PROVIDER), ...Object.entries(PRIMARY_DIRECT_RUNTIME_PROVIDER)]
+    .map(([wizard, runtime]) => [runtime, wizard]),
 );
 
 type ExistingPrimarySetup = {
@@ -38,7 +61,19 @@ export function isOAuthProviderUsable(provider: OAuthProvider): boolean {
 export function resolvePrimaryWizardProvider(runtimeProvider: string): string {
   const runtime = runtimeProvider.trim();
   if (runtime === "claude-code") return "anthropic";
-  return PRIMARY_OAUTH_WIZARD_PROVIDER[runtime] ?? runtime;
+  return PRIMARY_RUNTIME_WIZARD_PROVIDER[runtime] ?? runtime;
+}
+
+export function primaryProviderUsesEnvKey(
+  selectedProvider: string,
+  envKeys: ReadonlySet<string>,
+): boolean {
+  const provider = selectedProvider.trim();
+  const envKey = PRIMARY_DIRECT_ENV[provider];
+  if (provider === "azure_openai") {
+    return Boolean(envKey && envKeys.has(envKey) && envKeys.has("AZURE_FOUNDRY_BASE_URL"));
+  }
+  return Boolean(envKey && envKeys.has(envKey));
 }
 
 export function isUsableSecretPresence(present: boolean, source: string): boolean {
@@ -76,7 +111,7 @@ export function resolveConfiguredPrimaryRuntimeProvider({
   existingRuntimeProvider?: string;
 }): string {
   const selected = selectedProvider.trim();
-  if (hasDirectSecret) return selected;
+  if (hasDirectSecret) return PRIMARY_DIRECT_RUNTIME_PROVIDER[selected] ?? selected;
   return resolvePrimaryRuntimeProvider(selected, providers, existingRuntimeProvider);
 }
 
