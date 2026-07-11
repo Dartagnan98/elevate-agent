@@ -3,7 +3,8 @@
 ## Channel contract
 
 - Stable uses `latest-mac.yml` and `Elevate-latest-mac-{arch}.dmg`.
-- Beta uses `beta-mac.yml` and `Elevate-beta-mac-{arch}.dmg`.
+- Beta uses `beta-mac.yml`, the visible `Elevate-Beta-mac-{arch}.dmg` alias,
+  and the compatibility alias `Elevate-beta-mac-{arch}.dmg`.
 - Versioned ZIP and DMG names are immutable. Shipping aborts if the same remote
   name already exists with different bytes.
 - Beta never updates stable aliases, purges stable blockmaps, or runs the stable
@@ -22,19 +23,19 @@ export ELEVATE_RELEASE_PYTHON=/absolute/path/to/cli/.venv/bin/python
 npm --prefix desktop run release:beta
 ```
 
-For a hold point before upload, run the stages separately:
+`release:beta` always stops at a finalized, statically tested candidate. Install
+that exact `Elevate Beta.app`, sign in, then run the physical AI gate and the
+separate publish command:
 
 ```bash
-ELEVATE_RELEASE_CHANNEL=beta npm --prefix desktop run preflight:apple
-ELEVATE_RELEASE_CHANNEL=beta npm --prefix desktop run build:mac
-ELEVATE_RELEASE_CHANNEL=beta npm --prefix desktop run finalize:mac
-ELEVATE_RELEASE_PYTHON=/absolute/path/to/cli/.venv/bin/python npm --prefix desktop run smoke:mac
+ELEVATE_RELEASE_CHANNEL=beta npm --prefix desktop run smoke:mac:live
 ELEVATE_RELEASE_CHANNEL=beta npm --prefix desktop run ship:mac
 ```
 
-Before `ship:mac`, verify both packaged apps contain
-`elevateReleaseChannel: beta`, pass `codesign --verify`, and do not contain a
-development `.venv`.
+`smoke:mac:live` binds the installed app to the candidate receipt and requires a
+real exact-reply AI request, durable terminal state, session resume, served-asset
+parity, the Beta log/profile, and a valid signed-app seal. `ship:mac` refuses to
+run without that live evidence plus both architecture static smokes.
 
 ## Public verification
 

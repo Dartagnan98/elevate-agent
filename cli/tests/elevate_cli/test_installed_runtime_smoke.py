@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from datetime import datetime
@@ -153,6 +154,105 @@ def test_installed_runtime_smoke_can_skip_seal_for_dev_only_probe():
     smoke = _load_smoke_script()
 
     assert smoke.parse_args(["--skip-seal"]).skip_seal is True
+
+
+def test_candidate_binding_is_recorded_in_smoke_evidence(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    repo = tmp_path / "repo"
+    verifier = repo / "desktop/scripts/candidate-receipt.js"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    receipt = tmp_path / "candidate-receipt.json"
+    receipt.write_text("{}", encoding="utf-8")
+    app = tmp_path / "Elevate Beta.app"
+    app.mkdir()
+    payload = {
+        "candidate_id": "candidate-123",
+        "source_receipt_id": "source-123",
+        "candidate_architecture": "arm64",
+        "receipt_sha256": "a" * 64,
+        "app_version": "1.2.67",
+        "app_bundle_manifest_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        smoke.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps(payload) + "\n", stderr=""
+        ),
+    )
+
+    result = smoke.SmokeResult()
+    smoke.verify_candidate_binding(
+        repo_root=repo,
+        receipt_path=receipt,
+        installed_app=app,
+        architecture="arm64",
+        result=result,
+    )
+
+    assert result.ok is True
+    assert result.candidate_id == "candidate-123"
+    assert result.source_receipt_id == "source-123"
+    assert result.candidate_architecture == "arm64"
+    assert result.candidate_receipt_sha256 == "a" * 64
+    assert result.candidate_app_version == "1.2.67"
+    assert result.candidate_app_bundle_manifest_sha256 == "b" * 64
+
+
+def test_candidate_binding_hash_mismatch_blocks_smoke(monkeypatch, tmp_path):
+    smoke = _load_smoke_script()
+    repo = tmp_path / "repo"
+    verifier = repo / "desktop/scripts/candidate-receipt.js"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        smoke.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 1, stdout="", stderr="[candidate] arm64 bundle_manifest mismatch\n"
+        ),
+    )
+
+    result = smoke.SmokeResult()
+    smoke.verify_candidate_binding(
+        repo_root=repo,
+        receipt_path=tmp_path / "candidate-receipt.json",
+        installed_app=tmp_path / "Elevate Beta.app",
+        architecture="arm64",
+        result=result,
+    )
+
+    assert result.ok is False
+    assert result.failures == [
+        "candidate receipt verification failed: [candidate] arm64 bundle_manifest mismatch"
+    ]
+
+
+def test_smoke_evidence_integrity_matches_candidate_verifier_canonical_json():
+    smoke = _load_smoke_script()
+    evidence = {
+        "evidence_schema_version": 1,
+        "checks": ["Unicode proof ✓"],
+        "nested": {"beta": True, "count": 2},
+        "evidence_integrity_sha256": None,
+    }
+    expected = smoke.compute_evidence_integrity(evidence)
+    script = (
+        "const fs=require('node:fs');"
+        "const {evidenceIntegrity}=require('./desktop/scripts/candidate-receipt');"
+        "console.log(evidenceIntegrity(JSON.parse(fs.readFileSync(0,'utf8'))));"
+    )
+    completed = subprocess.run(
+        ["node", "-e", script],
+        cwd=REPO_ROOT,
+        input=json.dumps(evidence, ensure_ascii=False),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected
 
 
 def test_installed_runtime_smoke_allows_slow_gatekeeper_assessment():

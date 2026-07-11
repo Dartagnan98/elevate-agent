@@ -9,7 +9,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
-const { resolveReleaseProfile } = require("../src/release-profile");
+const { releaseArtifactNames, resolveReleaseProfile } = require("../src/release-profile");
+const {
+  CANDIDATE_RECEIPT,
+  assertTrustedSignerEvidence,
+  createFinalReceipt,
+  fetchPublicFeeds,
+  verifySourceReceipt,
+} = require("./candidate-receipt");
 
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
@@ -22,16 +29,27 @@ const FEED = path.join(DIST, FEED_NAME);
 const packageJson = require(path.join(ROOT, "package.json"));
 const APP_BUNDLE_NAME = resolveReleaseProfile(RELEASE_CHANNEL).appBundleName;
 
-function run(command, args, options = {}) {
+function runEvidence(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: ROOT,
-    stdio: "inherit",
+    encoding: "utf8",
+    timeout: 900_000,
     ...options,
   });
+  const stdout = (result.stdout || "").trim().replaceAll(ROOT, "<desktop>");
+  const stderr = (result.stderr || "").trim().replaceAll(ROOT, "<desktop>");
+  const combined = `${stdout}\n${stderr}`.trim();
   if (result.status !== 0) {
-    const rendered = [command, ...args].join(" ");
-    throw new Error(`${rendered} failed with exit ${result.status}`);
+    throw new Error(`${command} ${args.join(" ")} failed with exit ${result.status}${combined ? `: ${combined}` : ""}`);
   }
+  return {
+    ok: true,
+    status: result.status,
+    stdout,
+    stderr,
+    output: combined,
+    output_sha256: crypto.createHash("sha256").update(combined).digest("hex"),
+  };
 }
 
 function output(command, args) {
@@ -79,18 +97,17 @@ function refreshFeedHashes() {
 if (!fs.existsSync(FEED)) {
   throw new Error(`[finalize] missing ${FEED}; run electron-builder first`);
 }
+if (fs.existsSync(CANDIDATE_RECEIPT)) {
+  throw new Error("[finalize] immutable candidate-receipt.json already exists; use a new version/candidate");
+}
 
 const identity = resolveIdentity();
 const profile = process.env.APPLE_KEYCHAIN_PROFILE || "elevate-notarization";
 const version = packageJson.version;
+verifySourceReceipt({ channel: RELEASE_CHANNEL, version });
 const feed = yaml.load(fs.readFileSync(FEED, "utf8"));
 const feedUrls = new Set((feed.files || []).map((file) => file.url).filter(Boolean));
-const required = [
-  `Elevate-${version}-mac-x64.zip`,
-  `Elevate-${version}-mac-arm64.zip`,
-  `Elevate-${version}-mac-x64.dmg`,
-  `Elevate-${version}-mac-arm64.dmg`,
-];
+const required = releaseArtifactNames(resolveReleaseProfile(RELEASE_CHANNEL), version);
 for (const name of required) {
   if (!feedUrls.has(name)) {
     throw new Error(`[finalize] latest-mac.yml missing ${name}`);
@@ -114,19 +131,56 @@ for (const appDir of ["mac", "mac-arm64"]) {
 }
 
 const dmgs = required.filter((name) => name.endsWith(".dmg"));
+const dmgEvidence = {};
 console.log(`[finalize] signing/notarizing ${dmgs.length} DMG artifact(s) as ${identity}`);
 for (const dmg of dmgs) {
   const filePath = artifactPath(dmg);
   if (!fs.existsSync(filePath)) {
     throw new Error(`[finalize] missing ${filePath}`);
   }
-  run("codesign", ["--force", "--sign", identity, "--timestamp", filePath]);
-  run("codesign", ["--verify", "--verbose=2", filePath]);
-  run("xcrun", ["notarytool", "submit", filePath, "--keychain-profile", profile, "--wait"]);
-  run("xcrun", ["stapler", "staple", filePath]);
-  run("xcrun", ["stapler", "validate", filePath]);
-  run("spctl", ["-a", "-vv", "--type", "open", "--context", "context:primary-signature", filePath]);
+  const arch = dmg.includes("-arm64.") ? "arm64" : "x64";
+  const sign = runEvidence("codesign", ["--force", "--sign", identity, "--timestamp", filePath]);
+  const codesign = runEvidence("codesign", ["--verify", "--verbose=2", filePath]);
+  const codesignDetails = runEvidence("codesign", ["-d", "--verbose=4", filePath]);
+  const designatedRequirement = runEvidence("codesign", ["-d", "-r-", filePath]);
+  assertTrustedSignerEvidence(codesignDetails.output, designatedRequirement.output, dmg);
+  const notary = runEvidence("xcrun", [
+    "notarytool", "submit", filePath, "--keychain-profile", profile, "--wait", "--output-format", "json",
+  ]);
+  let notaryResult = {};
+  try {
+    notaryResult = JSON.parse(notary.stdout);
+  } catch {
+    notaryResult = { parse_error: true };
+  }
+  if (!notaryResult.id || String(notaryResult.status || "").toLowerCase() !== "accepted") {
+    throw new Error(`[finalize] notarization did not return an accepted submission for ${dmg}`);
+  }
+  const staple = runEvidence("xcrun", ["stapler", "staple", filePath]);
+  const stapleValidation = runEvidence("xcrun", ["stapler", "validate", filePath]);
+  const gatekeeper = runEvidence("spctl", ["-a", "-vv", "--type", "open", "--context", "context:primary-signature", filePath]);
+  dmgEvidence[arch] = {
+    artifact: dmg,
+    sign,
+    codesign,
+    codesign_details: codesignDetails,
+    designated_requirement: designatedRequirement,
+    notary: {
+      ...notary,
+      submission_id: notaryResult.id || null,
+      submission_status: notaryResult.status || null,
+    },
+    staple,
+    staple_validation: stapleValidation,
+    gatekeeper,
+  };
 }
 
 refreshFeedHashes();
+verifySourceReceipt({ channel: RELEASE_CHANNEL, version });
+const candidate = createFinalReceipt({
+  publicFeeds: fetchPublicFeeds(),
+  dmgEvidence,
+});
+console.log(`[finalize] immutable candidate receipt ${candidate.candidate_id}`);
 console.log("[finalize] macOS artifacts are signed, notarized, stapled, and feed-synced");

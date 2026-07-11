@@ -21,8 +21,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import filecmp
+import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -74,8 +76,10 @@ AIAgent(
 
 @dataclass
 class SmokeResult:
+    evidence_schema_version: int = 1
     ok: bool = True
     checks: list[str] = field(default_factory=list)
+    check_ids: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
     dashboard_port: int | None = None
@@ -97,18 +101,55 @@ class SmokeResult:
     log_hits: list[str] = field(default_factory=list)
     installed_whatsapp_bridge: dict[str, bool] | None = None
     installed_app_version: str | None = None
+    candidate_id: str | None = None
+    source_receipt_id: str | None = None
+    candidate_architecture: str | None = None
+    candidate_receipt_sha256: str | None = None
+    candidate_app_version: str | None = None
+    candidate_app_bundle_manifest_sha256: str | None = None
+    host_architecture: str | None = None
+    installed_app_path: str | None = None
+    release_channel: str | None = None
+    release_app_bundle_name: str | None = None
+    main_log_path: str | None = None
+    prompt_text: str | None = None
+    expected_text: str | None = None
+    terminal_status: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_ms: int | None = None
+    test_profile: dict[str, Any] | None = None
+    evidence_integrity_sha256: str | None = None
     output_path: str | None = None
 
-    def pass_check(self, message: str) -> None:
+    def pass_check(self, message: str, check_id: str | None = None) -> None:
         self.checks.append(message)
+        if check_id and check_id not in self.check_ids:
+            self.check_ids.append(check_id)
 
     def fail(self, message: str) -> None:
         self.ok = False
         self.failures.append(message)
 
 
+def compute_evidence_integrity(evidence: dict[str, Any]) -> str:
+    body = dict(evidence)
+    body.pop("evidence_integrity_sha256", None)
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def repo_root_from_script() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def host_architecture() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine in {"x86_64", "amd64"}:
+        return "x64"
+    return machine
 
 
 def compare_trees(left: Path, right: Path, *, limit: int = 20) -> list[str]:
@@ -208,7 +249,7 @@ def check_served_assets_match_installed(installed_web_dist: Path, result: SmokeR
             f"{result.installed_chat_asset!r} != {expected_chat!r}"
         )
     if result.installed_index_asset == expected_index and result.installed_chat_asset == expected_chat:
-        result.pass_check("served dashboard assets match installed web_dist")
+        result.pass_check("served dashboard assets match installed web_dist", "served_assets")
 
 
 def check_protected_http_auth(*, port: int, token: str, timeout: float, result: SmokeResult) -> None:
@@ -382,7 +423,10 @@ def run_bundled_runtime_dependency_smoke(
                 result.fail(f"bundled Python {name} failed: {summary}")
 
     if inventory["checks"] and all(item["ok"] for item in inventory["checks"]):
-        result.pass_check("bundled Python dependency closure and backend/agent initialization pass")
+        result.pass_check(
+            "bundled Python dependency closure and backend/agent initialization pass",
+            "runtime_dependencies",
+        )
 
 
 def run_installed_app_seal(
@@ -466,7 +510,7 @@ def run_installed_app_seal(
             result.fail(f"{name} installed app seal check failed: {summary}")
 
     if result.installed_app_seal and all(item["ok"] for item in result.installed_app_seal):
-        result.pass_check("installed app seal valid (codesign + spctl)")
+        result.pass_check("installed app seal valid (codesign + spctl)", "app_seal")
 
 
 def read_installed_app_version(installed_app: Path) -> str | None:
@@ -493,6 +537,74 @@ def read_installed_app_version(installed_app: Path) -> str | None:
     return completed.stdout.strip()
 
 
+def verify_candidate_binding(
+    *,
+    repo_root: Path,
+    receipt_path: Path,
+    installed_app: Path,
+    architecture: str,
+    result: SmokeResult,
+) -> None:
+    """Bind this smoke result to the exact finalized app bytes in the receipt."""
+
+    verifier = repo_root / "desktop/scripts/candidate-receipt.js"
+    if not verifier.exists():
+        result.fail(f"candidate verifier missing: {verifier}")
+        return
+    try:
+        completed = subprocess.run(
+            [
+                "node",
+                str(verifier),
+                "verify-app",
+                "--receipt",
+                str(receipt_path.resolve()),
+                "--app",
+                str(installed_app.resolve()),
+                "--arch",
+                architecture,
+            ],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        result.fail(f"candidate receipt verification failed: {exc}")
+        return
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        result.fail(f"candidate receipt verification failed: {detail}")
+        return
+    try:
+        binding = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        result.fail(f"candidate verifier returned invalid JSON: {exc}")
+        return
+    result.candidate_id = binding.get("candidate_id")
+    result.source_receipt_id = binding.get("source_receipt_id")
+    result.candidate_architecture = binding.get("candidate_architecture")
+    result.candidate_receipt_sha256 = binding.get("receipt_sha256")
+    result.candidate_app_version = binding.get("app_version")
+    result.candidate_app_bundle_manifest_sha256 = binding.get(
+        "app_bundle_manifest_sha256"
+    )
+    if (
+        not result.candidate_id
+        or not result.source_receipt_id
+        or not result.candidate_app_version
+        or not result.candidate_app_bundle_manifest_sha256
+        or result.candidate_architecture != architecture
+    ):
+        result.fail("candidate verifier returned incomplete binding")
+        return
+    result.pass_check(
+        f"installed app bytes and identity match candidate {result.candidate_id} ({architecture})",
+        "candidate_binding",
+    )
+
+
 def run_installed_whatsapp_bridge(
     *,
     installed_cli: Path,
@@ -516,7 +628,7 @@ def run_installed_whatsapp_bridge(
             "installed WhatsApp bridge incomplete: " + ", ".join(sorted(missing))
         )
         return
-    result.pass_check("installed WhatsApp bridge present for lazy install")
+    result.pass_check("installed WhatsApp bridge present for lazy install", "whatsapp_bridge")
 
 
 def _file_size(path: Path) -> int:
@@ -917,6 +1029,7 @@ async def run_sidecar_smoke(
     expected: str,
     timeout: float,
     result: SmokeResult,
+    require_terminal_truth: bool = False,
 ) -> None:
     if websockets is None:
         raise RuntimeError("websockets package is required for sidecar smoke")
@@ -948,6 +1061,7 @@ async def run_sidecar_smoke(
 
     next_id = 1
     final_payload: dict[str, Any] | None = None
+    user_message_id = f"installed-smoke-{time.time_ns()}"
     url = f"ws://127.0.0.1:{port}/api/ws?token={token}"
 
     async with websockets.connect(url, max_size=None, ping_interval=None) as ws:
@@ -1001,7 +1115,11 @@ async def run_sidecar_smoke(
 
         submit = await request(
             "prompt.submit",
-            {"session_id": sidecar_session_id, "text": prompt},
+            {
+                "session_id": sidecar_session_id,
+                "text": prompt,
+                "user_message_id": user_message_id,
+            },
             min(timeout, 30),
         )
         submit_result = submit.get("result") or {}
@@ -1044,13 +1162,22 @@ async def run_sidecar_smoke(
             )
         if "usage" not in final_payload:
             raise RuntimeError("message.complete missing usage payload")
-        result.pass_check("message.complete matched expected text and included usage")
+        if final_payload.get("status") != "complete":
+            raise RuntimeError(
+                f"message.complete terminal status is not complete: {final_payload.get('status')!r}"
+            )
+        result.pass_check(
+            "message.complete matched expected text and included usage", "sidecar_ai"
+        )
 
         required = {"message.start", "message.delta", "message.complete"}
         missing = sorted(required - set(result.events))
         if missing:
             raise RuntimeError(f"missing event types: {', '.join(missing)}")
         result.pass_check("required streaming events observed")
+
+        if require_terminal_truth and not result.persisted_session_id:
+            raise RuntimeError("live candidate session did not return a persisted_session_id")
 
         if result.persisted_session_id and result.sidecar_session_id:
             await request(
@@ -1084,7 +1211,45 @@ async def run_sidecar_smoke(
                 for message in messages
             ):
                 raise RuntimeError("resumed transcript missing final assistant text")
-            result.pass_check("session.resume reloaded final assistant text")
+            result.pass_check(
+                "session.resume reloaded final assistant text", "session_persistence"
+            )
+            if require_terminal_truth:
+                if not isinstance(result.resumed_session_id, str):
+                    raise RuntimeError("session.resume did not return a live session id")
+                terminal_deadline = time.monotonic() + min(timeout, 30)
+                while True:
+                    duplicate = await request(
+                        "prompt.submit",
+                        {
+                            "session_id": result.resumed_session_id,
+                            "text": prompt,
+                            "user_message_id": user_message_id,
+                        },
+                        min(timeout, 30),
+                    )
+                    duplicate_result = duplicate.get("result") or {}
+                    if (
+                        isinstance(duplicate_result, dict)
+                        and duplicate_result.get("status") == "duplicate"
+                        and duplicate_result.get("terminal_status") == "complete"
+                    ):
+                        result.terminal_status = "complete"
+                        result.pass_check(
+                            "duplicate prompt receipt reports durable complete terminal status",
+                            "terminal_truth",
+                        )
+                        break
+                    if (
+                        not isinstance(duplicate_result, dict)
+                        or duplicate_result.get("status") != "streaming"
+                        or not duplicate_result.get("duplicate")
+                        or time.monotonic() >= terminal_deadline
+                    ):
+                        raise RuntimeError(
+                            f"prompt receipt missing durable terminal truth: {duplicate!r}"
+                        )
+                    await asyncio.sleep(0.1)
             if isinstance(result.resumed_session_id, str):
                 await request(
                     "session.close",
@@ -1305,6 +1470,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--expected", default="installed compaction smoke ok")
     parser.add_argument("--expected-app-version")
+    parser.add_argument("--candidate-receipt", type=Path)
+    parser.add_argument("--candidate-architecture", choices=("x64", "arm64"))
+    parser.add_argument(
+        "--live-candidate",
+        action="store_true",
+        help="Write publication-gating evidence from a running signed candidate.",
+    )
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument(
         "--seal-timeout",
@@ -1352,7 +1524,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--main-log",
         type=Path,
-        default=Path.home() / "Library/Logs/Elevate/main.log",
     )
     parser.add_argument("--json-out", type=Path)
     return parser.parse_args(argv)
@@ -1362,12 +1533,97 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     result = SmokeResult()
     started_at = datetime.now()
+    result.started_at = started_at.isoformat(timespec="milliseconds")
+    candidate_data: dict[str, Any] = {}
+    if args.candidate_receipt:
+        try:
+            candidate_data = json.loads(args.candidate_receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            result.fail(f"candidate receipt could not be read: {exc}")
+    release = candidate_data.get("release") if isinstance(candidate_data, dict) else None
+    release = release if isinstance(release, dict) else {}
+    release_profile = release.get("profile")
+    release_profile = release_profile if isinstance(release_profile, dict) else {}
+    main_log = args.main_log or (
+        Path.home()
+        / "Library/Logs"
+        / str(release_profile.get("productName") or "Elevate")
+        / "main.log"
+    )
+    profile_name = (
+        "release-candidate-live-v1"
+        if args.live_candidate
+        else "release-candidate-static-v1"
+        if args.candidate_receipt
+        else "standalone-v1"
+    )
+    result.test_profile = {
+        "name": profile_name,
+        "skip_seal": bool(args.skip_seal),
+        "skip_parity": bool(args.skip_parity),
+        "skip_sidecar": bool(args.skip_sidecar),
+        "telegram_fixture": bool(args.telegram_fixture),
+        "telegram_hygiene_soak": bool(args.telegram_hygiene_soak),
+        "desktop_compacted_followup": bool(args.desktop_compacted_followup),
+    }
 
     repo_web_dist = args.repo_root / "cli/elevate_cli/web_dist"
     installed_cli = args.installed_app / "Contents/Resources/cli"
     installed_web_dist = installed_cli / "elevate_cli/web_dist"
-    dashboard_port = args.port or read_selected_dashboard_port(args.main_log, DEFAULT_PORT)
+    fallback_port = int(release_profile.get("preferredPort") or DEFAULT_PORT)
+    dashboard_port = args.port or read_selected_dashboard_port(main_log, fallback_port)
     result.dashboard_port = dashboard_port
+    result.installed_app_path = str(args.installed_app.resolve())
+    result.main_log_path = str(main_log.resolve())
+    result.prompt_text = args.prompt
+    result.expected_text = args.expected
+
+    if args.live_candidate:
+        result.host_architecture = host_architecture()
+        result.release_channel = str(release.get("channel") or "") or None
+        result.release_app_bundle_name = str(release_profile.get("appBundleName") or "") or None
+        if not args.candidate_receipt:
+            result.fail("--live-candidate requires --candidate-receipt")
+        if args.skip_seal or args.skip_parity or args.skip_sidecar:
+            result.fail("live candidate evidence cannot skip seal, parity, or sidecar")
+        if args.telegram_fixture or args.telegram_hygiene_soak or args.desktop_compacted_followup:
+            result.fail("live candidate evidence must use the fixed publication profile")
+        if args.candidate_architecture != result.host_architecture:
+            result.fail(
+                "live candidate architecture must match host: "
+                f"{args.candidate_architecture!r} != {result.host_architecture!r}"
+            )
+        if args.installed_app.name != result.release_app_bundle_name:
+            result.fail(
+                "live installed app does not match release profile: "
+                f"{args.installed_app.name!r} != {result.release_app_bundle_name!r}"
+            )
+        expected_log = (
+            Path.home()
+            / "Library/Logs"
+            / str(release_profile.get("productName") or "")
+            / "main.log"
+        )
+        if main_log.resolve() != expected_log.resolve() or not main_log.is_file():
+            result.fail(f"live candidate main log does not match active release profile: {main_log}")
+        else:
+            result.pass_check("live candidate uses the selected release-profile log", "log_profile")
+        candidate_id = str(candidate_data.get("candidate_id") or "")
+        expected_live_text = f"live candidate {candidate_id[:12]} ok"
+        if args.prompt != f"Reply exactly: {expected_live_text}" or args.expected != expected_live_text:
+            result.fail("live candidate exact-reply prompt does not bind the candidate ID")
+
+    if args.candidate_receipt:
+        if not args.candidate_architecture:
+            result.fail("--candidate-architecture is required with --candidate-receipt")
+        else:
+            verify_candidate_binding(
+                repo_root=args.repo_root,
+                receipt_path=args.candidate_receipt,
+                installed_app=args.installed_app,
+                architecture=args.candidate_architecture,
+                result=result,
+            )
 
     if args.expected_app_version:
         actual_version = read_installed_app_version(args.installed_app)
@@ -1377,7 +1633,10 @@ def main(argv: list[str]) -> int:
                 f"installed app version mismatch: {actual_version!r} != {args.expected_app_version!r}"
             )
         else:
-            result.pass_check(f"installed app version matches {args.expected_app_version}")
+            result.pass_check(
+                f"installed app version matches {args.expected_app_version}",
+                "app_version",
+            )
 
     run_bundled_runtime_dependency_smoke(
         runtime_python=(
@@ -1402,7 +1661,7 @@ def main(argv: list[str]) -> int:
             result.fail("installed web_dist does not match repo")
             result.failures.extend(diffs)
         else:
-            result.pass_check("installed web_dist matches repo")
+            result.pass_check("installed web_dist matches repo", "web_parity")
 
         for value in args.check_file:
             repo_path, installed_rel = cli_relative_path(args.repo_root, value)
@@ -1456,6 +1715,7 @@ def main(argv: list[str]) -> int:
                     expected=args.expected,
                     timeout=args.timeout,
                     result=result,
+                    require_terminal_truth=args.live_candidate,
                 )
             )
         except (
@@ -1491,14 +1751,21 @@ def main(argv: list[str]) -> int:
         ) as exc:
             result.fail(f"desktop compacted followup smoke failed: {exc}")
 
-    result.log_hits = read_recent_log_hits(args.main_log, started_at)
+    result.log_hits = read_recent_log_hits(main_log, started_at)
     if result.log_hits:
         result.fail("fresh Electron main log contains known bad pattern")
+    else:
+        result.pass_check("fresh Electron main log contains no known bad pattern", "log_hygiene")
 
     output_path = args.json_out
     if output_path is None:
         output_path = Path("/tmp") / f"elevate-installed-smoke-{int(time.time())}.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     result.output_path = str(output_path)
+    completed_at = datetime.now()
+    result.completed_at = completed_at.isoformat(timespec="milliseconds")
+    result.duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
+    result.evidence_integrity_sha256 = compute_evidence_integrity(result.__dict__)
     output_path.write_text(
         json.dumps(result.__dict__, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

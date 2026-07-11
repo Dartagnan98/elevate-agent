@@ -65,7 +65,7 @@ export CSC_NAME="Your Name (TEAMID)"
 # Optional when using the default profile. Export this only for a custom profile.
 export APPLE_KEYCHAIN_PROFILE="elevate-notarization"
 
-npm run release:mac
+npm run release:apple
 ```
 
 Do not commit Apple credentials. The build config signs and notarizes the app
@@ -77,11 +77,20 @@ silently skip when the profile is present but the environment variable is not.
 `npm run release:mac` builds x64 and arm64 artifacts separately, merges
 `latest-mac.yml` so the feed lists both architectures, finalizes the DMG
 containers, refreshes feed hashes after stapling changes the DMG bytes, and
-uploads the update feed artifacts to
-`https://api.elevationrealestatehq.com/updates`.
+runs the static signed-candidate smoke checks. It does not publish.
 
-`npm run release:apple` runs the preflight first, then performs the full
-Developer ID build, notarization, stapling, feed refresh, and upload.
+`npm run release:apple` runs the preflight first, then produces the finalized
+Developer ID candidate. Install that exact candidate, sign in with the release
+test account, and run the mandatory live AI gate before publishing:
+
+```bash
+npm run smoke:mac:live
+npm run ship:mac
+```
+
+`ship:mac` refuses static-only evidence. It requires the exact installed app to
+complete a bounded AI request and session resume, then publishes through the
+locked candidate-receipt lane and verifies the public bytes.
 
 To finalize local artifacts without uploading them:
 

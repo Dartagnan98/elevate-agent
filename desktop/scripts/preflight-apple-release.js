@@ -12,12 +12,16 @@ const RELEASE_CHANNEL = (process.env.ELEVATE_RELEASE_CHANNEL || "latest").trim()
 if (!["latest", "beta"].includes(RELEASE_CHANNEL)) {
   throw new Error(`[preflight] unsupported release channel: ${RELEASE_CHANNEL}`);
 }
-const PUBLIC_FEED_URL = `https://api.elevationrealestatehq.com/updates/${RELEASE_CHANNEL}-mac.yml`;
-const STABLE_FEED_URL = "https://api.elevationrealestatehq.com/updates/latest-mac.yml";
 const packageJson = require(path.join(ROOT, "package.json"));
 const packageLock = require(path.join(ROOT, "package-lock.json"));
 const createBuilderConfig = require(path.join(ROOT, "electron-builder.config.js"));
 const { resolveReleaseProfile } = require(path.join(ROOT, "src", "release-profile.js"));
+const {
+  compareSemver,
+  createSourceReceipt,
+  fetchPublicFeeds,
+  TRUSTED_APPLE_TEAM_ID,
+} = require(path.join(ROOT, "scripts", "candidate-receipt.js"));
 const releaseProfile = resolveReleaseProfile(RELEASE_CHANNEL);
 const stableProfile = resolveReleaseProfile("latest");
 const effectiveBuild = createBuilderConfig();
@@ -73,46 +77,11 @@ function isExecutable(relativePath) {
   }
 }
 
-function compareSemver(left, right) {
-  const a = String(left).split(".").map((part) => Number.parseInt(part, 10) || 0);
-  const b = String(right).split(".").map((part) => Number.parseInt(part, 10) || 0);
-  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-    if ((a[i] || 0) > (b[i] || 0)) return 1;
-    if ((a[i] || 0) < (b[i] || 0)) return -1;
-  }
-  return 0;
-}
-
 function currentNodeVersionAtLeast(major, minor) {
   const parts = process.versions.node.split(".").map((part) => Number.parseInt(part, 10) || 0);
   if (parts[0] > major) return true;
   if (parts[0] < major) return false;
   return parts[1] >= minor;
-}
-
-function latestFeedVersion(url = PUBLIC_FEED_URL) {
-  const result = spawnSync(
-    "curl",
-    ["--silent", "--show-error", "--location", "--max-time", "20", "--write-out", "\n%{http_code}", url],
-    { cwd: ROOT, encoding: "utf8", timeout: 30_000 },
-  );
-  if (result.status !== 0) {
-    return {
-      version: null,
-      error: (result.stderr || result.stdout || "").trim() || `curl exited ${result.status}`,
-      status: 0,
-    };
-  }
-  const output = result.stdout || "";
-  const split = output.lastIndexOf("\n");
-  const text = split >= 0 ? output.slice(0, split) : output;
-  const status = Number.parseInt(split >= 0 ? output.slice(split + 1) : "0", 10) || 0;
-  const match = text.match(/^version:\s*([^\s]+)/m);
-  return {
-    version: status === 200 && match ? match[1].trim() : null,
-    error: status === 200 && !match ? "missing version" : `HTTP ${status}`,
-    status,
-  };
 }
 
 function plistContains(relativePath, key) {
@@ -227,6 +196,7 @@ record(
     && effectiveBuild.appId === releaseProfile.appId
     && effectiveBuild.extraMetadata?.name === releaseProfile.packageName
     && effectiveBuild.extraMetadata?.elevateReleaseChannel === releaseProfile.channel
+    && effectiveBuild.artifactName === `${releaseProfile.artifactPrefix}-\${version}-\${os}-\${arch}.\${ext}`
     && effectiveBuild.protocols?.[0]?.schemes?.[0] === releaseProfile.protocolScheme
     && effectiveBuild.publish?.every((entry) => entry.channel === releaseProfile.channel),
   `${releaseProfile.productName} / ${releaseProfile.appId} / ${releaseProfile.protocolScheme}://`,
@@ -238,6 +208,9 @@ record(
     "appBundleName",
     "appId",
     "packageName",
+    "artifactPrefix",
+    "downloadAliasPrefix",
+    "downloadAliasPrefixes",
     "protocolScheme",
     "elevateHomeName",
     "workspaceName",
@@ -247,30 +220,27 @@ record(
   releaseProfile.isBeta ? `${releaseProfile.elevateHomeName} / port ${releaseProfile.preferredPort}` : "Stable lane",
 );
 
-let feed = latestFeedVersion();
-let baselineDetail = feed.version || feed.error;
-if (RELEASE_CHANNEL === "beta") {
-  const betaFeed = feed;
-  const stableFeed = latestFeedVersion(STABLE_FEED_URL);
-  if (!stableFeed.version) {
-    feed = stableFeed;
-    baselineDetail = `stable ${stableFeed.error}`;
-  } else if (betaFeed.version) {
-    feed = compareSemver(betaFeed.version, stableFeed.version) >= 0 ? betaFeed : stableFeed;
-    baselineDetail = `max(beta ${betaFeed.version}, latest ${stableFeed.version})`;
-  } else if (betaFeed.status === 404) {
-    feed = stableFeed;
-    baselineDetail = `latest ${stableFeed.version}; beta not published yet`;
-  } else {
-    feed = betaFeed;
-    baselineDetail = `beta ${betaFeed.error}`;
-  }
+let publicFeeds = {};
+let feed = { version: null };
+let baselineDetail = "public feeds unavailable";
+try {
+  publicFeeds = fetchPublicFeeds();
+  const versions = Object.values(publicFeeds).map((item) => item.version).filter(Boolean);
+  const highest = versions.sort(compareSemver).at(-1) || null;
+  feed = { version: highest };
+  baselineDetail = `max(beta ${publicFeeds.beta.version || "unpublished"}, latest ${publicFeeds.latest.version})`;
+  record("both public release feeds readable", true, baselineDetail);
+} catch (error) {
+  record("both public release feeds readable", false, error?.message || String(error));
 }
 record(
-  `package version is newer than public ${RELEASE_CHANNEL} baseline`,
+  "package version is globally newer than Stable and Beta",
   Boolean(feed.version) && compareSemver(packageJson.version, feed.version) > 0,
   feed.version ? `${packageJson.version} > ${feed.version} (${baselineDetail})` : baselineDetail
 );
+
+const gitStatus = output("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: REPO });
+record("release worktree is clean", gitStatus.ok && gitStatus.stdout.trim() === "", gitStatus.stdout.trim() || "clean");
 
 record("xcrun available", commandExists("xcrun", ["--version"]));
 record("codesign available", commandAvailable("codesign"));
@@ -284,6 +254,11 @@ record("notarytool available", commandExists("xcrun", ["notarytool", "--version"
 
 const identity = developerIdIdentity();
 record("Developer ID Application identity available", Boolean(identity), identity || "missing");
+record(
+  `Developer ID identity belongs to trusted Team ${TRUSTED_APPLE_TEAM_ID}`,
+  identity.startsWith("Developer ID Application:") && identity.includes(`(${TRUSTED_APPLE_TEAM_ID})`),
+  identity || "missing",
+);
 
 const profile = process.env.APPLE_KEYCHAIN_PROFILE || "elevate-notarization";
 const notary = notaryProfileWorks(profile);
@@ -323,6 +298,20 @@ record("Apple Events entitlement present", plistContains("desktop/entitlements.m
 record("microphone entitlement present", plistContains("desktop/entitlements.mac.plist", "com.apple.security.device.audio-input"));
 record("JIT entitlement present for Electron", plistContains("desktop/entitlements.mac.plist", "com.apple.security.cs.allow-jit"));
 record("debug entitlement absent", !plistContains("desktop/entitlements.mac.plist", "com.apple.security.get-task-allow"));
+
+if (checks.every((check) => check.ok)) {
+  try {
+    const sourceReceipt = createSourceReceipt({
+      channel: RELEASE_CHANNEL,
+      version: packageJson.version,
+      profile: releaseProfile,
+      publicFeeds,
+    });
+    record("immutable candidate source contract written", true, sourceReceipt.source_receipt_id);
+  } catch (error) {
+    record("immutable candidate source contract written", false, error?.message || String(error));
+  }
+}
 
 const failures = checks.filter((check) => !check.ok);
 for (const check of checks) {

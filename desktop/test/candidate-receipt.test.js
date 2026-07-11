@@ -1,0 +1,643 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const asar = require("@electron/asar");
+
+const {
+  REQUIRED_LIVE_AI_CHECK_IDS,
+  REQUIRED_SMOKE_CHECK_IDS,
+  archiveSuccessfulRelease,
+  assertBundleManifest,
+  assertFileRecord,
+  assertGloballyNewVersion,
+  assertPackagedMetadata,
+  assertPublicFeedsUnchanged,
+  assertTrustedSignerEvidence,
+  assertEmbeddedWebMatchesBuild,
+  buildRemotePublishTransaction,
+  canonicalJson,
+  evidenceIntegrity,
+  fileRecord,
+  hashPortableTree,
+  hashTree,
+  portableAsarDirectoryHash,
+  receiptId,
+  runMacBuilders,
+  sha256File,
+  verifyCandidateReceipt,
+  verifyReleaseArchive,
+  verifySourceReceipt,
+  validateFeed,
+  validateZipEntries,
+  writeImmutableReceipt,
+} = require("../scripts/candidate-receipt");
+
+function temporaryDirectory(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-candidate-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+test("candidate IDs use canonical key ordering", () => {
+  const left = { schema_version: 1, release: { version: "1.2.67", channel: "beta" } };
+  const right = { release: { channel: "beta", version: "1.2.67" }, schema_version: 1 };
+  assert.equal(canonicalJson(left), canonicalJson(right));
+  assert.equal(receiptId(left, "candidate_id"), receiptId(right, "candidate_id"));
+});
+
+test("global version must be newer than both Stable and Beta", () => {
+  const feeds = { latest: { version: "1.2.63" }, beta: { version: "1.2.66" } };
+  assert.equal(assertGloballyNewVersion("1.2.67", feeds), "1.2.66");
+  assert.throws(() => assertGloballyNewVersion("1.2.66", feeds), /newer than every public feed/);
+  assert.throws(() => assertGloballyNewVersion("1.2.64", feeds), /highest 1\.2\.66/);
+});
+
+test("any Stable or Beta feed drift invalidates the source contract", () => {
+  const expected = { latest: { sha256: "stable-a" }, beta: { sha256: "beta-a" } };
+  assert.equal(assertPublicFeedsUnchanged(expected, structuredClone(expected)), true);
+  assert.throws(
+    () => assertPublicFeedsUnchanged(expected, { latest: expected.latest, beta: { sha256: "beta-b" } }),
+    /public beta feed changed/,
+  );
+  assert.throws(
+    () => assertPublicFeedsUnchanged(expected, { latest: { sha256: "stable-b" }, beta: expected.beta }),
+    /public latest feed changed/,
+  );
+});
+
+test("feed validation rejects extras, duplicates, unsafe URLs, and top-level drift", () => {
+  const names = [
+    "Elevate-Beta-1.2.67-mac-x64.zip",
+    "Elevate-Beta-1.2.67-mac-x64.dmg",
+    "Elevate-Beta-1.2.67-mac-arm64.zip",
+    "Elevate-Beta-1.2.67-mac-arm64.dmg",
+  ];
+  const release = { version: "1.2.67", artifact_names: names };
+  const artifacts = Object.fromEntries(names.map((name, index) => [name, { size: 100 + index, sha512: `hash-${index}` }]));
+  const files = names.map((name) => ({ url: name, size: artifacts[name].size, sha512: artifacts[name].sha512 }));
+  const valid = { version: release.version, files, path: names[0], sha512: artifacts[names[0]].sha512 };
+  assert.equal(validateFeed(valid, release, artifacts), true);
+  assert.throws(() => validateFeed({ ...valid, files: [...files, { ...files[0], url: "extra.zip" }] }, release, artifacts), /URL set/);
+  assert.throws(() => validateFeed({ ...valid, files: [...files, files[0]] }, release, artifacts), /duplicate/);
+  assert.throws(() => validateFeed({ ...valid, files: [{ ...files[0], url: "../escape" }, ...files.slice(1)] }, release, artifacts), /unsafe/);
+  assert.throws(() => validateFeed({ ...valid, path: names[2], sha512: artifacts[names[2]].sha512 }, release, artifacts), /top-level/);
+  assert.throws(() => validateFeed({ ...valid, files: [{ ...files[0], size: 999 }, ...files.slice(1)] }, release, artifacts), /metadata mismatch/);
+});
+
+test("release signer is pinned to the trusted Apple TeamIdentifier", () => {
+  const details = [
+    "Authority=Developer ID Application: Dartagnan Patricio (G5TK395RYH)",
+    "TeamIdentifier=G5TK395RYH",
+  ].join("\n");
+  const requirement = "designated => anchor apple generic and certificate leaf[subject.OU] = G5TK395RYH";
+  assert.equal(assertTrustedSignerEvidence(details, requirement), true);
+  assert.throws(
+    () => assertTrustedSignerEvidence(details.replaceAll("G5TK395RYH", "WRONGTEAM1"), requirement.replace("G5TK395RYH", "WRONGTEAM1")),
+    /trusted TeamIdentifier/,
+  );
+});
+
+test("remote publication verifies staged artifacts under one lock before aliases and feed", () => {
+  const candidateId = "d".repeat(64);
+  const artifactNames = [
+    "Elevate-Beta-1.2.67-mac-x64.dmg",
+    "Elevate-Beta-1.2.67-mac-arm64.dmg",
+  ];
+  const candidate = {
+    candidate_id: candidateId,
+    public_feeds_at_finalize: {
+      latest: { sha256: "latest-baseline" },
+      beta: { sha256: "beta-baseline" },
+    },
+    artifacts: {
+      [artifactNames[0]]: { sha256: "a".repeat(64) },
+      [artifactNames[1]]: { sha256: "b".repeat(64) },
+      "beta-mac.yml": { sha256: "c".repeat(64) },
+    },
+    release: {
+      channel: "beta",
+      feed_name: "beta-mac.yml",
+      artifact_names: artifactNames,
+      download_aliases: [
+        "Elevate-Beta-mac-x64.dmg",
+        "Elevate-beta-mac-x64.dmg",
+        "Elevate-Beta-mac-arm64.dmg",
+        "Elevate-beta-mac-arm64.dmg",
+      ],
+    },
+  };
+  const stagingName = `.candidate-${candidateId}-test`;
+  const command = buildRemotePublishTransaction({ candidate, stagingName });
+  const parsed = require("node:child_process").spawnSync("bash", ["-n", "-c", command], { encoding: "utf8" });
+  assert.equal(parsed.status, 0, parsed.stderr);
+  assert.equal((command.match(/\bflock\b/g) || []).length, 1);
+  assert.match(command, /flock -x \/var\/lock\/elevate-release-publish\.lock/);
+  assert.match(command, new RegExp(stagingName));
+  assert.match(command, /latest-mac\.yml/);
+  assert.match(command, /beta-mac\.yml/);
+  assert.match(command, /Elevate-Beta-mac-arm64\.dmg/);
+  assert.match(command, /Elevate-beta-mac-arm64\.dmg/);
+  const firstStagedCheck = command.indexOf("STAGED_HASH_FAILED");
+  const lastStagedCheck = command.lastIndexOf("STAGED_HASH_FAILED");
+  const firstCollision = command.indexOf("FINAL_COLLISION");
+  const lastCollision = command.lastIndexOf("FINAL_COLLISION");
+  const firstArtifactMove = command.indexOf("else mv");
+  const lastArtifactMove = command.lastIndexOf("else mv");
+  const firstAliasMove = command.indexOf("mv -f");
+  const feedMove = command.lastIndexOf("mv -f");
+  assert.ok(command.indexOf("CAS_FAILED latest") < firstStagedCheck);
+  assert.ok(command.indexOf("CAS_FAILED beta") < firstStagedCheck);
+  assert.ok(lastStagedCheck < firstCollision);
+  assert.ok(lastCollision < firstArtifactMove);
+  assert.ok(lastArtifactMove < firstAliasMove);
+  assert.ok(command.lastIndexOf("Elevate-beta-mac-arm64.dmg") < feedMove);
+  assert.match(command, /trap .*rm -rf -- .*\.candidate-/);
+  for (const record of Object.values(candidate.artifacts)) assert.match(command, new RegExp(record.sha256));
+  assert.doesNotMatch(command, /mv -f .*Elevate-Beta-1\.2\.67-mac-(x64|arm64)\.dmg/);
+
+  const shipSource = fs.readFileSync(path.resolve(__dirname, "../scripts/ship-to-hetzner.js"), "utf8");
+  assert.match(shipSource, /`\$\{HOST\}:\$\{stagingPath\}`/);
+  assert.doesNotMatch(shipSource, /`\$\{HOST\}:\$\{REMOTE\}`/);
+  assert.throws(() => buildRemotePublishTransaction({ candidate, stagingName: "../unsafe" }), /unsafe remote staging/);
+  const incomplete = structuredClone(candidate);
+  delete incomplete.artifacts["beta-mac.yml"];
+  assert.throws(() => buildRemotePublishTransaction({ candidate: incomplete, stagingName }), /missing SHA256/);
+
+  const stable = structuredClone(candidate);
+  stable.release.channel = "latest";
+  const stableCommand = buildRemotePublishTransaction({ candidate: stable, stagingName });
+  assert.match(stableCommand, /find .* -maxdepth 1 -type f -name/);
+  assert.match(stableCommand, /\*\.zip\.blockmap/);
+  assert.match(stableCommand, /-delete/);
+});
+
+test("the real build runner exports one verified source ID into both builder configs", (t) => {
+  const root = temporaryDirectory(t);
+  const builder = path.join(root, "fake-builder.js");
+  const merge = path.join(root, "fake-merge.js");
+  const web = path.join(root, "fake-web.js");
+  const webOutput = path.join(root, "web-dist");
+  const webReceipt = path.join(root, "candidate-web.json");
+  const log = path.join(root, "build-log.jsonl");
+  const configPath = path.resolve(__dirname, "../electron-builder.config.js");
+  fs.writeFileSync(builder, `
+    const fs = require("node:fs");
+    const config = require(process.env.TEST_BUILDER_CONFIG)();
+    fs.appendFileSync(process.env.TEST_BUILD_LOG, JSON.stringify({
+      kind: "builder",
+      args: process.argv.slice(2),
+      envId: process.env.ELEVATE_SOURCE_RECEIPT_ID,
+      configId: config.extraMetadata.elevateSourceReceiptId,
+    }) + "\\n");
+  `);
+  fs.writeFileSync(merge, `
+    require("node:fs").appendFileSync(process.env.TEST_BUILD_LOG, JSON.stringify({
+      kind: "merge",
+      envId: process.env.ELEVATE_SOURCE_RECEIPT_ID,
+    }) + "\\n");
+  `);
+  fs.writeFileSync(web, `
+    const fs = require("node:fs");
+    fs.mkdirSync(process.env.TEST_WEB_OUTPUT, { recursive: true });
+    fs.writeFileSync(process.env.TEST_WEB_OUTPUT + "/index.html", "source-bound web");
+  `);
+  const sourceReceiptId = "b".repeat(64);
+  assert.equal(runMacBuilders({
+    verifySource: () => ({ source_receipt_id: sourceReceiptId }),
+    builderCommand: process.execPath,
+    builderPrefixArgs: [builder],
+    mergeCommand: process.execPath,
+    mergeArgs: [merge],
+    webCommand: process.execPath,
+    webArgs: [web],
+    webOutputPath: webOutput,
+    webReceiptPath: webReceipt,
+    cwd: path.resolve(__dirname, ".."),
+    env: {
+      ...process.env,
+      ELEVATE_RELEASE_CHANNEL: "beta",
+      TEST_BUILDER_CONFIG: configPath,
+      TEST_BUILD_LOG: log,
+      TEST_WEB_OUTPUT: webOutput,
+    },
+    stdio: "pipe",
+  }), sourceReceiptId);
+  const rows = fs.readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.slice(0, 2).map((row) => row.envId), [sourceReceiptId, sourceReceiptId]);
+  assert.deepEqual(rows.slice(0, 2).map((row) => row.configId), [sourceReceiptId, sourceReceiptId]);
+  assert.ok(rows[0].args.includes("--x64"));
+  assert.ok(rows[1].args.includes("--arm64"));
+  assert.equal(rows[2].envId, sourceReceiptId);
+  const generatedWebReceipt = JSON.parse(fs.readFileSync(webReceipt, "utf8"));
+  assert.equal(generatedWebReceipt.source_receipt_id, sourceReceiptId);
+  const scripts = require("../package.json").scripts;
+  assert.match(scripts["build:mac"], /candidate-receipt\.js build-mac/);
+  assert.doesNotMatch(scripts["release:mac"], /ship:mac/);
+  assert.match(scripts["smoke:mac:live"], /--live-candidate/);
+  assert.match(scripts["smoke:mac:live"], /live-ai\.json/);
+  assert.doesNotMatch(scripts["smoke:mac:live"], /--skip-sidecar/);
+});
+
+test("final app metadata rejects a missing or wrong embedded source ID", () => {
+  const sourceReceiptId = "c".repeat(64);
+  const release = {
+    version: "1.2.67",
+    channel: "beta",
+    profile: { packageName: "elevate-beta-desktop" },
+  };
+  const metadata = {
+    version: release.version,
+    name: release.profile.packageName,
+    elevateReleaseChannel: release.channel,
+    elevateSourceReceiptId: sourceReceiptId,
+  };
+  assert.equal(assertPackagedMetadata(metadata, release, sourceReceiptId), true);
+  assert.throws(() => assertPackagedMetadata({ ...metadata, elevateSourceReceiptId: undefined }, release, sourceReceiptId), /metadata drift/);
+  assert.throws(() => assertPackagedMetadata({ ...metadata, elevateSourceReceiptId: "wrong" }, release, sourceReceiptId), /metadata drift/);
+});
+
+test("portable desktop/src hash matches ASAR bytes and rejects altered packaged source", async (t) => {
+  const root = temporaryDirectory(t);
+  const packageRoot = path.join(root, "package");
+  const src = path.join(packageRoot, "src");
+  fs.mkdirSync(src, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, "package.json"), "{}");
+  fs.writeFileSync(path.join(src, "main.js"), "module.exports = 'approved';\n");
+  const approved = hashPortableTree(src);
+  const approvedAsar = path.join(root, "approved.asar");
+  await asar.createPackage(packageRoot, approvedAsar);
+  assert.equal(portableAsarDirectoryHash(approvedAsar, "src").sha256, approved.sha256);
+
+  fs.writeFileSync(path.join(src, "main.js"), "module.exports = 'altered';\n");
+  const alteredAsar = path.join(root, "altered.asar");
+  await asar.createPackage(packageRoot, alteredAsar);
+  assert.notEqual(portableAsarDirectoryHash(alteredAsar, "src").sha256, approved.sha256);
+});
+
+test("identical cross-arch web bundles still fail when they do not match the web build receipt", () => {
+  const wrong = { sha256: "wrong", portable: { sha256: "wrong-portable" } };
+  const apps = { x64: { embedded_web: wrong }, arm64: { embedded_web: structuredClone(wrong) } };
+  const webBuild = {
+    generated_web: {
+      manifest: { sha256: "approved" },
+      portable: { sha256: "approved-portable" },
+    },
+  };
+  assert.throws(() => assertEmbeddedWebMatchesBuild(apps, webBuild), /does not match/);
+});
+
+test("tree manifests change when packaged bytes change", (t) => {
+  const root = temporaryDirectory(t);
+  fs.mkdirSync(path.join(root, "nested"));
+  fs.writeFileSync(path.join(root, "nested", "payload.txt"), "before");
+  const before = hashTree(root);
+  fs.writeFileSync(path.join(root, "nested", "payload.txt"), "after");
+  const after = hashTree(root);
+  assert.notEqual(after.sha256, before.sha256);
+});
+
+test("artifact and public read-back verification rejects same-size wrong bytes", (t) => {
+  const root = temporaryDirectory(t);
+  const artifact = path.join(root, "artifact.dmg");
+  fs.writeFileSync(artifact, "approved");
+  const expected = fileRecord(artifact, root);
+  fs.writeFileSync(artifact, "tampered");
+  assert.equal(fs.statSync(artifact).size, expected.size);
+  assert.throws(() => assertFileRecord(artifact, expected, "public artifact"), /SHA256 mismatch/);
+});
+
+test("stale or mutated archive app manifests are release-blocking", () => {
+  const approved = { sha256: "approved", file_count: 10, size: 100 };
+  assert.equal(assertBundleManifest(structuredClone(approved), approved, "ZIP"), true);
+  assert.throws(
+    () => assertBundleManifest({ ...approved, sha256: "stale" }, approved, "ZIP"),
+    /does not match the smoke-tested app bundle/,
+  );
+  assert.throws(
+    () => assertBundleManifest({ ...approved, file_count: 9 }, approved, "DMG"),
+    /does not match the smoke-tested app bundle/,
+  );
+});
+
+test("ZIP extraction rejects traversal, absolute, foreign-root, and duplicate entries", () => {
+  assert.equal(validateZipEntries(["Elevate Beta.app/", "Elevate Beta.app/Contents/a"], "Elevate Beta.app"), true);
+  for (const entries of [
+    ["../escape"],
+    ["/absolute"],
+    ["Other.app/Contents/a"],
+    ["Elevate Beta.app/a", "Elevate Beta.app/a"],
+    ["Elevate Beta.app\\..\\escape"],
+  ]) {
+    assert.throws(() => validateZipEntries(entries, "Elevate Beta.app"), /(unsafe|escapes|duplicate)/);
+  }
+});
+
+test("tampering with an immutable candidate receipt invalidates its ID", (t) => {
+  const root = temporaryDirectory(t);
+  const receiptPath = path.join(root, "candidate-receipt.json");
+  const receipt = {
+    schema_version: 1,
+    kind: "elevate-final-candidate",
+    release: { version: "1.2.67", channel: "beta" },
+    artifacts: {},
+    apps: {},
+  };
+  receipt.candidate_id = receiptId(receipt, "candidate_id");
+  fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.equal(
+    verifyCandidateReceipt({ receiptPath, desktopRoot: root, repoRoot: root, requireApps: false, requireSource: false }).candidate_id,
+    receipt.candidate_id,
+  );
+  receipt.release.version = "1.2.68";
+  fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.throws(
+    () => verifyCandidateReceipt({ receiptPath, desktopRoot: root, repoRoot: root, requireApps: false, requireSource: false }),
+    /receipt ID mismatch/,
+  );
+});
+
+test("ship requires static dual-arch and host live-AI evidence bound to the exact candidate", (t) => {
+  const root = temporaryDirectory(t);
+  const home = path.join(root, "home");
+  const receiptPath = path.join(root, "candidate-receipt.json");
+  const receipt = {
+    schema_version: 1,
+    kind: "elevate-final-candidate",
+    source_receipt_id: "source-123",
+    release: {
+      version: "1.2.67",
+      channel: "beta",
+      profile: {
+        appBundleName: "Elevate Beta.app",
+        productName: "Elevate Beta",
+        preferredPort: 9139,
+      },
+    },
+    artifacts: {},
+    apps: {
+      x64: { bundle_manifest: { sha256: "app-x64" } },
+      arm64: { bundle_manifest: { sha256: "app-arm64" } },
+    },
+    required_evidence: {
+      x64_smoke: "desktop/dist/evidence/smoke-x64.json",
+      arm64_smoke: "desktop/dist/evidence/smoke-arm64.json",
+      live_ai: "desktop/dist/evidence/live-ai.json",
+    },
+  };
+  receipt.candidate_id = receiptId(receipt, "candidate_id");
+  fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+  const receiptHash = sha256File(receiptPath);
+  const evidenceDir = path.join(root, "desktop", "dist", "evidence");
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const makeEvidence = (arch, { live = false } = {}) => {
+    const expectedText = `live candidate ${receipt.candidate_id.slice(0, 12)} ok`;
+    const evidence = {
+      evidence_schema_version: 1,
+      ok: true,
+      failures: [],
+      log_hits: [],
+      check_ids: (live ? REQUIRED_LIVE_AI_CHECK_IDS : REQUIRED_SMOKE_CHECK_IDS).slice(),
+      candidate_id: receipt.candidate_id,
+      source_receipt_id: receipt.source_receipt_id,
+      candidate_architecture: arch,
+      candidate_receipt_sha256: receiptHash,
+      candidate_app_version: receipt.release.version,
+      candidate_app_bundle_manifest_sha256: receipt.apps[arch].bundle_manifest.sha256,
+      started_at: "2026-07-10T10:00:00.000Z",
+      completed_at: "2026-07-10T10:00:01.000Z",
+      duration_ms: 1000,
+      test_profile: {
+        name: live ? "release-candidate-live-v1" : "release-candidate-static-v1",
+        skip_seal: false,
+        skip_parity: false,
+        skip_sidecar: !live,
+        telegram_fixture: false,
+        telegram_hygiene_soak: false,
+        desktop_compacted_followup: false,
+      },
+    };
+    if (live) Object.assign(evidence, {
+      host_architecture: arch,
+      installed_app_path: path.join(home, "Applications", receipt.release.profile.appBundleName),
+      release_channel: receipt.release.channel,
+      release_app_bundle_name: receipt.release.profile.appBundleName,
+      main_log_path: path.join(home, "Library", "Logs", receipt.release.profile.productName, "main.log"),
+      prompt_text: `Reply exactly: ${expectedText}`,
+      expected_text: expectedText,
+      final_text: expectedText,
+      terminal_status: "complete",
+      persisted_session_id: "persisted-1",
+      resumed_session_id: "resumed-1",
+      resumed_message_count: 2,
+      license_authenticated: true,
+      license_expired: false,
+      dashboard_port: receipt.release.profile.preferredPort,
+    });
+    evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
+    return evidence;
+  };
+  for (const arch of ["x64", "arm64"]) {
+    fs.writeFileSync(path.join(evidenceDir, `smoke-${arch}.json`), JSON.stringify(makeEvidence(arch)));
+  }
+  assert.equal(verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: "static",
+  }).candidate_id, receipt.candidate_id);
+  assert.throws(() => verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: true,
+    evidenceHome: home,
+    hostArchitecture: "arm64",
+  }), /missing required evidence: live_ai/);
+  fs.writeFileSync(path.join(evidenceDir, "live-ai.json"), JSON.stringify(makeEvidence("arm64", { live: true })));
+  assert.equal(verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: true,
+    evidenceHome: home,
+    hostArchitecture: "arm64",
+  }).candidate_id, receipt.candidate_id);
+
+  const assertLiveRejected = (mutate, pattern) => {
+    const evidence = makeEvidence("arm64", { live: true });
+    mutate(evidence);
+    evidence.evidence_integrity_sha256 = evidenceIntegrity(evidence);
+    fs.writeFileSync(path.join(evidenceDir, "live-ai.json"), JSON.stringify(evidence));
+    assert.throws(() => verifyCandidateReceipt({
+      receiptPath,
+      desktopRoot: root,
+      repoRoot: root,
+      requireApps: false,
+      requireSource: false,
+      requireEvidence: true,
+      evidenceHome: home,
+      hostArchitecture: "arm64",
+    }), pattern);
+  };
+  assertLiveRejected((evidence) => { evidence.test_profile.skip_sidecar = true; }, /wrong test profile/);
+  assertLiveRejected((evidence) => { evidence.installed_app_path = path.join(home, "Applications", "Other.app"); }, /invalid live AI evidence/);
+  assertLiveRejected((evidence) => { evidence.candidate_architecture = "x64"; }, /invalid required smoke evidence/);
+  assertLiveRejected((evidence) => { evidence.candidate_id = "wrong"; }, /invalid required smoke evidence/);
+  assertLiveRejected((evidence) => { evidence.main_log_path = path.join(home, "Library", "Logs", "Elevate", "main.log"); }, /invalid live AI evidence/);
+
+  fs.writeFileSync(path.join(evidenceDir, "smoke-arm64.json"), JSON.stringify({
+    ok: true,
+    candidate_id: receipt.candidate_id,
+    candidate_architecture: "arm64",
+    candidate_receipt_sha256: receiptHash,
+  }));
+  assert.throws(() => verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: "static",
+  }), /invalid required smoke evidence/);
+
+  const missingCheck = makeEvidence("arm64");
+  missingCheck.check_ids = missingCheck.check_ids.filter((check) => check !== "app_seal");
+  missingCheck.evidence_integrity_sha256 = evidenceIntegrity(missingCheck);
+  fs.writeFileSync(path.join(evidenceDir, "smoke-arm64.json"), JSON.stringify(missingCheck));
+  assert.throws(() => verifyCandidateReceipt({
+    receiptPath,
+    desktopRoot: root,
+    repoRoot: root,
+    requireApps: false,
+    requireSource: false,
+    requireEvidence: "static",
+  }), /missing required checks/);
+});
+
+test("immutable receipt creation is idempotent but refuses replacement", (t) => {
+  const root = temporaryDirectory(t);
+  const receiptPath = path.join(root, "candidate-receipt.json");
+  const first = writeImmutableReceipt(receiptPath, { schema_version: 1, version: "1.2.67" }, "candidate_id");
+  assert.deepEqual(writeImmutableReceipt(receiptPath, { schema_version: 1, version: "1.2.67" }, "candidate_id"), first);
+  assert.throws(
+    () => writeImmutableReceipt(receiptPath, { schema_version: 1, version: "1.2.68" }, "candidate_id"),
+    /refusing to replace immutable/,
+  );
+});
+
+test("successful release archive preserves proof and clears only active pointers for the next release", (t) => {
+  const root = temporaryDirectory(t);
+  const dist = path.join(root, "dist");
+  const evidenceDir = path.join(dist, "evidence");
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  const source = { schema_version: 1, source: "approved" };
+  source.source_receipt_id = receiptId(source, "source_receipt_id");
+  const web = { schema_version: 1, source_receipt_id: source.source_receipt_id, web: "approved" };
+  web.web_build_id = receiptId(web, "web_build_id");
+  const candidate = {
+    schema_version: 1,
+    kind: "elevate-final-candidate",
+    source_receipt_id: source.source_receipt_id,
+    source,
+    web_build: web,
+    release: { channel: "beta", version: "1.2.67" },
+    required_evidence: {
+      x64_smoke: "dist/evidence/smoke-x64.json",
+      arm64_smoke: "dist/evidence/smoke-arm64.json",
+      live_ai: "dist/evidence/live-ai.json",
+    },
+  };
+  candidate.candidate_id = receiptId(candidate, "candidate_id");
+  const active = {
+    source: path.join(dist, "candidate-source.json"),
+    web: path.join(dist, "candidate-web.json"),
+    candidate: path.join(dist, "candidate-receipt.json"),
+    x64: path.join(evidenceDir, "smoke-x64.json"),
+    arm64: path.join(evidenceDir, "smoke-arm64.json"),
+    live: path.join(evidenceDir, "live-ai.json"),
+    public: path.join(evidenceDir, "public-readback.json"),
+    ship: path.join(evidenceDir, "ship.json"),
+  };
+  fs.writeFileSync(active.source, JSON.stringify(source));
+  fs.writeFileSync(active.web, JSON.stringify(web));
+  fs.writeFileSync(active.candidate, JSON.stringify(candidate));
+  for (const filePath of [active.x64, active.arm64, active.live, active.ship]) {
+    fs.writeFileSync(filePath, JSON.stringify({ candidate_id: candidate.candidate_id }));
+  }
+  const unrelated = path.join(evidenceDir, "keep-me.txt");
+  fs.writeFileSync(unrelated, "unrelated");
+
+  assert.throws(() => archiveSuccessfulRelease({ candidate, distRoot: dist, repoRoot: root }), /archive input is missing/);
+  for (const filePath of Object.values(active).filter((filePath) => filePath !== active.public)) {
+    assert.equal(fs.existsSync(filePath), true);
+  }
+
+  fs.writeFileSync(active.public, JSON.stringify({ candidate_id: candidate.candidate_id }));
+  const archived = archiveSuccessfulRelease({
+    candidate,
+    distRoot: dist,
+    repoRoot: root,
+    archivedAt: "2026-07-10T10:00:00.000Z",
+  });
+  assert.equal(
+    archived.archivePath,
+    path.join(dist, "release-receipts", "beta", `1.2.67-${candidate.candidate_id}`),
+  );
+  assert.equal(verifyReleaseArchive(archived.archivePath).candidate_id, candidate.candidate_id);
+  for (const filePath of Object.values(active)) assert.equal(fs.existsSync(filePath), false);
+  assert.equal(fs.readFileSync(unrelated, "utf8"), "unrelated");
+
+  writeImmutableReceipt(active.source, { schema_version: 1, source: "next" }, "source_receipt_id");
+  writeImmutableReceipt(active.web, { schema_version: 1, web: "next" }, "web_build_id");
+  writeImmutableReceipt(active.candidate, { schema_version: 1, version: "1.2.68" }, "candidate_id");
+  assert.equal(fs.existsSync(active.candidate), true);
+
+  fs.writeFileSync(path.join(archived.archivePath, "evidence", "smoke-x64.json"), "tampered");
+  assert.throws(() => verifyReleaseArchive(archived.archivePath), /mismatch/);
+});
+
+test("source verification rejects dirty or changed release inputs", (t) => {
+  const root = temporaryDirectory(t);
+  const git = (args) => {
+    const result = require("node:child_process").spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return (result.stdout || "").trim();
+  };
+  git(["init", "-q"]);
+  git(["config", "user.email", "candidate-test@example.invalid"]);
+  git(["config", "user.name", "Candidate Test"]);
+  const input = path.join(root, "release-input.txt");
+  fs.writeFileSync(input, "approved");
+  fs.writeFileSync(path.join(root, ".gitignore"), "candidate-source.json\n");
+  git(["add", "release-input.txt", ".gitignore"]);
+  git(["commit", "-qm", "fixture"]);
+  const receipt = {
+    schema_version: 1,
+    git: { commit: git(["rev-parse", "HEAD"]), branch: git(["branch", "--show-current"]), clean: true },
+    release: { channel: "beta", version: "1.2.67" },
+    inputs: { release_input: { kind: "file", ...fileRecord(input, root) } },
+  };
+  receipt.source_receipt_id = receiptId(receipt, "source_receipt_id");
+  const receiptPath = path.join(root, "candidate-source.json");
+  fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+  assert.equal(
+    verifySourceReceipt({ receiptPath, repoRoot: root, channel: "beta", version: "1.2.67" }).source_receipt_id,
+    receipt.source_receipt_id,
+  );
+  fs.writeFileSync(input, "tampered");
+  assert.throws(
+    () => verifySourceReceipt({ receiptPath, repoRoot: root, channel: "beta", version: "1.2.67" }),
+    /checkout no longer matches clean source receipt/,
+  );
+});

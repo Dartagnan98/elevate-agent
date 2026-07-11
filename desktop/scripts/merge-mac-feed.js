@@ -6,7 +6,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
-const { resolveReleaseProfile } = require("../src/release-profile");
+const { releaseArtifactNames, resolveReleaseProfile } = require("../src/release-profile");
+const { verifySourceReceipt } = require("./candidate-receipt");
 
 const ROOT = path.resolve(__dirname, "..");
 const DIST = path.join(ROOT, "dist");
@@ -18,6 +19,8 @@ const FEED_NAME = `${RELEASE_CHANNEL}-mac.yml`;
 const FEED = path.join(DIST, FEED_NAME);
 const APP_BUNDLE_NAME = resolveReleaseProfile(RELEASE_CHANNEL).appBundleName;
 const { version } = require(path.join(ROOT, "package.json"));
+
+verifySourceReceipt({ channel: RELEASE_CHANNEL, version });
 
 function appVersion(appPath) {
   const result = spawnSync(
@@ -54,12 +57,7 @@ function artifact(name) {
   };
 }
 
-const files = [
-  artifact(`Elevate-${version}-mac-x64.zip`),
-  artifact(`Elevate-${version}-mac-arm64.zip`),
-  artifact(`Elevate-${version}-mac-x64.dmg`),
-  artifact(`Elevate-${version}-mac-arm64.dmg`),
-];
+const files = releaseArtifactNames(resolveReleaseProfile(RELEASE_CHANNEL), version).map(artifact);
 
 const primary = files[0];
 const feed = {
@@ -71,4 +69,5 @@ const feed = {
 };
 
 fs.writeFileSync(FEED, yaml.dump(feed, { lineWidth: -1, noRefs: true }));
+verifySourceReceipt({ channel: RELEASE_CHANNEL, version });
 console.log(`[merge-feed] wrote ${path.relative(ROOT, FEED)} with ${files.length} artifact(s)`);

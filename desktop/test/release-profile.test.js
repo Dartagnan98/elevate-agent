@@ -9,19 +9,28 @@ const { sanitizeFileName } = require("builder-util/out/filename");
 
 const createBuilderConfig = require("../electron-builder.config");
 const {
+  artifactFileName,
   applyElectronProfile,
+  downloadAliasFileName,
+  downloadAliasFileNames,
+  releaseArtifactNames,
   resolveReleaseProfile,
   resolveRuntimePaths,
 } = require("../src/release-profile");
 
-function builderConfig(channel) {
+function builderConfig(channel, sourceReceiptId) {
   const previous = process.env.ELEVATE_RELEASE_CHANNEL;
+  const previousSourceReceiptId = process.env.ELEVATE_SOURCE_RECEIPT_ID;
   try {
     process.env.ELEVATE_RELEASE_CHANNEL = channel;
+    if (sourceReceiptId) process.env.ELEVATE_SOURCE_RECEIPT_ID = sourceReceiptId;
+    else delete process.env.ELEVATE_SOURCE_RECEIPT_ID;
     return createBuilderConfig();
   } finally {
     if (previous === undefined) delete process.env.ELEVATE_RELEASE_CHANNEL;
     else process.env.ELEVATE_RELEASE_CHANNEL = previous;
+    if (previousSourceReceiptId === undefined) delete process.env.ELEVATE_SOURCE_RECEIPT_ID;
+    else process.env.ELEVATE_SOURCE_RECEIPT_ID = previousSourceReceiptId;
   }
 }
 
@@ -52,6 +61,9 @@ test("Stable keeps its shipping identity and Beta has a collision-free identity"
     "appBundleName",
     "appId",
     "packageName",
+    "artifactPrefix",
+    "downloadAliasPrefix",
+    "downloadAliasPrefixes",
     "protocolScheme",
     "elevateHomeName",
     "workspaceName",
@@ -141,6 +153,8 @@ test("electron-builder receives the selected app, protocol, feed, and updater id
   assert.equal(stable.extraMetadata.elevateReleaseChannel, "latest");
   assert.deepEqual(stable.protocols[0].schemes, ["elevate"]);
   assert.equal(stable.publish[0].channel, "latest");
+  assert.equal(stable.artifactName, "Elevate-${version}-${os}-${arch}.${ext}");
+  assert.equal(resolveReleaseProfile("latest").downloadAliasPrefix, "Elevate-latest");
 
   assert.equal(beta.productName, "Elevate Beta");
   assert.equal(beta.appId, "com.elevationrealestate.elevate.beta");
@@ -148,9 +162,32 @@ test("electron-builder receives the selected app, protocol, feed, and updater id
   assert.equal(beta.extraMetadata.elevateReleaseChannel, "beta");
   assert.deepEqual(beta.protocols[0].schemes, ["elevate-beta"]);
   assert.equal(beta.publish[0].channel, "beta");
+  assert.equal(beta.artifactName, "Elevate-Beta-${version}-${os}-${arch}.${ext}");
+  assert.equal(resolveReleaseProfile("beta").downloadAliasPrefix, "Elevate-Beta");
   assert.equal(beta.dmg.title, "Elevate Beta");
   const updaterCache = (config) =>
     `${sanitizeFileName(config.extraMetadata.name).toLowerCase()}-updater`;
   assert.equal(updaterCache(beta), "elevate-beta-desktop-updater");
   assert.notEqual(updaterCache(beta), updaterCache(stable));
+});
+
+test("Stable and Beta artifact/download names stay visibly separated", () => {
+  const stable = resolveReleaseProfile("latest");
+  const beta = resolveReleaseProfile("beta");
+  assert.equal(artifactFileName(stable, "1.2.67", "arm64", "dmg"), "Elevate-1.2.67-mac-arm64.dmg");
+  assert.equal(artifactFileName(beta, "1.2.67", "arm64", "dmg"), "Elevate-Beta-1.2.67-mac-arm64.dmg");
+  assert.equal(downloadAliasFileName(stable, "arm64"), "Elevate-latest-mac-arm64.dmg");
+  assert.equal(downloadAliasFileName(beta, "arm64"), "Elevate-Beta-mac-arm64.dmg");
+  assert.deepEqual(downloadAliasFileNames(beta, "arm64"), [
+    "Elevate-Beta-mac-arm64.dmg",
+    "Elevate-beta-mac-arm64.dmg",
+  ]);
+  assert.equal(releaseArtifactNames(beta, "1.2.67").length, 4);
+  assert.ok(releaseArtifactNames(beta, "1.2.67").every((name) => name.startsWith("Elevate-Beta-")));
+});
+
+test("electron-builder stamps the immutable source receipt into both candidates", () => {
+  const sourceReceiptId = "a".repeat(64);
+  assert.equal(builderConfig("latest", sourceReceiptId).extraMetadata.elevateSourceReceiptId, sourceReceiptId);
+  assert.equal(builderConfig("beta", sourceReceiptId).extraMetadata.elevateSourceReceiptId, sourceReceiptId);
 });

@@ -9,6 +9,9 @@ const STABLE = Object.freeze({
   appBundleName: "Elevate.app",
   appId: "com.elevationrealestate.elevate",
   packageName: "@elevationrealestate/elevate-desktop",
+  artifactPrefix: "Elevate",
+  downloadAliasPrefix: "Elevate-latest",
+  downloadAliasPrefixes: Object.freeze(["Elevate-latest"]),
   protocolScheme: "elevate",
   elevateHomeName: ".elevate",
   workspaceName: "Elevation",
@@ -23,6 +26,9 @@ const BETA = Object.freeze({
   appBundleName: "Elevate Beta.app",
   appId: "com.elevationrealestate.elevate.beta",
   packageName: "elevate-beta-desktop",
+  artifactPrefix: "Elevate-Beta",
+  downloadAliasPrefix: "Elevate-Beta",
+  downloadAliasPrefixes: Object.freeze(["Elevate-Beta", "Elevate-beta"]),
   protocolScheme: "elevate-beta",
   elevateHomeName: ".elevate-beta",
   workspaceName: "Elevation Beta",
@@ -32,6 +38,26 @@ const BETA = Object.freeze({
 
 function resolveReleaseProfile(channel) {
   return String(channel || "").trim().toLowerCase() === "beta" ? BETA : STABLE;
+}
+
+function artifactFileName(profile, version, architecture, extension) {
+  return `${profile.artifactPrefix}-${version}-mac-${architecture}.${extension}`;
+}
+
+function releaseArtifactNames(profile, version) {
+  return ["x64", "arm64"].flatMap((architecture) => [
+    artifactFileName(profile, version, architecture, "zip"),
+    artifactFileName(profile, version, architecture, "dmg"),
+  ]);
+}
+
+function downloadAliasFileName(profile, architecture) {
+  return `${profile.downloadAliasPrefix}-mac-${architecture}.dmg`;
+}
+
+function downloadAliasFileNames(profile, architecture) {
+  return (profile.downloadAliasPrefixes || [profile.downloadAliasPrefix])
+    .map((prefix) => `${prefix}-mac-${architecture}.dmg`);
 }
 
 function resolveRuntimePaths({ profile, home, env = {} }) {
@@ -77,7 +103,11 @@ function applyElectronProfile({ app, fs, profile, paths }) {
 module.exports = {
   BETA,
   STABLE,
+  artifactFileName,
   applyElectronProfile,
+  downloadAliasFileName,
+  downloadAliasFileNames,
+  releaseArtifactNames,
   resolveReleaseProfile,
   resolveRuntimePaths,
 };

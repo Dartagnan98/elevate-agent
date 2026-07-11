@@ -12,14 +12,15 @@
     "start": "electron .",
     "build:web": "npm --prefix ../cli/web run build",
     "pack:mac": "npm run build:web && electron-builder --config electron-builder.config.js --mac dir",
-    "build:mac": "npm run build:web && export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; export ELEVATE_RELEASE_CHANNEL=${ELEVATE_RELEASE_CHANNEL:-latest}; electron-builder --config electron-builder.config.js --mac dmg zip --x64 --publish never && electron-builder --config electron-builder.config.js --mac dmg zip --arm64 --publish never && npm run merge:mac-feed",
+    "build:mac": "export APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-elevate-notarization}; export ELEVATE_RELEASE_CHANNEL=${ELEVATE_RELEASE_CHANNEL:-latest}; node scripts/candidate-receipt.js build-mac",
     "sync:mac-runtime": "bash scripts/sync-mac-runtime.sh",
     "preflight:apple": "node scripts/preflight-apple-release.js",
     "merge:mac-feed": "node scripts/merge-mac-feed.js",
     "finalize:mac": "node scripts/finalize-mac-dist.js",
-    "smoke:mac": "VERSION=$(node -p \"require('./package.json').version\") && APP_BUNDLE=$(node -p \"require('./src/release-profile').resolveReleaseProfile(process.env.ELEVATE_RELEASE_CHANNEL).appBundleName\") && PYTHON=${ELEVATE_RELEASE_PYTHON:-../cli/.venv/bin/python} && \"$PYTHON\" ../cli/scripts/installed_runtime_smoke.py --installed-app \"dist/mac/$APP_BUNDLE\" --expected-app-version \"$VERSION\" --skip-sidecar && \"$PYTHON\" ../cli/scripts/installed_runtime_smoke.py --installed-app \"dist/mac-arm64/$APP_BUNDLE\" --expected-app-version \"$VERSION\" --skip-sidecar",
+    "smoke:mac": "node scripts/candidate-receipt.js verify-final && mkdir -p dist/evidence && VERSION=$(node -p \"require('./dist/candidate-receipt.json').release.version\") && APP_BUNDLE=$(node -p \"require('./dist/candidate-receipt.json').release.profile.appBundleName\") && PYTHON=${ELEVATE_RELEASE_PYTHON:-../cli/.venv/bin/python} && \"$PYTHON\" ../cli/scripts/installed_runtime_smoke.py --installed-app \"dist/mac/$APP_BUNDLE\" --expected-app-version \"$VERSION\" --candidate-receipt dist/candidate-receipt.json --candidate-architecture x64 --json-out dist/evidence/smoke-x64.json --skip-sidecar && \"$PYTHON\" ../cli/scripts/installed_runtime_smoke.py --installed-app \"dist/mac-arm64/$APP_BUNDLE\" --expected-app-version \"$VERSION\" --candidate-receipt dist/candidate-receipt.json --candidate-architecture arm64 --json-out dist/evidence/smoke-arm64.json --skip-sidecar",
+    "smoke:mac:live": "node scripts/candidate-receipt.js verify-final --require-static-evidence && mkdir -p dist/evidence && VERSION=$(node -p \"require('./dist/candidate-receipt.json').release.version\") && APP_BUNDLE=$(node -p \"require('./dist/candidate-receipt.json').release.profile.appBundleName\") && PRODUCT_NAME=$(node -p \"require('./dist/candidate-receipt.json').release.profile.productName\") && HOME_NAME=$(node -p \"require('./dist/candidate-receipt.json').release.profile.elevateHomeName\") && CANDIDATE_ID=$(node -p \"require('./dist/candidate-receipt.json').candidate_id\") && SHORT_ID=$(printf %.12s \"$CANDIDATE_ID\") && EXPECTED=\"live candidate $SHORT_ID ok\" && ARCH=$(node -p \"process.arch\") && INSTALLED_APP=${ELEVATE_LIVE_APP:-\"$HOME/Applications/$APP_BUNDLE\"} && MAIN_LOG=\"$HOME/Library/Logs/$PRODUCT_NAME/main.log\" && PYTHON=${ELEVATE_RELEASE_PYTHON:-../cli/.venv/bin/python} && ELEVATE_HOME=\"$HOME/$HOME_NAME\" \"$PYTHON\" ../cli/scripts/installed_runtime_smoke.py --live-candidate --installed-app \"$INSTALLED_APP\" --main-log \"$MAIN_LOG\" --expected-app-version \"$VERSION\" --candidate-receipt dist/candidate-receipt.json --candidate-architecture \"$ARCH\" --prompt \"Reply exactly: $EXPECTED\" --expected \"$EXPECTED\" --json-out dist/evidence/live-ai.json",
     "ship:mac": "node scripts/ship-to-hetzner.js",
-    "release:mac": "npm run build:mac && npm run finalize:mac && npm run smoke:mac && npm run ship:mac",
+    "release:mac": "npm run build:mac && npm run finalize:mac && npm run smoke:mac",
     "release:apple": "npm run preflight:apple && npm run release:mac",
     "release:beta": "ELEVATE_RELEASE_CHANNEL=beta npm run release:apple"
   },
@@ -140,6 +141,7 @@
     }
   },
   "devDependencies": {
+    "@electron/asar": "^3.4.1",
     "electron": "^39.8.10",
     "electron-builder": "^26.0.12",
     "js-yaml": "^4.1.1"
