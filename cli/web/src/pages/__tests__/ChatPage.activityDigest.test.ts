@@ -120,6 +120,23 @@ describe("ChatActivityDigest tool labels", () => {
 });
 
 describe("terminal failure truth", () => {
+  it("reuses the failed assistant row when its terminal completion arrives", () => {
+    expect(
+      __chatPageTestables.terminalErrorCompletionTarget(
+        null,
+        "assistant-live",
+        "assistant-live",
+      ),
+    ).toBe("assistant-live");
+    expect(
+      __chatPageTestables.terminalErrorCompletionTarget(
+        null,
+        "assistant-other",
+        "assistant-live",
+      ),
+    ).toBeNull();
+  });
+
   it("settles a live assistant and marks unfinished tools errored on gateway failure", () => {
     const failed = __chatPageTestables.failActiveTurnMessage(
       message({ content: "", id: "assistant-live", status: "streaming" }),
@@ -494,6 +511,38 @@ describe("server/cache transcript merge", () => {
 });
 
 describe("terminal truth containment", () => {
+  it.each([
+    "Tool execution failed: RuntimeError: worker crashed",
+    "[TOOL EXECUTION SKIPPED — read_file was not started]",
+  ])("rehydrates anchored plain-text tool failure %s as errored", (toolResult) => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      {
+        content: "",
+        role: "assistant",
+        tool_calls: [
+          {
+            function: { arguments: "{}", name: "read_file" },
+            id: "call-plain-failure",
+          },
+        ],
+      },
+      {
+        content: toolResult,
+        role: "tool",
+        tool_call_id: "call-plain-failure",
+        tool_name: "read_file",
+      },
+      { content: "The tool did not complete.", role: "assistant" },
+    ]);
+
+    expect(hydrated).toHaveLength(1);
+    expect(hydrated[0].status).toBe("error");
+    expect(hydrated[0].tools?.[0]).toMatchObject({
+      error: toolResult,
+      status: "error",
+    });
+  });
+
   it("rehydrates failed tools and keeps their assistant turn errored", () => {
     const hydrated = __chatPageTestables.normalizeStoredTranscript([
       {

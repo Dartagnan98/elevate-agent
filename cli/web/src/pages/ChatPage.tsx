@@ -1123,7 +1123,11 @@ function storedToolError(
   if (["cancelled", "canceled", "error", "failed", "interrupted"].includes(status)) {
     return `${name} ${status}`;
   }
-  if (/^(?:error\b|\[tool execution (?:cancelled|canceled)\b)/i.test(content)) {
+  if (
+    /^(?:error\b|\[tool execution (?:cancelled|canceled|skipped)\b|tool execution failed(?::|\s))/i.test(
+      content,
+    )
+  ) {
     return content.slice(0, 1000);
   }
   return undefined;
@@ -1198,6 +1202,17 @@ function failActiveTurnMessage(
     status: "error",
     tools: turnTools.length ? turnTools : message.tools,
   };
+}
+
+function terminalErrorCompletionTarget(
+  activeAssistantId: string | null,
+  completionMessageId: string,
+  terminalErrorAssistantId: string | null,
+): string | null {
+  if (activeAssistantId) return activeAssistantId;
+  return completionMessageId && completionMessageId === terminalErrorAssistantId
+    ? completionMessageId
+    : null;
 }
 
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
@@ -1437,6 +1452,7 @@ export const __chatPageTestables = {
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
   subagentCompletionStatus,
+  terminalErrorCompletionTarget,
   settleQueuedDelivery,
   terminalDuplicatePromptStatus,
   storedToolError,
@@ -3108,6 +3124,10 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const activeSessionRef = useRef<string | null>(null);
   const currentAssistantRef = useRef<string | null>(null);
+  // A terminal AIAgent failure emits `error` immediately and then the durable
+  // `message.complete` frame for the same wire message. Remember that row so
+  // the completion updates it instead of allocating a duplicate assistant.
+  const terminalErrorAssistantRef = useRef<string | null>(null);
   // Gateway message_id of the turn currently streaming. message.complete
   // events are matched against this so a LATE completion from a superseded
   // turn (classic after an accidental stop: the interrupted turn emits its
@@ -5311,6 +5331,7 @@ export default function ChatPage() {
           return;
         }
         lastToolActivityAtRef.current = 0;
+        terminalErrorAssistantRef.current = null;
         turnHasToolErrorRef.current = false;
         stretchStartRef.current = at;
         contentStartRef.current = 0;
@@ -5430,6 +5451,18 @@ export default function ChatPage() {
           return;
         }
         const evMsgId = eventString(ev, "message_id");
+        const terminalErrorTarget = terminalErrorCompletionTarget(
+          currentAssistantRef.current,
+          evMsgId,
+          terminalErrorAssistantRef.current,
+        );
+        if (!currentAssistantRef.current && terminalErrorTarget) {
+          currentAssistantRef.current = terminalErrorTarget;
+          liveGatewayMsgIdRef.current = terminalErrorTarget;
+        }
+        if (evMsgId && terminalErrorAssistantRef.current === evMsgId) {
+          terminalErrorAssistantRef.current = null;
+        }
         const liveMsgId = liveGatewayMsgIdRef.current;
         if (evMsgId && liveMsgId && evMsgId !== liveMsgId) {
           const lateToolError = toolsRef.current.some(
@@ -6040,6 +6073,7 @@ export default function ChatPage() {
         const message = eventString(ev, "message") || "Gateway error";
         const activeMessageId = currentAssistantRef.current;
         const activeTools = toolsRef.current;
+        terminalErrorAssistantRef.current = activeMessageId;
         setBanner(message);
         if (activeMessageId) {
           flushAssistantDelta();
