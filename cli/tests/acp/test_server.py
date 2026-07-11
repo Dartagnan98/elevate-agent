@@ -600,6 +600,50 @@ class TestPrompt:
 
         assert resp.stop_reason == "cancelled"
 
+    @pytest.mark.asyncio
+    async def test_prompt_nonempty_failure_returns_refusal_and_skips_title(self, agent):
+        new_resp = await agent.new_session(cwd=".")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        state.agent.run_conversation = MagicMock(return_value={
+            "final_response": "The model failed after retries.",
+            "messages": [],
+            "failed": True,
+            "completed": False,
+            "error": "The model failed after retries.",
+        })
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        with patch("agent.title_generator.maybe_auto_title") as mock_title:
+            resp = await agent.prompt(
+                prompt=[TextContentBlock(type="text", text="finish this")],
+                session_id=new_resp.session_id,
+            )
+
+        assert resp.stop_reason == "refusal"
+        mock_title.assert_not_called()
+        update = mock_conn.session_update.await_args.args[1]
+        assert "The model failed after retries." in str(update)
+
+    @pytest.mark.asyncio
+    async def test_prompt_executor_failure_returns_refusal_and_persists_error(self, agent):
+        new_resp = await agent.new_session(cwd=".")
+        state = agent.session_manager.get_session(new_resp.session_id)
+        fake_loop = MagicMock()
+        fake_loop.run_in_executor = AsyncMock(side_effect=RuntimeError("executor unavailable"))
+
+        with patch("acp_adapter.server.asyncio.get_running_loop", return_value=fake_loop):
+            resp = await agent.prompt(
+                prompt=[TextContentBlock(type="text", text="finish this")],
+                session_id=new_resp.session_id,
+            )
+
+        assert resp.stop_reason == "refusal"
+        assert state.history[-1]["role"] == "assistant"
+        assert "executor unavailable" in state.history[-1]["content"]
+
 
 # ---------------------------------------------------------------------------
 # on_connect

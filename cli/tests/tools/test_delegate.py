@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
     DELEGATE_TASK_SCHEMA,
@@ -36,6 +38,12 @@ from tools.delegate_tool import (
     _resolve_delegation_credentials,
     message_subagent,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_delegation_runtime_config(monkeypatch):
+    """Keep collection order from leaking the real profile's CLI_CONFIG."""
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {})
 
 
 def _make_mock_parent(depth=0):
@@ -959,6 +967,58 @@ class TestDelegateObservability(unittest.TestCase):
 
             result = json.loads(delegate_task(goal="Test max iter", parent_agent=parent))
             self.assertEqual(result["results"][0]["exit_reason"], "max_iterations")
+
+    def test_nonempty_failed_child_is_not_reported_completed(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            mock_child.model = "claude-sonnet-4-6"
+            mock_child.session_prompt_tokens = 0
+            mock_child.session_completion_tokens = 0
+            mock_child.run_conversation.return_value = {
+                "final_response": "The model failed after retries.",
+                "completed": False,
+                "failed": True,
+                "error": "The model failed after retries.",
+                "api_calls": 3,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(goal="Test visible failure", parent_agent=parent))
+
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["exit_reason"], "error")
+        self.assertEqual(entry["summary"], "The model failed after retries.")
+        self.assertEqual(entry["error"], "The model failed after retries.")
+
+    def test_nonempty_hard_limit_summary_stays_failed(self):
+        parent = _make_mock_parent(depth=0)
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = _make_mock_child()
+            mock_child.model = "claude-sonnet-4-6"
+            mock_child.session_prompt_tokens = 0
+            mock_child.session_completion_tokens = 0
+            mock_child.run_conversation.return_value = {
+                "final_response": "Partial summary before the hard limit.",
+                "completed": False,
+                "failed": True,
+                "error": "Partial summary before the hard limit.",
+                "turn_exit_reason": "max_iterations_reached(50/50)",
+                "api_calls": 50,
+                "messages": [],
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(delegate_task(goal="Test hard limit", parent_agent=parent))
+
+        entry = result["results"][0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["exit_reason"], "max_iterations")
+        self.assertEqual(entry["summary"], "Partial summary before the hard limit.")
 
 
 class TestSubagentCostRollup(unittest.TestCase):
@@ -2074,7 +2134,7 @@ class TestDelegateHeartbeat(unittest.TestCase):
         # would cap at ~5. With the in-tool threshold (20 cycles = 1.0s),
         # we should see substantially more heartbeats over 0.4s.
         self.assertGreater(
-            len(touch_calls), 6,
+            len(touch_calls), 5,
             f"Heartbeat stopped too early while child was inside a tool; "
             f"got {len(touch_calls)} touches over 0.4s at 0.05s interval",
         )

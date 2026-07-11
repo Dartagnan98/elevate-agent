@@ -27,6 +27,9 @@ from pathlib import Path
 import fire
 import yaml
 
+from agent.result_outcome import agent_result_error, agent_result_succeeded
+from elevate_constants import get_elevate_home, OPENROUTER_BASE_URL
+
 # Load .env from ~/.elevate/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 _elevate_home = get_elevate_home()
@@ -59,8 +62,6 @@ from tools.rl_training_tool import get_missing_keys
 # ============================================================================
 # Config Loading
 # ============================================================================
-
-from elevate_constants import get_elevate_home, OPENROUTER_BASE_URL
 
 DEFAULT_MODEL = "anthropic/claude-opus-4.5"
 DEFAULT_BASE_URL = OPENROUTER_BASE_URL
@@ -226,6 +227,15 @@ def list_environments_sync():
         return json.loads(result)
     
     return asyncio.run(_list())
+
+
+def _agent_failure_text(result) -> str:
+    """Keep partial output visible while still reporting the terminal error."""
+    detail = agent_result_error(result)
+    partial = result.get("final_response", "").strip() if isinstance(result, dict) else ""
+    if partial and partial != detail.strip():
+        return f"{partial}\n\n{detail}"
+    return detail
 
 
 # ============================================================================
@@ -414,6 +424,8 @@ def main(
                 print("\n" + "=" * 60)
                 response = agent.run_conversation(user_input)
                 print("\n" + "=" * 60)
+                if not agent_result_succeeded(response):
+                    print(f"❌ Task failed:\n{_agent_failure_text(response)}")
                 
             except KeyboardInterrupt:
                 print("\n\n👋 Interrupted. Goodbye!")
@@ -431,9 +443,13 @@ def main(
         try:
             response = agent.run_conversation(task)
             print("\n" + "=" * 60)
+            if not agent_result_succeeded(response):
+                print(f"❌ Task failed:\n{_agent_failure_text(response)}")
+                sys.exit(1)
             print("✅ Task completed")
         except KeyboardInterrupt:
             print("\n\n⚠️ Interrupted by user")
+            sys.exit(130)
         except Exception as e:
             print(f"\n❌ Error: {e}")
             if verbose:

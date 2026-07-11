@@ -4,7 +4,7 @@ import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
 import { getTurnState, resetTurnState } from '../app/turnStore.js'
-import { patchUiState, resetUiState } from '../app/uiStore.js'
+import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import { estimateTokensRough } from '../lib/text.js'
 import type { Msg } from '../types.js'
 
@@ -91,6 +91,23 @@ describe('createGatewayEventHandler', () => {
     expect(appended[0]?.tools).toHaveLength(1)
     expect(appended[0]?.tools?.[0]).toContain('hero cards')
     expect(appended[0]?.toolTokens).toBeGreaterThan(0)
+  })
+
+  it('rings only for an explicitly successful message.complete', () => {
+    const ctx = buildCtx([])
+    const write = vi.fn()
+
+    ctx.system.bellOnComplete = true
+    ctx.system.stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(ctx)
+
+    onEvent({ payload: { status: 'error', text: 'failed' }, type: 'message.complete' } as any)
+    onEvent({ payload: { status: 'interrupted', text: 'stopped' }, type: 'message.complete' } as any)
+    onEvent({ payload: { text: 'legacy terminal frame' }, type: 'message.complete' } as any)
+    onEvent({ payload: { status: 'complete', text: 'done' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledTimes(1)
+    expect(write).toHaveBeenCalledWith('\x07')
   })
 
   it('keeps tool tokens across handler recreation mid-turn', () => {
@@ -310,5 +327,26 @@ describe('createGatewayEventHandler', () => {
     onEvent({ payload: { message: 'boom' }, type: 'error' } as any)
 
     expect(getTurnState().activity).toMatchObject([{ text: 'boom', tone: 'error' }])
+  })
+
+  it('settles failed background work with an explicit error marker', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    patchUiState({ bgTasks: new Set(['bg-1']) })
+
+    createGatewayEventHandler(ctx)({
+      payload: {
+        error: 'The model failed after retries.',
+        status: 'error',
+        task_id: 'bg-1',
+        text: 'The model failed after retries.'
+      },
+      type: 'background.complete'
+    } as any)
+
+    expect(getUiState().bgTasks.has('bg-1')).toBe(false)
+    expect(ctx.system.sys).toHaveBeenCalledWith(
+      '[bg bg-1] error: The model failed after retries.'
+    )
   })
 })

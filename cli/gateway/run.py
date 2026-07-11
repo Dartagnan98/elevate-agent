@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Dict, Optional, Any, List
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -1443,43 +1444,64 @@ def _normalize_empty_agent_response(
     *,
     history_len: int = 0,
 ) -> str:
-    """Normalize empty/None agent responses into user-facing messages.
+    """Normalize unsuccessful agent results into user-facing terminal messages.
 
     Consolidates the existing ``failed`` handler and adds a catch-all for
     the case where the agent did work (api_calls > 0) but returned no text.
     """
-    if response:
+    if (
+        agent_result_succeeded(agent_result)
+        and agent_result.get("final_response") != "(empty)"
+    ):
         return response
 
-    if agent_result.get("failed"):
-        error_detail = agent_result.get("error", "unknown error")
-        error_str = str(error_detail).lower()
-        is_context_failure = any(
-            p in error_str
-            for p in ("context", "token", "too large", "too long", "exceed", "payload")
-        ) or ("400" in error_str and history_len > 50)
-        if is_context_failure:
-            return (
-                "⚠️ Session too large for the model's context window.\n"
-                "Use /compact to compress the conversation, or "
-                "/reset to start fresh."
-            )
+    if response == "(empty)":
+        response = ""
+
+    error_detail = agent_result_error(agent_result)
+    error_str = error_detail.lower()
+    is_context_failure = any(
+        p in error_str
+        for p in ("context", "token", "too large", "too long", "exceed", "payload")
+    ) or ("400" in error_str and history_len > 50)
+
+    if response:
+        response_lower = response.lower()
+        if any(marker in response_lower for marker in (
+            "turn did not complete",
+            "request failed:",
+            "processing stopped:",
+            "turn was interrupted",
+            "interrupted before it completed",
+        )):
+            return response
+        if agent_result.get("interrupted"):
+            explanation = "⚠️ This turn was interrupted before it completed."
+        elif agent_result.get("partial"):
+            explanation = "⚠️ This is a partial response; the turn did not complete. Please retry."
+        elif agent_result.get("error") and error_detail.strip() != response.strip():
+            explanation = f"⚠️ This turn did not complete: {error_detail[:300]}"
+        else:
+            explanation = "⚠️ This turn did not complete. Please retry."
+        return f"{response}\n\n{explanation}"
+
+    if is_context_failure:
         return (
-            f"The request failed: {str(error_detail)[:300]}\n"
+            "⚠️ Session too large for the model's context window.\n"
+            "Use /compact to compress the conversation, or "
+            "/reset to start fresh."
+        )
+    if agent_result.get("interrupted"):
+        return "⚠️ This turn was interrupted before it completed. Please retry."
+    if agent_result.get("partial"):
+        return f"⚠️ Processing stopped: {error_detail[:200]}. Try again."
+    if agent_result.get("failed") or agent_result.get("error"):
+        return (
+            f"The request failed: {error_detail[:300]}\n"
             "Try again or use /reset to start a fresh session."
         )
 
-    api_calls = int(agent_result.get("api_calls", 0) or 0)
-    if api_calls > 0 and not agent_result.get("interrupted"):
-        if agent_result.get("partial"):
-            err = agent_result.get("error", "processing incomplete")
-            return f"⚠️ Processing stopped: {str(err)[:200]}. Try again."
-        return (
-            "⚠️ Processing completed but no response was generated. "
-            "This may be a transient error — try sending your message again."
-        )
-
-    return response
+    return "⚠️ This turn did not complete. Please retry."
 
 
 def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
@@ -1491,15 +1513,7 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     the marker in that case loses the recovery signal and startup auto-resume
     has nothing to schedule.
     """
-    if not isinstance(agent_result, dict):
-        return False
-    if agent_result.get("interrupted"):
-        return False
-    if agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
-        return False
-    if agent_result.get("completed") is False:
-        return False
-    return True
+    return agent_result_succeeded(agent_result)
 
 
 def _preserve_queued_followup_history_offset(
@@ -7040,6 +7054,7 @@ class GatewayRunner:
                 logger.debug("Usage ledger write skipped: %s", exc)
 
             response = agent_result.get("final_response") or ""
+            turn_succeeded = agent_result_succeeded(agent_result)
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
@@ -7047,10 +7062,14 @@ class GatewayRunner:
             # prefill, empty-retry, fallback).  Sending the raw sentinel
             # looks like a bug; a short explanation is more helpful.
             if response == "(empty)":
-                response = (
-                    "⚠️ The model returned no response after processing tool "
-                    "results. This can happen with some models — try again or "
-                    "rephrase your question."
+                response = ""
+                turn_succeeded = False
+
+            if not turn_succeeded:
+                response = _normalize_empty_agent_response(
+                    agent_result,
+                    response,
+                    history_len=len(history),
                 )
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
@@ -7070,7 +7089,7 @@ class GatewayRunner:
             # shutdown) — the turn ran to completion, so recovery
             # succeeded and subsequent messages should no longer receive
             # the restart-interruption system note.
-            if session_key:
+            if session_key and _should_clear_resume_pending_after_turn(agent_result):
                 self._clear_restart_failure_count(session_key)
                 try:
                     self.session_store.clear_resume_pending(session_key)
@@ -7080,36 +7099,12 @@ class GatewayRunner:
                         session_key[:20], _e,
                     )
 
-            # Surface error details when the agent failed silently (final_response=None)
-            if not response and agent_result.get("failed"):
-                error_detail = agent_result.get("error", "unknown error")
-                error_str = str(error_detail).lower()
-
-                # Detect context-overflow failures and give specific guidance.
-                # Generic 400 "Error" from Anthropic with large sessions is the
-                # most common cause of this (#1630).
-                _is_ctx_fail = any(p in error_str for p in (
-                    "context", "token", "too large", "too long",
-                    "exceed", "payload",
-                )) or (
-                    "400" in error_str
-                    and len(history) > 50
-                )
-
-                if _is_ctx_fail:
-                    if _legacy_recovery_failed:
-                        response = _legacy_transcript_recovery_reply(source.platform)
-                    else:
-                        response = (
-                            "⚠️ Session too large for the model's context window.\n"
-                            "Use /compact to compress the conversation, or "
-                            "/reset to start fresh."
-                        )
-                else:
-                    response = (
-                        f"The request failed: {str(error_detail)[:300]}\n"
-                        "Try again or use /reset to start a fresh session."
-                    )
+            if (
+                not turn_succeeded
+                and _legacy_recovery_failed
+                and "context window" in response.lower()
+            ):
+                response = _legacy_transcript_recovery_reply(source.platform)
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -7193,7 +7188,7 @@ class GatewayRunner:
             # compression exhausted), do NOT persist the user's message.
             # Persisting it would make the session even larger, causing the
             # same failure on the next attempt — an infinite loop. (#1630, #9893)
-            agent_failed_early = bool(agent_result.get("failed"))
+            agent_failed_early = not turn_succeeded
             if agent_failed_early:
                 logger.info(
                     "Skipping transcript persistence for failed request in "
@@ -7279,14 +7274,17 @@ class GatewayRunner:
             # Keep only last_prompt_tokens here for context-window tracking and
             # compression decisions. Clamp the -1 post-compaction sentinel to 0
             # so it never persists into the dashboard ring or pressure math.
-            self.session_store.update_session(
-                session_entry.session_key,
-                last_prompt_tokens=max(0, agent_result.get("last_prompt_tokens", 0) or 0),
-            )
+            if turn_succeeded:
+                self.session_store.update_session(
+                    session_entry.session_key,
+                    last_prompt_tokens=max(0, agent_result.get("last_prompt_tokens", 0) or 0),
+                )
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
+            if turn_succeeded and self._should_send_voice_reply(
+                event, response, agent_messages, already_sent=_already_sent
+            ):
                 await self._send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
@@ -7300,7 +7298,7 @@ class GatewayRunner:
             # content the user hasn't seen (streaming only sent earlier
             # partial output before the failure).  Without this guard,
             # users see the agent "stop responding without explanation."
-            if agent_result.get("already_sent") and not agent_result.get("failed"):
+            if turn_succeeded and agent_result.get("already_sent"):
                 if response:
                     _media_adapter = self.adapters.get(source.platform)
                     if _media_adapter:
@@ -9350,8 +9348,25 @@ class GatewayRunner:
             result = await self._run_in_executor_with_context(run_sync)
 
             response = result.get("final_response", "") if result else ""
-            if not response and result and result.get("error"):
-                response = f"Error: {result['error']}"
+            if result and not _should_clear_resume_pending_after_turn(result):
+                failure_text = _normalize_empty_agent_response(result, response)
+                if not failure_text:
+                    failure_text = str(
+                        result.get("error") or "No response was generated."
+                    )
+                self._record_background_task(
+                    task_id,
+                    "failed",
+                    prompt,
+                    source,
+                    error=failure_text,
+                )
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=f"❌ Background task {task_id} failed:\n\n{failure_text}",
+                    metadata=_thread_metadata,
+                )
+                return
             self._record_background_task(
                 task_id,
                 "completed",
@@ -9543,15 +9558,22 @@ class GatewayRunner:
             result = await self._run_in_executor_with_context(run_sync)
 
             response = (result.get("final_response") or "") if result else ""
-            if not response and result and result.get("error"):
-                response = f"Error: {result['error']}"
-            if not response:
-                response = "(No response generated)"
+            preview = question[:60] + ("..." if len(question) > 60 else "")
+            header = f'💬 /btw: "{preview}"\n\n'
+            if not agent_result_succeeded(result):
+                failure_text = _normalize_empty_agent_response(result or {}, response)
+                failure_detail = agent_result_error(result)
+                if response and failure_detail.strip() not in failure_text:
+                    failure_text += f"\n\nReason: {failure_detail}"
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=header + f"❌ /btw failed\n\n{failure_text}",
+                    metadata=_thread_meta,
+                )
+                return
 
             media_files, response = adapter.extract_media(response)
             images, text_content = adapter.extract_images(response)
-            preview = question[:60] + ("..." if len(question) > 60 else "")
-            header = f'💬 /btw: "{preview}"\n\n'
 
             if text_content:
                 await adapter.send(
@@ -12121,24 +12143,39 @@ class GatewayRunner:
         agent runs on the host with full access to local files, memory,
         skills, and a unified session store.
         """
+        def _proxy_failure(
+            error: str,
+            *,
+            partial_text: str = "",
+            api_calls: int = 0,
+        ) -> Dict[str, Any]:
+            partial_text = partial_text.strip()
+            return {
+                "final_response": partial_text or f"⚠️ {error}",
+                "messages": [],
+                "api_calls": api_calls,
+                "tools": [],
+                "history_offset": len(history),
+                "session_id": session_id,
+                "response_previewed": False,
+                "completed": False,
+                "failed": True,
+                "partial": bool(partial_text),
+                "error": error,
+            }
+
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
         except ImportError:
-            return {
-                "final_response": "⚠️ Proxy mode requires aiohttp. Install with: pip install aiohttp",
-                "messages": [],
-                "api_calls": 0,
-                "tools": [],
-            }
+            return _proxy_failure(
+                "Proxy mode requires aiohttp. Install with: pip install aiohttp"
+            )
 
         proxy_url = self._get_proxy_url()
         if not proxy_url:
-            return {
-                "final_response": "⚠️ Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)",
-                "messages": [],
-                "api_calls": 0,
-                "tools": [],
-            }
+            return _proxy_failure(
+                "Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)"
+            )
 
         proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
 
@@ -12246,6 +12283,9 @@ class GatewayRunner:
 
         # Make the HTTP request with SSE streaming -----------------------
         full_response = ""
+        saw_done = False
+        stream_error = ""
+        transport_error = ""
         _start = time.time()
 
         try:
@@ -12262,15 +12302,13 @@ class GatewayRunner:
                             "Proxy error (%d) from %s: %s",
                             resp.status, proxy_url, error_text[:500],
                         )
-                        return {
-                            "final_response": f"⚠️ Proxy error ({resp.status}): {error_text[:300]}",
-                            "messages": [],
-                            "api_calls": 0,
-                            "tools": [],
-                        }
+                        return _proxy_failure(
+                            f"Proxy error ({resp.status}): {error_text[:300]}"
+                        )
 
                     # Parse SSE stream
                     buffer = ""
+                    current_event = ""
                     async for chunk in resp.content.iter_any():
                         if not _run_still_current():
                             logger.info(
@@ -12295,13 +12333,33 @@ class GatewayRunner:
                             line, buffer = buffer.split("\n", 1)
                             line = line.strip()
                             if not line:
+                                current_event = ""
                                 continue
-                            if line.startswith("data: "):
-                                data = line[6:]
+                            if line.startswith("event:"):
+                                current_event = line[6:].strip()
+                                continue
+                            if line.startswith("data:"):
+                                data = line[5:].lstrip()
                                 if data.strip() == "[DONE]":
+                                    saw_done = True
                                     break
                                 try:
                                     obj = json.loads(data)
+                                    if not isinstance(obj, dict):
+                                        if current_event in ("error", "response.failed"):
+                                            stream_error = str(obj)
+                                        continue
+                                    error_obj = obj.get("error")
+                                    if error_obj or current_event in ("error", "response.failed"):
+                                        if isinstance(error_obj, dict):
+                                            stream_error = str(
+                                                error_obj.get("message") or error_obj
+                                            )
+                                        else:
+                                            stream_error = str(
+                                                error_obj or obj.get("message") or current_event
+                                            )
+                                        continue
                                     choices = obj.get("choices", [])
                                     if choices:
                                         delta = choices[0].get("delta", {})
@@ -12311,20 +12369,16 @@ class GatewayRunner:
                                             if _stream_consumer:
                                                 _stream_consumer.on_delta(content)
                                 except json.JSONDecodeError:
-                                    pass
+                                    if current_event in ("error", "response.failed"):
+                                        stream_error = data
+                        if saw_done:
+                            break
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("Proxy connection error to %s: %s", proxy_url, e)
-            if not full_response:
-                return {
-                    "final_response": f"⚠️ Proxy connection error: {e}",
-                    "messages": [],
-                    "api_calls": 0,
-                    "tools": [],
-                }
-            # Partial response — return what we got
+            transport_error = str(e)
         finally:
             # Finalize stream consumer
             if _stream_consumer:
@@ -12356,8 +12410,32 @@ class GatewayRunner:
             proxy_url, (session_id or "")[:20], _elapsed, len(full_response),
         )
 
+        if stream_error:
+            return _proxy_failure(
+                f"Remote agent failed: {stream_error}",
+                partial_text=full_response,
+                api_calls=1,
+            )
+        if transport_error:
+            return _proxy_failure(
+                f"Proxy connection error: {transport_error}",
+                partial_text=full_response,
+                api_calls=1,
+            )
+        if not saw_done:
+            return _proxy_failure(
+                "Proxy stream ended before the remote agent completed.",
+                partial_text=full_response,
+                api_calls=1,
+            )
+        if not full_response.strip():
+            return _proxy_failure(
+                "The remote agent completed without a response.",
+                api_calls=1,
+            )
+
         return {
-            "final_response": full_response or "(No response from remote agent)",
+            "final_response": full_response,
             "messages": [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": full_response},
@@ -12367,6 +12445,10 @@ class GatewayRunner:
             "history_offset": len(history),
             "session_id": session_id,
             "response_previewed": _stream_consumer is not None and bool(full_response),
+            "completed": True,
+            "failed": False,
+            "partial": False,
+            "error": None,
         }
 
     # ------------------------------------------------------------------
@@ -13443,6 +13525,10 @@ class GatewayRunner:
                     "messages": result.get("messages", []),
                     "api_calls": result.get("api_calls", 0),
                     "failed": result.get("failed", False),
+                    "partial": result.get("partial", False),
+                    "interrupted": result.get("interrupted", False),
+                    "error": result.get("error"),
+                    "completed": result.get("completed", False),
                     "compression_exhausted": result.get("compression_exhausted", False),
                     "tools": tools_holder[0] or [],
                     "history_offset": len(agent_history),
@@ -13528,7 +13614,11 @@ class GatewayRunner:
             _effective_history_offset = 0 if _session_was_split else len(agent_history)
 
             # Auto-generate session title after first exchange (non-blocking)
-            if final_response and self._session_db:
+            if (
+                final_response
+                and self._session_db
+                and _should_clear_resume_pending_after_turn(result)
+            ):
                 try:
                     from agent.title_generator import maybe_auto_title
                     all_msgs = result_holder[0].get("messages", []) if result_holder[0] else []
@@ -13547,6 +13637,14 @@ class GatewayRunner:
                 "last_reasoning": result.get("last_reasoning"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
+                "failed": result.get("failed", False),
+                "partial": result.get("partial", False),
+                "interrupted": result.get("interrupted", False),
+                "error": result.get("error"),
+                "completed": result.get(
+                    "completed",
+                    not result.get("failed") and not result.get("error"),
+                ),
                 "tools": tools_holder[0] or [],
                 "history_offset": _effective_history_offset,
                 "last_prompt_tokens": _last_prompt_toks,

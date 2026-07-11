@@ -1607,6 +1607,21 @@ class TestExecuteToolCalls:
         assert len(messages) == 1
         assert messages[0]["role"] == "tool"
 
+    def test_quiet_tool_exception_prints_failure_result(self, agent):
+        tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
+        messages = []
+        agent.platform = "cli"
+        agent.tool_progress_callback = None
+
+        with patch("run_agent.handle_function_call", side_effect=RuntimeError("boom")), \
+             patch.object(agent, "_safe_print") as mock_print:
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        rendered = str(mock_print.call_args.args[0]).lower()
+        assert "error" in rendered or "failed" in rendered
+        assert "boom" in messages[0]["content"]
+
     def test_quiet_tool_output_suppressed_without_progress_callback_for_non_cli_agent(self, agent):
         tc = _mock_tool_call(name="web_search", arguments='{"q":"test"}', call_id="c1")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc])
@@ -1880,12 +1895,13 @@ class TestConcurrentToolExecution:
         assert messages[1]["tool_call_id"] == "c2"
         assert "result_fast" in messages[1]["content"]
 
-    def test_concurrent_handles_tool_error(self, agent):
+    def test_concurrent_handles_tool_error(self, agent, capsys):
         """If one tool raises, others should still complete."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
         tc2 = _mock_tool_call(name="web_search", arguments='{}', call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
+        agent.quiet_mode = False
 
         call_count = [0]
         def fake_handle(name, args, task_id, **kwargs):
@@ -1901,6 +1917,10 @@ class TestConcurrentToolExecution:
         contents = [m["content"] for m in messages]
         assert any("Error" in content or "boom" in content for content in contents)
         assert any("success" in content for content in contents)
+        output = capsys.readouterr().out
+        assert "❌ Tool" in output
+        assert "failed" in output
+        assert "✅ Tool" in output
 
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
@@ -2143,6 +2163,11 @@ class TestHandleMaxIterations:
         assert isinstance(result, str)
         assert "error" in result.lower()
         assert "API down" in result
+        assert messages[-1] == {
+            "role": "assistant",
+            "content": result,
+            "finish_reason": "error",
+        }
 
     def test_summary_skips_reasoning_for_unsupported_openrouter_model(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
@@ -2264,13 +2289,23 @@ class TestRunConversation:
 
     def test_interrupt_breaks_loop(self, agent):
         self._setup_agent(agent)
+        memory_manager = MagicMock()
+        memory_manager.prefetch_all.return_value = ""
+        agent._memory_manager = memory_manager
+        persisted = {}
 
         def interrupt_side_effect(api_kwargs):
             agent._interrupt_requested = True
             raise InterruptedError("Agent interrupted during API call")
 
         with (
-            patch.object(agent, "_persist_session"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent._set_interrupt"),
@@ -2280,6 +2315,81 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("hello")
         assert result["interrupted"] is True
+        assert result["completed"] is False
+        assert persisted["messages"][-1]["finish_reason"] == "interrupted"
+        memory_manager.sync_all.assert_not_called()
+        memory_manager.queue_prefetch_all.assert_not_called()
+
+    def test_terminal_provider_exception_is_failed_and_skips_success_hooks(self, agent):
+        self._setup_agent(agent)
+        agent.max_iterations = 2
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="unused", finish_reason="stop"
+        )
+        transport = agent._get_transport()
+        hook_names = []
+
+        def _record_hook(name, **_kwargs):
+            hook_names.append(name)
+            return []
+
+        with (
+            patch.object(
+                transport, "normalize_response", side_effect=RuntimeError("bad envelope")
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("elevate_cli.plugins.invoke_hook", side_effect=_record_hook),
+            patch("agent.turn_attribution.attribute_turn_safely") as attribution,
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["error"] == "bad envelope"
+        assert "bad envelope" in result["final_response"]
+        assert result["messages"][-1]["finish_reason"] == "error"
+        assert "post_llm_call" not in hook_names
+        attribution.assert_not_called()
+
+    def test_iteration_budget_summary_is_incomplete_even_below_max_calls(self, agent):
+        from agent.iteration_budget import IterationBudget as RealIterationBudget
+
+        self._setup_agent(agent)
+        agent.max_iterations = 5
+        tool_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[tool_call]
+            ),
+            _mock_response(content="Work stopped at the configured limit."),
+        ]
+        persisted = {}
+        with (
+            patch("run_agent.IterationBudget", return_value=RealIterationBudget(1)),
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search until done")
+
+        assert result["api_calls"] == 1
+        assert result["api_calls"] < agent.max_iterations
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"].startswith("max_iterations_reached")
+        assert persisted["messages"][-1]["role"] == "assistant"
+        assert persisted["messages"][-1]["finish_reason"] == "error"
 
     def test_invalid_tool_name_retry(self, agent):
         """Model hallucinates an invalid tool name, agent retries and succeeds."""
@@ -2326,12 +2436,13 @@ class TestRunConversation:
             result = agent.run_conversation("hello", conversation_history=prefill)
 
         mock_compress.assert_not_called()  # no compression triggered
-        assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] == run_agent.EMPTY_RESPONSE_FAILURE_MESSAGE
         assert result["api_calls"] == 6  # 1 original + 2 prefill + 3 retries
 
-    def test_reasoning_only_response_prefill_then_empty(self, agent):
-        """Structured reasoning-only triggers prefill (2), then retries (3), then (empty)."""
+    def test_reasoning_only_response_prefill_then_fails(self, agent):
+        """Structured reasoning-only exhausts recovery as a visible failure."""
         self._setup_agent(agent)
         empty_resp = _mock_response(
             content=None,
@@ -2346,8 +2457,9 @@ class TestRunConversation:
             patch.object(agent, "_cleanup_task_resources"),
         ):
             result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] == run_agent.EMPTY_RESPONSE_FAILURE_MESSAGE
         assert result["api_calls"] == 6  # 1 original + 2 prefill + 3 retries
 
     def test_reasoning_only_prefill_succeeds_on_continuation(self, agent):
@@ -2378,23 +2490,35 @@ class TestRunConversation:
             if roles[i] == "assistant" and roles[i + 1] == "assistant":
                 raise AssertionError("Consecutive assistant messages found in history")
 
-    def test_truly_empty_response_retries_3_times_then_empty(self, agent):
-        """Truly empty response (no content, no reasoning) retries 3 times then falls through to (empty)."""
+    def test_truly_empty_response_retries_3_times_then_fails_visibly(self, agent):
+        """Exhausted empty responses are persisted and returned as a failure."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
         empty_resp = _mock_response(content=None, finish_reason="stop")
+        persisted = {}
         # 4 responses: 1 original + 3 nudge retries, all empty
         agent.client.chat.completions.create.side_effect = [
             empty_resp, empty_resp, empty_resp, empty_resp,
         ]
         with (
-            patch.object(agent, "_persist_session"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
             result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert "did not complete" in result["final_response"].lower()
+        assert result["error"] == result["final_response"]
+        assert persisted["messages"][-1]["content"] == result["final_response"]
+        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert all(m.get("content") != "(empty)" for m in persisted["messages"])
         assert result["api_calls"] == 4  # 1 original + 3 retries
 
     def test_truly_empty_response_succeeds_on_nudge(self, agent):
@@ -2417,6 +2541,247 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Here is the actual answer."
         assert result["api_calls"] == 2  # 1 original + 1 nudge retry
+
+    def test_post_tool_empty_failure_does_not_persist_retry_sentinels(self, agent):
+        self._setup_agent(agent)
+        tool_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        tool_response = _mock_response(
+            content="", finish_reason="tool_calls", tool_calls=[tool_call]
+        )
+        empty_response = _mock_response(content=None, finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [
+            tool_response,
+            empty_response,
+            empty_response,
+            empty_response,
+            empty_response,
+            empty_response,
+        ]
+        persisted = {}
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search before answering")
+
+        assert result["failed"] is True
+        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert all(m.get("content") != "(empty)" for m in persisted["messages"])
+        assert not any(
+            m.get("_empty_recovery_synthetic") for m in persisted["messages"]
+        )
+        assert any(m.get("role") == "tool" for m in persisted["messages"])
+
+    def test_post_tool_empty_nudge_success_cleans_provider_and_history(self, agent):
+        self._setup_agent(agent)
+        tool_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[tool_call]
+            ),
+            _mock_response(content=None, finish_reason="stop"),
+            _mock_response(content="Recovered answer.", finish_reason="stop"),
+        ]
+        persisted = {}
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search before answering")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered answer."
+        assert all(
+            "_empty_recovery_synthetic" not in message
+            for call in agent.client.chat.completions.create.call_args_list
+            for message in call.kwargs["messages"]
+        )
+        assert not any(
+            m.get("content") == "(empty)"
+            or (
+                isinstance(m.get("content"), str)
+                and m["content"].startswith("You just executed tool calls")
+            )
+            or m.get("_empty_recovery_synthetic")
+            for m in persisted["messages"]
+        )
+
+    def test_empty_nudge_then_tool_then_text_keeps_history_clean(self, agent):
+        self._setup_agent(agent)
+        first_tool = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        recovered_tool = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-2"
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[first_tool]
+            ),
+            _mock_response(content=None, finish_reason="stop"),
+            _mock_response(
+                content="", finish_reason="tool_calls", tool_calls=[recovered_tool]
+            ),
+            _mock_response(content="Recovered after tools.", finish_reason="stop"),
+        ]
+        persisted = {}
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search before answering")
+
+        assert result["final_response"] == "Recovered after tools."
+        assert all(
+            "_empty_recovery_synthetic" not in message
+            for call in agent.client.chat.completions.create.call_args_list
+            for message in call.kwargs["messages"]
+        )
+        final_provider_messages = (
+            agent.client.chat.completions.create.call_args_list[-1].kwargs["messages"]
+        )
+        assert not any(
+            m.get("content") == "(empty)"
+            or (
+                isinstance(m.get("content"), str)
+                and m["content"].startswith("You just executed tool calls")
+            )
+            for m in final_provider_messages
+        )
+        assert not any(
+            m.get("content") == "(empty)"
+            or (
+                isinstance(m.get("content"), str)
+                and m["content"].startswith("You just executed tool calls")
+            )
+            or m.get("_empty_recovery_synthetic")
+            for m in persisted["messages"]
+        )
+
+    def test_empty_nudge_partial_stream_is_persisted_without_scaffolding(self, agent):
+        self._setup_agent(agent)
+        tool_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        responses = iter(
+            [
+                _mock_response(
+                    content="", finish_reason="tool_calls", tool_calls=[tool_call]
+                ),
+                _mock_response(content=None, finish_reason="stop"),
+                _mock_response(content=None, finish_reason="stop"),
+            ]
+        )
+        provider_payloads = []
+
+        def _api_call(api_kwargs):
+            provider_payloads.append(api_kwargs["messages"])
+            response = next(responses)
+            if len(provider_payloads) == 3:
+                agent._current_streamed_assistant_text = "Durable partial answer"
+            return response
+
+        persisted = {}
+        with (
+            patch("run_agent.handle_function_call", return_value="search result"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_api_call),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search before answering")
+
+        assert result["final_response"] == "Durable partial answer"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "partial text was preserved" in result["error"]
+        assert persisted["messages"][-1]["content"] == "Durable partial answer"
+        assert persisted["messages"][-1]["role"] == "assistant"
+        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert not any(
+            m.get("content") == "(empty)"
+            or (
+                isinstance(m.get("content"), str)
+                and m["content"].startswith("You just executed tool calls")
+            )
+            or m.get("_empty_recovery_synthetic")
+            for m in persisted["messages"]
+        )
+        assert all(
+            "_empty_recovery_synthetic" not in message
+            for payload in provider_payloads
+            for message in payload
+        )
+
+    def test_empty_failure_skips_success_only_side_effects(self, agent):
+        self._setup_agent(agent)
+        agent.base_url = "http://127.0.0.1:1234/v1"
+        agent.valid_tool_names.add("skill_manage")
+        memory_manager = MagicMock()
+        memory_manager.prefetch_all.return_value = ""
+        agent._memory_manager = memory_manager
+        empty_response = _mock_response(content=None, finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [empty_response] * 4
+        hook_names = []
+
+        def _record_hook(name, **_kwargs):
+            hook_names.append(name)
+            return []
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_spawn_background_review") as background_review,
+            patch("elevate_cli.plugins.invoke_hook", side_effect=_record_hook),
+            patch("agent.turn_attribution.attribute_turn_safely") as attribution,
+        ):
+            result = agent.run_conversation("That's wrong, answer me")
+
+        assert result["failed"] is True
+        assert "post_llm_call" not in hook_names
+        attribution.assert_not_called()
+        memory_manager.sync_all.assert_not_called()
+        memory_manager.queue_prefetch_all.assert_not_called()
+        background_review.assert_not_called()
 
     def test_empty_response_triggers_fallback_provider(self, agent):
         """After 3 empty retries, fallback provider is activated and produces content."""
@@ -2457,8 +2822,8 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Fallback answer."
 
-    def test_empty_response_fallback_also_empty_returns_empty(self, agent):
-        """If fallback also returns empty, final response is (empty)."""
+    def test_empty_response_fallback_also_empty_fails_visibly(self, agent):
+        """If fallback also returns empty, the turn reports a visible failure."""
         self._setup_agent(agent)
         agent.base_url = "http://127.0.0.1:1234/v1"
         agent._fallback_chain = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}]
@@ -2489,8 +2854,9 @@ class TestRunConversation:
             patch.object(agent, "_try_activate_fallback", side_effect=_mock_fallback),
         ):
             result = agent.run_conversation("answer me")
-        assert result["completed"] is True
-        assert result["final_response"] == "(empty)"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["final_response"] == run_agent.EMPTY_RESPONSE_FAILURE_MESSAGE
 
     def test_empty_response_emits_status_for_gateway(self, agent):
         """_emit_status is called during empty retries so gateway users see feedback."""
@@ -2516,7 +2882,8 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("answer me")
 
-        assert result["final_response"] == "(empty)"
+        assert result["failed"] is True
+        assert result["final_response"] == run_agent.EMPTY_RESPONSE_FAILURE_MESSAGE
         # Should have emitted retry statuses (3 retries) + final failure
         retry_msgs = [m for m in status_messages if "retrying" in m.lower()]
         assert len(retry_msgs) == 3, f"Expected 3 retry status messages, got {len(retry_msgs)}: {status_messages}"
@@ -2524,13 +2891,14 @@ class TestRunConversation:
         assert len(failure_msgs) >= 1, f"Expected at least 1 failure status, got: {status_messages}"
 
     def test_partial_stream_recovery_uses_streamed_content(self, agent):
-        """When streaming fails after partial delivery, recovered partial content becomes final response."""
+        """When streaming fails after partial delivery, text stays visible but incomplete."""
         self._setup_agent(agent)
         # Simulate a partial-stream-stub response: content recovered from streaming
         partial_resp = _mock_response(
             content="Here is the partial answer that was stream",
-            finish_reason="stop",
+            finish_reason="incomplete",
         )
+        partial_resp._elevate_stream_incomplete_error = "peer closed connection"
         agent.client.chat.completions.create.return_value = partial_resp
         # Simulate that streaming had already delivered this text
         agent._current_streamed_assistant_text = "Here is the partial answer that was stream"
@@ -2540,8 +2908,11 @@ class TestRunConversation:
             patch.object(agent, "_cleanup_task_resources"),
         ):
             result = agent.run_conversation("explain something")
-        # The partial content should be used as-is (not empty, not retried)
-        assert result["completed"] is True
+        # The partial content should be used as-is, but never called complete.
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "partial text was preserved" in result["error"]
         assert result["final_response"] == "Here is the partial answer that was stream"
         assert result["api_calls"] == 1  # No retries
 
@@ -2571,8 +2942,12 @@ class TestRunConversation:
         ):
             result = agent.run_conversation("ask me")
         # Should recover partial streamed content, not fall through to (empty)
-        assert result["completed"] is True
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "partial text was preserved" in result["error"]
         assert result["final_response"] == "The answer to your question is that"
+        assert result["messages"][-1]["finish_reason"] == "error"
         assert result["api_calls"] == 1  # No wasted retries
         # Should emit the stream-interrupted status, NOT the empty-retry status
         recovery_msgs = [m for m in status_messages if "stream interrupted" in m.lower()]
@@ -2603,6 +2978,9 @@ class TestRunConversation:
             result = agent.run_conversation("question")
         # Should use the streamed content, not the old prior-turn fallback
         assert result["final_response"] == "Fresh partial content from this turn"
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
         assert result["api_calls"] == 1
 
     def test_nous_401_refreshes_after_remint_and_retries(self, agent):
@@ -2938,13 +3316,37 @@ class TestRunConversation:
             finish_reason="length",
         )
         agent.client.chat.completions.create.return_value = resp
+        agent._disable_streaming = True
+        agent._response_was_previewed = True
+        agent.steer("keep this steer")
+        agent.queue_soft_interrupt("keep this follow-up")
+        persisted = {}
+        hook_names = []
+
+        def _record_hook(name, **_kwargs):
+            hook_names.append(name)
+            return []
 
         with (
-            patch.object(agent, "_persist_session"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
             patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_cleanup_task_resources") as cleanup,
+            patch.object(
+                agent, "clear_interrupt", wraps=agent.clear_interrupt
+            ) as clear_interrupt,
+            patch(
+                "elevate_cli.plugins.invoke_hook", side_effect=_record_hook
+            ),
         ):
-            result = agent.run_conversation("hello")
+            result = agent.run_conversation(
+                "hello", stream_callback=MagicMock()
+            )
 
         # Should return immediately — no continuation, only 1 API call
         assert result["completed"] is False
@@ -2955,6 +3357,18 @@ class TestRunConversation:
         assert result["final_response"] is not None
         assert "Thinking Budget Exhausted" in result["final_response"]
         assert "/thinkon" in result["final_response"]
+        assert result["pending_steer"] == "keep this steer"
+        assert "keep this follow-up" in result["pending_soft_interrupt"]
+        assert result["response_previewed"] is True
+        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert persisted["messages"][-1]["content"] == result["final_response"]
+        cleanup.assert_called_once()
+        clear_interrupt.assert_called_once()
+        assert agent._pending_steer is None
+        assert agent._pending_soft_interrupts == []
+        assert agent._response_was_previewed is False
+        assert agent._stream_callback is None
+        assert hook_names.count("on_session_end") == 1
 
     def test_length_empty_content_without_think_tags_retries_normally(self, agent):
         """When finish_reason='length' and content is None but no think tags,
@@ -3052,19 +3466,75 @@ class TestRunConversation:
             content="", finish_reason="tool_calls", tool_calls=[bad_tc],
         )
         agent.client.chat.completions.create.return_value = resp
+        persisted = {}
 
         with (
             patch("run_agent.handle_function_call") as mock_handle_function_call,
-            patch.object(agent, "_persist_session"),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
             patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_cleanup_task_resources") as cleanup,
         ):
             result = agent.run_conversation("write the report")
 
         assert result["completed"] is False
+        assert result["failed"] is True
         assert result["partial"] is True
         assert "truncated due to output length limit" in result["error"]
+        assert persisted["messages"][-1] == {
+            "role": "assistant",
+            "content": result["final_response"],
+            "finish_reason": "error",
+        }
+        cleanup.assert_called_once()
         mock_handle_function_call.assert_not_called()
+
+    def test_compression_exhaustion_persists_terminal_failure(self, agent):
+        self._setup_agent(agent)
+        payload_error = RuntimeError("request payload too large")
+        payload_error.status_code = 413
+        agent.client.chat.completions.create.side_effect = payload_error
+        persisted = {}
+
+        with (
+            patch.object(
+                agent,
+                "_compress_context",
+                side_effect=lambda messages, system_message, **_kwargs: (
+                    messages,
+                    system_message,
+                ),
+            ),
+            patch.object(
+                agent.context_compressor,
+                "emergency_truncate_tool_results",
+                return_value=([], 0),
+            ),
+            patch.object(
+                agent,
+                "_persist_session",
+                side_effect=lambda messages, _history: persisted.update(
+                    messages=list(messages)
+                ),
+            ),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources") as cleanup,
+        ):
+            result = agent.run_conversation("continue the long session")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["compression_exhausted"] is True
+        assert persisted["messages"][-1]["role"] == "assistant"
+        assert persisted["messages"][-1]["finish_reason"] == "error"
+        assert persisted["messages"][-1]["content"] == result["final_response"]
+        cleanup.assert_called_once()
 
 
 class TestRetryExhaustion:
@@ -4155,6 +4625,17 @@ class TestStreamingApiCall:
         callback.assert_any_call("Hel")
         callback.assert_any_call("lo ")
         callback.assert_any_call("World")
+
+    def test_clean_eof_without_terminal_frame_is_marked_incomplete(self, agent):
+        agent.client.chat.completions.create.return_value = iter([
+            _make_chunk(content="Partial answer"),
+        ])
+
+        resp = agent._interruptible_streaming_api_call({"messages": []})
+
+        assert resp.choices[0].message.content == "Partial answer"
+        assert resp.choices[0].finish_reason == "incomplete"
+        assert resp._elevate_stream_incomplete_error
 
     def test_tool_call_accumulation(self, agent):
         # Per OpenAI streaming spec, function names are delivered atomically

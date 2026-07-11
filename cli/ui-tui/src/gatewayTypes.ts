@@ -310,6 +310,7 @@ export interface SubagentEventPayload {
   cost_usd?: number
   depth?: number
   duration_seconds?: number
+  error?: string
   files_read?: string[]
   files_written?: string[]
   goal: string
@@ -320,6 +321,7 @@ export interface SubagentEventPayload {
   output_tokens?: number
   parent_id?: null | string
   reasoning_tokens?: number
+  raw_status?: string
   source?: string
   status?: 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
   subagent_id?: string
@@ -432,8 +434,16 @@ export type GatewayEvent =
   | { payload: { command: string; description: string }; session_id?: string; type: 'approval.request' }
   | { payload: { request_id: string }; session_id?: string; type: 'sudo.request' }
   | { payload: { env_var: string; prompt: string; request_id: string }; session_id?: string; type: 'secret.request' }
-  | { payload: { task_id: string; text: string }; session_id?: string; type: 'background.complete' }
-  | { payload: { text: string }; session_id?: string; type: 'btw.complete' }
+  | {
+      payload: { error?: string; status: 'complete' | 'error'; task_id: string; text: string }
+      session_id?: string
+      type: 'background.complete'
+    }
+  | {
+      payload: { error?: string; status: 'complete' | 'error'; text: string }
+      session_id?: string
+      type: 'btw.complete'
+    }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.spawn_requested' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.start' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.thinking' }
@@ -443,7 +453,15 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { message_id?: string; rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | {
-      payload?: { message_id?: string; reasoning?: string; rendered?: string; text?: string; usage?: Usage }
+      payload?: {
+        error?: string
+        message_id?: string
+        reasoning?: string
+        rendered?: string
+        status?: 'complete' | 'error' | 'interrupted'
+        text?: string
+        usage?: Usage
+      }
       session_id?: string
       type: 'message.complete'
     }

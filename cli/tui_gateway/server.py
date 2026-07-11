@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 from agent.cwd import safe_getcwd
 from agent.memory_manager import sanitize_context
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -137,6 +138,59 @@ _answers: dict[str, str] = {}
 _db = None
 _db_error: str | None = None
 _PROMPT_EXECUTION_OWNER = f"{os.getpid()}:{uuid.uuid4().hex}"
+_EMPTY_MODEL_FAILURE = (
+    "The model returned no response after multiple retries, so this turn "
+    "did not complete. Please retry."
+)
+
+
+def _normalize_empty_terminal_history(
+    messages: list, assistant_message_id: str
+) -> list:
+    normalized = list(messages)
+    for index in range(len(normalized) - 1, -1, -1):
+        message = normalized[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        is_empty = content is None or (
+            isinstance(content, str)
+            and (not content.strip() or content.strip() == "(empty)")
+        )
+        if message.get("tool_calls") or not is_empty:
+            continue
+        replacement = dict(message)
+        replacement["content"] = _EMPTY_MODEL_FAILURE
+        replacement["finish_reason"] = "error"
+        normalized[index] = replacement
+        return normalized
+    normalized.append(
+        {
+            "role": "assistant",
+            "content": _EMPTY_MODEL_FAILURE,
+            "finish_reason": "error",
+            "client_message_id": assistant_message_id,
+        }
+    )
+    return normalized
+
+
+def _agent_terminal_payload(result: Any, **extra: Any) -> dict:
+    """Build a truthful terminal event for background agent work."""
+    succeeded = agent_result_succeeded(result)
+    text = (
+        str(result.get("final_response") or result.get("error") or "")
+        if isinstance(result, dict)
+        else str(result or "")
+    )
+    payload = {**extra, "status": "complete" if succeeded else "error", "text": text}
+    if not succeeded:
+        payload["error"] = agent_result_error(result)
+        if not payload["text"]:
+            payload["text"] = payload["error"]
+    return payload
+
+
 _prompt_claims_lock = threading.RLock()
 _active_prompt_claims: dict[tuple[str, str], dict] = {}
 _stdout_lock = threading.Lock()
@@ -1802,6 +1856,15 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         _emit("tool.complete", sid, payload)
 
 
+def _normalize_subagent_terminal_status(status: object) -> str:
+    raw = str(status or "").strip().lower()
+    if raw == "completed":
+        return "completed"
+    if raw in {"cancelled", "canceled", "interrupted"}:
+        return "interrupted"
+    return "failed"
+
+
 def _on_tool_progress(
     sid: str,
     event_type: str,
@@ -1903,8 +1966,21 @@ def _on_tool_progress(
             payload["tool_name"] = str(name)
         if preview:
             payload["text"] = str(preview)
-        if _kwargs.get("status"):
-            payload["status"] = str(_kwargs["status"])
+        raw_status = str(_kwargs.get("status") or "")
+        if event_type == "subagent.complete":
+            payload["status"] = _normalize_subagent_terminal_status(raw_status)
+            payload["raw_status"] = raw_status
+        elif raw_status:
+            payload["status"] = raw_status
+        error = _kwargs.get("error")
+        if (
+            not error
+            and event_type == "subagent.complete"
+            and payload["status"] != "completed"
+        ):
+            error = preview or _kwargs.get("summary")
+        if error:
+            payload["error"] = str(error)
         if _kwargs.get("summary"):
             payload["summary"] = str(_kwargs["summary"])
         if _kwargs.get("duration_seconds") is not None:
@@ -4590,13 +4666,17 @@ def _make_async_delegate_sink(sid: str, session: dict):
             for r in results:
                 if not isinstance(r, dict):
                     continue
+                raw_status = str(r.get("status") or "")
+                error = str(r.get("error") or "")
                 _emit(
                     "subagent.complete",
                     sid,
                     {
                         "subagent_id": r.get("subagent_id")
                         or f"{task_id}-{r.get('task_index')}",
-                        "status": r.get("status") or "completed",
+                        "status": _normalize_subagent_terminal_status(raw_status),
+                        "raw_status": raw_status,
+                        **({"error": error} if error else {}),
                         "summary": str(r.get("summary") or "")[:600],
                         "child_session_id": r.get("child_session_id"),
                         "goal": r.get("goal"),
@@ -4910,6 +4990,7 @@ def _(rid, params: dict) -> dict:
         claimed = False
         receipt_terminal_status = "error"
         session_tokens = []
+        terminal_frame_pending = False
         try:
             claimed = db.claim_prompt_receipt(
                 session_key,
@@ -4938,6 +5019,7 @@ def _(rid, params: dict) -> dict:
                     "user_message_id": receipt_user_id,
                 },
             )
+            terminal_frame_pending = True
             wait_err = _wait_agent(session, rid)
             if wait_err:
                 error = wait_err.get("error") if isinstance(wait_err, dict) else None
@@ -5133,11 +5215,31 @@ def _(rid, params: dict) -> dict:
                 last_reasoning = None
                 status_note = None
                 if isinstance(result, dict):
-                    if isinstance(result.get("messages"), list):
+                    raw = result.get("final_response", "")
+                    status = (
+                        "interrupted"
+                        if result.get("interrupted")
+                        else "error" if not agent_result_succeeded(result)
+                        else "complete"
+                    )
+                    result_messages = result.get("messages")
+                    empty_terminal = status != "interrupted" and (
+                        not isinstance(raw, str)
+                        or not raw.strip()
+                        or raw.strip() == "(empty)"
+                    )
+                    if empty_terminal:
+                        raw = _EMPTY_MODEL_FAILURE
+                        status = "error"
+                        if isinstance(result_messages, list):
+                            result_messages = _normalize_empty_terminal_history(
+                                result_messages, turn_ids["assistant"]
+                            )
+                    if isinstance(result_messages, list):
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
                             if current_version == current_history_version:
-                                session["history"] = result["messages"]
+                                session["history"] = result_messages
                                 _next_ver = max(current_version, current_history_version) + 1
                                 session["history_version"] = _next_ver
                                 current_history_version = _next_ver
@@ -5160,18 +5262,13 @@ def _(rid, params: dict) -> dict:
                                     "History changed during this turn — the response above is visible "
                                     "but was not saved to session history."
                                 )
-                    raw = result.get("final_response", "")
-                    status = (
-                        "interrupted"
-                        if result.get("interrupted")
-                        else "error" if result.get("error") else "complete"
-                    )
                     lr = result.get("last_reasoning")
                     if isinstance(lr, str) and lr.strip():
                         last_reasoning = lr.strip()
                 else:
-                    raw = str(result)
-                    status = "complete"
+                    terminal = _agent_terminal_payload(result)
+                    raw = terminal["text"]
+                    status = terminal["status"]
                 receipt_terminal_status = status
 
                 followup = None
@@ -5209,6 +5306,7 @@ def _(rid, params: dict) -> dict:
                 if not has_followup:
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
+                terminal_frame_pending = has_followup
                 if followup_rounds > 0 and not has_followup:
                     _record_backend_event(
                         "experience.recovered",
@@ -5287,6 +5385,7 @@ def _(rid, params: dict) -> dict:
                         "continuation": True,
                     },
                 )
+                terminal_frame_pending = True
 
             # CLI parity: when voice-mode TTS is on, speak the agent reply
             # (cli.py:_voice_speak_response).  Only the final text — tool
@@ -5326,7 +5425,20 @@ def _(rid, params: dict) -> dict:
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
-            _emit("error", sid, {"message": str(e)})
+            if terminal_frame_pending:
+                receipt_terminal_status = "error"
+                error_text = str(e) or type(e).__name__
+                _emit(
+                    "message.complete",
+                    sid,
+                    _agent_terminal_payload(
+                        {"completed": False, "error": error_text},
+                        message_id=turn_ids["assistant"],
+                    ),
+                )
+                terminal_frame_pending = False
+            elif receipt_terminal_status == "error":
+                _emit("error", sid, {"message": str(e)})
         finally:
             try:
                 if approval_token is not None:
@@ -5645,20 +5757,18 @@ def _(rid, params: dict) -> dict:
             _emit(
                 "background.complete",
                 parent,
-                {
-                    "task_id": task_id,
-                    "text": (
-                        result.get("final_response", str(result))
-                        if isinstance(result, dict)
-                        else str(result)
-                    ),
-                },
+                _agent_terminal_payload(result, task_id=task_id),
             )
         except Exception as e:
             _emit(
                 "background.complete",
                 parent,
-                {"task_id": task_id, "text": f"error: {e}"},
+                {
+                    "task_id": task_id,
+                    "status": "error",
+                    "text": str(e),
+                    "error": str(e),
+                },
             )
         finally:
             _clear_session_context(session_tokens)
@@ -5703,19 +5813,13 @@ def _(rid, params: dict) -> dict:
                 max_iterations=8,
                 enabled_toolsets=[],
             ).run_conversation(text, conversation_history=snapshot)
+            _emit("btw.complete", sid, _agent_terminal_payload(result))
+        except Exception as e:
             _emit(
                 "btw.complete",
                 sid,
-                {
-                    "text": (
-                        result.get("final_response", str(result))
-                        if isinstance(result, dict)
-                        else str(result)
-                    )
-                },
+                {"status": "error", "text": str(e), "error": str(e)},
             )
-        except Exception as e:
-            _emit("btw.complete", sid, {"text": f"error: {e}"})
         finally:
             _clear_session_context(session_tokens)
 

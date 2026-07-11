@@ -28,6 +28,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Optional
 
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 from elevate_cli.fallback_config import get_fallback_chain
 
 
@@ -180,7 +181,7 @@ def run_oneshot(
 
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
-            response = _run_agent(
+            result = _run_agent_result(
                 prompt,
                 model=model,
                 provider=provider,
@@ -193,12 +194,13 @@ def run_oneshot(
         except Exception:
             pass
 
+    response = str(result.get("final_response") or result.get("error") or "")
     if response:
         real_stdout.write(response)
         if not response.endswith("\n"):
             real_stdout.write("\n")
         real_stdout.flush()
-    return 0
+    return 0 if agent_result_succeeded(result) else 1
 
 
 def _create_session_db_for_oneshot():
@@ -226,6 +228,24 @@ def _run_agent(
 ) -> str:
     """Build an AIAgent exactly like a normal CLI chat turn would, then
     run a single conversation.  Returns the final response string."""
+    result = _run_agent_result(
+        prompt,
+        model=model,
+        provider=provider,
+        toolsets=toolsets,
+        use_config_toolsets=use_config_toolsets,
+    )
+    return str(result.get("final_response") or result.get("error") or "")
+
+
+def _run_agent_result(
+    prompt: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    toolsets: object = None,
+    use_config_toolsets: bool = True,
+) -> dict:
+    """Run one conversation while preserving the full outcome contract."""
     # Imports are local so they don't run when elevate is invoked for
     # other commands (keeps top-level CLI startup cheap).
     from elevate_cli.config import load_config
@@ -339,7 +359,10 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    return agent.chat(prompt) or ""
+    result = agent.run_conversation(prompt)
+    if isinstance(result, dict):
+        return result
+    return {"failed": True, "completed": False, "error": agent_result_error(result)}
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:

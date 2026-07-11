@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
+from aiohttp.test_utils import AioHTTPTestCase, TestClient as AioHTTPTestClient, TestServer
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.api_server import (
@@ -33,6 +33,11 @@ from gateway.platforms.api_server import (
     cors_middleware,
     security_headers_middleware,
 )
+
+
+class _MemoryResponseStore(ResponseStore):
+    def __init__(self, max_size=100, db_path=None):
+        super().__init__(max_size=max_size, db_path=":memory:")
 
 
 @pytest.fixture(autouse=True)
@@ -50,8 +55,29 @@ def _isolated_operational_store(monkeypatch):
     """
     key = f"acct_t{uuid.uuid4().hex[:12]}"
     monkeypatch.setattr(
+        APIServerAdapter,
+        "_ensure_persisted_api_key",
+        lambda self: "sk-auto-generated-test-key",
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.api_server.ResponseStore",
+        _MemoryResponseStore,
+    )
+    monkeypatch.setattr(
         "elevate_cli.data.connection.get_account_key", lambda: key
     )
+
+
+class TestClient(AioHTTPTestClient):
+    """Authenticate ordinary handler tests without weakening production auth."""
+
+    async def _request(self, method, path, **kwargs):
+        adapter = self._server.app["api_server_adapter"]
+        if getattr(adapter, "_test_auto_auth", False):
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault("Authorization", f"Bearer {adapter._api_key}")
+            kwargs["headers"] = headers
+        return await super()._request(method, path, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +101,16 @@ class TestCheckRequirements:
 
 class TestResponseStore:
     def test_put_and_get(self):
-        store = ResponseStore(max_size=10)
+        store = ResponseStore(max_size=10, db_path=":memory:")
         store.put("resp_1", {"output": "hello"})
         assert store.get("resp_1") == {"output": "hello"}
 
     def test_get_missing_returns_none(self):
-        store = ResponseStore(max_size=10)
+        store = ResponseStore(max_size=10, db_path=":memory:")
         assert store.get("resp_missing") is None
 
     def test_lru_eviction(self):
-        store = ResponseStore(max_size=3)
+        store = ResponseStore(max_size=3, db_path=":memory:")
         store.put("resp_1", {"output": "one"})
         store.put("resp_2", {"output": "two"})
         store.put("resp_3", {"output": "three"})
@@ -95,7 +121,7 @@ class TestResponseStore:
         assert len(store) == 3
 
     def test_access_refreshes_lru(self):
-        store = ResponseStore(max_size=3)
+        store = ResponseStore(max_size=3, db_path=":memory:")
         store.put("resp_1", {"output": "one"})
         store.put("resp_2", {"output": "two"})
         store.put("resp_3", {"output": "three"})
@@ -107,21 +133,21 @@ class TestResponseStore:
         assert store.get("resp_1") is not None
 
     def test_update_existing_key(self):
-        store = ResponseStore(max_size=10)
+        store = ResponseStore(max_size=10, db_path=":memory:")
         store.put("resp_1", {"output": "v1"})
         store.put("resp_1", {"output": "v2"})
         assert store.get("resp_1") == {"output": "v2"}
         assert len(store) == 1
 
     def test_delete_existing(self):
-        store = ResponseStore(max_size=10)
+        store = ResponseStore(max_size=10, db_path=":memory:")
         store.put("resp_1", {"output": "hello"})
         assert store.delete("resp_1") is True
         assert store.get("resp_1") is None
         assert len(store) == 0
 
     def test_delete_missing(self):
-        store = ResponseStore(max_size=10)
+        store = ResponseStore(max_size=10, db_path=":memory:")
         assert store.delete("resp_missing") is False
 
 
@@ -220,12 +246,12 @@ class TestIdempotencyCache:
 
 
 class TestAdapterInit:
-    def test_default_config(self):
+    def test_default_config_generates_auth_key(self):
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         assert adapter._host == "127.0.0.1"
         assert adapter._port == 8642
-        assert adapter._api_key == ""
+        assert adapter._api_key
         assert adapter.platform == Platform.API_SERVER
 
     def test_custom_config_from_extra(self):
@@ -272,12 +298,13 @@ class TestAdapterInit:
 
 
 class TestAuth:
-    def test_no_key_configured_allows_all(self):
+    def test_no_key_configured_generates_key_and_requires_auth(self):
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         mock_request = MagicMock()
         mock_request.headers = {}
-        assert adapter._check_auth(mock_request) is None
+        assert adapter._api_key
+        assert adapter._check_auth(mock_request).status == 401
 
     def test_valid_key_passes(self):
         config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
@@ -327,7 +354,9 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
     if cors_origins is not None:
         extra["cors_origins"] = cors_origins
     config = PlatformConfig(enabled=True, extra=extra)
-    return APIServerAdapter(config)
+    adapter = APIServerAdapter(config)
+    adapter._test_auto_auth = not bool(api_key)
+    return adapter
 
 
 def _create_app(adapter: APIServerAdapter) -> web.Application:
@@ -585,6 +614,42 @@ class TestChatCompletionsEndpoint:
                 assert "Hello!" in body
 
     @pytest.mark.asyncio
+    async def test_stream_nonempty_failed_result_emits_error_not_stop(self, adapter):
+        app = _create_app(adapter)
+        failure = "The model failed after retries."
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_agent",
+                new_callable=AsyncMock,
+                return_value=(
+                    {
+                        "final_response": failure,
+                        "failed": True,
+                        "completed": False,
+                        "error": failure,
+                    },
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                ),
+            ):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "elevate",
+                        "messages": [{"role": "user", "content": "finish it"}],
+                        "stream": True,
+                    },
+                    headers={"Authorization": f"Bearer {adapter._api_key}"},
+                )
+                body = await resp.text()
+
+        assert resp.status == 200
+        assert '"type": "server_error"' in body
+        assert failure in body
+        assert '"finish_reason": "stop"' not in body
+        assert "data: [DONE]" in body
+
+    @pytest.mark.asyncio
     async def test_stream_sends_keepalive_during_quiet_tool_gap(self, adapter):
         """Idle SSE streams should send keepalive comments while tools run silently."""
         import asyncio
@@ -809,6 +874,37 @@ class TestChatCompletionsEndpoint:
             assert data["choices"][0]["message"]["content"] == "Hello! How can I help you today?"
             assert data["choices"][0]["finish_reason"] == "stop"
             assert "usage" in data
+
+    @pytest.mark.asyncio
+    async def test_nonstream_nonempty_failed_result_returns_error(self, adapter):
+        app = _create_app(adapter)
+        failure = "The model failed after retries."
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {
+                        "final_response": failure,
+                        "failed": True,
+                        "completed": False,
+                        "error": failure,
+                    },
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "elevate",
+                        "messages": [{"role": "user", "content": "finish it"}],
+                    },
+                    headers={"Authorization": f"Bearer {adapter._api_key}"},
+                )
+
+                data = await resp.json()
+
+        assert resp.status == 500
+        assert data["error"]["type"] == "server_error"
+        assert data["error"]["message"] == failure
+        assert "choices" not in data
 
     @pytest.mark.asyncio
     async def test_system_prompt_extracted(self, adapter):
@@ -1036,6 +1132,50 @@ class TestResponsesEndpoint:
             assert data["output"][0]["type"] == "message"
             assert data["output"][0]["content"][0]["type"] == "output_text"
             assert data["output"][0]["content"][0]["text"] == "Paris is the capital of France."
+
+    @pytest.mark.asyncio
+    async def test_nonstream_nonempty_failed_result_has_failed_status(self, adapter):
+        app = _create_app(adapter)
+        failure = "The model failed after retries."
+        auth = {"Authorization": f"Bearer {adapter._api_key}"}
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {
+                        "final_response": failure,
+                        "failed": True,
+                        "completed": False,
+                        "error": failure,
+                        "messages": [],
+                    },
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "elevate", "input": "finish it"},
+                    headers=auth,
+                )
+
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "failed"
+            assert data["error"]["message"] == failure
+            stored = adapter._response_store.get(data["id"])
+            assert stored["response"]["status"] == "failed"
+
+            chained = await cli.post(
+                "/v1/responses",
+                json={
+                    "model": "elevate",
+                    "input": "continue",
+                    "previous_response_id": data["id"],
+                },
+                headers=auth,
+            )
+            chained_data = await chained.json()
+
+        assert chained.status == 409
+        assert "did not complete" in chained_data["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_successful_response_with_array_input(self, adapter):
@@ -1291,6 +1431,7 @@ class TestResponsesStreaming:
                 resp = await cli.post(
                     "/v1/responses",
                     json={"model": "elevate", "input": "hi", "stream": True},
+                    headers={"Authorization": f"Bearer {adapter._api_key}"},
                 )
                 assert resp.status == 200
                 assert "text/event-stream" in resp.headers.get("Content-Type", "")
@@ -1303,6 +1444,38 @@ class TestResponsesStreaming:
                 assert '"logprobs": []' in body
                 assert "Hello" in body
                 assert " world" in body
+
+    @pytest.mark.asyncio
+    async def test_stream_nonempty_failed_result_emits_response_failed(self, adapter):
+        app = _create_app(adapter)
+        failure = "The model returned no response, so this turn did not complete."
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(
+                adapter,
+                "_run_agent",
+                new_callable=AsyncMock,
+                return_value=(
+                    {
+                        "final_response": failure,
+                        "messages": [],
+                        "completed": False,
+                        "failed": True,
+                        "error": failure,
+                    },
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                ),
+            ):
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={"model": "elevate", "input": "hi", "stream": True},
+                    headers={"Authorization": f"Bearer {adapter._api_key}"},
+                )
+                body = await resp.text()
+
+        assert "event: response.failed" in body
+        assert "event: response.completed" not in body
+        assert '"status": "completed"' not in body
+        assert failure in body
 
     @pytest.mark.asyncio
     async def test_stream_emits_function_call_and_output_items(self, adapter):
@@ -1398,6 +1571,42 @@ class TestResponsesStreaming:
                 assert data["id"] == response_id
                 assert data["status"] == "completed"
                 assert data["output"][-1]["content"][0]["text"] == "Stored response"
+
+
+class TestStructuredRuns:
+    @pytest.mark.asyncio
+    async def test_nonempty_failed_result_emits_run_failed(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
+        failure = "The model returned no response, so this turn did not complete."
+        fake_agent = MagicMock()
+        fake_agent.session_prompt_tokens = 0
+        fake_agent.session_completion_tokens = 0
+        fake_agent.session_total_tokens = 0
+        fake_agent.run_conversation.return_value = {
+            "final_response": failure,
+            "messages": [],
+            "completed": False,
+            "failed": True,
+            "error": failure,
+        }
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=fake_agent):
+                auth = {"Authorization": f"Bearer {adapter._api_key}"}
+                start = await cli.post(
+                    "/v1/runs", json={"input": "do it"}, headers=auth
+                )
+                run_id = (await start.json())["run_id"]
+                events = await cli.get(
+                    f"/v1/runs/{run_id}/events", headers=auth
+                )
+                body = await events.text()
+
+        assert '"event": "run.failed"' in body
+        assert '"event": "run.completed"' not in body
+        assert failure in body
 
 
 # ---------------------------------------------------------------------------

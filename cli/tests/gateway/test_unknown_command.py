@@ -79,6 +79,80 @@ def _make_runner():
     return runner
 
 
+@pytest.mark.parametrize(
+    "sentinel",
+    [
+        {"failed": True, "error": "provider failed"},
+        {"partial": True},
+        {"interrupted": True},
+        {"error": "provider failed"},
+        {"completed": False},
+    ],
+)
+@pytest.mark.asyncio
+async def test_normal_message_failure_sentinels_are_visible_and_not_persisted(
+    monkeypatch, sentinel
+):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "Partial answer",
+            "messages": [],
+            "api_calls": 1,
+            "completed": True,
+            "already_sent": True,
+            **sentinel,
+        }
+    )
+    runner._should_send_voice_reply = MagicMock(return_value=True)
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("finish the task"))
+
+    assert result is not None
+    assert "Partial answer" in result
+    assert any(
+        marker in result.lower()
+        for marker in ("did not complete", "interrupted", "request failed")
+    )
+    runner.session_store.append_to_transcript.assert_not_called()
+    runner.session_store.update_session.assert_not_called()
+    runner._should_send_voice_reply.assert_not_called()
+    runner._send_voice_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_sentinel_gets_visible_failure_and_no_persistence(
+    monkeypatch,
+):
+    import gateway.run as gateway_run
+
+    runner = _make_runner()
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "(empty)",
+            "messages": [],
+            "api_calls": 4,
+            "completed": True,
+            "already_sent": True,
+        }
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    result = await runner._handle_message(_make_event("finish the task"))
+
+    assert "did not complete" in result.lower()
+    assert "(empty)" not in result
+    runner.session_store.append_to_transcript.assert_not_called()
+    runner.session_store.update_session.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_unknown_slash_command_returns_guidance(monkeypatch):
     """A genuinely unknown /foobar should return user-facing guidance, not

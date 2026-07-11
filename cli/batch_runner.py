@@ -31,6 +31,7 @@ from multiprocessing import Pool, Lock
 import traceback
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
 from rich.console import Console
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 
 logger = logging.getLogger(__name__)
 import fire
@@ -335,6 +336,13 @@ def _process_single_prompt(
 
         # Run the agent with task_id to ensure each task gets its own isolated VM
         result = agent.run_conversation(prompt, task_id=task_id)
+        succeeded = agent_result_succeeded(result)
+        outcome_error = ""
+        if not succeeded:
+            outcome_error = agent_result_error(result)
+            partial = str(result.get("final_response") or "").strip()
+            if partial and partial != outcome_error.strip():
+                outcome_error = f"{partial}\n\n{outcome_error}"
         
         # Extract tool usage statistics
         tool_stats = _extract_tool_stats(result["messages"])
@@ -350,8 +358,9 @@ def _process_single_prompt(
         )
         
         return {
-            "success": True,
+            "success": succeeded,
             "prompt_index": prompt_index,
+            "error": outcome_error or None,
             "trajectory": trajectory,
             "tool_stats": tool_stats,
             "reasoning_stats": reasoning_stats,
@@ -1288,4 +1297,3 @@ def main(
 
 if __name__ == "__main__":
     fire.Fire(main)
-

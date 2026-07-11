@@ -27,6 +27,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.result_outcome import agent_result_error, agent_result_succeeded
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1051,7 +1053,7 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
     If *session_key* is provided, loads/saves conversation history for
     cross-card memory within the same document.
 
-    Returns the agent's final response text, or empty string on failure.
+    Returns the agent's final response text, or an explicit user-visible error.
     """
     from run_agent import AIAgent
 
@@ -1093,7 +1095,14 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
         logger.info("[Feishu-Comment] _run_comment_agent: done api_calls=%d response_len=%d response=%s",
                     api_calls, len(response), response[:200])
 
-        # Save updated history
+        if not agent_result_succeeded(result):
+            error_detail = agent_result_error(result)
+            if response and response != error_detail.strip():
+                error_detail = f"{response}\n\n{error_detail}"
+            logger.error("[Feishu-Comment] Agent turn did not complete: %s", error_detail[:500])
+            return f"❌ Elevate could not complete this reply:\n{error_detail}"
+
+        # Only successful turns become future comment context.
         if session_key:
             new_messages = result.get("messages", [])
             if new_messages:
@@ -1102,7 +1111,7 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
         return response
     except Exception as e:
         logger.exception("[Feishu-Comment] _run_comment_agent: agent failed: %s", e)
-        return ""
+        return f"❌ Elevate could not complete this reply:\n{e}"
     finally:
         set_doc_client(None)
         set_drive_client(None)

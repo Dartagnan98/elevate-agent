@@ -151,6 +151,24 @@ def _agent_tools_token_estimate(agent) -> int:
     return est
 
 
+def _drop_trailing_empty_response_scaffolding(messages: list) -> bool:
+    had_prefill = False
+    while (
+        messages
+        and isinstance(messages[-1], dict)
+        and (
+            messages[-1].get("_thinking_prefill")
+            or messages[-1].get("_empty_recovery_synthetic")
+            or messages[-1].get("_empty_terminal_sentinel")
+        )
+    ):
+        had_prefill = had_prefill or bool(
+            messages[-1].get("_thinking_prefill")
+        )
+        messages.pop()
+    return had_prefill
+
+
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):
     """Restore the cached system prompt from the session DB or build it fresh.
 
@@ -849,8 +867,9 @@ def run_conversation(
             # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
             if "finish_reason" in api_msg:
                 api_msg.pop("finish_reason")
-            # Strip internal thinking-prefill marker
+            # Strip private retry markers before provider serialization.
             api_msg.pop("_thinking_prefill", None)
+            api_msg.pop("_empty_recovery_synthetic", None)
             # Strip Codex Responses API fields (call_id, response_item_id) for
             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
             # Uses new dicts so the internal messages list retains the fields
@@ -3416,16 +3435,10 @@ def run_conversation(
                         if clean:
                             agent._vprint(f"  ┊ 💬 {clean}")
                 
-                # Pop thinking-only prefill message(s) before appending
-                # (tool-call path — same rationale as the final-response path).
-                _had_prefill = False
-                while (
+                # A recovered tool call replaces private retry scaffolding.
+                _had_prefill = _drop_trailing_empty_response_scaffolding(
                     messages
-                    and isinstance(messages[-1], dict)
-                    and messages[-1].get("_thinking_prefill")
-                ):
-                    messages.pop()
-                    _had_prefill = True
+                )
 
                 # Reset prefill counter when tool calls follow a prefill
                 # recovery.  Without this, the counter accumulates across
@@ -3573,6 +3586,13 @@ def run_conversation(
                         )
                         final_response = _recovered
                         agent._response_was_previewed = True
+                        _drop_trailing_empty_response_scaffolding(messages)
+                        recovered_msg = agent._build_assistant_message(
+                            assistant_message, "stop"
+                        )
+                        recovered_msg["content"] = _recovered
+                        recovered_msg["finish_reason"] = "stop"
+                        messages.append(recovered_msg)
                         break
 
                     # If the previous turn already delivered real content alongside
@@ -3762,20 +3782,16 @@ def run_conversation(
                             continue
 
                     # Exhausted retries and fallback chain (or no
-                    # fallback configured).  Fall through to the
-                    # "(empty)" terminal.
+                    # fallback configured). This is a failed turn, not
+                    # successful assistant content.
                     _turn_exit_reason = "empty_response_exhausted"
                     reasoning_text = agent._extract_reasoning(assistant_message)
-                    agent._drop_trailing_empty_response_scaffolding(messages)
+                    _drop_trailing_empty_response_scaffolding(messages)
                     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
-                    assistant_msg["content"] = "(empty)"
-                    # This is a user-facing failure sentinel for the gateway,
-                    # not real assistant content. Persisting it makes later
-                    # "continue" turns replay assistant("(empty)") as if it
-                    # were a meaningful model response, which can keep long
-                    # tool-heavy sessions stuck in empty-response loops.
-                    assistant_msg["_empty_terminal_sentinel"] = True
+                    assistant_msg["content"] = _ra().EMPTY_RESPONSE_FAILURE_MESSAGE
+                    assistant_msg["finish_reason"] = "error"
                     messages.append(assistant_msg)
+                    failed = True
 
                     if reasoning_text:
                         reasoning_preview = reasoning_text[:500] + "..." if len(reasoning_text) > 500 else reasoning_text
@@ -3802,7 +3818,7 @@ def run_conversation(
                                ". No fallback providers configured.")
                         )
 
-                    final_response = "(empty)"
+                    final_response = _ra().EMPTY_RESPONSE_FAILURE_MESSAGE
                     break
                 
                 # Reset retry counter/signature on successful content
@@ -3850,16 +3866,7 @@ def run_conversation(
                 # scaffolding before appending the final response.  These
                 # internal turns are only for the next API retry and should
                 # not become durable transcript context.
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and (
-                        messages[-1].get("_thinking_prefill")
-                        or messages[-1].get("_empty_recovery_synthetic")
-                        or messages[-1].get("_empty_terminal_sentinel")
-                    )
-                ):
-                    messages.pop()
+                _drop_trailing_empty_response_scaffolding(messages)
 
                 messages.append(final_msg)
                 
@@ -3914,9 +3921,15 @@ def run_conversation(
             if api_call_count >= agent.max_iterations - 1:
                 _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                 final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
+                failed = True
                 # Append as assistant so the history stays valid for
                 # session resume (avoids consecutive user messages).
-                messages.append({"role": "assistant", "content": final_response})
+                _drop_trailing_empty_response_scaffolding(messages)
+                messages.append({
+                    "role": "assistant",
+                    "content": final_response,
+                    "finish_reason": "error",
+                })
                 break
     
     if final_response is None and (
@@ -3937,6 +3950,7 @@ def run_conversation(
                 "— requesting summary..."
             )
         final_response = agent._handle_max_iterations(messages, api_call_count)
+        failed = True
 
         # If running as a kanban worker, block the task so the dispatcher
         # knows the worker could not complete (rather than treating it as a
@@ -3977,6 +3991,7 @@ def run_conversation(
         final_response is not None
         and api_call_count < agent.max_iterations
         and not failed
+        and not interrupted
     )
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
@@ -3990,7 +4005,7 @@ def run_conversation(
     # scaffolding has been removed. Otherwise a later user "continue" turn
     # can replay assistant("(empty)") / recovery nudges and fall into the
     # same empty-response loop again.
-    agent._drop_trailing_empty_response_scaffolding(messages)
+    _drop_trailing_empty_response_scaffolding(messages)
     agent._persist_session(messages, conversation_history)
 
     # ── Turn-exit diagnostic log ─────────────────────────────────────
@@ -4052,7 +4067,7 @@ def run_conversation(
     # Gate: only applied when a real text response exists for this
     # turn and the user didn't interrupt.  Empty/interrupted turns
     # already have other surface text that shouldn't be augmented.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not failed:
         try:
             _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
             if _failed and agent._file_mutation_verifier_enabled():
@@ -4066,7 +4081,7 @@ def run_conversation(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can transform the LLM's output text before it's returned.
     # First hook to return a string wins; None/empty return leaves text unchanged.
-    if final_response and not interrupted:
+    if final_response and not interrupted and not failed:
         try:
             from elevate_cli.plugins import invoke_hook as _invoke_hook
             _transform_results = _invoke_hook(
@@ -4087,7 +4102,7 @@ def run_conversation(
     # Fired once per turn after the tool-calling loop completes.
     # Plugins can use this to persist conversation data (e.g. sync
     # to an external memory system).
-    if final_response and not interrupted:
+    if final_response and not interrupted and not failed:
         try:
             from elevate_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -4147,6 +4162,8 @@ def run_conversation(
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
     }
+    if failed:
+        result["error"] = final_response
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
     # If a /steer landed after the final assistant turn (no more tool
@@ -4176,15 +4193,21 @@ def run_conversation(
         agent._iters_since_skill = 0
 
     # External memory provider: sync the completed turn + queue next prefetch.
-    agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message,
-        final_response=final_response,
-        interrupted=interrupted,
-    )
+    if not failed and not interrupted:
+        agent._sync_external_memory_for_turn(
+            original_user_message=original_user_message,
+            final_response=final_response,
+            interrupted=interrupted,
+        )
 
     # Background memory/skill review — runs AFTER the response is delivered
     # so it never competes with the user's task for model attention.
-    if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+    if (
+        final_response
+        and not interrupted
+        and not failed
+        and (_should_review_memory or _should_review_skills)
+    ):
         try:
             agent._spawn_background_review(
                 messages_snapshot=list(messages),

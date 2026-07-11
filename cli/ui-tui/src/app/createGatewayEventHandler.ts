@@ -427,13 +427,21 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'background.complete':
         dropBgTask(ev.payload.task_id)
-        sys(`[bg ${ev.payload.task_id}] ${ev.payload.text}`)
+        sys(
+          `[bg ${ev.payload.task_id}] ${ev.payload.status === 'error' ? 'error: ' : ''}${
+            ev.payload.text || ev.payload.error || 'background task did not complete'
+          }`
+        )
 
         return
 
       case 'btw.complete':
         dropBgTask('btw:x')
-        sys(`[btw] ${ev.payload.text}`)
+        sys(
+          `[btw] ${ev.payload.status === 'error' ? 'error: ' : ''}${
+            ev.payload.text || ev.payload.error || 'background task did not complete'
+          }`
+        )
 
         return
 
@@ -538,7 +546,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           ev.payload,
           c => ({
             durationSeconds: ev.payload.duration_seconds ?? c.durationSeconds,
-            status: ev.payload.status ?? 'completed',
+            status: ev.payload.status ?? 'failed',
             summary: ev.payload.summary || ev.payload.text || c.summary
           }),
           { createIfMissing: false }
@@ -561,7 +569,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           const msgs: Msg[] = finalMessages.length ? finalMessages : [{ role: 'assistant', text: finalText }]
           msgs.forEach(appendMessage)
 
-          if (bellOnComplete && stdout?.isTTY) {
+          if (ev.payload?.status === 'complete' && bellOnComplete && stdout?.isTTY) {
             stdout.write('\x07')
           }
         }

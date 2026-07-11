@@ -181,6 +181,85 @@ class TestSanitizeCommentText(unittest.TestCase):
         self.assertIn("&gt;", result)
 
 
+class TestCommentAgentOutcome(unittest.TestCase):
+    @patch("gateway.platforms.feishu_comment._save_session_history")
+    @patch("gateway.platforms.feishu_comment._load_session_history", return_value=[])
+    @patch(
+        "gateway.platforms.feishu_comment._resolve_model_and_runtime",
+        return_value=("test/model", {"api_key": "test-key"}),
+    )
+    @patch("tools.feishu_drive_tool.set_client")
+    @patch("tools.feishu_doc_tool.set_client")
+    @patch("run_agent.AIAgent")
+    def test_failed_partial_reply_is_visible_but_not_persisted(
+        self, agent_class, _set_doc, _set_drive, _runtime, _load, save,
+    ):
+        from gateway.platforms.feishu_comment import _run_comment_agent
+
+        agent_class.return_value.run_conversation.return_value = {
+            "final_response": "I drafted half the reply.",
+            "messages": [{"role": "assistant", "content": "I drafted half the reply."}],
+            "completed": False,
+            "partial": True,
+            "error": "iteration budget exhausted",
+        }
+
+        response = _run_comment_agent("reply", Mock(), "doc-session")
+
+        self.assertIn("❌ Elevate could not complete this reply", response)
+        self.assertIn("I drafted half the reply.", response)
+        self.assertIn("iteration budget exhausted", response)
+        save.assert_not_called()
+
+    @patch("gateway.platforms.feishu_comment._save_session_history")
+    @patch("gateway.platforms.feishu_comment._load_session_history", return_value=[])
+    @patch(
+        "gateway.platforms.feishu_comment._resolve_model_and_runtime",
+        return_value=("test/model", {"api_key": "test-key"}),
+    )
+    @patch("tools.feishu_drive_tool.set_client")
+    @patch("tools.feishu_doc_tool.set_client")
+    @patch("run_agent.AIAgent")
+    def test_successful_reply_is_persisted(
+        self, agent_class, _set_doc, _set_drive, _runtime, _load, save,
+    ):
+        from gateway.platforms.feishu_comment import _run_comment_agent
+
+        messages = [{"role": "assistant", "content": "Complete reply."}]
+        agent_class.return_value.run_conversation.return_value = {
+            "final_response": "Complete reply.",
+            "messages": messages,
+            "completed": True,
+        }
+
+        response = _run_comment_agent("reply", Mock(), "doc-session")
+
+        self.assertEqual(response, "Complete reply.")
+        save.assert_called_once_with("doc-session", messages)
+
+    @patch("gateway.platforms.feishu_comment._save_session_history")
+    @patch("gateway.platforms.feishu_comment._load_session_history", return_value=[])
+    @patch(
+        "gateway.platforms.feishu_comment._resolve_model_and_runtime",
+        return_value=("test/model", {"api_key": "test-key"}),
+    )
+    @patch("tools.feishu_drive_tool.set_client")
+    @patch("tools.feishu_doc_tool.set_client")
+    @patch("run_agent.AIAgent")
+    def test_exception_returns_visible_error_instead_of_silent_empty(
+        self, agent_class, _set_doc, _set_drive, _runtime, _load, save,
+    ):
+        from gateway.platforms.feishu_comment import _run_comment_agent
+
+        agent_class.return_value.run_conversation.side_effect = RuntimeError("provider offline")
+
+        response = _run_comment_agent("reply", Mock(), "doc-session")
+
+        self.assertIn("❌ Elevate could not complete this reply", response)
+        self.assertIn("provider offline", response)
+        save.assert_not_called()
+
+
 class TestWikiReverseLookup(unittest.TestCase):
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)

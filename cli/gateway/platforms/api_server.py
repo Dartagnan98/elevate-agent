@@ -31,6 +31,7 @@ import re
 import sqlite3
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 try:
@@ -51,6 +52,7 @@ from gateway.orchestration import (
     get_orchestration_store,
     normalize_run_metadata,
 )
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +347,12 @@ class ResponseStore:
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
         self._max_size = max_size
+        self._memory: Optional[OrderedDict[str, Dict[str, Any]]] = (
+            OrderedDict() if db_path == ":memory:" else None
+        )
+        self._memory_conversations: Dict[str, str] = {}
+        if self._memory is not None:
+            return
         # Lazy-import to avoid a circular dependency: api_server is loaded
         # by the gateway entry point, which in turn pulls in elevate_cli.
         from elevate_cli.data import connection as _pg_connection
@@ -376,6 +384,11 @@ class ResponseStore:
     # ── public API ──────────────────────────────────────────────────────
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
+        if self._memory is not None:
+            value = self._memory.get(response_id)
+            if value is not None:
+                self._memory.move_to_end(response_id)
+            return value
         row = self._exec_one(
             "SELECT data FROM response_store_responses WHERE response_id = ?",
             (response_id,),
@@ -396,6 +409,12 @@ class ResponseStore:
 
         Equivalent to sqlite's ``INSERT OR REPLACE`` via PG upsert.
         """
+        if self._memory is not None:
+            self._memory[response_id] = data
+            self._memory.move_to_end(response_id)
+            while len(self._memory) > self._max_size:
+                self._memory.popitem(last=False)
+            return
         payload = json.dumps(data, default=str)
         now = time.time()
         with self._connect() as conn:
@@ -433,6 +452,8 @@ class ResponseStore:
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
+        if self._memory is not None:
+            return self._memory.pop(response_id, None) is not None
         n = self._exec_write(
             "DELETE FROM response_store_responses WHERE response_id = ?",
             (response_id,),
@@ -441,6 +462,8 @@ class ResponseStore:
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
+        if self._memory is not None:
+            return self._memory_conversations.get(name)
         row = self._exec_one(
             "SELECT response_id FROM response_store_conversations WHERE name = ?",
             (name,),
@@ -449,6 +472,9 @@ class ResponseStore:
 
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id (upsert)."""
+        if self._memory is not None:
+            self._memory_conversations[name] = response_id
+            return
         self._exec_write(
             """
             INSERT INTO response_store_conversations (name, response_id)
@@ -463,6 +489,8 @@ class ResponseStore:
         return None
 
     def __len__(self) -> int:
+        if self._memory is not None:
+            return len(self._memory)
         row = self._exec_one("SELECT COUNT(*) AS c FROM response_store_responses")
         return int(row["c"]) if row else 0
 
@@ -1383,6 +1411,16 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
+        response_headers = {"X-Elevate-Session-Id": session_id}
+        if gateway_session_key:
+            response_headers["X-Elevate-Session-Key"] = gateway_session_key
+        if not agent_result_succeeded(result):
+            return web.json_response(
+                _openai_error(agent_result_error(result), err_type="server_error"),
+                status=500,
+                headers=response_headers,
+            )
+
         final_response = result.get("final_response", "")
         if not final_response:
             final_response = result.get("error", "(No response generated)")
@@ -1409,9 +1447,6 @@ class APIServerAdapter(BasePlatformAdapter):
             },
         }
 
-        response_headers = {"X-Elevate-Session-Id": session_id}
-        if gateway_session_key:
-            response_headers["X-Elevate-Session-Key"] = gateway_session_key
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
@@ -1510,24 +1545,30 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            agent_error = ""
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
-            except Exception:
-                pass
+                if not agent_result_succeeded(result):
+                    agent_error = agent_result_error(result)
+            except Exception as exc:
+                agent_error = str(exc)
 
-            # Finish chunk
-            finish_chunk = {
-                "id": completion_id, "object": "chat.completion.chunk",
-                "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": usage.get("input_tokens", 0),
-                    "completion_tokens": usage.get("output_tokens", 0),
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
-            }
-            await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
+            if agent_error:
+                error_event = _openai_error(agent_error, err_type="server_error")
+                await response.write(f"data: {json.dumps(error_event)}\n\n".encode())
+            else:
+                finish_chunk = {
+                    "id": completion_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                }
+                await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
             # Client disconnected mid-stream.  Interrupt the agent so it
@@ -1865,8 +1906,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     await _emit_text_delta(agent_final)
                 if agent_final and not final_response_text:
                     final_response_text = agent_final
-                if isinstance(result, dict) and result.get("error") and not final_response_text:
-                    agent_error = result["error"]
+                if isinstance(result, dict) and not agent_result_succeeded(result):
+                    agent_error = agent_result_error(result)
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running agent for streaming responses: %s", e, exc_info=True)
                 agent_error = str(e)
@@ -1885,7 +1926,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 msg_done_item = {
                     "id": message_item_id,
                     "type": "message",
-                    "status": "completed",
+                    "status": "incomplete" if agent_error else "completed",
                     "role": "assistant",
                     "content": [
                         {"type": "output_text", "text": final_response_text}
@@ -1897,8 +1938,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "item": msg_done_item,
                 })
 
-            # Always append a final message item in the completed
-            # response envelope so clients that only parse the terminal
+            # Always append a final message item in the terminal response
+            # envelope so clients that only parse the terminal
             # payload still see the assistant text.  This mirrors the
             # shape produced by _extract_output_items in the batch path.
             final_items: List[Dict[str, Any]] = list(emitted_items)
@@ -2060,6 +2101,13 @@ class APIServerAdapter(BasePlatformAdapter):
             stored = self._response_store.get(previous_response_id)
             if stored is None:
                 return web.json_response(_openai_error(f"Previous response not found: {previous_response_id}"), status=404)
+            if (stored.get("response") or {}).get("status") == "failed":
+                return web.json_response(
+                    _openai_error(
+                        f"Previous response did not complete: {previous_response_id}"
+                    ),
+                    status=409,
+                )
             conversation_history = list(stored.get("conversation_history", []))
             stored_session_id = stored.get("session_id")
             # If no instructions provided, carry forward from previous
@@ -2213,10 +2261,11 @@ class APIServerAdapter(BasePlatformAdapter):
         # Build output items (includes tool calls + final message)
         output_items = self._extract_output_items(result)
 
+        response_succeeded = agent_result_succeeded(result)
         response_data = {
             "id": response_id,
             "object": "response",
-            "status": "completed",
+            "status": "completed" if response_succeeded else "failed",
             "created_at": created_at,
             "model": body.get("model", self._model_name),
             "output": output_items,
@@ -2226,6 +2275,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 "total_tokens": usage.get("total_tokens", 0),
             },
         }
+        if not response_succeeded:
+            response_data["error"] = {
+                "message": agent_result_error(result),
+                "type": "server_error",
+            }
 
         # Store the complete response object for future chaining / GET retrieval
         if store:
@@ -2237,7 +2291,7 @@ class APIServerAdapter(BasePlatformAdapter):
             })
             # Update conversation mapping so the next request with the same
             # conversation name automatically chains to this response
-            if conversation:
+            if conversation and response_succeeded:
                 self._response_store.set_conversation(conversation, response_id)
 
         response_headers = {"X-Elevate-Session-Id": session_id}
@@ -2954,6 +3008,13 @@ class APIServerAdapter(BasePlatformAdapter):
         if not conversation_history and previous_response_id:
             stored = self._response_store.get(previous_response_id)
             if stored:
+                if (stored.get("response") or {}).get("status") == "failed":
+                    return web.json_response(
+                        _openai_error(
+                            f"Previous response did not complete: {previous_response_id}"
+                        ),
+                        status=409,
+                    )
                 conversation_history = list(stored.get("conversation_history", []))
                 stored_session_id = stored.get("session_id")
                 if instructions is None:
@@ -3000,13 +3061,22 @@ class APIServerAdapter(BasePlatformAdapter):
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
-                q.put_nowait({
-                    "event": "run.completed",
-                    "run_id": run_id,
-                    "timestamp": time.time(),
-                    "output": final_response,
-                    "usage": usage,
-                })
+                if agent_result_succeeded(result):
+                    q.put_nowait({
+                        "event": "run.completed",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "output": final_response,
+                        "usage": usage,
+                    })
+                else:
+                    q.put_nowait({
+                        "event": "run.failed",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "error": agent_result_error(result),
+                        "usage": usage,
+                    })
             except Exception as exc:
                 logger.exception("[api_server] run %s failed", run_id)
                 try:

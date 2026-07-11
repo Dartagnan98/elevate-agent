@@ -237,6 +237,49 @@ class TestRunBackgroundTask:
         mock_agent_instance.close.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_failed_visible_result_is_not_reported_complete(self):
+        runner = _make_runner()
+        runner._record_background_task = MagicMock()
+        failure = (
+            "The model returned no response after multiple retries, so this "
+            "turn did not complete. Please retry."
+        )
+        mock_adapter = AsyncMock()
+        mock_adapter.send = AsyncMock()
+        mock_adapter.extract_media = MagicMock(return_value=([], failure))
+        mock_adapter.extract_images = MagicMock(return_value=([], failure))
+        runner.adapters[Platform.TELEGRAM] = mock_adapter
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="12345",
+            chat_id="67890",
+            user_name="testuser",
+        )
+        with patch(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            return_value={"api_key": "test-key"},
+        ), patch("run_agent.AIAgent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.run_conversation.return_value = {
+                "final_response": failure,
+                "messages": [],
+                "completed": False,
+                "failed": True,
+                "error": failure,
+            }
+            MockAgent.return_value = mock_agent_instance
+
+            await runner._run_background_task("say hello", source, "bg_test")
+
+        content = mock_adapter.send.call_args.kwargs["content"]
+        assert content.startswith("❌ Background task bg_test failed")
+        assert "✅ Background task complete" not in content
+        assert any(
+            call.args[1] == "failed"
+            for call in runner._record_background_task.call_args_list
+        )
+
+    @pytest.mark.asyncio
     async def test_agent_cleanup_runs_when_background_agent_raises(self):
         """Temporary background agents must be cleaned up on error paths too."""
         runner = _make_runner()

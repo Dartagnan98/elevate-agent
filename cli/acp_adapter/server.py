@@ -61,6 +61,7 @@ from acp_adapter.events import (
 )
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 
 logger = logging.getLogger(__name__)
 
@@ -594,7 +595,13 @@ class ElevateACPAgent(acp.Agent):
                 return result
             except Exception as e:
                 logger.exception("Agent error in session %s", session_id)
-                return {"final_response": f"Error: {e}", "messages": state.history}
+                return {
+                    "final_response": f"Error: {e}",
+                    "messages": state.history,
+                    "failed": True,
+                    "completed": False,
+                    "error": str(e),
+                }
             finally:
                 # Restore ELEVATE_INTERACTIVE.
                 if previous_interactive is None:
@@ -610,17 +617,40 @@ class ElevateACPAgent(acp.Agent):
 
         try:
             result = await loop.run_in_executor(_executor, _run_agent)
-        except Exception:
+        except asyncio.CancelledError:
+            try:
+                agent.interrupt("ACP prompt cancelled")
+            except Exception:
+                logger.debug("Could not interrupt cancelled ACP prompt", exc_info=True)
+            return PromptResponse(stop_reason="cancelled")
+        except Exception as exc:
             logger.exception("Executor error for session %s", session_id)
-            return PromptResponse(stop_reason="end_turn")
+            error_text = f"Agent execution failed before it could finish: {exc}"
+            state.history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": error_text},
+            ])
+            try:
+                self.session_manager.save_session(session_id)
+            except Exception:
+                logger.debug("Could not persist ACP executor failure", exc_info=True)
+            if conn:
+                await conn.session_update(
+                    session_id,
+                    acp.update_agent_message_text(error_text),
+                )
+            return PromptResponse(stop_reason="refusal")
 
         if result.get("messages"):
             state.history = result["messages"]
             # Persist updated history so sessions survive process restarts.
             self.session_manager.save_session(session_id)
 
-        final_response = result.get("final_response", "")
-        if final_response:
+        succeeded = agent_result_succeeded(result)
+        final_response = str(result.get("final_response") or "")
+        if not succeeded and not final_response:
+            final_response = agent_result_error(result)
+        if final_response and succeeded:
             try:
                 from agent.title_generator import maybe_auto_title
 
@@ -647,7 +677,14 @@ class ElevateACPAgent(acp.Agent):
                 cached_read_tokens=result.get("cache_read_tokens"),
             )
 
-        stop_reason = "cancelled" if state.cancel_event and state.cancel_event.is_set() else "end_turn"
+        # ACP has no general runtime-failure stop reason. ``refusal`` is the
+        # only supported non-success terminal besides cancellation; the
+        # streamed agent message above carries the concrete failure text.
+        cancelled = bool(
+            (state.cancel_event and state.cancel_event.is_set())
+            or result.get("interrupted")
+        )
+        stop_reason = "cancelled" if cancelled else "end_turn" if succeeded else "refusal"
         return PromptResponse(stop_reason=stop_reason, usage=usage)
 
     # ---- Slash commands (headless) -------------------------------------------

@@ -12,7 +12,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from batch_runner import BatchRunner, _process_batch_worker
+from batch_runner import BatchRunner, _process_batch_worker, _process_single_prompt
 
 
 @pytest.fixture
@@ -186,3 +186,36 @@ class TestBatchWorkerResumeBehavior:
         assert result["discarded_no_reasoning"] == 1
         assert result["completed_prompts"] == [0]
         assert not batch_file.exists() or batch_file.read_text() == ""
+
+
+def test_single_prompt_does_not_hardcode_partial_agent_result_as_success(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, _prompt, task_id=None):
+            return {
+                "final_response": "usable partial context",
+                "messages": [],
+                "completed": False,
+                "partial": True,
+                "error": "iteration budget exhausted",
+                "api_calls": 2,
+            }
+
+        def _convert_to_trajectory_format(self, *_args):
+            return [{"role": "assistant", "content": "usable partial context"}]
+
+    monkeypatch.setattr("batch_runner.AIAgent", FakeAgent)
+    monkeypatch.setattr("batch_runner.sample_toolsets_from_distribution", lambda _name: [])
+
+    result = _process_single_prompt(
+        7,
+        {"prompt": "do the work"},
+        1,
+        {"distribution": "minimal", "model": "test/model", "max_iterations": 3},
+    )
+
+    assert result["success"] is False
+    assert "usable partial context" in result["error"]
+    assert "iteration budget exhausted" in result["error"]

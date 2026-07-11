@@ -35,6 +35,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -2337,10 +2338,7 @@ def _run_single_child(
 
         if interrupted:
             status = "interrupted"
-        elif summary:
-            # A summary means the subagent produced usable output.
-            # exit_reason ("completed" vs "max_iterations") already
-            # tells the parent *how* the task ended.
+        elif agent_result_succeeded(result):
             status = "completed"
         else:
             status = "failed"
@@ -2389,10 +2387,18 @@ def _run_single_child(
         # Determine exit reason
         if interrupted:
             exit_reason = "interrupted"
-        elif completed:
+        elif status == "completed":
             exit_reason = "completed"
-        else:
+        elif str(result.get("turn_exit_reason") or "").startswith(
+            ("max_iterations_reached", "max_session_seconds", "budget_exhausted")
+        ):
             exit_reason = "max_iterations"
+        elif completed is False and not any(
+            result.get(key) for key in ("failed", "partial", "error")
+        ):
+            exit_reason = "max_iterations"
+        else:
+            exit_reason = "error"
 
         # Extract token counts (safe for mock objects)
         _input_tokens = getattr(child, "session_prompt_tokens", 0)
@@ -2437,7 +2443,9 @@ def _run_single_child(
             ),
         }
         if status == "failed":
-            entry["error"] = result.get("error", "Subagent did not produce a response.")
+            entry["error"] = agent_result_error(
+                result, "Subagent did not produce a response."
+            )
 
         # Partial-success contract: any non-completed outcome (failed run,
         # interrupt) still carries whatever the child produced so the parent

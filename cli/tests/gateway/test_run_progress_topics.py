@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import sys
+import threading
 import time
 import types
 from types import SimpleNamespace
@@ -142,6 +143,10 @@ def _make_runner(adapter):
     runner._session_db = None
     runner._running_agents = {}
     runner._session_run_generation = {}
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.RLock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.RLock()
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config = SimpleNamespace(
         thread_sessions_per_user=False,
@@ -493,6 +498,34 @@ class BackgroundReviewAgent:
         }
 
 
+class FailedVisibleAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(
+        self, message, conversation_history=None, task_id=None,
+        persist_user_message=None,
+    ):
+        failure = (
+            "The model returned no response after multiple retries, so this "
+            "turn did not complete. Please retry."
+        )
+        return {
+            "final_response": failure,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": failure,
+                    "finish_reason": "error",
+                }
+            ],
+            "api_calls": 4,
+            "completed": False,
+            "failed": True,
+            "error": failure,
+        }
+
+
 class VerboseAgent:
     """Agent that emits a tool call with args whose JSON exceeds 200 chars."""
     LONG_CODE = "x" * 300
@@ -762,6 +795,20 @@ async def test_run_agent_defers_background_review_notification_until_release(mon
 
     assert result["final_response"] == "done"
     assert adapter.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_propagates_visible_failure_state(monkeypatch, tmp_path):
+    _adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FailedVisibleAgent,
+        session_id="sess-visible-failure",
+    )
+
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["error"] == result["final_response"]
 
 
 @pytest.mark.asyncio

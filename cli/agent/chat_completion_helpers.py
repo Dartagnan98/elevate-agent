@@ -961,7 +961,12 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         for msg in messages:
             api_msg = msg.copy()
             agent._copy_reasoning_content_for_api(msg, api_msg)
-            for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+            for internal_field in (
+                "reasoning",
+                "finish_reason",
+                "_thinking_prefill",
+                "_empty_recovery_synthetic",
+            ):
                 api_msg.pop(internal_field, None)
             if _needs_sanitize:
                 agent._sanitize_tool_calls_for_strict_api(api_msg)
@@ -1156,6 +1161,20 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
         logging.warning(f"Failed to get summary response: {e}")
         final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
 
+    if final_response:
+        if (
+            messages
+            and isinstance(messages[-1], dict)
+            and messages[-1].get("role") == "assistant"
+            and messages[-1].get("content") == final_response
+        ):
+            messages[-1]["finish_reason"] = "error"
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": final_response,
+                "finish_reason": "error",
+            })
     return final_response
 
 

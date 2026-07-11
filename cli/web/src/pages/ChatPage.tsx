@@ -1167,6 +1167,39 @@ function turnCompletionPresentation(
   };
 }
 
+function subagentCompletionStatus(rawStatus: unknown): SubagentEntry["status"] {
+  return String(rawStatus ?? "").trim().toLowerCase() === "completed"
+    ? "done"
+    : "error";
+}
+
+function failActiveTurnMessage(
+  message: ChatMessage,
+  tools: ToolEntry[],
+  error: string,
+  completedAt: number,
+): ChatMessage {
+  const turnTools = tools
+    .filter((tool) => tool.messageId === message.id)
+    .map((tool) =>
+      tool.status === "running"
+        ? {
+            ...tool,
+            completedAt: tool.completedAt ?? completedAt,
+            error: tool.error ?? error,
+            status: "error" as const,
+          }
+        : tool,
+    );
+  return {
+    ...message,
+    completedAt,
+    content: message.content || error,
+    status: "error",
+    tools: turnTools.length ? turnTools : message.tools,
+  };
+}
+
 function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessage[] {
   const list = messages ?? [];
   const total = list.length;
@@ -1387,6 +1420,7 @@ export const __chatPageTestables = {
   contextRingTitle,
   defaultActivityDigestOpen,
   describeToolGroup,
+  failActiveTurnMessage,
   isCompactSlashCommand,
   isOpenPreviewIntent,
   messageRowPropsEqual,
@@ -1402,6 +1436,7 @@ export const __chatPageTestables = {
   shouldHandlePreviewShortcut,
   shouldKeepTranscriptMessage,
   sortBackgroundTasksForDisplay,
+  subagentCompletionStatus,
   settleQueuedDelivery,
   terminalDuplicatePromptStatus,
   storedToolError,
@@ -5143,12 +5178,9 @@ export default function ChatPage() {
       // thinking no longer reads as 0 output.
       const preview = isThinking && rawPreview ? `💭 ${rawPreview}` : rawPreview;
       const thinkingDelta = isThinking ? estimateTokens(rawPreview) : 0;
-      const statusText = String(payload.status || "").toLowerCase();
       const nextStatus: SubagentEntry["status"] =
         ev.type === "subagent.complete"
-          ? statusText.includes("error") || statusText.includes("fail")
-            ? "error"
-            : "done"
+          ? subagentCompletionStatus(payload.status)
           : "running";
       const now = eventMillis(ev);
       const childSessionId =
@@ -5940,7 +5972,13 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("background.complete", (ev) => {
         if (!accepts(ev)) return;
-        appendMessage("system", eventText(ev) || "Background task complete");
+        const payload = compactToolPayload(ev.payload);
+        const failed = payload.status === "error" || Boolean(payload.error);
+        appendMessage(
+          "system",
+          eventText(ev) || String(payload.error || "Background task complete"),
+          failed ? { status: "error" } : {},
+        );
       }),
     );
     unsubs.push(
@@ -5986,7 +6024,13 @@ export default function ChatPage() {
     unsubs.push(
       gw.on("btw.complete", (ev) => {
         if (!accepts(ev)) return;
-        appendMessage("system", eventText(ev) || "Background task complete");
+        const payload = compactToolPayload(ev.payload);
+        const failed = payload.status === "error" || Boolean(payload.error);
+        appendMessage(
+          "system",
+          eventText(ev) || String(payload.error || "Background task complete"),
+          failed ? { status: "error" } : {},
+        );
       }),
     );
     unsubs.push(
@@ -5994,9 +6038,35 @@ export default function ChatPage() {
         if (!accepts(ev)) return;
         const at = eventMillis(ev);
         const message = eventString(ev, "message") || "Gateway error";
+        const activeMessageId = currentAssistantRef.current;
+        const activeTools = toolsRef.current;
         setBanner(message);
-        appendMessage("system", message, { createdAt: at, status: "error" });
+        if (activeMessageId) {
+          flushAssistantDelta();
+          setMessages((prev) =>
+            prev.map((item) =>
+              item.id === activeMessageId
+                ? failActiveTurnMessage(item, activeTools, message, at)
+                : item,
+            ),
+          );
+        } else {
+          appendMessage("system", message, { createdAt: at, status: "error" });
+        }
+        currentAssistantRef.current = null;
+        liveGatewayMsgIdRef.current = null;
+        turnOutputBaselineRef.current = null;
+        turnHasToolErrorRef.current = false;
+        if (manualCompactAssistantRef.current === activeMessageId) {
+          manualCompactAssistantRef.current = null;
+          manualCompactRequestInFlightRef.current = false;
+        }
+        toolsRef.current = [];
+        activityTraceRef.current = [];
+        setTools([]);
+        setActivityTrace([]);
         setBusy(false);
+        setCompacting(false);
         clearActiveTurnSnapshot(persistedSessionIdRef.current ?? ev.session_id);
         setSubagents((prev) =>
           prev.map((subagent) =>
@@ -10561,13 +10631,24 @@ type BreakdownStep =
 
 type ToolCategory = "command" | "search" | "edit" | "read" | "skill" | "other";
 
+function toolNameTokens(name: string): Set<string> {
+  return new Set(
+    name
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean),
+  );
+}
+
 function toolCategory(name: string): ToolCategory {
-  const n = name.toLowerCase();
-  if (/terminal|bash|shell|exec|command|process|^run/.test(n)) return "command";
-  if (/search|grep|glob|find/.test(n)) return "search";
-  if (/write|edit|patch/.test(n)) return "edit";
-  if (/skill/.test(n)) return "skill";
-  if (/read|cat|open|view|file/.test(n)) return "read";
+  const tokens = toolNameTokens(name);
+  const has = (...values: string[]) => values.some((value) => tokens.has(value));
+  if (has("terminal", "bash", "shell", "exec", "execute", "command", "process", "run")) return "command";
+  if (has("search", "grep", "glob", "find")) return "search";
+  if (has("write", "edit", "patch")) return "edit";
+  if (has("skill", "skills")) return "skill";
+  if (has("read", "cat", "open", "view", "file")) return "read";
   return "other";
 }
 
@@ -10616,7 +10697,10 @@ function toolTarget(tool: ToolStep, max = 44): string {
 const TOOL_NAME_LABELS: Record<string, string> = {
   delegate: "Delegated a task",
   delegate_task: "Delegated a task",
+  deals_overview: "Checked deals",
+  elevate_db: "Queried Elevate data",
   exec_command: "Checked workspace",
+  leads_overview: "Checked leads",
   mixture_of_agents: "Ran a mixture of agents",
   agent_handoff: "Handed off to an agent",
   read_file: "Read file",
@@ -10707,14 +10791,15 @@ function groupConsecutiveTools(steps: BreakdownStep[]): BreakdownStep[] {
   return out;
 }
 
-/** Pick a lucide icon for a tool by substring-matching its name. */
+/** Pick a lucide icon from whole tool-name tokens. */
 function breakdownToolIcon(name: string): LucideIcon {
-  const n = name.toLowerCase();
-  if (/terminal|bash|shell|run|exec|command/.test(n)) return SquareTerminal;
-  if (/search|grep|glob|find/.test(n)) return Search;
-  if (/write|edit|patch/.test(n)) return FilePen;
-  if (/read|cat|open|view/.test(n)) return FileText;
-  if (/memory/.test(n)) return Brain;
+  const tokens = toolNameTokens(name);
+  const has = (...values: string[]) => values.some((value) => tokens.has(value));
+  if (has("terminal", "bash", "shell", "run", "exec", "execute", "command")) return SquareTerminal;
+  if (has("search", "grep", "glob", "find")) return Search;
+  if (has("write", "edit", "patch")) return FilePen;
+  if (has("read", "cat", "open", "view", "file")) return FileText;
+  if (has("memory")) return Brain;
   return Zap;
 }
 

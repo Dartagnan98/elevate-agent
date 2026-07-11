@@ -255,6 +255,8 @@ class TestRunAgentViaProxy:
 
         # Verify response was assembled
         assert result["final_response"] == "Hello world"
+        assert result["completed"] is True
+        assert result["failed"] is False
 
     @pytest.mark.asyncio
     async def test_handles_http_error(self, monkeypatch):
@@ -279,6 +281,9 @@ class TestRunAgentViaProxy:
 
         assert "Proxy error (401)" in result["final_response"]
         assert result["api_calls"] == 0
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["partial"] is False
 
     @pytest.mark.asyncio
     async def test_handles_connection_error(self, monkeypatch):
@@ -309,6 +314,99 @@ class TestRunAgentViaProxy:
                     )
 
         assert "Proxy connection error" in result["final_response"]
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["partial"] is False
+
+    @pytest.mark.parametrize(
+        "error_chunk",
+        [
+            'data: {"error":{"message":"remote turn did not complete"}}\n\n',
+            "event: error\ndata: remote turn did not complete\n\n",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sse_error_event_cannot_be_reported_as_success(
+        self, monkeypatch, error_chunk
+    ):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        runner = _make_runner()
+
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                'data: {"choices":[{"delta":{"content":"Partial answer"}}]}\n\n'
+                + error_chunk
+                + "data: [DONE]\n\n"
+            ],
+        )
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(_FakeSession(resp)):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="test",
+                    )
+
+        assert result["final_response"] == "Partial answer"
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["completed"] is False
+        assert "remote turn did not complete" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_partial_disconnect_is_failed_partial_result(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        runner = _make_runner()
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                'data: {"choices":[{"delta":{"content":"Partial answer"}}]}\n\n'
+            ],
+        )
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(_FakeSession(resp)):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="test",
+                    )
+
+        assert result["final_response"] == "Partial answer"
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["completed"] is False
+        assert "before the remote agent completed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_done_without_remote_response_is_failure(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        runner = _make_runner()
+        resp = _FakeSSEResponse(status=200, sse_chunks=["data: [DONE]\n\n"])
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(_FakeSession(resp)):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="test",
+                    )
+
+        assert result["failed"] is True
+        assert result["partial"] is False
+        assert result["completed"] is False
+        assert "completed without a response" in result["error"]
 
     @pytest.mark.asyncio
     async def test_skips_tool_messages_in_history(self, monkeypatch):

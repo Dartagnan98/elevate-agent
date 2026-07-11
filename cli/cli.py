@@ -68,6 +68,7 @@ from agent.usage_pricing import (
     format_token_count_compact,
 )
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
+from agent.result_outcome import agent_result_error, agent_result_succeeded
 from elevate_cli.banner import _format_context_length, format_banner_version_label
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -6369,8 +6370,9 @@ class ElevateCLI:
                 )
 
                 response = result.get("final_response", "") if result else ""
-                if not response and result and result.get("error"):
-                    response = f"Error: {result['error']}"
+                succeeded = agent_result_succeeded(result)
+                if not response and not succeeded:
+                    response = f"Error: {agent_result_error(result, 'Unknown error')}"
 
                 # Display result in the CLI (thread-safe via patch_stdout).
                 # Force a TUI refresh first so spinner/status bar don't overlap
@@ -6380,7 +6382,10 @@ class ElevateCLI:
                     time.sleep(0.05)  # brief pause for refresh
                 print()
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-                _cprint(f"  ✅ Background task #{task_num} complete")
+                if succeeded:
+                    _cprint(f"  ✅ Background task #{task_num} complete")
+                else:
+                    _cprint(f"  ❌ Background task #{task_num} failed")
                 _cprint(f"  Prompt: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
                 if response:
@@ -6409,7 +6414,7 @@ class ElevateCLI:
                     _cprint("  (No response generated)")
 
                 # Play bell if enabled
-                if self.bell_on_complete:
+                if succeeded and self.bell_on_complete:
                     sys.stdout.write("\a")
                     sys.stdout.flush()
 
@@ -6503,8 +6508,13 @@ class ElevateCLI:
                 )
 
                 response = (result.get("final_response") or "") if result else ""
-                if not response and result and result.get("error"):
-                    response = f"Error: {result['error']}"
+                succeeded = agent_result_succeeded(result)
+                if not succeeded:
+                    error_detail = agent_result_error(result)
+                    if response and error_detail.strip() != response.strip():
+                        response += f"\n\nError: {error_detail}"
+                    elif not response:
+                        response = f"Error: {error_detail}"
 
                 # TUI refresh before printing
                 if self._app:
@@ -6520,9 +6530,12 @@ class ElevateCLI:
                     except Exception:
                         _resp_color = "#4F6D4A"
 
+                    panel_label = "▲ /btw" if succeeded else "❌ /btw incomplete"
+                    if not succeeded:
+                        _resp_color = "#D16D6D"
                     ChatConsole().print(Panel(
                         _render_final_assistant_content(response, mode=self.final_response_markdown),
-                        title=f"[{_resp_color} bold]▲ /btw[/]",
+                        title=f"[{_resp_color} bold]{panel_label}[/]",
                         title_align="left",
                         border_style=_resp_color,
                         box=rich_box.HORIZONTALS,
@@ -6531,7 +6544,7 @@ class ElevateCLI:
                 else:
                     _cprint("  💬 /btw: (no response)")
 
-                if self.bell_on_complete:
+                if succeeded and self.bell_on_complete:
                     sys.stdout.write("\a")
                     sys.stdout.flush()
 
@@ -8452,6 +8465,8 @@ class ElevateCLI:
         Returns:
             The agent's response, or None on error
         """
+        self._last_agent_result = None
+
         # Single-query and direct chat callers do not go through run(), so
         # register secure secret capture here as well.
         set_secret_capture_callback(self._secret_capture_callback)
@@ -8778,9 +8793,10 @@ class ElevateCLI:
 
             # Get the final response
             response = result.get("final_response", "") if result else ""
+            turn_succeeded = agent_result_succeeded(result) if result else False
 
             # Auto-generate session title after first exchange (non-blocking)
-            if response and result and not result.get("failed") and not result.get("partial"):
+            if response and turn_succeeded:
                 try:
                     from agent.title_generator import maybe_auto_title
                     maybe_auto_title(
@@ -8796,14 +8812,18 @@ class ElevateCLI:
             # Handle failed or partial results (e.g., non-retryable errors, rate limits,
             # truncated output, invalid tool calls). Both "failed" and "partial" with
             # an empty final_response mean the agent couldn't produce a usable answer.
-            if result and (result.get("failed") or result.get("partial")) and not response:
-                error_detail = result.get("error", "Unknown error")
+            if result and not turn_succeeded and not response:
+                error_detail = agent_result_error(result, "Unknown error")
                 response = f"Error: {error_detail}"
                 # Stop continuous voice mode on persistent errors (e.g. 429 rate limit)
                 # to avoid an infinite error → record → error loop
                 if self._voice_continuous:
                     self._voice_continuous = False
                     _cprint(f"\n{_DIM}Continuous voice mode stopped due to error.{_RST}")
+            elif result and not turn_succeeded:
+                error_detail = agent_result_error(result, "Unknown error")
+                if error_detail.strip() != response.strip():
+                    response += f"\n\n---\nError: {error_detail}"
 
             # Handle interrupt - check if we were interrupted
             pending_message = None
@@ -8839,7 +8859,7 @@ class ElevateCLI:
                         display_reasoning = reasoning.strip()
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
 
-            if response and not response_previewed:
+            if response and (not response_previewed or not turn_succeeded):
                 # Use skin engine for label/color with fallback
                 try:
                     from elevate_cli.skin_engine import get_active_skin
@@ -8852,7 +8872,10 @@ class ElevateCLI:
                     _resp_color = "#CD7F32"
                     _resp_text = "#FFF8DC"
 
-                is_error_response = result and (result.get("failed") or result.get("partial"))
+                is_error_response = bool(result and not turn_succeeded)
+                if is_error_response:
+                    label = "❌ Elevate — incomplete"
+                    _resp_color = "#D16D6D"
                 already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
                     # Text was already printed sentence-by-sentence; just close the box
@@ -8877,7 +8900,7 @@ class ElevateCLI:
 
             # Play terminal bell when agent finishes (if enabled).
             # Works over SSH — the bell propagates to the user's terminal.
-            if self.bell_on_complete:
+            if turn_succeeded and self.bell_on_complete:
                 sys.stdout.write("\a")
                 sys.stdout.flush()
 
@@ -8933,6 +8956,7 @@ class ElevateCLI:
                 print(f"\n⏩ Delivering leftover /steer as next turn: '{preview}'")
                 self._pending_input.put(_leftover_steer)
 
+            self._last_agent_result = result
             return response
             
         except Exception as e:
@@ -11231,7 +11255,7 @@ def main(
                     print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
                     
                     # Ensure proper exit code for automation wrappers
-                    sys.exit(1 if isinstance(result, dict) and result.get("failed") else 0)
+                    sys.exit(0 if agent_result_succeeded(result) else 1)
             
             # Exit with error code if credentials or agent init fails
             sys.exit(1)
@@ -11242,6 +11266,13 @@ def main(
                 cli.console.print(f"[bold blue]Query:[/] {_query_label}")
             cli.chat(query, images=single_query_images or None)
             cli._print_exit_summary()
+            sys.exit(
+                0
+                if agent_result_succeeded(
+                    getattr(cli, "_last_agent_result", None)
+                )
+                else 1
+            )
         return
     
     # Run interactive mode

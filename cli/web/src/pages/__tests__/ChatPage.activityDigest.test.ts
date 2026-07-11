@@ -91,6 +91,69 @@ describe("ChatActivityDigest tool labels", () => {
       ]),
     ).toBe("Updated task list, read 5 files");
   });
+
+  it("does not misclassify realtor overview tools as file views", () => {
+    expect(
+      __chatPageTestables.describeToolGroup([
+        tool({ name: "leads_overview", context: '{"recent_limit":1}' }),
+      ]),
+    ).toBe("Checked leads");
+    expect(
+      __chatPageTestables.describeToolGroup([
+        tool({ name: "deals_overview", context: '{"status":"active"}' }),
+      ]),
+    ).toBe("Checked deals");
+  });
+
+  it("preserves command and skill categories for plural or compound tool names", () => {
+    expect(
+      __chatPageTestables.describeToolGroup([
+        tool({ name: "execute_code", context: '{"code":"print(1)"}' }),
+      ]),
+    ).toBe("Checked workspace");
+    expect(
+      __chatPageTestables.describeToolGroup([
+        tool({ name: "skills_list", context: "" }),
+      ]),
+    ).toBe("Loaded a skill");
+  });
+});
+
+describe("terminal failure truth", () => {
+  it("settles a live assistant and marks unfinished tools errored on gateway failure", () => {
+    const failed = __chatPageTestables.failActiveTurnMessage(
+      message({ content: "", id: "assistant-live", status: "streaming" }),
+      [
+        toolEntry({ messageId: "assistant-live", status: "running" }),
+        toolEntry({ id: "done", messageId: "assistant-live", status: "done" }),
+        toolEntry({ id: "other", messageId: "assistant-other", status: "running" }),
+      ],
+      "agent crashed",
+      2_000,
+    );
+
+    expect(failed).toMatchObject({
+      completedAt: 2_000,
+      content: "agent crashed",
+      status: "error",
+    });
+    expect(failed.tools).toMatchObject([
+      { completedAt: 2_000, error: "agent crashed", status: "error" },
+      { id: "done", status: "done" },
+    ]);
+  });
+
+  it.each(["timeout", "interrupted", "cancelled", "error", "failed", "", undefined])(
+    "does not present subagent status %s as success",
+    (status) => {
+      expect(__chatPageTestables.subagentCompletionStatus(status)).toBe("error");
+    },
+  );
+
+  it("presents only explicit completed subagent status as success", () => {
+    expect(__chatPageTestables.subagentCompletionStatus("completed")).toBe("done");
+    expect(__chatPageTestables.subagentCompletionStatus("Completed")).toBe("done");
+  });
 });
 
 describe("ChatActivityDigest reasoning persistence", () => {

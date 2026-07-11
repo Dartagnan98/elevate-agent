@@ -364,7 +364,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 function_result = f"[Tool execution cancelled — {name} was skipped due to user interrupt]"
             else:
                 function_result = f"Error executing tool '{name}': thread did not return a result"
+            function_name = name
+            function_args = args
             tool_duration = 0.0
+            is_error = True
+            blocked = False
         else:
             function_name, function_args, function_result, tool_duration, is_error, blocked = r
 
@@ -411,12 +415,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             agent._safe_print(f"  {cute_msg}")
         elif not agent.quiet_mode:
             _preview_str = _multimodal_text_summary(function_result)
+            marker = "❌" if is_error else "✅"
+            outcome = "failed" if is_error else "completed"
             if agent.verbose_logging:
-                print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s")
+                print(f"  {marker} Tool {i+1} {outcome} in {tool_duration:.2f}s")
                 print(agent._wrap_verbose("Result: ", _preview_str))
             else:
                 response_preview = _preview_str[:agent.log_prefix_chars] + "..." if len(_preview_str) > agent.log_prefix_chars else _preview_str
-                print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
+                print(f"  {marker} Tool {i+1} {outcome} in {tool_duration:.2f}s - {response_preview}")
 
         agent._current_tool = None
         agent._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s)")
@@ -716,6 +722,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 _ce_result = function_result
             except Exception as tool_error:
                 function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
+                _ce_result = function_result
                 logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
             finally:
                 tool_duration = time.time() - tool_start_time
@@ -740,6 +747,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 _mem_result = function_result
             except Exception as tool_error:
                 function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
+                _mem_result = function_result
                 logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
             finally:
                 tool_duration = time.time() - tool_start_time
@@ -768,6 +776,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 _spinner_result = function_result
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"
+                _spinner_result = function_result
                 logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
             finally:
                 tool_duration = time.time() - tool_start_time
@@ -880,13 +889,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         agent._apply_pending_steer_to_tool_results(messages, 1)
 
         if not agent.quiet_mode:
+            marker = "❌" if _is_error_result else "✅"
+            outcome = "failed" if _is_error_result else "completed"
             if agent.verbose_logging:
-                print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s")
+                print(f"  {marker} Tool {i} {outcome} in {tool_duration:.2f}s")
                 print(agent._wrap_verbose("Result: ", function_result))
             else:
                 _fr_str = function_result if isinstance(function_result, str) else str(function_result)
                 response_preview = _fr_str[:agent.log_prefix_chars] + "..." if len(_fr_str) > agent.log_prefix_chars else _fr_str
-                print(f"  ✅ Tool {i} completed in {tool_duration:.2f}s - {response_preview}")
+                print(f"  {marker} Tool {i} {outcome} in {tool_duration:.2f}s - {response_preview}")
 
         if agent._interrupt_requested and i < len(assistant_message.tool_calls):
             remaining = len(assistant_message.tool_calls) - i

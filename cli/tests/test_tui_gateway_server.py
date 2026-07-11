@@ -124,6 +124,24 @@ def test_status_callback_accepts_single_message_argument():
     )
 
 
+def test_background_terminal_payload_marks_nonempty_failure_as_error():
+    payload = server._agent_terminal_payload(
+        {
+            "final_response": "The provider failed after retries.",
+            "failed": True,
+            "completed": False,
+        },
+        task_id="bg-1",
+    )
+
+    assert payload == {
+        "task_id": "bg-1",
+        "status": "error",
+        "text": "The provider failed after retries.",
+        "error": "The provider failed after retries.",
+    }
+
+
 def test_emit_records_content_free_session_breadcrumb(monkeypatch):
     from elevate_cli.diagnostics import session_recorder
 
@@ -319,6 +337,41 @@ def test_tool_complete_emits_detected_failure(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("failed_count", [0, 3])
+def test_tool_complete_keeps_successful_failed_count_successful(
+    monkeypatch, failed_count
+):
+    server._sessions["sid"] = _session(
+        tool_started_at={"tool-1": 10.0},
+        running_tools={"tool-1": {"name": "leads_overview"}},
+    )
+    monkeypatch.setattr(server.time, "time", lambda: 12.0)
+    result = json.dumps(
+        {
+            "success": True,
+            "overview": {
+                "pendingApproval": 0,
+                "queued": 0,
+                "sending": 0,
+                "sent": 0,
+                "failed": failed_count,
+                "retrying": 0,
+            },
+        }
+    )
+    try:
+        with patch("tui_gateway.server._emit") as emit:
+            server._on_tool_complete(
+                "sid", "tool-1", "leads_overview", {"recent_limit": 1}, result
+            )
+    finally:
+        server._sessions.pop("sid", None)
+
+    payload = emit.call_args.args[2]
+    assert payload["summary"] == "Completed in 2.0s"
+    assert "error" not in payload
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
@@ -417,6 +470,40 @@ def test_reasoning_callbacks_honor_show_reasoning_toggle():
         ]
     finally:
         server._sessions.pop("sid", None)
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected"),
+    [
+        ("completed", "completed"),
+        ("interrupted", "interrupted"),
+        ("cancelled", "interrupted"),
+        ("timeout", "failed"),
+        ("error", "failed"),
+        ("failed", "failed"),
+        (None, "failed"),
+    ],
+)
+def test_subagent_complete_normalizes_terminal_wire_status(
+    raw_status, expected
+):
+    server._sessions["sid"] = _session(tool_progress_mode="all")
+    try:
+        with patch("tui_gateway.server._emit") as emit:
+            server._on_tool_progress(
+                "sid",
+                "subagent.complete",
+                preview="finished",
+                status=raw_status,
+                error="detail",
+            )
+    finally:
+        server._sessions.pop("sid", None)
+
+    payload = emit.call_args.args[2]
+    assert payload["status"] == expected
+    assert payload["raw_status"] == str(raw_status or "")
+    assert payload["error"] == "detail"
 
 
 def test_config_set_yolo_toggles_session_scope():
@@ -908,6 +995,162 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
     assert captured["session_key"] == "session-key"
 
 
+def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
+    db = _install_prompt_receipt_db(monkeypatch)
+
+    class _Agent:
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None,
+            **kwargs,
+        ):
+            return {
+                "final_response": "(empty)",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "(empty)",
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+        monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "Use deals_overview before answering",
+                    "user_message_id": "user-empty",
+                },
+            }
+        )
+
+        assert response.get("result")
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert len(complete) == 1
+        payload = complete[0][2]
+        assert payload["status"] == "error"
+        assert payload["text"] != "(empty)"
+        assert "did not complete" in payload["text"].lower()
+        assert db.rows[("session-key", "user-empty")]["status"] == "error"
+        assert server._sessions["sid"]["history"] == [
+            {
+                "role": "assistant",
+                "content": server._EMPTY_MODEL_FAILURE,
+                "finish_reason": "error",
+            }
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
+@pytest.mark.parametrize("agent_result", [None, "", "legacy string result"])
+def test_prompt_submit_non_dict_result_is_terminal_error(monkeypatch, agent_result):
+    db = _install_prompt_receipt_db(monkeypatch)
+
+    class _Agent:
+        def run_conversation(self, *args, **kwargs):
+            return agent_result
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+        monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "ping",
+                    "user_message_id": "user-invalid-result",
+                },
+            }
+        )
+
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert len(complete) == 1
+        assert complete[0][2]["status"] == "error"
+        assert complete[0][2]["text"]
+        assert db.rows[("session-key", "user-invalid-result")]["status"] == "error"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_outer_exception_emits_terminal_error(monkeypatch, tmp_path):
+    db = _install_prompt_receipt_db(monkeypatch)
+    monkeypatch.setattr(server, "_CRASH_LOG", str(tmp_path / "crash.log"))
+
+    class _Agent:
+        def run_conversation(self, *args, **kwargs):
+            raise RuntimeError("agent crashed")
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+        server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "ping",
+                    "user_message_id": "user-crash",
+                },
+            }
+        )
+
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert len(complete) == 1
+        assert complete[0][2] == {
+            "error": "agent crashed",
+            "message_id": complete[0][2]["message_id"],
+            "status": "error",
+            "text": "agent crashed",
+        }
+        assert not [args for args in emitted if args[0] == "error"]
+        assert db.rows[("session-key", "user-crash")]["status"] == "error"
+    finally:
+        server._sessions.pop("sid", None)
+
+
 def test_prompt_submit_expands_context_refs(monkeypatch):
     _install_prompt_receipt_db(monkeypatch)
     captured = {}
@@ -1294,7 +1537,7 @@ def test_prompt_submit_terminalization_failure_can_be_recovered(monkeypatch, tmp
         def run_conversation(self, prompt, conversation_history=None, **kwargs):
             calls["runs"] += 1
             return {
-                "final_response": "",
+                "final_response": "done",
                 "messages": [
                     *(conversation_history or []),
                     {
@@ -2721,6 +2964,45 @@ def test_async_delegate_sink_rewakes_main_agent():
     assert "CMA drafted" in params["persist_user_message"]
     # Consumed: nothing left parked for a later turn to double-report.
     assert session.get("pending_delegate_results") == []
+
+
+def test_async_delegate_sink_normalizes_failure_status_and_preserves_error():
+    class _NoopThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            return None
+
+    emitted = []
+    session = _session(running=True)
+    with patch(
+        "tui_gateway.server._emit",
+        side_effect=lambda event, sid, payload=None: emitted.append(
+            (event, sid, payload)
+        ),
+    ), patch("tui_gateway.server.threading.Thread", _NoopThread):
+        server._make_async_delegate_sink("sid", session)(
+            {
+                "task_id": "dt-timeout",
+                "results": [
+                    {
+                        "error": "child timed out",
+                        "status": "timeout",
+                        "subagent_id": "child-1",
+                        "summary": "",
+                        "task_index": 0,
+                    }
+                ],
+            }
+        )
+
+    payload = next(
+        payload for event, _sid, payload in emitted if event == "subagent.complete"
+    )
+    assert payload["status"] == "failed"
+    assert payload["raw_status"] == "timeout"
+    assert payload["error"] == "child timed out"
 
 
 def test_parked_result_yields_to_busy_session():
