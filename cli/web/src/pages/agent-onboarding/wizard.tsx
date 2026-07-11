@@ -47,6 +47,12 @@ import {
   draftFromSnapshot,
   type AgentSetupDraft,
 } from "./index";
+import {
+  isPrimaryModelReady,
+  isOAuthProviderUsable,
+  resolvePrimaryRuntimeProvider,
+  resolvePrimaryWizardProvider,
+} from "./oauth-readiness";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -190,7 +196,13 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
   },
 ];
 
-export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
+export function AgentOnboardingWelcome({
+  onContinue,
+  onFinishLater,
+}: {
+  onContinue: () => void;
+  onFinishLater: () => void;
+}) {
   const [exiting, setExiting] = useState(false);
 
   useEffect(() => {
@@ -241,6 +253,17 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
         >
           Start onboarding
         </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={onFinishLater}
+          className="onboarding-rise-delay-3 mt-3 text-[12px] text-muted-foreground hover:text-foreground"
+        >
+          Continue to Chat
+        </Button>
+        <p className="onboarding-rise-delay-3 mt-1 text-[11px] text-muted-foreground/75">
+          Finish setup later from Agent Onboarding.
+        </p>
       </div>
     </div>,
     document.body,
@@ -250,10 +273,12 @@ export function AgentOnboardingWelcome({ onContinue }: { onContinue: () => void 
 export function AgentOnboardingWizard({
   setup,
   onSetupUpdated,
+  onFinishLater,
   onFinish,
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
+  onFinishLater: () => void;
   onFinish: () => void;
 }) {
   const [draft, setDraft] = useState<AgentSetupDraft>(() => draftFromSnapshot(setup));
@@ -263,6 +288,12 @@ export function AgentOnboardingWizard({
   const [showMissing, setShowMissing] = useState(false);
   const [stepIdx, setStepIdx] = useState(0);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[] | null>(null);
+  const primaryItem = useMemo(
+    () => setup.items.find((item) => item.key === "model_primary"),
+    [setup.items],
+  );
+  const primaryItemValue = (primaryItem?.value ?? {}) as Record<string, unknown>;
+  const existingRuntimeProvider = String(primaryItemValue.runtimeProvider ?? "");
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
@@ -288,21 +319,21 @@ export function AgentOnboardingWizard({
           const current = draftRef.current.primaryProvider;
           if (!current.trim()) {
             const live = resp.providers.find(
-              (p) => p.status.logged_in && p.id !== "claude-code",
+              (p) => isOAuthProviderUsable(p) && p.id !== "claude-code",
             );
-            const fallback = resp.providers.find((p) => p.status.logged_in);
+            const fallback = resp.providers.find(isOAuthProviderUsable);
             const pick = live ?? fallback;
             if (pick) {
               setDraft((prev) =>
                 prev.primaryProvider.trim()
                   ? prev
-                  : { ...prev, primaryProvider: pick.id === "claude-code" ? "anthropic" : pick.id },
+                  : { ...prev, primaryProvider: resolvePrimaryWizardProvider(pick.id) },
               );
             }
           }
         })
         .catch(() => {
-          if (!cancelled) setOauthProviders([]);
+          // Keep null: a transport failure is unknown, not disconnected.
         });
     };
     if (AGENT_WIZARD_STEPS[stepIdx]?.id === "models") {
@@ -315,29 +346,18 @@ export function AgentOnboardingWizard({
 
   const connectedProviderIds = useMemo(() => {
     if (!oauthProviders) return new Set<string>();
-    return new Set(oauthProviders.filter((p) => p.status.logged_in).map((p) => p.id));
+    return new Set(oauthProviders.filter(isOAuthProviderUsable).map((p) => p.id));
   }, [oauthProviders]);
   const anyProviderConnected = connectedProviderIds.size > 0;
 
-  // Map the wizard's grouped provider value to the concrete provider id the
-  // backend catalog endpoint understands. "openai" routes to "openai-codex"
-  // when Codex is the signed-in flow; "qwen" routes to "qwen-oauth"; etc.
-  const catalogProviderId = useMemo(() => {
-    const p = draft.primaryProvider;
-    if (!p) return "";
-    if (p === "openai") {
-      return connectedProviderIds.has("openai-codex") ? "openai-codex" : "openai";
-    }
-    if (p === "anthropic") {
-      if (connectedProviderIds.has("anthropic")) return "anthropic";
-      if (connectedProviderIds.has("claude-code")) return "claude-code";
-      return "anthropic";
-    }
-    if (p === "qwen") {
-      return connectedProviderIds.has("qwen-oauth") ? "qwen-oauth" : "qwen";
-    }
-    return p;
-  }, [draft.primaryProvider, connectedProviderIds]);
+  const catalogProviderId = useMemo(
+    () => resolvePrimaryRuntimeProvider(
+      draft.primaryProvider,
+      oauthProviders,
+      existingRuntimeProvider,
+    ),
+    [draft.primaryProvider, oauthProviders, existingRuntimeProvider],
+  );
 
   // Live model catalog for the chosen provider. Refetches whenever the
   // resolved provider id changes so the dropdown stays in sync with auth
@@ -446,22 +466,17 @@ export function AgentOnboardingWizard({
       // A provider is "available" if either: the user signed in via CLI/wizard
       // OAuth (real auth store), OR a key is detected in ~/.elevate/.env, OR
       // the user pasted one in this session.
-      const providerConnected =
-        connectedProviderIds.has(draft.primaryProvider) ||
-        // The grouped value ("openai"/"qwen") resolves to the concrete OAuth id
-        // ("openai-codex"/"qwen-oauth") — that live OAuth session IS the
-        // credential, so no pasted key is needed.
-        connectedProviderIds.has(catalogProviderId) ||
-        // claude-code subscription credentials count as anthropic access
-        (draft.primaryProvider === "anthropic" && connectedProviderIds.has("claude-code"));
-      const primaryHasKey =
-        providerConnected ||
-        Boolean(draft.primaryApiKey.trim()) ||
-        draft.primarySecretPresent;
-      if (!anyProviderConnected && !primaryHasKey) {
+      const primaryReady = isPrimaryModelReady({
+        selectedProvider: draft.primaryProvider,
+        selectedModel: draft.primaryModel,
+        hasSecret: Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent,
+        oauthProviders,
+        existingPrimary: primaryItem,
+      });
+      if (!anyProviderConnected && !primaryReady) {
         return "Connect a model provider below before continuing.";
       }
-      if (!draft.primaryProvider.trim() || !draft.primaryModel.trim() || !primaryHasKey) {
+      if (!primaryReady) {
         return "Pick a provider and model the agent should think with.";
       }
       // Embedding is OPTIONAL — without it, memory recall falls back to the
@@ -495,7 +510,7 @@ export function AgentOnboardingWizard({
       }
     }
     return null;
-  }, [step.id, draft, anyProviderConnected, connectedProviderIds, catalogProviderId]);
+  }, [step.id, draft, anyProviderConnected, oauthProviders, primaryItem]);
 
   const canAdvance = missingMessage == null;
 
@@ -507,7 +522,9 @@ export function AgentOnboardingWizard({
     setSaving(true);
     setError(null);
     try {
-      const updated = await api.updateAgentSetup(buildItemUpdates(draft));
+      const updated = await api.updateAgentSetup(
+        buildItemUpdates(draft, oauthProviders, primaryItem),
+      );
       onSetupUpdated(updated);
     } catch (err) {
       setError(errorMessage(err, "Save failed"));
@@ -515,13 +532,13 @@ export function AgentOnboardingWizard({
     } finally {
       setSaving(false);
     }
-  }, [draft, onSetupUpdated]);
+  }, [draft, oauthProviders, onSetupUpdated, primaryItem]);
 
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
     try {
-      await api.updateAgentSetup(buildItemUpdates(draft));
+      await api.updateAgentSetup(buildItemUpdates(draft, oauthProviders, primaryItem));
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
     } catch (err) {
@@ -532,7 +549,7 @@ export function AgentOnboardingWizard({
     playOnboardingChime();
     setCompleting(false);
     onFinish();
-  }, [draft, onSetupUpdated, onFinish]);
+  }, [draft, oauthProviders, onSetupUpdated, onFinish, primaryItem]);
 
   const handleNext = useCallback(async () => {
     if (busy) return;
@@ -569,6 +586,20 @@ export function AgentOnboardingWizard({
       <div className="onboarding-aurora-bg pointer-events-none fixed inset-0" aria-hidden />
       <div className="relative flex min-h-full items-center justify-center px-6 py-10">
        <div className="relative flex w-full max-w-3xl flex-col">
+        <div className="mb-5 flex items-center justify-between gap-4">
+          <span className="text-[11px] text-muted-foreground/75">
+            Completed steps stay saved.
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onFinishLater}
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+          >
+            Finish later
+          </Button>
+        </div>
         <div className="mb-7 flex items-center gap-1.5">
           {AGENT_WIZARD_STEPS.map((s, idx) => (
             <span
@@ -613,7 +644,7 @@ export function AgentOnboardingWizard({
 
                 <WizardSection
                   title="Or paste API keys"
-                  hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Writes to ~/.elevate/.env."
+                  hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Saves to your current Elevate profile."
                 >
                   <ApiKeysPanel
                     onError={(msg) => setError(msg)}
@@ -634,7 +665,7 @@ export function AgentOnboardingWizard({
                         { value: "", label: anyProviderConnected ? "— pick one —" : "— connect a provider above first —" },
                         {
                           value: "anthropic",
-                          label: `Anthropic (Claude)${connectedProviderIds.has("anthropic") || connectedProviderIds.has("claude-code") ? " · connected" : ""}`,
+                          label: `Anthropic (Claude)${connectedProviderIds.has("anthropic") ? " · connected" : ""}`,
                         },
                         {
                           value: "openai",
@@ -654,14 +685,14 @@ export function AgentOnboardingWizard({
                           value: "minimax",
                           label: `MiniMax${connectedProviderIds.has("minimax-oauth") || connectedProviderIds.has("minimax") ? " · connected" : ""}`,
                         },
-                        { value: "deepseek", label: "DeepSeek (paste key in .env)" },
-                        { value: "zai", label: "Z.AI / GLM (paste key in .env)" },
-                        { value: "kimi-coding", label: "Kimi / Moonshot (paste key in .env)" },
-                        { value: "nvidia", label: "NVIDIA NIM (paste key in .env)" },
-                        { value: "huggingface", label: "Hugging Face (paste key in .env)" },
-                        { value: "ollama-cloud", label: "Ollama Cloud (paste key in .env)" },
-                        { value: "openrouter", label: "OpenRouter (paste key in .env)" },
-                        { value: "azure_openai", label: "Azure OpenAI (paste key in .env)" },
+                        { value: "deepseek", label: "DeepSeek (add key in Settings)" },
+                        { value: "zai", label: "Z.AI / GLM (add key in Settings)" },
+                        { value: "kimi-coding", label: "Kimi / Moonshot (add key in Settings)" },
+                        { value: "nvidia", label: "NVIDIA NIM (add key in Settings)" },
+                        { value: "huggingface", label: "Hugging Face (add key in Settings)" },
+                        { value: "ollama-cloud", label: "Ollama Cloud (add key in Settings)" },
+                        { value: "openrouter", label: "OpenRouter (add key in Settings)" },
+                        { value: "azure_openai", label: "Azure OpenAI (add key in Settings)" },
                       ]}
                     />
                     <WizardModelPicker
@@ -674,7 +705,7 @@ export function AgentOnboardingWizard({
                     />
                   </div>
                   <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
-                    Don't see your provider connected? Hit "Sign in" on a card above, or paste the key in <code className="rounded bg-muted px-1 py-0.5 text-[10.5px]">~/.elevate/.env</code> and reload.
+                    Don't see your provider connected? Hit "Sign in" on a card above, or add the key under Settings &gt; API keys and reload.
                   </p>
                 </WizardSection>
 
@@ -1339,7 +1370,7 @@ function ConnectedAgentsRail({
   }, []);
 
   const connectedProviders = useMemo(
-    () => oauthProviders.filter((p) => p.status?.logged_in),
+    () => oauthProviders.filter(isOAuthProviderUsable),
     [oauthProviders],
   );
 
@@ -2141,7 +2172,7 @@ function ApiKeysPanel({
       <ConfirmDialog
         open={clearTarget !== null}
         title={`Remove ${clearTarget?.label ?? "this key"}?`}
-        description="This deletes the saved value from ~/.elevate/.env. You can paste a replacement later."
+        description="This deletes the saved value from your current Elevate profile. You can paste a replacement later."
         confirmLabel="Clear"
         destructive
         loading={clearTarget ? saving === clearTarget.envKey : false}
@@ -3115,7 +3146,7 @@ function ExtendedChannelsBrowser() {
   return (
     <div className="grid gap-2">
       <p className="text-[11.5px] leading-5 text-muted-foreground/80">
-        12 more platforms supported by the CLI. Expand any one to paste credentials — saved directly to your <code>.env</code>.
+        12 more platforms supported by the CLI. Expand any one to paste credentials — saved directly to your current Elevate profile.
       </p>
       <ul className="grid gap-1.5">
         {EXTENDED_CHANNELS.map((c) => {

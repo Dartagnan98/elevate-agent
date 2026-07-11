@@ -1480,14 +1480,23 @@ class TestNewEndpoints:
         import elevate_cli.data.agent_setup as agent_setup
         from elevate_cli.config import load_config
 
-        monkeypatch.setattr(agent_setup, "_detect_runtime_credentials", lambda: {})
+        detector_calls = 0
+        real_detector = agent_setup._detect_runtime_credentials
+
+        def detect_runtime_credentials():
+            nonlocal detector_calls
+            detector_calls += 1
+            return real_detector()
+
+        monkeypatch.setattr(agent_setup, "_detect_runtime_credentials", detect_runtime_credentials)
 
         initial = self.client.get("/api/agent/setup")
         assert initial.status_code == 200
+        assert detector_calls == 1
         initial_body = initial.json()
         assert initial_body["complete"] is False
         assert initial_body["requiredCount"] == 2
-        assert set(initial_body["missingRequiredKeys"]) == {"model_primary", "memory_store"}
+        assert set(initial_body["missingRequiredKeys"]) == {"model_primary"}
 
         incomplete = self.client.post("/api/agent/setup/complete")
         assert incomplete.status_code == 409
@@ -1506,14 +1515,12 @@ class TestNewEndpoints:
                     {
                         "key": "model_primary",
                         "status": "configured",
-                        "provider": "openai",
-                        "value": {"model": "gpt-5.5", "apiKey": "test-key"},
-                    },
-                    {
-                        "key": "model_embedding",
-                        "status": "configured",
-                        "provider": "openai",
-                        "value": {"model": "text-embedding-3-large", "apiKey": "test-key"},
+                        "provider": "openrouter",
+                        "value": {
+                            "model": "openai/gpt-4o-mini",
+                            "runtimeProvider": "openrouter",
+                            "apiKey": "sk-live-abcdefghijklmnopqrstuv",
+                        },
                     },
                     {
                         "key": "memory_store",
@@ -1525,7 +1532,12 @@ class TestNewEndpoints:
             },
         )
         assert updated.status_code == 200
-        assert updated.json()["complete"] is True
+        updated_body = updated.json()
+        assert updated_body["complete"] is True
+        primary = next(item for item in updated_body["items"] if item["key"] == "model_primary")
+        assert primary["value"]["apiKey"] == ""
+        assert primary["value"]["secretPresent"] is True
+        assert "sk-live-abcdefghijklmnopqrstuv" not in json.dumps(updated_body)
 
         completed = self.client.post("/api/agent/setup/complete")
         assert completed.status_code == 200
@@ -1533,16 +1545,25 @@ class TestNewEndpoints:
         assert body["complete"] is True
         assert body["completedAt"]
         assert body["materialized"] == {
-            "model": {"provider": "openai-codex", "model": "gpt-5.5"},
-            "embedding": {"provider": "openai", "model": "text-embedding-3-large"},
+            "model": {"provider": "openrouter", "model": "openai/gpt-4o-mini"},
             "memory": {"provider": "holographic"},
         }
 
         cfg = load_config()
-        assert cfg["model"]["provider"] == "openai-codex"
-        assert cfg["model"]["default"] == "gpt-5.5"
-        assert cfg["plugins"]["elevate-memory-store"]["embedding_model"] == "text-embedding-3-large"
+        assert cfg["model"]["provider"] == "openrouter"
+        assert cfg["model"]["default"] == "openai/gpt-4o-mini"
         assert cfg["memory"]["provider"] == "holographic"
+
+        from elevate_cli.data import connect
+        from elevate_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested="openrouter")
+        assert runtime["api_key"] == "sk-live-abcdefghijklmnopqrstuv"
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT value_json FROM agent_setup_items WHERE key='model_primary'"
+            ).fetchone()
+        assert "sk-live-abcdefghijklmnopqrstuv" not in row["value_json"]
 
         reset = self.client.post("/api/agent/setup/reset")
         assert reset.status_code == 200

@@ -100,6 +100,7 @@ import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { useToast } from "@/hooks/useToast";
 import { useIconButtonTitles } from "@/hooks/useIconButtonTitles";
 import { useSystemActions } from "@/contexts/useSystemActions";
+import { AGENT_ONBOARDING_ROUTED_KEY } from "@/pages/agent-onboarding/onboarding-exit";
 
 const loadConfigPage = () => import("@/pages/ConfigPage");
 const loadDocsPage = () => import("@/pages/DocsPage");
@@ -281,10 +282,10 @@ function OnboardingGate() {
     if (checkedRef.current) return;
     checkedRef.current = true;
     if (typeof window === "undefined") return;
-    if (window.sessionStorage.getItem("elevate:onboarding-routed") === "1") return;
+    if (window.sessionStorage.getItem(AGENT_ONBOARDING_ROUTED_KEY) === "1") return;
     // Already on onboarding (e.g. opened from the sidebar) — mark done, no nav.
     if (location.pathname.startsWith("/agent-onboarding")) {
-      window.sessionStorage.setItem("elevate:onboarding-routed", "1");
+      window.sessionStorage.setItem(AGENT_ONBOARDING_ROUTED_KEY, "1");
       return;
     }
     let cancelled = false;
@@ -292,8 +293,8 @@ function OnboardingGate() {
       .getAgentSetup()
       .then((snap) => {
         if (cancelled) return;
-        window.sessionStorage.setItem("elevate:onboarding-routed", "1");
-        const complete = Boolean(snap && (snap.complete || snap.completedAt));
+        window.sessionStorage.setItem(AGENT_ONBOARDING_ROUTED_KEY, "1");
+        const complete = Boolean(snap?.complete);
         if (!complete) {
           navigate("/agent-onboarding?run=1", { replace: true });
         }

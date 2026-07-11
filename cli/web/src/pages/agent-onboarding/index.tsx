@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -14,6 +14,7 @@ import type {
   AgentSetupItem,
   AgentSetupItemUpdate,
   AgentSetupSnapshot,
+  OAuthProvider,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { RouteSkeleton } from "@/components/route-skeletons";
@@ -22,6 +23,13 @@ import {
   AgentOnboardingWelcome,
   AgentOnboardingWizard,
 } from "./wizard";
+import {
+  isPrimaryModelReady,
+  isUsableSecretPresence,
+  resolveConfiguredPrimaryRuntimeProvider,
+  resolvePrimaryWizardProvider,
+} from "./oauth-readiness";
+import { exitAgentOnboardingToChat } from "./onboarding-exit";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -199,7 +207,9 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
   const subagentsVal = (subagentsItem?.value ?? {}) as Record<string, unknown>;
   const agentChannelsItem = byKey.get("agent_channel_routing");
   return {
-    primaryProvider: String(byKey.get("model_primary")?.provider ?? ""),
+    primaryProvider: resolvePrimaryWizardProvider(
+      String(byKey.get("model_primary")?.provider ?? ""),
+    ),
     primaryModel: String(primaryVal.model ?? ""),
     primaryApiKey: String(primaryVal.apiKey ?? ""),
     embeddingProvider: String(byKey.get("model_embedding")?.provider ?? ""),
@@ -254,7 +264,10 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
     subagentsEnabled: subagentsItem ? subagentsItem.status === "configured" : false,
     subagentsPack: String(subagentsVal.pack ?? "agent_default"),
     agentChannels: parseAgentChannels(agentChannelsItem?.value),
-    primarySecretPresent: Boolean(primaryVal.secretPresent),
+    primarySecretPresent: isUsableSecretPresence(
+      Boolean(primaryVal.secretPresent),
+      String(primaryVal.secretSource ?? ""),
+    ),
     primarySecretPreview: String(primaryVal.secretPreview ?? ""),
     embeddingSecretPresent: Boolean(embeddingVal.secretPresent),
     embeddingSecretPreview: String(embeddingVal.secretPreview ?? ""),
@@ -269,13 +282,28 @@ export function draftFromSnapshot(snapshot: AgentSetupSnapshot): AgentSetupDraft
   };
 }
 
-export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[] {
-  const primaryHasKey = Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
-  const primaryReady = Boolean(
-    draft.primaryProvider.trim() && primaryHasKey && draft.primaryModel.trim(),
-  );
+export function buildItemUpdates(
+  draft: AgentSetupDraft,
+  oauthProviders: OAuthProvider[] | null = [],
+  existingPrimary?: AgentSetupItem,
+): AgentSetupItemUpdate[] {
+  const primaryHasSecret = Boolean(draft.primaryApiKey.trim()) || draft.primarySecretPresent;
+  const primaryReady = isPrimaryModelReady({
+    selectedProvider: draft.primaryProvider,
+    selectedModel: draft.primaryModel,
+    hasSecret: primaryHasSecret,
+    oauthProviders,
+    existingPrimary,
+  });
+  const existingPrimaryValue = (existingPrimary?.value ?? {}) as Record<string, unknown>;
+  const primaryRuntimeProvider = resolveConfiguredPrimaryRuntimeProvider({
+    selectedProvider: draft.primaryProvider,
+    hasDirectSecret: primaryHasSecret,
+    providers: oauthProviders,
+    existingRuntimeProvider: String(existingPrimaryValue.runtimeProvider ?? ""),
+  }) || null;
   const embeddingHasKey = draft.embeddingShareKey
-    ? primaryHasKey
+    ? primaryHasSecret
     : Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
   const embeddingReady = Boolean(
     draft.embeddingProvider.trim() && draft.embeddingModel.trim() && embeddingHasKey,
@@ -315,6 +343,7 @@ export function buildItemUpdates(draft: AgentSetupDraft): AgentSetupItemUpdate[]
       provider: draft.primaryProvider.trim() || null,
       value: {
         model: draft.primaryModel.trim(),
+        runtimeProvider: primaryRuntimeProvider,
         apiKey: draft.primaryApiKey,
         usesEnvSecret: !draft.primaryApiKey.trim() && draft.primarySecretPresent,
       },
@@ -614,10 +643,26 @@ export function AgentSetupLaunch({
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[] | null>(null);
 
   useEffect(() => {
     setDraft(draftFromSnapshot(setup));
   }, [setup]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getOAuthProviders()
+      .then((response) => {
+        if (!cancelled) setOauthProviders(response.providers);
+      })
+      .catch(() => {
+        // Unknown is not disconnected. Keep null so an unchanged configured
+        // model cannot be cleared by a transient status failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const byKey = useMemo(
     () => new Map(setup.items.map((item: AgentSetupItem) => [item.key, item])),
@@ -638,7 +683,9 @@ export function AgentSetupLaunch({
     setError(null);
     setSavedMessage(null);
     try {
-      const updated = await api.updateAgentSetup(buildItemUpdates(draft));
+      const updated = await api.updateAgentSetup(
+        buildItemUpdates(draft, oauthProviders, primaryItem),
+      );
       onSetupUpdated(updated);
       setSavedMessage(
         updated.complete
@@ -650,14 +697,14 @@ export function AgentSetupLaunch({
     } finally {
       setSaving(false);
     }
-  }, [draft, onSetupUpdated]);
+  }, [draft, oauthProviders, onSetupUpdated, primaryItem]);
 
   const markComplete = useCallback(async () => {
     setCompleting(true);
     setError(null);
     setSavedMessage(null);
     try {
-      await api.updateAgentSetup(buildItemUpdates(draft));
+      await api.updateAgentSetup(buildItemUpdates(draft, oauthProviders, primaryItem));
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
       onForceOnboardingDone?.();
@@ -666,7 +713,7 @@ export function AgentSetupLaunch({
     } finally {
       setCompleting(false);
     }
-  }, [draft, onSetupUpdated, onForceOnboardingDone]);
+  }, [draft, oauthProviders, onSetupUpdated, onForceOnboardingDone, primaryItem]);
 
   const updateField = useCallback(
     <K extends keyof AgentSetupDraft>(key: K, value: AgentSetupDraft[K]) => {
@@ -1185,6 +1232,7 @@ type WizardPhase = "welcome" | "wizard" | "form";
 
 export function AgentOnboardingPage() {
   const { loading, setup, error, setSetup, refresh } = useAgentSetup();
+  const navigate = useNavigate();
   const [forceOnboarding, setForceOnboarding] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -1206,6 +1254,10 @@ export function AgentOnboardingPage() {
     next.delete("run");
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
+
+  const finishOnboardingLater = useCallback(() => {
+    exitAgentOnboardingToChat(navigate);
+  }, [navigate]);
 
   const onReset = useCallback(async () => {
     setResetting(true);
@@ -1242,7 +1294,10 @@ export function AgentOnboardingPage() {
 
   if (showOnboarding && wizardPhase === "welcome") {
     return (
-      <AgentOnboardingWelcome onContinue={() => setWizardPhase("wizard")} />
+      <AgentOnboardingWelcome
+        onContinue={() => setWizardPhase("wizard")}
+        onFinishLater={finishOnboardingLater}
+      />
     );
   }
   if (showOnboarding && wizardPhase === "wizard") {
@@ -1250,6 +1305,7 @@ export function AgentOnboardingPage() {
       <AgentOnboardingWizard
         setup={setup}
         onSetupUpdated={setSetup}
+        onFinishLater={finishOnboardingLater}
         onFinish={() => {
           setWizardPhase("form");
           setForceOnboarding(false);

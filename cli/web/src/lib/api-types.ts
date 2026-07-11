@@ -2795,7 +2795,7 @@ export interface OAuthProviderStatus {
   source?: string | null;
   source_label?: string | null;
   token_preview?: string | null;
-  expires_at?: string | null;
+  expires_at?: string | number | null;
   has_refresh_token?: boolean;
   last_refresh?: string | null;
   error?: string;

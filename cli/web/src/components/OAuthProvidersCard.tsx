@@ -14,10 +14,16 @@ interface Props {
   onSuccess?: (msg: string) => void;
 }
 
-function formatExpiresAt(expiresAt: string | null | undefined, expiresInTemplate: string): string | null {
+function formatExpiresAt(expiresAt: string | number | null | undefined, expiresInTemplate: string): string | null {
   if (!expiresAt) return null;
   try {
-    const dt = new Date(expiresAt);
+    const numeric = typeof expiresAt === "number" ? expiresAt : Number(expiresAt);
+    const value = Number.isFinite(numeric)
+      ? Math.abs(numeric) < 100_000_000_000
+        ? numeric * 1000
+        : numeric
+      : expiresAt;
+    const dt = new Date(value);
     if (Number.isNaN(dt.getTime())) return null;
     const now = Date.now();
     const diff = dt.getTime() - now;

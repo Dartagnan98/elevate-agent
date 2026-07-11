@@ -38,6 +38,35 @@ STATE_ID = "default"
 READY_STATUSES = {"configured", "connected", "manual"}
 VALID_STATUSES = READY_STATUSES | {"missing", "skipped"}
 
+_SECRET_FIELDS_BY_ITEM: dict[str, tuple[str, ...]] = {
+    "model_primary": ("apiKey",),
+    "model_embedding": ("apiKey",),
+    "model_image": ("apiKey",),
+    "memory_store": ("supabaseKey",),
+    "composio_workspace": ("apiKey",),
+    "operator_channel_telegram": ("botToken",),
+    "operator_channel_discord": ("botToken",),
+    "operator_channel_whatsapp": ("token",),
+    "operator_channel_slack": ("webhookUrl",),
+}
+
+_PRIMARY_PROVIDER_ENV_NAMES: dict[str, tuple[str, ...]] = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+    "openai": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"),
+    "xai": ("XAI_API_KEY",),
+    "minimax": ("MINIMAX_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "zai": ("GLM_API_KEY", "ZAI_API_KEY", "ZHIPU_API_KEY", "Z_AI_API_KEY"),
+    "kimi-coding": ("KIMI_API_KEY", "KIMI_CODING_API_KEY"),
+    "nvidia": ("NVIDIA_API_KEY",),
+    "huggingface": ("HF_TOKEN",),
+    "ollama-cloud": ("OLLAMA_API_KEY",),
+    "azure_openai": ("AZURE_OPENAI_API_KEY",),
+    "qwen": ("DASHSCOPE_API_KEY",),
+}
+
 
 _DEFAULT_ITEMS: list[dict[str, Any]] = [
     {
@@ -348,6 +377,7 @@ def _ensure_seeded(conn: sqlite3.Connection) -> None:
                 now,
             ),
         )
+    _scrub_persisted_secrets(conn)
 
 
 def _encode_json(value: Any) -> str | None:
@@ -370,6 +400,33 @@ def _decode_json(value: str | None) -> Any:
 def _clean_text(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _sanitize_value_for_storage(key: str, value: Any) -> Any:
+    """Never persist onboarding secrets in the readiness database."""
+    if not isinstance(value, dict):
+        return value
+    sanitized = dict(value)
+    for field in _SECRET_FIELDS_BY_ITEM.get(key, ()):
+        if field in sanitized:
+            sanitized[field] = ""
+    return sanitized
+
+
+def _scrub_persisted_secrets(conn: sqlite3.Connection) -> None:
+    """Remove plaintext secrets written by older onboarding builds."""
+    rows = conn.execute(
+        "SELECT key, value_json FROM agent_setup_items WHERE value_json IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        key = row["key"]
+        value = _decode_json(row["value_json"])
+        sanitized = _sanitize_value_for_storage(key, value)
+        if sanitized != value:
+            conn.execute(
+                "UPDATE agent_setup_items SET value_json=? WHERE key=?",
+                (_encode_json(sanitized), key),
+            )
 
 
 def _token_preview(value: str | None, visible: int = 4) -> str:
@@ -414,39 +471,6 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     overlays: dict[str, dict[str, Any]] = {}
 
-    # A primary model is "ready" if it's pinned in config.yaml OR a supported
-    # OAuth provider is signed in. OAuth flows (gpt-5.5 via Codex — the bundled
-    # realtor default) carry NO API key in the env, so the key probes below miss
-    # them and a realtor gets stuck at "Missing: model_primary". Recognize both
-    # so onboarding completes for OAuth-only setups.
-    try:
-        from elevate_cli.config import load_config as _load_cfg
-
-        _cfg_model = (_load_cfg() or {}).get("model") or {}
-    except Exception:
-        _cfg_model = {}
-    _cfg_provider = str(_cfg_model.get("provider") or "").strip()
-    _cfg_default = str(_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
-    _codex_logged_in = False
-    try:
-        from elevate_cli import auth as _auth
-
-        _codex_logged_in = bool(_auth.get_codex_auth_status().get("logged_in"))
-    except Exception:
-        _codex_logged_in = False
-    if _cfg_provider and _cfg_default:
-        overlays["model_primary"] = {
-            "status": "configured",
-            "provider": _cfg_provider,
-            "value": {"model": _cfg_default, "apiKey": "", "secretPresent": True, "secretSource": "config"},
-        }
-    elif _codex_logged_in:
-        overlays["model_primary"] = {
-            "status": "configured",
-            "provider": "openai-codex",
-            "value": {"model": _cfg_default or "gpt-5.5", "apiKey": "", "secretPresent": True, "secretSource": "oauth"},
-        }
-
     anthropic_token = _get("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     openai_key = _get("OPENAI_API_KEY")
     gemini_key = _get("GEMINI_API_KEY", "GOOGLE_API_KEY", "NANO_BANANA_API_KEY")
@@ -457,7 +481,149 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     supabase_url = _get("SUPABASE_URL")
     supabase_key = _get("SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY")
 
-    if anthropic_token:
+    try:
+        from elevate_cli.config import (
+            get_compatible_custom_providers as _get_custom_providers,
+            load_config as _load_cfg,
+        )
+
+        _cfg = _load_cfg() or {}
+        _cfg_model = _cfg.get("model") or {}
+        _custom_providers = _get_custom_providers(_cfg)
+    except Exception:
+        _cfg = {}
+        _cfg_model = {}
+        _custom_providers = []
+    if not isinstance(_cfg_model, dict):
+        _cfg_model = {}
+
+    _cfg_provider = str(_cfg_model.get("provider") or "").strip()
+    _cfg_default = str(_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
+
+    def _matching_primary_credential(provider: str) -> tuple[str, str | None] | None:
+        """Return (source, secret) only for the configured provider."""
+        try:
+            from elevate_cli import auth as _auth
+            from elevate_cli.providers import resolve_provider_full
+        except Exception:
+            return None
+
+        user_providers = _cfg.get("providers") if isinstance(_cfg.get("providers"), dict) else {}
+        try:
+            provider_def = resolve_provider_full(provider, user_providers, _custom_providers)
+        except Exception:
+            provider_def = None
+        try:
+            runtime_provider = _auth.resolve_provider(provider)
+        except Exception:
+            runtime_provider = str(getattr(provider_def, "id", "") or provider).strip().lower()
+
+        provider_config = _auth.PROVIDER_REGISTRY.get(runtime_provider)
+        auth_type = (
+            provider_config.auth_type
+            if provider_config is not None
+            else str(getattr(provider_def, "auth_type", "api_key") or "api_key")
+        )
+        if auth_type != "api_key":
+            try:
+                status = _auth.get_auth_status(runtime_provider)
+            except Exception:
+                status = {}
+            return ("oauth", None) if status.get("logged_in") else None
+
+        config_entries: list[dict[str, Any]] = []
+        direct_entry = user_providers.get(provider) if isinstance(user_providers, dict) else None
+        if isinstance(direct_entry, dict):
+            config_entries.append(direct_entry)
+        requested = provider.strip().lower()
+        for entry in _custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip().lower()
+            provider_key = str(entry.get("provider_key") or "").strip().lower()
+            slug = f"custom:{name.replace(' ', '-')}" if name else ""
+            if requested in {name, provider_key, slug}:
+                config_entries.append(entry)
+
+        env_names: list[str] = []
+        for hint in ("key_env", "api_key_env"):
+            name = str(_cfg_model.get(hint) or "").strip()
+            if name:
+                env_names.append(name)
+        exact_env_names = _PRIMARY_PROVIDER_ENV_NAMES.get(requested)
+        if exact_env_names is not None:
+            env_names.extend(exact_env_names)
+        else:
+            env_names.extend(getattr(provider_def, "api_key_env_vars", ()) or ())
+            if provider_config is not None:
+                env_names.extend(provider_config.api_key_env_vars)
+        for entry in config_entries:
+            name = str(entry.get("key_env") or "").strip()
+            if name:
+                env_names.append(name)
+
+        seen: set[str] = set()
+        for name in env_names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            secret = _get(name)
+            if secret and _auth.has_usable_secret(secret):
+                return "env", secret
+
+        for entry in config_entries:
+            secret = str(entry.get("api_key") or "").strip()
+            if secret and _auth.has_usable_secret(secret):
+                return "config_inline", secret
+
+        if runtime_provider == "anthropic":
+            try:
+                from agent.anthropic_adapter import (
+                    is_claude_code_token_valid,
+                    read_claude_code_credentials,
+                    read_elevate_oauth_credentials,
+                )
+
+                if any(
+                    creds and is_claude_code_token_valid(creds)
+                    for creds in (
+                        read_elevate_oauth_credentials(),
+                        read_claude_code_credentials(),
+                    )
+                ):
+                    return "oauth", None
+            except Exception:
+                pass
+        return None
+
+    if _cfg_provider and _cfg_default:
+        matched = _matching_primary_credential(_cfg_provider)
+        secret_source, matched_secret = matched or ("config", None)
+        overlays["model_primary"] = {
+            "status": "configured" if matched else "missing",
+            "provider": _cfg_provider,
+            "value": {
+                "model": _cfg_default,
+                "runtimeProvider": _cfg_provider,
+                "apiKey": "",
+                "secretPresent": bool(matched),
+                "secretSource": secret_source,
+                "secretPreview": _token_preview(matched_secret),
+            },
+        }
+    elif _matching_primary_credential("openai-codex"):
+        overlays["model_primary"] = {
+            "status": "configured",
+            "provider": "openai-codex",
+            "value": {
+                "model": "gpt-5.5",
+                "runtimeProvider": "openai-codex",
+                "apiKey": "",
+                "secretPresent": True,
+                "secretSource": "oauth",
+            },
+        }
+    elif anthropic_token:
         overlays["model_primary"] = {
             "status": "configured",
             "provider": "anthropic",
@@ -656,7 +822,10 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     return overlays
 
 
-def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
+def _apply_runtime_overlay(
+    item: dict[str, Any],
+    overlays: Mapping[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Surface detected runtime credentials into the wizard snapshot.
 
     Two modes:
@@ -669,13 +838,59 @@ def _apply_runtime_overlay(item: dict[str, Any]) -> dict[str, Any]:
          wizard input shows "Already set — …last4 (paste to replace)" on
          re-runs. Persisted provider/model/apiKey always win.
     """
-    overlays = _detect_runtime_credentials()
-    overlay = overlays.get(item["key"])
+    if overlays is None:
+        overlays = _detect_runtime_credentials()
+    item_key = item["key"]
+    overlay = overlays.get(item_key)
     if not overlay:
+        if item_key == "model_primary" and item.get("provider"):
+            merged = dict(item)
+            merged["status"] = "missing"
+            return merged
         return item
 
     status = item.get("status") or ""
     value = item.get("value")
+
+    # Required readiness is server-derived. A client-declared configured
+    # primary is valid only when the exact runtime provider has a credential.
+    if item_key == "model_primary" and item.get("provider") and isinstance(value, dict):
+        expected_provider = str(value.get("runtimeProvider") or item.get("provider") or "").strip()
+        detected_provider = str(overlay.get("provider") or "").strip()
+        ready = (
+            overlay.get("status") in READY_STATUSES
+            and detected_provider == expected_provider
+        )
+        merged = dict(item)
+        merged["status"] = "configured" if ready else "missing"
+        enriched = dict(value)
+        overlay_value = overlay.get("value") or {}
+        for hint_key in ("secretPresent", "secretPreview", "secretSource"):
+            if hint_key in overlay_value:
+                enriched[hint_key] = overlay_value[hint_key]
+        merged["value"] = enriched
+        merged["detected"] = bool(ready)
+        return merged
+
+    # Local memory is intrinsically ready; Supabase is ready only when both
+    # URL and key are detected from the runtime profile.
+    if item_key == "memory_store" and item.get("provider") and isinstance(value, dict):
+        selected_provider = str(item.get("provider") or "").strip()
+        ready = selected_provider == "sqlite_local" or (
+            selected_provider == "supabase"
+            and overlay.get("status") in READY_STATUSES
+            and overlay.get("provider") == "supabase"
+        )
+        merged = dict(item)
+        merged["status"] = "configured" if ready else "missing"
+        enriched = dict(value)
+        overlay_value = overlay.get("value") or {}
+        for hint_key in ("secretPresent", "secretPreview", "secretSource"):
+            if hint_key in overlay_value:
+                enriched[hint_key] = overlay_value[hint_key]
+        merged["value"] = enriched
+        merged["detected"] = bool(ready)
+        return merged
 
     # Mode 1: untouched item gets the full overlay.
     if status == "missing" and value is None:
@@ -814,7 +1029,8 @@ def get_agent_setup(conn: sqlite3.Connection) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT * FROM agent_setup_items ORDER BY sort_order ASC, key ASC"
     ).fetchall()
-    items = [_apply_runtime_overlay(_row_to_item(row)) for row in rows]
+    overlays = _detect_runtime_credentials()
+    items = [_apply_runtime_overlay(_row_to_item(row), overlays) for row in rows]
     return _snapshot(conn, items)
 
 
@@ -847,7 +1063,7 @@ def update_agent_setup(
                 (
                     status,
                     _clean_text(item.get("provider")),
-                    _encode_json(item.get("value")),
+                    _encode_json(_sanitize_value_for_storage(key, item.get("value"))),
                     _clean_text(item.get("notes")),
                     now,
                     key,

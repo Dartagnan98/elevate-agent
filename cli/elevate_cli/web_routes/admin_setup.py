@@ -174,12 +174,132 @@ def _mirror_admin_setup_portal_env(
 _WIZARD_PROVIDER_TO_CONFIG = {
     "openai": "openai-codex",
     "qwen": "qwen-oauth",
+    "xai": "xai-oauth",
+    "gemini": "google-gemini-cli",
+    "minimax": "minimax-oauth",
     "azure_openai": "azure-foundry",
 }
+
+
+def _wizard_runtime_provider(provider: str, value: Dict[str, Any]) -> str:
+    runtime_provider = str(value.get("runtimeProvider") or "").strip()
+    return runtime_provider or _WIZARD_PROVIDER_TO_CONFIG.get(provider, provider)
+
+
 _WIZARD_MEMORY_TO_CONFIG = {
     "sqlite_local": "holographic",
     "supabase": "supabase",
 }
+
+_PRIMARY_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "zai": "GLM_API_KEY",
+    "kimi-coding": "KIMI_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
+    "huggingface": "HF_TOKEN",
+    "ollama-cloud": "OLLAMA_API_KEY",
+    "azure_openai": "AZURE_OPENAI_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+}
+_EMBEDDING_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "voyage": "VOYAGE_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+_IMAGE_KEY_ENV = {
+    "nano_banana": "GEMINI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "openai_images": "OPENAI_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "replicate": "REPLICATE_API_TOKEN",
+}
+
+
+def _primary_api_key_env(provider: str) -> str:
+    if provider in _PRIMARY_KEY_ENV:
+        return _PRIMARY_KEY_ENV[provider]
+    try:
+        from elevate_cli.config import get_compatible_custom_providers
+        from elevate_cli.providers import resolve_provider_full
+
+        cfg = load_config()
+        resolved = resolve_provider_full(
+            provider,
+            cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {},
+            get_compatible_custom_providers(cfg),
+        )
+        return next(iter(resolved.api_key_env_vars), "")
+    except Exception:
+        return ""
+
+
+def _materialize_agent_setup_secrets(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Move submitted secrets into the active profile and return DB-safe items."""
+    safe_items: List[Dict[str, Any]] = []
+    for raw_item in items:
+        item = dict(raw_item)
+        key = str(item.get("key") or "")
+        provider = str(item.get("provider") or "").strip()
+        value = dict(item.get("value") or {}) if isinstance(item.get("value"), dict) else {}
+
+        def save_secret(field: str, env_key: str) -> None:
+            secret = str(value.get(field) or "").strip()
+            if secret and not env_key:
+                raise ValueError(f"No runtime secret slot is defined for {key}:{provider}")
+            if secret:
+                if env_key == "ANTHROPIC_API_KEY":
+                    from elevate_cli.config import save_anthropic_api_key
+
+                    save_anthropic_api_key(secret)
+                else:
+                    save_env_value(env_key, secret)
+                value["usesEnvSecret"] = True
+            if field in value:
+                value[field] = ""
+
+        if key == "model_primary":
+            save_secret("apiKey", _primary_api_key_env(provider))
+        elif key == "model_embedding":
+            save_secret("apiKey", _EMBEDDING_KEY_ENV.get(provider, ""))
+        elif key == "model_image":
+            save_secret("apiKey", _IMAGE_KEY_ENV.get(provider, ""))
+        elif key == "memory_store":
+            save_secret("supabaseKey", "SUPABASE_SERVICE_ROLE_KEY")
+            if value.get("supabaseUrl"):
+                save_env_value("SUPABASE_URL", str(value["supabaseUrl"]).strip())
+        elif key == "composio_workspace":
+            save_secret("apiKey", "COMPOSIO_API_KEY")
+            if value.get("workspace"):
+                save_env_value("COMPOSIO_WORKSPACE", str(value["workspace"]).strip())
+        elif key == "operator_channel_telegram":
+            save_secret("botToken", "TELEGRAM_BOT_TOKEN")
+            if value.get("chatId"):
+                save_env_value("TELEGRAM_CHAT_ID", str(value["chatId"]).strip())
+        elif key == "operator_channel_discord":
+            save_secret("botToken", "DISCORD_BOT_TOKEN")
+            if value.get("channelId"):
+                save_env_value("DISCORD_CHANNEL_ID", str(value["channelId"]).strip())
+        elif key == "operator_channel_whatsapp":
+            save_secret("token", "WHATSAPP_TOKEN")
+            if value.get("provider"):
+                save_env_value("WHATSAPP_PROVIDER", str(value["provider"]).strip())
+            if value.get("phoneId"):
+                save_env_value("WHATSAPP_PHONE_ID", str(value["phoneId"]).strip())
+        elif key == "operator_channel_slack":
+            save_secret("webhookUrl", "SLACK_WEBHOOK_URL")
+            if value.get("channel"):
+                save_env_value("SLACK_CHANNEL", str(value["channel"]).strip())
+
+        item["value"] = value
+        safe_items.append(item)
+    return safe_items
 
 
 def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
@@ -210,9 +330,10 @@ def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
 
     mp = items.get("model_primary") or {}
     prov = str(mp.get("provider") or "").strip()
-    model = str((mp.get("value") or {}).get("model") or "").strip()
+    mp_value = mp.get("value") or {}
+    model = str(mp_value.get("model") or "").strip()
     if prov and model:
-        canon = _WIZARD_PROVIDER_TO_CONFIG.get(prov, prov)
+        canon = _wizard_runtime_provider(prov, mp_value)
         mc = cfg.get("model")
         if not isinstance(mc, dict):
             mc = {}
@@ -532,13 +653,20 @@ def create_admin_setup_router(
     def put_agent_setup_endpoint(body: _AgentSetupUpdateBody):
         """Update Agent setup items while the gate is open."""
         try:
-            from elevate_cli.data import connect, update_agent_setup
+            from elevate_cli.data import connect, get_agent_setup, update_agent_setup
+
+            items = _materialize_agent_setup_secrets(
+                [item.dict() for item in body.items]
+            )
 
             with connect() as conn:
-                return update_agent_setup(
-                    conn,
-                    items=[item.dict() for item in body.items],
-                )
+                update_agent_setup(conn, items=items)
+                materialized = _materialize_agent_setup_to_config(conn)
+                if materialized.get("error"):
+                    raise RuntimeError(materialized["error"])
+                snapshot = get_agent_setup(conn)
+                snapshot["materialized"] = materialized
+                return snapshot
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -559,12 +687,11 @@ def create_admin_setup_router(
             from elevate_cli.data import complete_agent_setup, connect
 
             with connect() as conn:
+                materialized = _materialize_agent_setup_to_config(conn)
+                if materialized.get("error"):
+                    raise RuntimeError(materialized["error"])
                 snapshot = complete_agent_setup(conn)
-                try:
-                    snapshot["materialized"] = _materialize_agent_setup_to_config(conn)
-                except Exception as exc:  # never let materialization undo completion
-                    _log.exception("agent setup materialization failed")
-                    snapshot["materialize_error"] = str(exc)
+                snapshot["materialized"] = materialized
                 return snapshot
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))

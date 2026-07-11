@@ -31,19 +31,43 @@ def _truncate_token(value: Optional[str], visible: int = 6) -> str:
     return f"…{s[-visible:]}"
 
 
+def _anthropic_status_payload(
+    creds: Dict[str, Any],
+    *,
+    logged_in: bool,
+    source: str,
+    source_label: str,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "logged_in": logged_in,
+        "source": source,
+        "source_label": source_label,
+        "token_preview": _truncate_token(creds.get("accessToken")),
+        "expires_at": creds.get("expiresAt") or None,
+        "has_refresh_token": bool(creds.get("refreshToken")),
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
 def _anthropic_oauth_status() -> Dict[str, Any]:
     """Combined status across Elevate PKCE, Claude Code, and env tokens."""
     try:
         from agent.anthropic_adapter import (
+            is_claude_code_token_valid,
             read_elevate_oauth_credentials,
             read_claude_code_credentials,
             _ELEVATE_OAUTH_FILE,
         )
     except ImportError:
+        is_claude_code_token_valid = None  # type: ignore
         read_claude_code_credentials = None  # type: ignore
         read_elevate_oauth_credentials = None  # type: ignore
         _ELEVATE_OAUTH_FILE = None  # type: ignore
 
+    stale_status = None
     elevate_creds = None
     if read_elevate_oauth_credentials:
         try:
@@ -51,14 +75,21 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
         except Exception:
             elevate_creds = None
     if elevate_creds and elevate_creds.get("accessToken"):
-        return {
-            "logged_in": True,
-            "source": "elevate_pkce",
-            "source_label": f"Elevate PKCE ({_ELEVATE_OAUTH_FILE})",
-            "token_preview": _truncate_token(elevate_creds.get("accessToken")),
-            "expires_at": elevate_creds.get("expiresAt"),
-            "has_refresh_token": bool(elevate_creds.get("refreshToken")),
-        }
+        source_label = f"Elevate PKCE ({_ELEVATE_OAUTH_FILE})"
+        if is_claude_code_token_valid and is_claude_code_token_valid(elevate_creds):
+            return _anthropic_status_payload(
+                elevate_creds,
+                logged_in=True,
+                source="elevate_pkce",
+                source_label=source_label,
+            )
+        stale_status = _anthropic_status_payload(
+            elevate_creds,
+            logged_in=False,
+            source="elevate_pkce",
+            source_label=source_label,
+            error="Stored Anthropic OAuth credentials expired. Sign in again.",
+        )
 
     cc_creds = None
     if read_claude_code_credentials:
@@ -67,14 +98,29 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
         except Exception:
             cc_creds = None
     if cc_creds and cc_creds.get("accessToken"):
-        return {
-            "logged_in": True,
-            "source": "claude_code",
-            "source_label": "Claude Code (~/.claude/.credentials.json)",
-            "token_preview": _truncate_token(cc_creds.get("accessToken")),
-            "expires_at": cc_creds.get("expiresAt"),
-            "has_refresh_token": bool(cc_creds.get("refreshToken")),
-        }
+        credential_source = cc_creds.get("source")
+        source_label = (
+            "Claude Code (macOS Keychain)"
+            if credential_source == "macos_keychain"
+            else "Claude Code (~/.claude/.credentials.json)"
+        )
+        if is_claude_code_token_valid and is_claude_code_token_valid(cc_creds):
+            return _anthropic_status_payload(
+                cc_creds,
+                logged_in=True,
+                source="claude_code",
+                source_label=source_label,
+            )
+        stale_status = _anthropic_status_payload(
+            cc_creds,
+            logged_in=False,
+            source="claude_code",
+            source_label=source_label,
+            error=(
+                "Claude Code sign-in expired and is not runtime-usable. "
+                "Run 'claude /login', then refresh this page."
+            ),
+        )
 
     env_token = os.getenv("ANTHROPIC_TOKEN") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
     if env_token:
@@ -86,7 +132,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
             "expires_at": None,
             "has_refresh_token": False,
         }
-    return {"logged_in": False, "source": None}
+    return stale_status or {"logged_in": False, "source": None}
 
 
 def _claude_code_only_status() -> Dict[str, Any]:
@@ -97,14 +143,27 @@ def _claude_code_only_status() -> Dict[str, Any]:
     except Exception:
         creds = None
     if creds and creds.get("accessToken"):
-        return {
-            "logged_in": True,
-            "source": "claude_code_cli",
-            "source_label": "~/.claude/.credentials.json",
-            "token_preview": _truncate_token(creds.get("accessToken")),
-            "expires_at": creds.get("expiresAt"),
-            "has_refresh_token": bool(creds.get("refreshToken")),
-        }
+        try:
+            from agent.anthropic_adapter import is_claude_code_token_valid
+            valid = is_claude_code_token_valid(creds)
+        except Exception:
+            valid = False
+        source_label = (
+            "macOS Keychain"
+            if creds.get("source") == "macos_keychain"
+            else "~/.claude/.credentials.json"
+        )
+        return _anthropic_status_payload(
+            creds,
+            logged_in=valid,
+            source="claude_code_cli",
+            source_label=source_label,
+            error=(
+                None
+                if valid
+                else "Claude Code sign-in expired. Run 'claude /login', then refresh this page."
+            ),
+        )
     return {"logged_in": False, "source": None}
 
 
