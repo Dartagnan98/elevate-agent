@@ -569,8 +569,12 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
 
     usage = payload.get("usage")
     if isinstance(usage, dict):
-        for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
-            value = usage.get(key)
+        for key, aliases in (
+            ("input_tokens", ("input_tokens", "input")),
+            ("output_tokens", ("output_tokens", "output")),
+            ("reasoning_tokens", ("reasoning_tokens", "reasoning")),
+        ):
+            value = next((usage.get(alias) for alias in aliases if usage.get(alias) is not None), None)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 clean[key] = value
 
@@ -1554,14 +1558,17 @@ def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
         "model": getattr(agent, "model", "") or "",
+        "provider": getattr(agent, "provider", "") or "",
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "cache_read": g("session_cache_read_tokens"),
         "cache_write": g("session_cache_write_tokens"),
+        "reasoning": g("session_reasoning_tokens"),
         "prompt": g("session_prompt_tokens"),
         "completion": g("session_completion_tokens"),
         "total": g("session_total_tokens"),
         "calls": g("session_api_calls"),
+        "estimated_cost_usd": getattr(agent, "session_estimated_cost_usd", 0) or 0,
     }
     comp = getattr(agent, "context_compressor", None)
     if comp:
@@ -1613,6 +1620,71 @@ def _get_usage(agent) -> dict:
     except Exception:
         pass
     return usage
+
+
+def _usage_delta(
+    before: dict | None,
+    after: dict | None,
+    key: str,
+) -> float:
+    if before is None or not isinstance(after, dict):
+        return 0
+    try:
+        return max(0, float(after.get(key) or 0) - float(before.get(key) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_tui_turn_usage(
+    *,
+    session_id: str,
+    message_id: str,
+    status: str,
+    usage_before: dict | None,
+    usage_after: dict | None,
+    latency_ms: int,
+    agent_result: Any = None,
+    error_type: str = "",
+) -> None:
+    """Persist one logical dashboard turn using deltas from cached-agent totals."""
+    row_result = dict(agent_result) if isinstance(agent_result, dict) else {}
+    for target, source in (
+        ("input_tokens", "input"),
+        ("output_tokens", "output"),
+        ("total_tokens", "total"),
+        ("cache_read_tokens", "cache_read"),
+        ("cache_write_tokens", "cache_write"),
+        ("reasoning_tokens", "reasoning"),
+        ("api_calls", "calls"),
+    ):
+        row_result[target] = int(_usage_delta(usage_before, usage_after, source))
+    row_result["estimated_cost_usd"] = _usage_delta(
+        usage_before, usage_after, "estimated_cost_usd"
+    )
+    row_result["session_id"] = session_id
+    row_result["model"] = str((usage_after or {}).get("model") or row_result.get("model") or "")
+    row_result["provider"] = str(
+        (usage_after or {}).get("provider") or row_result.get("provider") or ""
+    )
+    row_result["status"] = status or "error"
+    row_result["failed"] = row_result["status"] != "complete"
+    if error_type:
+        row_result["error_type"] = error_type
+
+    try:
+        from gateway.usage_ledger import record_gateway_turn
+
+        record_gateway_turn(
+            agent_result=row_result,
+            session_id=session_id,
+            session_key=session_id,
+            message_id=message_id,
+            source="tui",
+            latency_ms=max(0, int(latency_ms)),
+            session_db=_get_db(),
+        )
+    except Exception as exc:
+        logger.debug("TUI turn-usage write skipped: %s", exc)
 
 
 def _probe_credentials(agent) -> str:
@@ -4991,6 +5063,12 @@ def _(rid, params: dict) -> dict:
         receipt_terminal_status = "error"
         session_tokens = []
         terminal_frame_pending = False
+        turn_started_at = None
+        turn_usage_before = None
+        turn_usage_after = None
+        turn_latency_ms = None
+        turn_usage_result = None
+        turn_usage_error_type = ""
         try:
             claimed = db.claim_prompt_receipt(
                 session_key,
@@ -5000,6 +5078,7 @@ def _(rid, params: dict) -> dict:
             )
             if not claimed:
                 return
+            turn_started_at = time.monotonic()
             # Server-initiated wake turns have no optimistic user bubble. Emit
             # their stored marker only after this worker owns the durable claim.
             if (
@@ -5058,6 +5137,7 @@ def _(rid, params: dict) -> dict:
                 history = list(session["history"])
                 history_version = int(session.get("history_version", 0))
             agent = session["agent"]
+            turn_usage_before = _get_usage(agent)
             # Wire the async-delegation sink so top-level delegate_task calls
             # dispatch non-blocking: the child runs on its own thread and its
             # result returns as a new turn via this sink instead of blocking
@@ -5203,6 +5283,7 @@ def _(rid, params: dict) -> dict:
                     run_kwargs["persist_user_message"] = persist_override
 
                 result = agent.run_conversation(current_prompt, **run_kwargs)
+                turn_usage_result = result
                 # Compaction redesign: a compacting turn NO LONGER rotates the
                 # session id — the transcript is append-only and compaction lives
                 # in the payload-time cursor + metadata. So the old
@@ -5283,9 +5364,10 @@ def _(rid, params: dict) -> dict:
                     and followup_rounds < 8
                 )
 
+                completion_usage = _get_usage(agent)
                 payload = {
                     "text": raw,
-                    "usage": _get_usage(agent),
+                    "usage": completion_usage,
                     "status": status,
                     "message_id": turn_ids["assistant"],
                 }
@@ -5304,6 +5386,10 @@ def _(rid, params: dict) -> dict:
                     # continuation renders as a disconnected new turn.
                     payload["followup"] = True
                 if not has_followup:
+                    turn_usage_after = completion_usage
+                    turn_latency_ms = int(
+                        max(0.0, time.monotonic() - turn_started_at) * 1000
+                    )
                     _mark_session_idle(session)
                 _emit("message.complete", sid, payload)
                 terminal_frame_pending = has_followup
@@ -5411,6 +5497,7 @@ def _(rid, params: dict) -> dict:
         except Exception as e:
             import traceback
 
+            turn_usage_error_type = type(e).__name__
             trace = traceback.format_exc()
             try:
                 os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
@@ -5428,6 +5515,13 @@ def _(rid, params: dict) -> dict:
             if terminal_frame_pending:
                 receipt_terminal_status = "error"
                 error_text = str(e) or type(e).__name__
+                try:
+                    turn_usage_after = _get_usage(session.get("agent"))
+                except Exception:
+                    logger.debug("TUI error usage snapshot failed", exc_info=True)
+                turn_latency_ms = int(
+                    max(0.0, time.monotonic() - turn_started_at) * 1000
+                )
                 _emit(
                     "message.complete",
                     sid,
@@ -5440,6 +5534,16 @@ def _(rid, params: dict) -> dict:
             elif receipt_terminal_status == "error":
                 _emit("error", sid, {"message": str(e)})
         finally:
+            if claimed and turn_started_at is not None:
+                if turn_usage_after is None:
+                    try:
+                        turn_usage_after = _get_usage(session.get("agent"))
+                    except Exception:
+                        logger.debug("TUI final usage snapshot failed", exc_info=True)
+                if turn_latency_ms is None:
+                    turn_latency_ms = int(
+                        max(0.0, time.monotonic() - turn_started_at) * 1000
+                    )
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
@@ -5475,6 +5579,17 @@ def _(rid, params: dict) -> dict:
             # generation, avoiding "answer is done but chat is still running"
             # on dashboard reattach.
             _mark_session_idle(session)
+            if claimed and turn_started_at is not None:
+                _record_tui_turn_usage(
+                    session_id=session_key,
+                    message_id=receipt_assistant_id,
+                    status=receipt_terminal_status,
+                    usage_before=turn_usage_before,
+                    usage_after=turn_usage_after,
+                    latency_ms=turn_latency_ms,
+                    agent_result=turn_usage_result,
+                    error_type=turn_usage_error_type,
+                )
 
     # Capture round-0 ids BEFORE starting the worker: followup rounds re-mint
     # turn_ids in the background thread, and the ack must always describe the

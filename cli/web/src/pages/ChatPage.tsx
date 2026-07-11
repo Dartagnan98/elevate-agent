@@ -1246,17 +1246,114 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
   // so the tool-call dropdown rebuilds from the saved record and shows even
   // when the localStorage snapshot is gone (cache wipe / fresh install).
   let pendingTools: ToolEntry[] = [];
+  // One visible assistant turn can contain several persisted provider
+  // responses (tool call, tool result, final answer). Live rendering keeps
+  // those under one message.start/message.complete envelope, so retain the
+  // user-visible start and add every absorbed assistant response's output
+  // tokens before hydrating the final answer.
+  let pendingTurnStartedAt: number | undefined;
+  let pendingTurnTokenCount = 0;
+  let pendingTurnHasTokenCount = false;
+  let pendingTurnCompletedAt: number | undefined;
+  let pendingTurnMessageId: string | undefined;
+  let pendingTurnTerminalStatus: "error" | "interrupted" | undefined;
+  let pendingTraces: ActivityTrace[] = [];
+
+  const resetPendingTurn = (): void => {
+    pendingTools = [];
+    pendingTraces = [];
+    pendingTurnStartedAt = undefined;
+    pendingTurnCompletedAt = undefined;
+    pendingTurnMessageId = undefined;
+    pendingTurnTerminalStatus = undefined;
+    pendingTurnTokenCount = 0;
+    pendingTurnHasTokenCount = false;
+  };
+
+  const flushPendingTurnWithoutFinalAnswer = (): void => {
+    if (!pendingTools.length && !pendingTraces.length) {
+      resetPendingTurn();
+      return;
+    }
+    const messageId = pendingTurnMessageId ?? id("stored-orphan");
+    const createdAt =
+      pendingTurnStartedAt ??
+      pendingTraces[0]?.createdAt ??
+      pendingTools[0]?.startedAt ??
+      Date.now();
+    out.push({
+      completedAt: pendingTurnCompletedAt ?? createdAt,
+      content: "",
+      createdAt,
+      id: messageId,
+      role: "assistant",
+      status: pendingTurnTerminalStatus ?? "error",
+      warning: "Saved turn ended after tool execution without a final assistant response.",
+      ...(pendingTools.length
+        ? { tools: pendingTools.map((tool) => ({ ...tool, messageId })) }
+        : {}),
+      ...(pendingTraces.length
+        ? { traces: pendingTraces.map((trace) => ({ ...trace, messageId })) }
+        : {}),
+      ...(pendingTurnHasTokenCount ? { tokenCount: pendingTurnTokenCount } : {}),
+    });
+    resetPendingTurn();
+  };
 
   list.forEach((m, index) => {
     const createdAt = timestampMillis(
       m.timestamp,
       Date.now() - Math.max(0, total - index),
     );
+    const content = typeof m.content === "string" ? m.content : "";
+    const keepMessage = shouldKeepTranscriptMessage(m.role, content);
+    const isSteer =
+      keepMessage &&
+      m.role === "user" &&
+      typeof m.message_id === "string" &&
+      m.message_id.startsWith("steer.");
 
-    if (m.role === "assistant" && m.tool_calls?.length) {
-      m.tool_calls.forEach((call, ci) => {
+    if (m.role === "user" && keepMessage) {
+      const hasPendingTurn = pendingTools.length > 0 || pendingTraces.length > 0;
+      if (isSteer && hasPendingTurn) {
+        pendingTraces.push(
+          {
+            createdAt,
+            id: `${m.message_id || `stored-${index}`}-steer`,
+            kind: "steer",
+            text: content,
+          },
+          {
+            createdAt: createdAt + 1,
+            id: `${m.message_id || `stored-${index}`}-steer-marker`,
+            kind: "marker",
+            text: "Conversation steered",
+          },
+        );
+        return;
+      }
+      if (!isSteer || !hasPendingTurn) {
+        // An ordinary user row starts a new logical turn. A steer after a
+        // completed response starts a continuation segment; the merge below
+        // folds both segments back into one visual run. A steer that arrives
+        // while tools are still pending remains inside the current segment.
+        if (!isSteer) flushPendingTurnWithoutFinalAnswer();
+        pendingTurnStartedAt = createdAt;
+      }
+    }
+
+    const hasToolCalls = m.role === "assistant" && !!m.tool_calls?.length;
+    if (hasToolCalls) {
+      pendingTurnStartedAt ??= createdAt;
+      const absorbedMessageId = stableHydrateId(m.message_id, `stored-${index}`);
+      pendingTurnMessageId ??= absorbedMessageId;
+      pendingTurnCompletedAt = Math.max(pendingTurnCompletedAt ?? 0, createdAt);
+      m.tool_calls!.forEach((call, ci) => {
         const result = call.id ? toolResults.get(call.id) : undefined;
         const error = storedToolError(call.function?.name || result?.tool_name || "tool", result);
+        const toolCompletedAt = result
+          ? timestampMillis(result.timestamp, createdAt)
+          : createdAt;
         pendingTools.push({
           kind: "tool",
           id: call.id || `stored-${index}-${ci}`,
@@ -1267,17 +1364,55 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
           error: cutResult(error),
           status: error ? "error" : "done",
           startedAt: createdAt,
-          completedAt: result ? timestampMillis(result.timestamp, createdAt) : createdAt,
+          completedAt: toolCompletedAt,
         });
+        pendingTurnCompletedAt = Math.max(
+          pendingTurnCompletedAt ?? 0,
+          toolCompletedAt,
+        );
       });
     }
 
-    if (
-      !shouldKeepTranscriptMessage(
-        m.role,
-        typeof m.content === "string" ? m.content : "",
-      )
-    ) {
+    if (m.role === "assistant" && typeof m.token_count === "number") {
+      pendingTurnTokenCount += m.token_count;
+      pendingTurnHasTokenCount = true;
+    }
+
+    if (m.role === "assistant") {
+      const terminalStatus = turnCompletionPresentation(
+        m.finish_reason ?? "complete",
+      ).messageStatus;
+      if (terminalStatus === "error" || terminalStatus === "interrupted") {
+        pendingTurnTerminalStatus = terminalStatus;
+      }
+      const reasoningText = (
+        (typeof m.reasoning === "string" && m.reasoning) ||
+        (typeof m.reasoning_content === "string" && m.reasoning_content) ||
+        ""
+      ).trim();
+      if (hasToolCalls && reasoningText) {
+        pendingTraces.push({
+          createdAt,
+          id: `${pendingTurnMessageId}-reasoning-${index}`,
+          kind: "reasoning",
+          text: reasoningText,
+        });
+      }
+      if (hasToolCalls && content.trim()) {
+        pendingTraces.push({
+          createdAt,
+          id: `${pendingTurnMessageId}-interim-${index}`,
+          kind: "interim",
+          text: content,
+        });
+      }
+    }
+
+    if (hasToolCalls) {
+      return;
+    }
+
+    if (!keepMessage) {
       return; // dropped (tool results, empty turns) — tool calls already buffered
     }
 
@@ -1285,19 +1420,24 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
     const chat: ChatMessage = {
       content: collapseSkillInvocation(
         m.role,
-        typeof m.content === "string" ? m.content : "",
+        content,
       ),
-      createdAt,
+      createdAt:
+        m.role === "assistant" ? pendingTurnStartedAt ?? createdAt : createdAt,
       id: messageId,
       role: m.role,
       status: turnCompletionPresentation(m.finish_reason ?? "complete").messageStatus,
       title: m.tool_name,
     };
-    // Surface the persisted per-turn token count on the assistant turn so the
-    // usage badge rebuilds from the saved record (survives cache wipe / fresh
-    // install), not just from the live streaming snapshot.
-    if (m.role === "assistant" && typeof m.token_count === "number") {
-      chat.tokenCount = m.token_count;
+    // A stored assistant timestamp marks that provider response's completion.
+    // Pair it with the logical turn start above so the duration remains stable
+    // after a cache wipe instead of comparing the final answer against an
+    // earlier tool completion and collapsing to 0s.
+    if (m.role === "assistant") {
+      chat.completedAt = createdAt;
+      if (pendingTurnHasTokenCount) {
+        chat.tokenCount = pendingTurnTokenCount;
+      }
     }
     // Rebuild the thinking trace from the persisted reasoning column so a
     // reloaded turn shows the same muted reasoning the live turn did (the live
@@ -1310,6 +1450,7 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       ).trim();
       if (reasoningText) {
         chat.traces = [
+          ...pendingTraces.map((trace) => ({ ...trace, messageId })),
           {
             createdAt,
             id: `${messageId}-reasoning`,
@@ -1318,6 +1459,8 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
             messageId,
           },
         ];
+      } else if (pendingTraces.length) {
+        chat.traces = pendingTraces.map((trace) => ({ ...trace, messageId }));
       }
     }
     if (m.role === "assistant" && pendingTools.length) {
@@ -1330,33 +1473,16 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       }
       pendingTools = [];
     }
-    if (
-      m.role === "user" &&
-      typeof m.message_id === "string" &&
-      m.message_id.startsWith("steer.")
-    ) {
+    if (isSteer) {
       steerRowIdxs.push(out.length);
     }
     out.push(chat);
+    if (m.role === "assistant") {
+      resetPendingTurn();
+    }
   });
 
-  // Trailing tool calls with no assistant turn after them → attach to the last
-  // assistant message so they aren't lost.
-  if (pendingTools.length) {
-    for (let i = out.length - 1; i >= 0; i -= 1) {
-      if (out[i].role === "assistant") {
-        const mid = out[i].id;
-        out[i] = {
-          ...out[i],
-          tools: [
-            ...(out[i].tools ?? []),
-            ...pendingTools.map((t) => ({ ...t, messageId: mid })),
-          ],
-        };
-        break;
-      }
-    }
-  }
+  flushPendingTurnWithoutFinalAnswer();
 
   // Steered continuation rounds (user row persisted as "steer.…") fold back
   // into ONE visual run — the previous assistant card absorbs the inline
@@ -1395,6 +1521,8 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       // matches the live steer.applied path.
       content: B.content,
       completedAt: B.completedAt ?? A.completedAt,
+      status: B.status ?? A.status,
+      warning: B.warning ?? A.warning,
       traces: [
         ...(A.traces ?? []),
         ...interimTrace,
@@ -1429,6 +1557,38 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
   return out;
 }
 
+function joinTurnUsageToMessages(
+  messages: ChatMessage[],
+  turnUsage: TurnUsageEntry[],
+): Map<string, TurnUsageEntry> {
+  const map = new Map<string, TurnUsageEntry>();
+  const assistantIds = messages
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.id);
+  const assistantIdSet = new Set(assistantIds);
+  const legacyUsage: TurnUsageEntry[] = [];
+
+  for (const usage of turnUsage) {
+    const usageMessageId =
+      typeof usage.message_id === "string" ? usage.message_id.trim() : "";
+    if (!usageMessageId) {
+      legacyUsage.push(usage);
+    } else if (assistantIdSet.has(usageMessageId)) {
+      map.set(usageMessageId, usage);
+    }
+  }
+
+  const unmatchedAssistantIds = assistantIds.filter((messageId) => !map.has(messageId));
+  const fallbackCount = Math.min(unmatchedAssistantIds.length, legacyUsage.length);
+  for (let index = 0; index < fallbackCount; index += 1) {
+    map.set(
+      unmatchedAssistantIds[unmatchedAssistantIds.length - 1 - index],
+      legacyUsage[legacyUsage.length - 1 - index],
+    );
+  }
+  return map;
+}
+
 export const __chatPageTestables = {
   activeSnapshotAlreadyCompleted,
   buildBreakdownSteps,
@@ -1438,6 +1598,7 @@ export const __chatPageTestables = {
   failActiveTurnMessage,
   isCompactSlashCommand,
   isOpenPreviewIntent,
+  joinTurnUsageToMessages,
   messageRowPropsEqual,
   mergeActiveTurnSnapshot,
   mergeServerWithCache,
@@ -8438,24 +8599,13 @@ export default function ChatPage() {
     }
     return grouped;
   }, [subagents, messageFold, messages]);
-  // Join per-turn usage to assistant turns for the footer. turn_usage.message_id
-  // is a gateway id that won't match our ids, so pair chronologically from the
-  // most-recent end (the turns the user is actually looking at).
-  const turnUsageByMessage = useMemo(() => {
-    const map = new Map<string, TurnUsageEntry>();
-    if (!turnUsage.length) return map;
-    const assistantIds = messages
-      .filter((m) => m.role === "assistant")
-      .map((m) => m.id);
-    const n = Math.min(assistantIds.length, turnUsage.length);
-    for (let i = 0; i < n; i += 1) {
-      map.set(
-        assistantIds[assistantIds.length - 1 - i],
-        turnUsage[turnUsage.length - 1 - i],
-      );
-    }
-    return map;
-  }, [turnUsage, messages]);
+  // Exact gateway ids are authoritative. Only truly legacy rows without an id
+  // may fall back to chronological pairing; an identified blocked/pre-agent
+  // row must never slide onto a different completed answer.
+  const turnUsageByMessage = useMemo(
+    () => joinTurnUsageToMessages(messages, turnUsage),
+    [turnUsage, messages],
+  );
   // Diff artifacts grouped by message — used to reattach inline_diff to stored
   // tools on reload (the diff isn't persisted on the tool itself).
   const diffsByMessage = useMemo(() => {

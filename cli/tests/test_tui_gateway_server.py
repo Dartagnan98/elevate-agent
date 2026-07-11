@@ -15,7 +15,10 @@ from tui_gateway import server
 @pytest.fixture(autouse=True)
 def _allow_prompt_submit_without_license(monkeypatch):
     """Unit tests in this file exercise gateway RPC behavior behind the gate."""
+    from gateway import usage_ledger
+
     monkeypatch.setattr(server, "_license_signed_in", lambda: True)
+    monkeypatch.setattr(usage_ledger, "record_gateway_turn", lambda **_kwargs: None)
     server._active_prompt_claims.clear()
     yield
     server._active_prompt_claims.clear()
@@ -163,9 +166,9 @@ def test_emit_records_content_free_session_breadcrumb(monkeypatch):
                 "text": "raw answer",
                 "reasoning": "private reasoning",
                 "usage": {
-                    "input_tokens": 10,
-                    "output_tokens": 3,
-                    "reasoning_tokens": 2,
+                    "input": 10,
+                    "output": 3,
+                    "reasoning": 2,
                 },
             },
         )
@@ -995,8 +998,144 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
     assert captured["session_key"] == "session-key"
 
 
-def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
+def test_prompt_submit_records_one_delta_usage_row_at_completion(monkeypatch):
+    from gateway import usage_ledger
+
     db = _install_prompt_receipt_db(monkeypatch)
+    clock = {"now": 100.0}
+    recorded = []
+    receipt_status_at_record = []
+    claim_present_at_record = []
+    running_at_record = []
+
+    def record_gateway_turn(**kwargs):
+        receipt_status_at_record.append(
+            db.rows[("session-key", "user-usage")]["status"]
+        )
+        claim_present_at_record.append(
+            ("session-key", "user-usage") in server._active_prompt_claims
+        )
+        running_at_record.append(server._sessions["sid"]["running"])
+        recorded.append(kwargs)
+        return 1
+
+    class _Agent:
+        model = "gemini-2.5-flash"
+        provider = "gemini"
+        session_input_tokens = 1_000
+        session_output_tokens = 20
+        session_total_tokens = 1_020
+        session_cache_read_tokens = 10
+        session_cache_write_tokens = 2
+        session_reasoning_tokens = 3
+        session_prompt_tokens = 1_000
+        session_completion_tokens = 20
+        session_api_calls = 1
+        session_estimated_cost_usd = 0.1
+
+        def run_conversation(self, *_args, **_kwargs):
+            self.session_input_tokens = 1_700
+            self.session_output_tokens = 47
+            self.session_total_tokens = 1_747
+            self.session_cache_read_tokens = 14
+            self.session_cache_write_tokens = 3
+            self.session_reasoning_tokens = 8
+            self.session_prompt_tokens = 1_700
+            self.session_completion_tokens = 47
+            self.session_api_calls = 3
+            self.session_estimated_cost_usd = 0.125
+            clock["now"] = 100.5
+            return {
+                "completed": True,
+                "failed": False,
+                "final_response": "done",
+                "messages": [{"role": "assistant", "content": "done"}],
+                # Deliberately cumulative: the gateway must overwrite these
+                # with the logical turn delta before recording.
+                "input_tokens": 1_700,
+                "output_tokens": 47,
+                "total_tokens": 1_747,
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server.time, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
+        monkeypatch.setattr(server, "_voice_tts_enabled", lambda: False)
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+        monkeypatch.setattr(
+            usage_ledger,
+            "record_gateway_turn",
+            record_gateway_turn,
+        )
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "ping",
+                    "user_message_id": "user-usage",
+                },
+            }
+        )
+
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert response["result"]["status"] == "streaming"
+        assert len(complete) == 1
+        assert len(recorded) == 1
+        assert receipt_status_at_record == ["complete"]
+        assert claim_present_at_record == [False]
+        assert running_at_record == [False]
+        call = recorded[0]
+        assert call["source"] == "tui"
+        assert call["session_id"] == "session-key"
+        assert call["session_key"] == "session-key"
+        assert call["message_id"] == complete[0][2]["message_id"]
+        assert call["latency_ms"] == 500
+        assert {
+            key: call["agent_result"][key]
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "api_calls",
+                "status",
+            )
+        } == {
+            "input_tokens": 700,
+            "output_tokens": 27,
+            "total_tokens": 727,
+            "cache_read_tokens": 4,
+            "cache_write_tokens": 1,
+            "reasoning_tokens": 5,
+            "api_calls": 2,
+            "status": "complete",
+        }
+        assert call["agent_result"]["estimated_cost_usd"] == pytest.approx(0.025)
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
+    from gateway import usage_ledger
+
+    db = _install_prompt_receipt_db(monkeypatch)
+    recorded = []
 
     class _Agent:
         def run_conversation(
@@ -1028,6 +1167,11 @@ def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
         monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
         monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
         monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+        monkeypatch.setattr(
+            usage_ledger,
+            "record_gateway_turn",
+            lambda **kwargs: recorded.append(kwargs) or 1,
+        )
 
         response = server.handle_request(
             {
@@ -1048,6 +1192,9 @@ def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
         assert payload["status"] == "error"
         assert payload["text"] != "(empty)"
         assert "did not complete" in payload["text"].lower()
+        assert len(recorded) == 1
+        assert recorded[0]["message_id"] == payload["message_id"]
+        assert recorded[0]["agent_result"]["status"] == "error"
         assert db.rows[("session-key", "user-empty")]["status"] == "error"
         assert server._sessions["sid"]["history"] == [
             {

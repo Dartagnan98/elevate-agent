@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_cli.data.usage_ledger import turns_for_session
+
 
 GetSessionDb = Callable[[], Any]
 OpenInFileManager = Callable[[Path], None]
@@ -241,6 +243,44 @@ def _artifact_kind(path: Path, mime_type: Optional[str]) -> str:
     return "file"
 
 
+_TURN_USAGE_MERGE_FIELDS = (
+    "source", "session_id", "session_key", "message_id", "timestamp",
+    "provider", "model", "input_tokens", "output_tokens", "total_tokens",
+    "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+    "estimated_cost_usd", "latency_ms", "status", "error_type",
+)
+
+
+def _merge_turn_usage_rows(canonical: list[dict], legacy: list[dict]) -> list[dict]:
+    """Merge one session's ledgers, preferring canonical copies of a turn."""
+    def key(row: dict) -> tuple:
+        message_id = str(row.get("message_id") or "")
+        if message_id:
+            return (
+                "message",
+                str(row.get("source") or ""),
+                str(row.get("session_key") or row.get("session_id") or ""),
+                message_id,
+            )
+        return ("row", *(row.get(field) for field in _TURN_USAGE_MERGE_FIELDS))
+
+    merged = {key(row): row for row in legacy if isinstance(row, dict)}
+    merged.update({key(row): row for row in canonical if isinstance(row, dict)})
+
+    def order(row: dict) -> tuple:
+        try:
+            timestamp = float(row.get("timestamp"))
+        except (TypeError, ValueError):
+            timestamp = float("inf")
+        return (
+            timestamp,
+            str(row.get("message_id") or ""),
+            str(row.get("source") or ""),
+        )
+
+    return sorted(merged.values(), key=order)
+
+
 # ── Per-open transcript coalescing cache ─────────────────────────────────
 # One session open fans out to 5 detail routes (messages/todos/plan/files/
 # artifacts), each needing the full decoded transcript. Without this they'd
@@ -460,7 +500,29 @@ def create_session_detail_router(
         db = get_session_db()
         try:
             sid, active_id, identity = _resolve_active_session_or_404(db, session_id)
-            rows = db.turn_usage_for_session(active_id)
+            try:
+                canonical_rows = await asyncio.to_thread(
+                    turns_for_session, active_id
+                )
+            except Exception as exc:
+                log.debug(
+                    "Canonical turn-usage read failed for %s: %s",
+                    active_id,
+                    exc,
+                )
+                canonical_rows = []
+            try:
+                legacy_rows = await asyncio.to_thread(
+                    db.turn_usage_for_session, active_id
+                )
+            except Exception as exc:
+                log.debug(
+                    "Legacy turn-usage fallback failed for %s: %s",
+                    active_id,
+                    exc,
+                )
+                legacy_rows = []
+            rows = _merge_turn_usage_rows(canonical_rows, legacy_rows)
         finally:
             db.close()
 

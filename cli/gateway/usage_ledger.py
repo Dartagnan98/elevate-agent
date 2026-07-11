@@ -186,7 +186,7 @@ def record_gateway_turn(
     try:
         from elevate_cli.data.usage_ledger import record_turn as _pg_record_turn
 
-        return _pg_record_turn(row)
+        return _pg_record_turn(row, strict=True)
     except Exception as exc:
         logger.debug(
             "PG usage ledger write failed, falling back to SQLite SessionDB: %s",
@@ -221,7 +221,7 @@ def recent_turns(
     try:
         from elevate_cli.data.usage_ledger import recent_turns as _pg_recent
 
-        return _pg_recent(limit=limit)
+        return _pg_recent(limit=limit, strict=True)
     except Exception as exc:
         logger.debug(
             "PG usage ledger read failed, falling back to SQLite SessionDB: %s",
@@ -260,7 +260,12 @@ def sum_recent_tokens(
     try:
         from elevate_cli.data.usage_ledger import sum_recent_tokens as _pg_sum
 
-        return _pg_sum(since=since, source=source, session_key=session_key)
+        return _pg_sum(
+            since=since,
+            source=source,
+            session_key=session_key,
+            strict=True,
+        )
     except Exception as exc:
         logger.debug(
             "PG usage ledger token sum failed, falling back to recent rows: %s",

@@ -510,7 +510,300 @@ describe("server/cache transcript merge", () => {
   });
 });
 
+describe("turn usage reconciliation", () => {
+  it("does not shift an unmatched identified usage row onto a completed answer", () => {
+    const completed = {
+      content: "Completed answer",
+      createdAt: 1_700_000_000_000,
+      id: "assistant-complete",
+      role: "assistant",
+      status: "complete",
+    } as TestMessage;
+
+    const joined = __chatPageTestables.joinTurnUsageToMessages([completed], [
+      { message_id: "assistant-pre-agent", total_tokens: 19 },
+    ]);
+
+    expect(joined.size).toBe(0);
+    expect(joined.get(completed.id)).toBeUndefined();
+  });
+
+  it("matches exact ids first and reserves positional fallback for id-less rows", () => {
+    const messages = [
+      {
+        content: "First answer",
+        createdAt: 1_700_000_000_000,
+        id: "assistant-first",
+        role: "assistant",
+        status: "complete",
+      },
+      {
+        content: "Second answer",
+        createdAt: 1_700_000_001_000,
+        id: "assistant-second",
+        role: "assistant",
+        status: "complete",
+      },
+    ] as TestMessage[];
+    const exact = { message_id: "assistant-first", total_tokens: 11 };
+    const legacy = { message_id: null, total_tokens: 22 };
+
+    const joined = __chatPageTestables.joinTurnUsageToMessages(messages, [
+      exact,
+      { message_id: "blocked-before-agent", total_tokens: 99 },
+      legacy,
+    ]);
+
+    expect(joined.get("assistant-first")).toBe(exact);
+    expect(joined.get("assistant-second")).toBe(legacy);
+  });
+});
+
 describe("terminal truth containment", () => {
+  it("folds narrated tool execution into the final logical assistant card", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      {
+        content: "Check the lead board.",
+        message_id: "user-narrated-tool",
+        role: "user",
+        timestamp: 1_700_000_000,
+      },
+      {
+        content: "I’ll check the lead board now.",
+        message_id: "assistant-tool-narration",
+        reasoning: "Use the overview tool first.",
+        role: "assistant",
+        timestamp: 1_700_000_001,
+        token_count: 12,
+        tool_calls: [
+          {
+            function: { arguments: "{}", name: "leads_overview" },
+            id: "call-narrated-leads",
+          },
+        ],
+      },
+      {
+        content: '{"success":true,"total":3}',
+        role: "tool",
+        timestamp: 1_700_000_002,
+        tool_call_id: "call-narrated-leads",
+        tool_name: "leads_overview",
+      },
+      {
+        content: "There are 3 leads.",
+        finish_reason: "stop",
+        message_id: "assistant-final-leads",
+        reasoning: "Summarize the result.",
+        role: "assistant",
+        timestamp: 1_700_000_003,
+        token_count: 8,
+      },
+    ]);
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1]).toMatchObject({
+      completedAt: 1_700_000_003_000,
+      content: "There are 3 leads.",
+      createdAt: 1_700_000_000_000,
+      status: "complete",
+      tokenCount: 20,
+    });
+    expect(hydrated[1].tools).toMatchObject([
+      { name: "leads_overview", status: "done" },
+    ]);
+    expect(hydrated[1].traces?.map(({ kind, text }) => ({ kind, text }))).toEqual([
+      { kind: "reasoning", text: "Use the overview tool first." },
+      { kind: "interim", text: "I’ll check the lead board now." },
+      { kind: "reasoning", text: "Summarize the result." },
+    ]);
+    expect(hydrated[1].traces?.every((trace) => trace.messageId === hydrated[1].id))
+      .toBe(true);
+  });
+
+  it("reports a narrated tool turn with no final answer as unresolved", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      { content: "Check the board.", role: "user", timestamp: 1_700_000_000 },
+      {
+        content: "I’ll check that now.",
+        message_id: "assistant-orphaned-narration",
+        role: "assistant",
+        timestamp: 1_700_000_001,
+        token_count: 9,
+        tool_calls: [
+          {
+            function: { arguments: "{}", name: "leads_overview" },
+            id: "call-orphaned-leads",
+          },
+        ],
+      },
+      {
+        content: '{"success":true,"total":3}',
+        role: "tool",
+        timestamp: 1_700_000_002,
+        tool_call_id: "call-orphaned-leads",
+        tool_name: "leads_overview",
+      },
+    ]);
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1]).toMatchObject({
+      completedAt: 1_700_000_002_000,
+      content: "",
+      createdAt: 1_700_000_000_000,
+      status: "error",
+      tokenCount: 9,
+      warning: "Saved turn ended after tool execution without a final assistant response.",
+    });
+    expect(hydrated[1].tools).toMatchObject([
+      { name: "leads_overview", status: "done" },
+    ]);
+    expect(hydrated[1].traces).toMatchObject([
+      { kind: "interim", text: "I’ll check that now." },
+    ]);
+  });
+
+  it("rehydrates one tool turn with the same logical timing and output tokens as live", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      {
+        content: "Use leads_overview once.",
+        message_id: "user-physical",
+        role: "user",
+        timestamp: 1_700_000_000,
+      },
+      {
+        content: "",
+        role: "assistant",
+        timestamp: 1_700_000_002.9,
+        token_count: 17,
+        tool_calls: [
+          {
+            function: { arguments: '{"recent_limit":1}', name: "leads_overview" },
+            id: "call-leads",
+          },
+        ],
+      },
+      {
+        content: '{"success":true,"overview":{"pendingApproval":0}}',
+        role: "tool",
+        timestamp: 1_700_000_002.95,
+        tool_call_id: "call-leads",
+        tool_name: "leads_overview",
+      },
+      {
+        content: "Pending Approval: 0",
+        finish_reason: "stop",
+        message_id: "assistant-physical",
+        role: "assistant",
+        timestamp: 1_700_000_003,
+        token_count: 30,
+      },
+    ]);
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1]).toMatchObject({
+      completedAt: 1_700_000_003_000,
+      createdAt: 1_700_000_000_000,
+      status: "complete",
+      tokenCount: 47,
+    });
+    expect(hydrated[1].tools).toMatchObject([
+      { name: "leads_overview", status: "done" },
+    ]);
+  });
+
+  it("does not bleed an unfinished turn's tools or tokens into the next user turn", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      { content: "First request", role: "user", timestamp: 1_700_000_000 },
+      {
+        content: "",
+        role: "assistant",
+        timestamp: 1_700_000_001,
+        token_count: 11,
+        tool_calls: [
+          {
+            function: { arguments: "{}", name: "read_file" },
+            id: "orphaned-call",
+          },
+        ],
+      },
+      { content: "Second request", role: "user", timestamp: 1_700_000_010 },
+      {
+        content: "Second answer",
+        role: "assistant",
+        timestamp: 1_700_000_012,
+        token_count: 7,
+      },
+    ]);
+
+    expect(hydrated.at(-1)).toMatchObject({
+      completedAt: 1_700_000_012_000,
+      createdAt: 1_700_000_010_000,
+      content: "Second answer",
+      tokenCount: 7,
+    });
+    expect(hydrated.at(-1)?.tools).toBeUndefined();
+  });
+
+  it("composes timing and token totals across a persisted steer continuation", () => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      { content: "Original request", role: "user", timestamp: 1_700_000_000 },
+      {
+        content: "First response",
+        role: "assistant",
+        timestamp: 1_700_000_002,
+        token_count: 10,
+      },
+      {
+        content: "Also include retries",
+        message_id: "steer.follow-up",
+        role: "user",
+        timestamp: 1_700_000_003,
+      },
+      {
+        content: "Final response with retries",
+        role: "assistant",
+        timestamp: 1_700_000_005,
+        token_count: 20,
+      },
+    ]);
+
+    expect(hydrated).toHaveLength(2);
+    expect(hydrated[1]).toMatchObject({
+      completedAt: 1_700_000_005_000,
+      createdAt: 1_700_000_000_000,
+      content: "Final response with retries",
+      tokenCount: 30,
+    });
+    expect(hydrated[1].traces?.map((trace) => trace.kind)).toEqual([
+      "interim",
+      "steer",
+      "marker",
+    ]);
+  });
+
+  it.each([
+    ["error", "error"],
+    ["interrupted", "interrupted"],
+  ] as const)("keeps %s turn timing while preserving terminal status", (finishReason, status) => {
+    const hydrated = __chatPageTestables.normalizeStoredTranscript([
+      { content: "Run this", role: "user", timestamp: 1_700_000_000 },
+      {
+        content: "The turn stopped.",
+        finish_reason: finishReason,
+        role: "assistant",
+        timestamp: 1_700_000_004,
+        token_count: 3,
+      },
+    ]);
+
+    expect(hydrated[1]).toMatchObject({
+      completedAt: 1_700_000_004_000,
+      createdAt: 1_700_000_000_000,
+      status,
+      tokenCount: 3,
+    });
+  });
+
   it.each([
     "Tool execution failed: RuntimeError: worker crashed",
     "[TOOL EXECUTION SKIPPED — read_file was not started]",

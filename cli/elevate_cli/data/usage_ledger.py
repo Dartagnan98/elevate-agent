@@ -56,12 +56,13 @@ _INSERT_COLUMNS = (
 )
 
 
-def record_turn(row: Dict[str, Any]) -> Optional[int]:
+def record_turn(row: Dict[str, Any], *, strict: bool = False) -> Optional[int]:
     """Insert one turn-usage row. Returns the new id, or None on dedup/error.
 
     Dedup: the unique partial index ``idx_turn_usage_dedup`` enforces
     one row per ``(source, session_key, message_id)`` triple where all
-    three are non-empty.
+    three are non-empty. With ``strict=True``, database errors propagate while
+    a legitimate dedup conflict still returns None.
     """
     if not isinstance(row, dict):
         return None
@@ -103,12 +104,14 @@ def record_turn(row: Dict[str, Any]) -> Optional[int]:
                 return None
             return int(result[0])
     except Exception as exc:
+        if strict:
+            raise
         logger.debug("Failed to write usage ledger row: %s", exc)
         return None
 
 
-def recent_turns(limit: int = 20) -> List[Dict[str, Any]]:
-    """Return the most recent rows, newest first."""
+def recent_turns(limit: int = 20, *, strict: bool = False) -> List[Dict[str, Any]]:
+    """Return newest rows first; propagate database errors in strict mode."""
     limit = max(1, min(int(limit or 20), 1000))
     try:
         with connect() as conn:
@@ -118,8 +121,30 @@ def recent_turns(limit: int = 20) -> List[Dict[str, Any]]:
             ).fetchall()
         return [dict(r) for r in rows]
     except Exception as exc:
+        if strict:
+            raise
         logger.debug("Failed to read usage ledger: %s", exc)
         return []
+
+
+def turns_for_session(session_key: str, limit: int = 1000) -> List[Dict[str, Any]]:
+    """Return one session's canonical usage rows, oldest first.
+
+    Unlike the broad analytics reader above, errors intentionally propagate so
+    the dashboard route can fall back to the legacy SQLite ledger during the
+    migration window instead of mistaking an unavailable Postgres store for an
+    empty session.
+    """
+    if not session_key:
+        return []
+    limit = max(1, min(int(limit or 1000), 1000))
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM turn_usage WHERE session_id = ? OR session_key = ? "
+            "ORDER BY timestamp ASC, id ASC LIMIT ?",
+            (session_key, session_key, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def sum_recent_tokens(
@@ -127,8 +152,9 @@ def sum_recent_tokens(
     since: float,
     source: str | None = None,
     session_key: str | None = None,
+    strict: bool = False,
 ) -> int:
-    """Sum total tokens for recent ledger rows."""
+    """Sum recent tokens; propagate database errors in strict mode."""
     where = ["timestamp >= ?"]
     params: list[Any] = [float(since)]
     if source:
@@ -145,8 +171,10 @@ def sum_recent_tokens(
             return 0
         return int(row["total"] if isinstance(row, dict) else row[0] or 0)
     except Exception as exc:
+        if strict:
+            raise
         logger.debug("Failed to sum usage ledger tokens: %s", exc)
         return 0
 
 
-__all__ = ["record_turn", "recent_turns", "sum_recent_tokens"]
+__all__ = ["record_turn", "recent_turns", "sum_recent_tokens", "turns_for_session"]
