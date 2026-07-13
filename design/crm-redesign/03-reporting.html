@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body>
+<title>Elevation — Reporting</title>
+<style>
+  :root{
+    --navy:#182848; --navy-2:#22355c; --navy-3:#33477a;
+    --terracotta:#C46340; --blue:#5E8AD0; --blue-2:#4a76bc;
+    --ink:#1c2438; --sub:#5c6479; --faint:#8a90a3;
+    --paper:#eef1f6; --card:#ffffff; --line:#e3e6ee; --line-2:#eef0f5;
+    --c-data:#5E8AD0; --c-soft:rgba(94,138,208,.16); --c-soft-2:rgba(94,138,208,.04);
+    --c-accent:#C46340; --c-good:#3f9d6b; --c-good-bg:rgba(63,157,107,.14); --c-warn:#c98a2e; --c-bad-bg:rgba(196,99,64,.13);
+    --grid:rgba(24,40,72,.08);
+    --shadow:0 1px 2px rgba(24,40,72,.05), 0 6px 20px rgba(24,40,72,.06);
+    --shadow-lg:0 16px 50px rgba(24,40,72,.24);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --r:12px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --navy:#cdd8ef; --navy-2:#b3c2e0; --navy-3:#93a6cf;
+    --terracotta:#e08a63; --blue:#7ba4e2; --blue-2:#5E8AD0;
+    --ink:#e7eaf2; --sub:#a2a9bc; --faint:#767d92;
+    --paper:#0e121b; --card:#161c29; --line:#28303f; --line-2:#1b2130;
+    --c-data:#7ba4e2; --c-soft:rgba(123,164,226,.2); --c-soft-2:rgba(123,164,226,.03);
+    --c-accent:#e08a63; --c-good:#5cc08a; --c-good-bg:rgba(92,192,138,.16); --c-warn:#e0a94e; --c-bad-bg:rgba(224,138,99,.15);
+    --grid:rgba(205,216,239,.1);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);
+    --shadow-lg:0 18px 54px rgba(0,0,0,.5);
+  }}
+  :root[data-theme="light"]{--navy:#182848;--navy-3:#33477a;--terracotta:#C46340;--blue:#5E8AD0;--ink:#1c2438;--sub:#5c6479;--faint:#8a90a3;--paper:#eef1f6;--card:#fff;--line:#e3e6ee;--line-2:#eef0f5;--c-data:#5E8AD0;--c-soft:rgba(94,138,208,.16);--c-soft-2:rgba(94,138,208,.04);--c-accent:#C46340;--c-good:#3f9d6b;--c-good-bg:rgba(63,157,107,.14);--c-warn:#c98a2e;--c-bad-bg:rgba(196,99,64,.13);--grid:rgba(24,40,72,.08);--shadow:0 1px 2px rgba(24,40,72,.05),0 6px 20px rgba(24,40,72,.06);--shadow-lg:0 16px 50px rgba(24,40,72,.24);}
+  :root[data-theme="dark"]{--navy:#cdd8ef;--navy-3:#93a6cf;--terracotta:#e08a63;--blue:#7ba4e2;--ink:#e7eaf2;--sub:#a2a9bc;--faint:#767d92;--paper:#0e121b;--card:#161c29;--line:#28303f;--line-2:#1b2130;--c-data:#7ba4e2;--c-soft:rgba(123,164,226,.2);--c-soft-2:rgba(123,164,226,.03);--c-accent:#e08a63;--c-good:#5cc08a;--c-good-bg:rgba(92,192,138,.16);--c-warn:#e0a94e;--c-bad-bg:rgba(224,138,99,.15);--grid:rgba(205,216,239,.1);--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);--shadow-lg:0 18px 54px rgba(0,0,0,.5);}
+
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font);line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1200px;margin:0 auto;padding:24px 20px 64px;}
+
+  .masthead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;}
+  .brandmark{width:34px;height:34px;border-radius:9px;background:var(--navy);display:grid;place-items:center;color:var(--card);font-weight:800;font-size:15px;flex:none;}
+  .masthead h1{font-size:19px;margin:0;color:var(--navy);font-weight:750;letter-spacing:-.01em;}
+  .masthead .sub{font-size:12.5px;color:var(--faint);font-family:var(--mono);}
+  .m-right{margin-left:auto;display:flex;gap:8px;align-items:center;}
+  .goalbtn{border:0;background:var(--navy);color:var(--card);border-radius:9px;padding:9px 15px;font:inherit;font-size:13px;font-weight:700;cursor:pointer;display:inline-flex;gap:7px;align-items:center;}
+  .goalbtn:hover{filter:brightness(1.08);}
+  .range{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:9px;padding:9px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer;box-shadow:var(--shadow);display:inline-flex;gap:8px;align-items:center;}
+  .range .car{color:var(--faint);font-size:10px;}
+
+  /* goal progress */
+  .goalcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:15px 17px;margin-bottom:16px;}
+  .goalcard .gc-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .goalcard .gc-hd b{font-size:14px;color:var(--navy);}
+  .goalcard .gc-hd .edit{border:0;background:transparent;color:var(--blue-2);font:inherit;font-size:12.5px;font-weight:650;cursor:pointer;}
+  .goals{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;}
+  .goal .gtop{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;}
+  .goal .glab{font-size:12px;color:var(--sub);font-weight:600;}
+  .goal .gnum{font-size:12.5px;color:var(--ink);font-weight:700;font-variant-numeric:tabular-nums;}
+  .goal .gnum .goalv{color:var(--faint);font-weight:600;}
+  .gbar{height:9px;border-radius:999px;background:var(--line-2);overflow:hidden;}
+  .gbar span{display:block;height:100%;border-radius:999px;transition:width .4s;}
+  .goal .gpct{font-size:11px;font-weight:700;font-family:var(--mono);margin-top:5px;}
+
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:12px;}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px 15px;box-shadow:var(--shadow);}
+  .kpi .n{font-size:24px;font-weight:750;color:var(--navy);font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1;}
+  .kpi .l{font-size:11px;color:var(--sub);margin-top:6px;}
+  .kpi .d{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;font-family:var(--mono);margin-top:7px;padding:2px 7px;border-radius:999px;}
+  .kpi .d.up{color:var(--c-good);background:var(--c-good-bg);} .kpi .d.down{color:var(--c-accent);background:var(--c-bad-bg);} .kpi .d.flat{color:var(--faint);background:var(--line-2);}
+  .respo{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:18px;padding:2px 4px;font-size:12.5px;color:var(--sub);}
+  .respo b{color:var(--navy);font-variant-numeric:tabular-nums;}
+
+  /* activity math card */
+  .mathcard{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--terracotta);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 18px 18px;}
+  .mathhd{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:14px;}
+  .mathhd h3{margin:0 0 3px;font-size:14.5px;color:var(--navy);font-weight:700;}
+  .mathhd .cap{font-size:12px;color:var(--faint);margin:0;}
+  .bigratio{display:flex;flex-direction:column;align-items:flex-end;flex:none;}
+  .br-n{font-size:34px;font-weight:800;color:var(--terracotta);font-variant-numeric:tabular-nums;line-height:1;}
+  .br-l{font-size:10.5px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;margin-top:3px;}
+  .mathrow{display:flex;align-items:stretch;flex-wrap:wrap;background:var(--paper);border-radius:10px;padding:6px 4px;}
+  .mstep{flex:1;min-width:104px;text-align:center;padding:10px 6px;}
+  .mstep .mn{font-size:23px;font-weight:750;color:var(--navy);font-variant-numeric:tabular-nums;line-height:1;}
+  .mstep.goal .mn{color:var(--terracotta);}
+  .mstep .ml{font-size:11px;color:var(--sub);margin-top:4px;}
+  .marrow{display:flex;align-items:center;color:var(--faint);font-size:17px;}
+  .mathcadence{margin-top:13px;border-top:1px solid var(--line-2);padding-top:12px;font-size:13.5px;color:var(--sub);}
+  .mathcadence b{color:var(--navy);font-variant-numeric:tabular-nums;}
+
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .cardc{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:16px 17px 18px;}
+  .cardc.span{grid-column:1 / -1;}
+  .cardc h3{margin:0 0 3px;font-size:14.5px;color:var(--navy);font-weight:700;}
+  .cardc .cap{font-size:12px;color:var(--faint);margin:0 0 14px;}
+  svg{width:100%;height:auto;display:block;overflow:visible;}
+  .lbl{fill:var(--sub);font-family:var(--font);}
+  .val{fill:var(--ink);font-family:var(--mono);font-weight:700;}
+  .axl{fill:var(--faint);font-family:var(--mono);}
+  .legt{fill:var(--sub);font-family:var(--font);font-size:12px;}
+
+  .tip{position:fixed;pointer-events:none;background:var(--navy);color:var(--card);font-size:12px;font-weight:600;padding:6px 10px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:90;white-space:nowrap;transform:translate(-50%,-120%);}
+  .tip[hidden]{display:none;}
+  .spendnote{margin-top:10px;font-size:12px;color:var(--sub);border-top:1px solid var(--line-2);padding-top:11px;}
+  .spendnote b{color:var(--navy);}
+  .trend-hd{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:6px;}
+  .tabs2{display:inline-flex;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:3px;flex:none;}
+  .tabs2 button{border:0;background:transparent;color:var(--sub);font:inherit;font-size:12.5px;font-weight:650;padding:6px 14px;border-radius:999px;cursor:pointer;}
+  .tabs2 button.on{background:var(--navy);color:var(--card);}
+  .tlabel{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-family:var(--mono);margin:12px 0 2px;}
+  #view-yoy[hidden],#view-monthly[hidden]{display:none;}
+  .yoy2{display:grid;grid-template-columns:1fr 1fr;gap:22px;}
+
+  /* goals modal */
+  .gm-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:100;padding:20px;}
+  .gm-overlay[hidden]{display:none;}
+  .gm-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);max-width:420px;width:100%;padding:22px 24px;}
+  .gm-card h3{margin:0 0 3px;color:var(--navy);font-size:18px;font-weight:750;}
+  .gm-card .gm-sub{font-size:12.5px;color:var(--sub);margin-bottom:16px;}
+  .gm-field{margin-bottom:13px;}
+  .gm-field label{display:block;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:5px;}
+  .gm-field input{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:14px;color:var(--ink);background:var(--card);}
+  .gm-field input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--c-soft);}
+  .gm-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}
+  .gm-cancel{border:0;background:transparent;color:var(--faint);font:inherit;font-weight:650;font-size:13.5px;padding:9px 14px;cursor:pointer;}
+  .gm-save{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 22px;border-radius:9px;cursor:pointer;}
+
+  .footnote{margin-top:22px;font-size:12px;color:var(--faint);font-family:var(--mono);text-align:center;}
+
+  @media (max-width:820px){
+    .kpis{grid-template-columns:repeat(2,1fr);}
+    .goals{grid-template-columns:repeat(2,1fr);}
+    .charts{grid-template-columns:1fr;} .cardc.span{grid-column:auto;} .yoy2{grid-template-columns:1fr;}
+  }
+</style>
+
+<div class="page">
+  <div class="masthead">
+    <div class="brandmark">E</div>
+    <div>
+      <h1>Reporting</h1>
+      <div class="sub">mockup · leads, conversion, and activity</div>
+    </div>
+    <div class="m-right">
+      <button class="goalbtn" onclick="openGoals()">🎯 Set goals</button>
+      <button class="range">Last 30 days <span class="car">▾</span></button>
+    </div>
+  </div>
+
+  <div class="goalcard">
+    <div class="gc-hd"><b>Goal progress</b><button class="edit" onclick="openGoals()">Edit goals</button></div>
+    <div class="goals" id="goals"></div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="n">34</div><div class="l">New leads</div><div class="d up">▲ 9%</div></div>
+    <div class="kpi"><div class="n">48</div><div class="l">Calls made</div><div class="d up">▲ 6%</div></div>
+    <div class="kpi"><div class="n">512</div><div class="l">Texts sent</div><div class="d up">▲ 14%</div></div>
+    <div class="kpi"><div class="n">256</div><div class="l">Emails sent</div><div class="d flat">— even</div></div>
+    <div class="kpi"><div class="n">18</div><div class="l">Appointments booked</div><div class="d up">▲ 12%</div></div>
+    <div class="kpi"><div class="n">8.4%</div><div class="l">Lead → client</div><div class="d up">▲ 1.1pt</div></div>
+  </div>
+
+  <div class="mathcard" style="margin-bottom:16px">
+    <div class="mathhd">
+      <div><h3>What it takes to hit your goal</h3><p class="cap">Worked backward from your funnel's real conversion rates — so you know your daily number.</p></div>
+      <div class="bigratio"><span class="br-n" id="conv-per-sale">34</span><span class="br-l">conversations per sale</span></div>
+    </div>
+    <div class="mathrow" id="mathrow"></div>
+    <div class="mathcadence" id="mathcadence"></div>
+  </div>
+
+  <div class="charts">
+    <div class="cardc">
+      <h3>Lead-to-close funnel</h3>
+      <p class="cap">Conversation → appointment → client → close. Right column = kept from the stage above.</p>
+      <svg id="funnel" viewBox="0 0 560 300" role="img" aria-label="Lead to close funnel"></svg>
+    </div>
+
+    <div class="cardc">
+      <h3>Conversion by source</h3>
+      <p class="cap">Share of each source's leads that became clients.</p>
+      <svg id="conv" viewBox="0 0 560 420" role="img" aria-label="Conversion rate by lead source"></svg>
+    </div>
+
+    <div class="cardc">
+      <h3>Where closed deals came from</h3>
+      <p class="cap">Origin of the deals you actually closed (year to date).</p>
+      <svg id="closedsrc" viewBox="0 0 560 300" role="img" aria-label="Closed deals by source"></svg>
+    </div>
+
+    <div class="cardc">
+      <h3>Marketing spend</h3>
+      <p class="cap">Dollars into each channel this year.</p>
+      <svg id="spend" viewBox="0 0 560 260" role="img" aria-label="Marketing spend by channel"></svg>
+      <div class="spendnote">≈ <b>$258</b> marketing cost per closed deal · <b>$44</b> per new lead</div>
+    </div>
+
+    <div class="cardc span">
+      <div class="trend-hd">
+        <div><h3>Leads &amp; sales over time</h3><p class="cap">Leads on the axis; closings overlaid (dashed) to show the shape — point labels are the actual number of sales.</p></div>
+        <div class="tabs2"><button class="on" onclick="showTrend('monthly',this)">Monthly</button><button onclick="showTrend('yoy',this)">Year over year</button></div>
+      </div>
+      <div id="view-monthly">
+        <svg id="combo" viewBox="0 0 1120 300" role="img" aria-label="New leads and closings by month"></svg>
+      </div>
+      <div id="view-yoy" hidden>
+        <div class="yoy2">
+          <div><div class="tlabel">Leads by year</div><svg id="leadsyear" viewBox="0 0 540 150" role="img" aria-label="Leads by year"></svg></div>
+          <div><div class="tlabel">Sales by year</div><svg id="salesyear" viewBox="0 0 540 150" role="img" aria-label="Sales by year"></svg></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footnote">Sample data · pipeline value + closed-deal detail live on the admin page; this view is leads, conversion, and outreach.</div>
+</div>
+
+<div id="tip" class="tip" hidden></div>
+
+<div id="goalmodal" class="gm-overlay" hidden onclick="if(event.target===this)closeGoals()">
+  <div class="gm-card">
+    <h3>Set your goals</h3>
+    <div class="gm-sub">Targets for this period. Progress shows on this page and your admin dashboard.</div>
+    <div class="gm-field"><label>New leads (per month)</label><input id="g-leads" type="number" value="40"></div>
+    <div class="gm-field"><label>Appointments booked (per month)</label><input id="g-appts" type="number" value="25"></div>
+    <div class="gm-field"><label>Closings (per month)</label><input id="g-close" type="number" value="3"></div>
+    <div class="gm-field"><label>GCI target (year, $)</label><input id="g-gci" type="number" value="250000"></div>
+    <div class="gm-foot"><button class="gm-cancel" onclick="closeGoals()">Cancel</button><button class="gm-save" onclick="saveGoals()">Save goals</button></div>
+  </div>
+</div>
+
+<script>
+  var root=document.documentElement;
+  (function(){try{var mq=matchMedia('(prefers-color-scheme:dark)');if(!root.getAttribute('data-theme'))root.setAttribute('data-theme',mq.matches?'dark':'light');}catch(e){}})();
+
+  var SVGNS="http://www.w3.org/2000/svg";
+  function el(tag,attrs){var n=document.createElementNS(SVGNS,tag);for(var k in attrs)n.setAttribute(k,attrs[k]);return n;}
+  var tip=document.getElementById('tip');
+  function bindTip(node,html){
+    node.addEventListener('pointerenter',function(){ tip.innerHTML=html; tip.hidden=false; });
+    node.addEventListener('pointermove',function(e){ tip.style.left=e.clientX+'px'; tip.style.top=(e.clientY-6)+'px'; });
+    node.addEventListener('pointerleave',function(){ tip.hidden=true; });
+  }
+
+  function hbars(id, data, opts){
+    opts=opts||{}; var svg=document.getElementById(id); svg.innerHTML='';
+    var W=560, padL=opts.padL||128, padR=opts.padR||54, rowH=opts.rowH||34, gap=opts.gap||8, top=6;
+    var max=Math.max.apply(null,data.map(function(d){return d.value;}));
+    var barW=W-padL-padR;
+    data.forEach(function(d,i){
+      var y=top+i*(rowH+gap);
+      var w=Math.max(3, barW*(d.value/max));
+      svg.appendChild(el('rect',{x:padL,y:y,width:barW,height:rowH,rx:7,fill:'var(--line-2)'}));
+      var fill=d.accent?'var(--c-accent)':'var(--c-data)';
+      var bar=el('rect',{x:padL,y:y,width:w,height:rowH,rx:7,fill:fill}); svg.appendChild(bar);
+      var lt=el('text',{x:padL-12,y:y+rowH/2+4,'text-anchor':'end','font-size':13,'class':'lbl'}); lt.textContent=d.label; svg.appendChild(lt);
+      var vt=el('text',{x:padL+w+8,y:y+rowH/2+4,'font-size':13,'class':'val'}); vt.textContent=opts.fmt?opts.fmt(d.value):d.value; svg.appendChild(vt);
+      if(opts.showPct && i>0){
+        var prev=data[i-1].value; var pct=Math.round(d.value/prev*100);
+        var pc=el('text',{x:W-2,y:y+rowH/2+4,'text-anchor':'end','font-size':11,'class':'axl'}); pc.textContent=pct+'%'; svg.appendChild(pc);
+      }
+      bindTip(bar, '<b>'+d.label+'</b> · '+(opts.fmt?opts.fmt(d.value):d.value));
+    });
+    svg.setAttribute('viewBox','0 0 '+W+' '+(top+data.length*(rowH+gap)));
+  }
+
+  // combo: leads area+line (real axis) + closings line overlaid (own band, real labels)
+  function combo(id, leads, sales){
+    var svg=document.getElementById(id); svg.innerHTML='';
+    var W=1120,H=300, padL=46,padR=30,padT=40,padB=34;
+    var iw=W-padL-padR, ih=H-padT-padB;
+    var max1=Math.max.apply(null,leads.map(function(d){return d.value;}))*1.2;
+    var x=function(i){return padL+iw*(i/(leads.length-1));};
+    var y1=function(v){return padT+ih*(1-v/max1);};
+    var s2=sales.map(function(d){return d.value;}); var smin=Math.min.apply(null,s2), smax=Math.max.apply(null,s2);
+    var y2=function(v){var t=(v-smin)/((smax-smin)||1); return (padT+ih)-(0.14*ih + t*0.5*ih);};
+    // gridlines (leads)
+    for(var g=0;g<=3;g++){ var gy=padT+ih*g/3; svg.appendChild(el('line',{x1:padL,y1:gy,x2:W-padR,y2:gy,stroke:'var(--grid)','stroke-width':1}));
+      var gl=el('text',{x:padL-8,y:gy+4,'text-anchor':'end','font-size':11,'class':'axl'}); gl.textContent=Math.round(max1*(1-g/3)); svg.appendChild(gl); }
+    // leads area+line
+    var d1='M '+x(0)+' '+y1(leads[0].value); for(var i=1;i<leads.length;i++) d1+=' L '+x(i)+' '+y1(leads[i].value);
+    var grad=el('linearGradient',{id:'ag-'+id,x1:0,y1:0,x2:0,y2:1});
+    grad.appendChild(el('stop',{offset:'0%','stop-color':'var(--c-soft)'})); grad.appendChild(el('stop',{offset:'100%','stop-color':'var(--c-soft-2)'}));
+    var defs=el('defs',{}); defs.appendChild(grad); svg.appendChild(defs);
+    svg.appendChild(el('path',{d:d1+' L '+x(leads.length-1)+' '+(padT+ih)+' L '+x(0)+' '+(padT+ih)+' Z',fill:'url(#ag-'+id+')'}));
+    svg.appendChild(el('path',{d:d1,fill:'none',stroke:'var(--c-data)','stroke-width':2.4,'stroke-linejoin':'round','stroke-linecap':'round'}));
+    // closings line (dashed terracotta)
+    var d2='M '+x(0)+' '+y2(sales[0].value); for(var j=1;j<sales.length;j++) d2+=' L '+x(j)+' '+y2(sales[j].value);
+    svg.appendChild(el('path',{d:d2,fill:'none',stroke:'var(--c-accent)','stroke-width':2.2,'stroke-dasharray':'6 4','stroke-linejoin':'round','stroke-linecap':'round'}));
+    // points + x labels + closings value labels + hit targets
+    leads.forEach(function(pt,i){
+      svg.appendChild(el('circle',{cx:x(i),cy:y1(pt.value),r:3.5,fill:'var(--c-data)',stroke:'var(--card)','stroke-width':2}));
+      svg.appendChild(el('circle',{cx:x(i),cy:y2(sales[i].value),r:3.5,fill:'var(--c-accent)',stroke:'var(--card)','stroke-width':2}));
+      var sl=el('text',{x:x(i),y:y2(sales[i].value)-9,'text-anchor':'middle','font-size':11,'class':'val'}); sl.setAttribute('fill','var(--c-accent)'); sl.textContent=sales[i].value; svg.appendChild(sl);
+      var xl=el('text',{x:x(i),y:H-12,'text-anchor':'middle','font-size':11,'class':'axl'}); xl.textContent=pt.label; svg.appendChild(xl);
+      var hit=el('rect',{x:x(i)-16,y:padT,width:32,height:ih,fill:'transparent'});
+      bindTip(hit,'<b>'+pt.label+'</b> · '+pt.value+' leads · '+sales[i].value+' closings'); svg.appendChild(hit);
+    });
+    // legend (top-left)
+    svg.appendChild(el('line',{x1:padL,y1:16,x2:padL+22,y2:16,stroke:'var(--c-data)','stroke-width':2.4}));
+    var l1=el('text',{x:padL+28,y:20,'class':'legt'}); l1.textContent='New leads'; svg.appendChild(l1);
+    svg.appendChild(el('line',{x1:padL+120,y1:16,x2:padL+142,y2:16,stroke:'var(--c-accent)','stroke-width':2.2,'stroke-dasharray':'6 4'}));
+    var l2=el('text',{x:padL+148,y:20,'class':'legt'}); l2.textContent='Closings'; svg.appendChild(l2);
+  }
+
+  // funnel now includes conversation + appointment steps
+  hbars('funnel',[
+    {label:'Leads',value:1240},{label:'Conversations',value:640},{label:'Appointments',value:210},
+    {label:'Clients',value:88},{label:'Under contract',value:24},{label:'Closed',value:19}
+  ],{showPct:true,padR:96,padL:120,fmt:function(v){return v.toLocaleString();}});
+
+  hbars('conv',[
+    {label:'Referral',value:22,accent:true},{label:'Sign call',value:16},{label:'Apple Messages',value:14},
+    {label:'Realtor.ca',value:12},{label:'Door knocking',value:10},{label:'Website',value:9},
+    {label:'YouTube',value:7},{label:'Paid ads',value:6},{label:'Instagram',value:5},{label:'Gmail',value:4}
+  ],{padL:118,fmt:function(v){return v+'%';}});
+
+  hbars('closedsrc',[
+    {label:'Referral',value:6,accent:true},{label:'Repeat / SOI',value:4},{label:'Website',value:3},
+    {label:'Sign call',value:2},{label:'Realtor.ca',value:2},{label:'Paid ads',value:1},{label:'Instagram',value:1}
+  ],{padL:112,fmt:function(v){return v+(v===1?' deal':' deals');}});
+
+  hbars('spend',[
+    {label:'Facebook / IG ads',value:1800},{label:'Google PPC',value:1200},{label:'Making It Rain',value:900},
+    {label:'Realtor.ca / portals',value:600},{label:'YouTube ads',value:500},{label:'Print / postcards',value:400}
+  ],{padL:132,padR:72,rowH:28,gap:8,fmt:function(v){return '$'+v.toLocaleString();}});
+
+  combo('combo',
+    [{label:'Dec',value:28},{label:'Jan',value:41},{label:'Feb',value:35},{label:'Mar',value:52},{label:'Apr',value:38},{label:'May',value:47},{label:'Jun',value:44},{label:'Jul',value:34}],
+    [{label:'Dec',value:2},{label:'Jan',value:3},{label:'Feb',value:1},{label:'Mar',value:4},{label:'Apr',value:2},{label:'May',value:3},{label:'Jun',value:2},{label:'Jul',value:2}]
+  );
+
+  hbars('leadsyear',[{label:'2024',value:356},{label:'2025',value:468},{label:'2026 · YTD',value:291,accent:true}],{padL:88,padR:60,rowH:32,fmt:function(v){return v.toLocaleString();}});
+  hbars('salesyear',[{label:'2024',value:14},{label:'2025',value:19},{label:'2026 · YTD',value:11,accent:true}],{padL:88,padR:60,rowH:32,fmt:function(v){return v+' sales';}});
+
+  function showTrend(v, btn){
+    document.querySelectorAll('.tabs2 button').forEach(function(b){b.classList.remove('on');}); btn.classList.add('on');
+    document.getElementById('view-monthly').hidden = v!=='monthly';
+    document.getElementById('view-yoy').hidden = v!=='yoy';
+  }
+
+  // ---- goals ----
+  var GOALS={leads:{label:'New leads',cur:34,goal:40,fmt:function(v){return v;}},
+             appts:{label:'Appointments',cur:18,goal:25,fmt:function(v){return v;}},
+             close:{label:'Closings (mo)',cur:2,goal:3,fmt:function(v){return v;}},
+             gci:{label:'GCI (year)',cur:142000,goal:250000,fmt:function(v){return '$'+Math.round(v/1000)+'k';}}};
+  function renderGoals(){
+    var wrap=document.getElementById('goals'); wrap.innerHTML='';
+    Object.keys(GOALS).forEach(function(k){
+      var g=GOALS[k]; var pct=Math.min(100,Math.round(g.cur/g.goal*100));
+      var color = pct>=80?'var(--c-good)':pct>=50?'var(--c-data)':'var(--c-warn)';
+      var pctcol = pct>=80?'var(--c-good)':pct>=50?'var(--sub)':'var(--c-warn)';
+      var d=document.createElement('div'); d.className='goal';
+      d.innerHTML='<div class="gtop"><span class="glab">'+g.label+'</span><span class="gnum">'+g.fmt(g.cur)+' <span class="goalv">/ '+g.fmt(g.goal)+'</span></span></div>'+
+        '<div class="gbar"><span style="width:'+pct+'%;background:'+color+'"></span></div>'+
+        '<div class="gpct" style="color:'+pctcol+'">'+pct+'% to goal</div>';
+      wrap.appendChild(d);
+    });
+  }
+  renderGoals();
+
+  // ---- activity math: reverse the funnel from the closings goal ----
+  var FUNNEL_N={leads:1240,conv:640,appt:210,client:88,closed:19};
+  function renderActivityMath(){
+    var G=GOALS.close.goal;
+    var r_lc=FUNNEL_N.conv/FUNNEL_N.leads, r_ca=FUNNEL_N.appt/FUNNEL_N.conv,
+        r_ac=FUNNEL_N.client/FUNNEL_N.appt, r_cc=FUNNEL_N.closed/FUNNEL_N.client;
+    var clients=G/r_cc, appts=clients/r_ac, convs=appts/r_ca, leads=convs/r_lc;
+    document.getElementById('conv-per-sale').textContent=Math.round(FUNNEL_N.conv/FUNNEL_N.closed);
+    var steps=[
+      {n:Math.ceil(leads),l:'leads'},{n:Math.ceil(convs),l:'conversations'},
+      {n:Math.ceil(appts),l:'appointments'},{n:Math.ceil(clients),l:'client meetings'},
+      {n:G,l:G===1?'closing':'closings',goal:true}
+    ];
+    var row=document.getElementById('mathrow'); row.innerHTML='';
+    steps.forEach(function(s,i){
+      var d=document.createElement('div'); d.className='mstep'+(s.goal?' goal':'');
+      d.innerHTML='<div class="mn">'+s.n.toLocaleString()+'</div><div class="ml">'+s.l+'</div>';
+      row.appendChild(d);
+      if(i<steps.length-1){ var a=document.createElement('div'); a.className='marrow'; a.textContent='→'; row.appendChild(a); }
+    });
+    var perWeek=Math.round(convs/4.3), perDay=Math.max(1,Math.round(convs/21));
+    document.getElementById('mathcadence').innerHTML='To hit <b>'+G+'</b> closing'+(G===1?'':'s')+' a month, that’s about <b>'+Math.ceil(convs)+'</b> conversations a month — roughly <b>'+perWeek+'</b> a week, or <b>'+perDay+'</b> a day.';
+  }
+  renderActivityMath();
+
+  function openGoals(){
+    document.getElementById('g-leads').value=GOALS.leads.goal;
+    document.getElementById('g-appts').value=GOALS.appts.goal;
+    document.getElementById('g-close').value=GOALS.close.goal;
+    document.getElementById('g-gci').value=GOALS.gci.goal;
+    document.getElementById('goalmodal').hidden=false;
+  }
+  function closeGoals(){ document.getElementById('goalmodal').hidden=true; }
+  function saveGoals(){
+    GOALS.leads.goal=+document.getElementById('g-leads').value||GOALS.leads.goal;
+    GOALS.appts.goal=+document.getElementById('g-appts').value||GOALS.appts.goal;
+    GOALS.close.goal=+document.getElementById('g-close').value||GOALS.close.goal;
+    GOALS.gci.goal=+document.getElementById('g-gci').value||GOALS.gci.goal;
+    renderGoals(); renderActivityMath(); closeGoals();
+  }
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape')closeGoals(); });
+</script>
+
+</body>
+</html>

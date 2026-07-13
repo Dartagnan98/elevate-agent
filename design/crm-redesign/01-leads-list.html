@@ -1,0 +1,1091 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body>
+<title>Elevation — Leads</title>
+<style>
+  :root{
+    --navy:#182848; --navy-2:#22355c; --navy-3:#33477a;
+    --terracotta:#C46340; --terracotta-2:#b3542f;
+    --blue:#5E8AD0; --blue-2:#4a76bc; --blue-soft:rgba(94,138,208,.12);
+    --ink:#1c2438; --sub:#5c6479; --faint:#8a90a3;
+    --paper:#eef1f6; --card:#ffffff; --line:#e3e6ee; --line-2:#eef0f5; --row-hover:#f5f7fb;
+    --hot:#C46340; --hot-bg:rgba(196,99,64,.13);
+    --warm:#c98a2e; --warm-bg:rgba(201,138,46,.14);
+    --lukewarm:#cf9a52; --lukewarm-bg:rgba(207,154,82,.15);
+    --cool:#5E8AD0; --cool-bg:rgba(94,138,208,.13);
+    --soi:#3f9d6b; --soi-bg:rgba(63,157,107,.14);
+    --nurture:#7d8598; --nurture-bg:rgba(125,133,152,.14);
+    --closed:#6f9a82; --referred:#8a6fb0; --ok:#4f7fc4;
+    --shadow:0 1px 2px rgba(24,40,72,.05), 0 6px 20px rgba(24,40,72,.06);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --r:12px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --navy:#cdd8ef; --navy-2:#b3c2e0; --navy-3:#93a6cf;
+    --terracotta:#e08a63; --terracotta-2:#c46340; --blue:#7ba4e2; --blue-2:#5E8AD0; --blue-soft:rgba(123,164,226,.15);
+    --ink:#e7eaf2; --sub:#a2a9bc; --faint:#767d92;
+    --paper:#0e121b; --card:#161c29; --line:#28303f; --line-2:#1b2130; --row-hover:#1b2233;
+    --hot:#e08a63; --hot-bg:rgba(224,138,99,.15);
+    --warm:#e0a94e; --warm-bg:rgba(224,169,78,.15);
+    --lukewarm:#dcab63; --lukewarm-bg:rgba(220,171,99,.15);
+    --cool:#7ba4e2; --cool-bg:rgba(123,164,226,.15);
+    --soi:#5cc08a; --soi-bg:rgba(92,192,138,.15);
+    --nurture:#9aa1b4; --nurture-bg:rgba(154,161,180,.14);
+    --closed:#79b399; --referred:#a98fce; --ok:#7ba4e2;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);
+  }}
+  :root[data-theme="light"]{--navy:#182848;--navy-2:#22355c;--navy-3:#33477a;--terracotta:#C46340;--terracotta-2:#b3542f;--blue:#5E8AD0;--blue-2:#4a76bc;--blue-soft:rgba(94,138,208,.12);--ink:#1c2438;--sub:#5c6479;--faint:#8a90a3;--paper:#eef1f6;--card:#fff;--line:#e3e6ee;--line-2:#eef0f5;--row-hover:#f5f7fb;--hot:#C46340;--hot-bg:rgba(196,99,64,.13);--warm:#c98a2e;--warm-bg:rgba(201,138,46,.14);--lukewarm:#cf9a52;--lukewarm-bg:rgba(207,154,82,.15);--cool:#5E8AD0;--cool-bg:rgba(94,138,208,.13);--soi:#3f9d6b;--soi-bg:rgba(63,157,107,.14);--nurture:#7d8598;--nurture-bg:rgba(125,133,152,.14);--closed:#6f9a82;--referred:#8a6fb0;--ok:#4f7fc4;--shadow:0 1px 2px rgba(24,40,72,.05),0 6px 20px rgba(24,40,72,.06);}
+  :root[data-theme="dark"]{--navy:#cdd8ef;--navy-2:#b3c2e0;--navy-3:#93a6cf;--terracotta:#e08a63;--terracotta-2:#c46340;--blue:#7ba4e2;--blue-2:#5E8AD0;--blue-soft:rgba(123,164,226,.15);--ink:#e7eaf2;--sub:#a2a9bc;--faint:#767d92;--paper:#0e121b;--card:#161c29;--line:#28303f;--line-2:#1b2130;--row-hover:#1b2233;--hot:#e08a63;--hot-bg:rgba(224,138,99,.15);--warm:#e0a94e;--warm-bg:rgba(224,169,78,.15);--lukewarm:#dcab63;--lukewarm-bg:rgba(220,171,99,.15);--cool:#7ba4e2;--cool-bg:rgba(123,164,226,.15);--soi:#5cc08a;--soi-bg:rgba(92,192,138,.15);--nurture:#9aa1b4;--nurture-bg:rgba(154,161,180,.14);--closed:#79b399;--referred:#a98fce;--ok:#7ba4e2;--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);}
+
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font);line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1320px;margin:0 auto;padding:22px 20px 60px;}
+
+  .masthead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px;}
+  .brandmark{width:34px;height:34px;border-radius:9px;background:var(--navy);display:grid;place-items:center;color:var(--card);font-weight:800;font-size:15px;flex:none;}
+  .masthead h1{font-size:19px;margin:0;color:var(--navy);font-weight:750;letter-spacing:-.01em;}
+  .masthead .sub{font-size:12.5px;color:var(--faint);font-family:var(--mono);}
+  .m-right{margin-left:auto;display:flex;align-items:center;gap:8px;}
+  .addbtn{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:9px 16px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;}
+  .addbtn:hover{filter:brightness(1.08);}
+  .iconbtn{border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:9px;width:36px;height:36px;cursor:pointer;font-size:16px;}
+
+  .views{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:16px;overflow-x:auto;}
+  .views button{border:0;background:transparent;font:inherit;font-size:14px;font-weight:600;color:var(--faint);padding:10px 14px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;transition:.15s;}
+  .views button.on{color:var(--navy);border-bottom-color:var(--terracotta);}
+  .views button:hover{color:var(--ink);}
+  .ai-tag{font-size:10px;font-weight:700;font-family:var(--mono);color:#fff;background:var(--blue);padding:2px 6px;border-radius:999px;letter-spacing:.03em;}
+  .views .caret{color:var(--faint);font-size:11px;}
+
+  .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px;}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:13px 15px;box-shadow:var(--shadow);position:relative;overflow:hidden;}
+  .kpi.accent{border-left:3px solid var(--terracotta);}
+  .kpi .n{font-size:24px;font-weight:750;color:var(--navy);font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1;}
+  .kpi .l{font-size:11.5px;color:var(--sub);margin-top:5px;}
+  .kpi .l b{color:var(--ink);}
+  .kpi .pin{position:absolute;top:12px;right:13px;font-size:10.5px;font-weight:700;font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--terracotta);}
+
+  /* two-tier filter bar */
+  .filterbar{display:grid;gap:9px;margin-bottom:14px;}
+  .frow{display:flex;align-items:center;gap:10px;}
+  .frow-lab{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--mono);flex:none;min-width:76px;border:0;background:transparent;cursor:pointer;display:inline-flex;align-items:center;gap:5px;padding:2px 0;}
+  .frow-lab:hover{color:var(--sub);}
+  .rcaret{font-size:9px;transition:transform .15s;}
+  .frow[data-open="0"] .rcaret{transform:rotate(-90deg);}
+  .rsum{display:none;font-size:12.5px;font-weight:650;color:var(--sub);}
+  .frow[data-open="0"] .rsum{display:inline;}
+  .frow[data-open="0"] .track{display:none;}
+  .frow[data-open="0"] .filtersbtn{display:none;}
+  .track{display:flex;gap:7px;overflow-x:auto;padding-bottom:3px;min-width:0;flex:1 1 auto;scrollbar-width:thin;}
+
+  /* side-by-side filter dropdowns */
+  .quickfilters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
+  .qf{position:relative;}
+  .qf-btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:9px 13px;font:inherit;font-size:13px;cursor:pointer;box-shadow:var(--shadow);}
+  .qf-btn:hover{border-color:var(--navy-3);}
+  .qf-lab{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-family:var(--mono);}
+  .qf-val{color:var(--ink);font-weight:650;}
+  .qf-car{color:var(--faint);font-size:10px;}
+  .qf.active .qf-btn{border-color:var(--navy);box-shadow:0 0 0 2px var(--blue-soft);}
+  .qf.active .qf-val{color:var(--navy);}
+  .qf-menu{position:absolute;top:calc(100% + 6px);left:0;background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:0 12px 40px rgba(24,40,72,.22);padding:6px;min-width:216px;max-height:62vh;overflow:auto;z-index:45;display:flex;flex-direction:column;gap:3px;}
+  .qf-menu[hidden]{display:none;}
+  .qf-menu .chip{border:0;background:transparent;justify-content:flex-start;border-radius:8px;padding:8px 11px;font-size:13px;font-weight:600;color:var(--ink);width:100%;white-space:normal;}
+  .qf-menu .chip .c{margin-left:auto;}
+  .qf-menu .chip:hover:not(.on){background:var(--paper);}
+  .qf-menu .chip.on{background:var(--navy);color:#fff;}
+  .qf-menu .chip.on .c{background:rgba(255,255,255,.22);color:#fff;}
+  .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:6px 13px;font:inherit;font-size:13px;font-weight:600;color:var(--sub);cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:7px;transition:.14s;flex:none;}
+  .chip.sm{padding:5px 11px;font-size:12px;}
+  .chip .c{font-variant-numeric:tabular-nums;font-size:11px;font-weight:750;color:var(--faint);background:var(--paper);border-radius:999px;padding:1px 6px;}
+  .chip.on{background:var(--navy);border-color:transparent;color:#fff;}
+  .chip.on .c{background:rgba(255,255,255,.22);color:#fff;}
+  .chip:hover:not(.on){border-color:var(--navy-3);}
+  .chip .tdot{width:8px;height:8px;border-radius:50%;flex:none;}
+  .filtersbtn{border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:9px;padding:7px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;gap:6px;align-items:center;flex:none;}
+
+  .tablewrap{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;}
+  .tscroll{overflow-x:auto;}
+  .thead,.trow{display:grid;grid-template-columns:34px minmax(210px,2.3fr) 1.35fr minmax(175px,1.55fr) .9fr minmax(160px,1.45fr) .85fr 26px;gap:12px;align-items:center;padding:0 16px;min-width:1000px;}
+  .thead{height:44px;border-bottom:1px solid var(--line);background:var(--paper);}
+  .th{font-size:11.5px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:5px;}
+  .th .sort{color:var(--faint);opacity:.6;font-size:10px;}
+  .leadgroup{border-bottom:1px solid var(--line-2);}
+  .leadgroup:last-child{border-bottom:0;}
+  .leadgroup[hidden]{display:none;}
+  .trow{min-height:64px;cursor:pointer;transition:background .12s;min-width:1000px;}
+  .trow:hover{background:var(--row-hover);}
+  .leadgroup.open .trow{background:var(--row-hover);}
+
+  .cbox{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--navy-3);cursor:pointer;background:var(--card);}
+  .namecell{display:flex;align-items:center;gap:11px;min-width:0;}
+  .avatar{width:36px;height:36px;border-radius:50%;flex:none;display:grid;place-items:center;font-weight:700;font-size:13px;color:#fff;background:var(--navy-3);}
+  .avatar[data-heat="hot"]{background:linear-gradient(135deg,var(--terracotta),var(--terracotta-2));}
+  .avatar[data-heat="warm"]{background:linear-gradient(135deg,#d69a45,var(--warm));}
+  .avatar[data-heat="lukewarm"]{background:linear-gradient(135deg,#dcab63,var(--lukewarm));}
+  .avatar[data-heat="cool"]{background:linear-gradient(135deg,var(--navy-3),var(--navy-2));}
+  .avatar[data-heat="soi"]{background:linear-gradient(135deg,#4bbd85,var(--soi));}
+  .avatar[data-heat="nurture"]{background:linear-gradient(135deg,#9aa1b4,var(--nurture));}
+  .nm{min-width:0;}
+  .nm .n{font-size:14.5px;font-weight:650;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px;}
+  .nm .verified{color:var(--ok);font-size:11px;}
+  .nm .t{font-size:12px;color:var(--faint);margin-top:2px;display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .tpill{display:inline-flex;align-items:center;font-size:10px;font-weight:700;padding:1px 7px;border-radius:999px;letter-spacing:.02em;flex:none;}
+  .tpill.hot{color:var(--hot);background:var(--hot-bg);} .tpill.warm{color:var(--warm);background:var(--warm-bg);}
+  .tpill.lukewarm{color:var(--lukewarm);background:var(--lukewarm-bg);} .tpill.cool{color:var(--cool);background:var(--cool-bg);}
+  .tpill.soi{color:var(--soi);background:var(--soi-bg);} .tpill.nurture{color:var(--nurture);background:var(--nurture-bg);}
+  .star{border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:15px;line-height:1;padding:0;}
+  .star.on{color:var(--terracotta);}
+
+  .stage{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:5px 10px;font-size:12.5px;font-weight:600;color:var(--ink);max-width:100%;}
+  .stage .chev{color:var(--faint);font-size:10px;margin-left:auto;}
+  .stage .dot{width:7px;height:7px;border-radius:50%;flex:none;}
+  .dot.s-new{background:var(--blue);} .dot.s-attempted{background:var(--warm);} .dot.s-prospect{background:var(--navy-3);}
+  .dot.s-client{background:var(--soi);} .dot.s-pending{background:var(--terracotta);} .dot.s-closed{background:var(--closed);}
+  .dot.s-referred{background:var(--referred);} .dot.s-realtor{background:var(--nurture);} .dot.s-trash{background:var(--faint);}
+
+  .contact{min-width:0;font-size:13px;}
+  .contact .e{color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .contact .p{color:var(--faint);font-family:var(--mono);font-size:12px;margin-top:2px;}
+  .src{font-size:12.5px;color:var(--sub);font-weight:600;}
+  .src .sub{display:block;font-size:11px;color:var(--faint);font-family:var(--mono);font-weight:400;margin-top:1px;}
+
+  .ai-draft{display:inline-flex;align-items:center;gap:6px;background:var(--terracotta);color:#fff;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;}
+  .ai-draft:hover{filter:brightness(1.07);}
+  .ai-next{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub);}
+  .ai-next .spark{color:var(--blue-2);}
+  .ai-muted{font-size:12.5px;color:var(--faint);}
+  .ai-sent{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--soi);font-weight:700;}
+
+  .activity{font-size:12.5px;color:var(--sub);font-family:var(--mono);white-space:nowrap;}
+  .chev-cell{color:var(--faint);font-size:16px;text-align:center;}
+  .chev-cell a{color:var(--faint);text-decoration:none;display:inline-block;padding:2px 7px;border-radius:6px;font-weight:700;}
+  .chev-cell a:hover{color:var(--navy);background:var(--paper);}
+
+  .draftpanel{border-top:1px dashed var(--line);background:var(--paper);padding:14px 16px 16px;}
+  .draftpanel[hidden]{display:none;}
+  .dp-head{display:flex;align-items:center;gap:10px;margin-bottom:9px;flex-wrap:wrap;}
+  .channel{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;padding:4px 11px;border-radius:999px;}
+  .channel.text{color:var(--blue-2);background:var(--blue-soft);}
+  .channel.email{color:var(--terracotta);background:var(--hot-bg);}
+  .dp-meta{font-size:11.5px;color:var(--faint);font-family:var(--mono);}
+  .dp-switch{margin-left:auto;font-size:12px;color:var(--blue-2);font-weight:600;cursor:pointer;background:none;border:0;padding:0;}
+  .dp-subject{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 11px;font:inherit;font-size:13px;font-weight:600;color:var(--ink);background:var(--card);margin-bottom:8px;}
+  .dp-body{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:13.5px;color:var(--ink);background:var(--card);resize:vertical;min-height:76px;line-height:1.5;}
+  .dp-body:focus,.dp-subject:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .dp-actions{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;}
+  .dp-send{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 17px;border-radius:8px;cursor:pointer;}
+  .dp-send:hover{filter:brightness(1.08);}
+  .dp-later{border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:650;font-size:13px;padding:8px 14px;border-radius:8px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;}
+  .dp-later:hover{border-color:var(--navy-3);}
+  .dp-skip{border:0;background:transparent;color:var(--faint);font:inherit;font-weight:600;font-size:12.5px;cursor:pointer;margin-left:auto;}
+  .dp-voice{font-size:11.5px;color:var(--faint);font-family:var(--mono);}
+  .dp-schedule{display:flex;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px 12px;}
+  .dp-schedule .lab{font-size:12.5px;color:var(--sub);font-weight:600;}
+  .dp-schedule input{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;color:var(--ink);background:var(--paper);}
+  .dp-schedule input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .dp-schedule .go{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 16px;border-radius:8px;cursor:pointer;}
+  .dp-schedule .go:hover{filter:brightness(1.08);}
+  .dp-schedule .cancel{border:0;background:transparent;color:var(--faint);font:inherit;font-weight:600;font-size:12.5px;cursor:pointer;}
+
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 4px 0;flex-wrap:wrap;}
+  .pager .rng{font-size:12.5px;color:var(--faint);font-family:var(--mono);}
+  .pager .nums{display:flex;align-items:center;gap:4px;}
+  .pager .nums button{border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:8px;min-width:32px;height:32px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;padding:0 8px;}
+  .pager .nums button.on{background:var(--navy);color:#fff;border-color:transparent;}
+  .pager .nums .dots{color:var(--faint);padding:0 2px;}
+
+  .callout{margin-top:22px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--terracotta);border-radius:11px;font-size:13px;color:var(--sub);box-shadow:var(--shadow);}
+  .callout b{color:var(--navy);}
+
+  /* section tabs + last-run */
+  .lastrun{margin-left:auto;font-size:12px;color:var(--faint);font-family:var(--mono);display:inline-flex;align-items:center;gap:6px;white-space:nowrap;padding-left:12px;}
+  .lastrun b{color:var(--sub);}
+  .section[hidden]{display:none;}
+
+  /* checkbox checked state */
+  .cbox.checked{background:var(--navy);border-color:var(--navy);position:relative;}
+  .cbox.checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+
+  /* bulk selection toolbar */
+  .selbar{display:none;align-items:center;gap:9px;background:var(--navy);color:#fff;border-radius:11px;padding:9px 13px;margin-bottom:12px;box-shadow:var(--shadow);flex-wrap:wrap;}
+  .selbar.on{display:flex;}
+  .selbar .cnt{font-weight:700;font-size:13.5px;}
+  .selbar .cnt b{font-variant-numeric:tabular-nums;}
+  .sb-btn{border:0;background:rgba(255,255,255,.14);color:#fff;font:inherit;font-weight:650;font-size:12.5px;padding:7px 13px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;}
+  .sb-btn:hover{background:rgba(255,255,255,.26);}
+  .sb-primary{background:var(--terracotta);} .sb-primary:hover{background:var(--terracotta-2);}
+  .sb-clear{margin-left:auto;background:transparent;color:rgba(255,255,255,.72);}
+  .sb-more{position:relative;}
+  .moremenu{position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:0 12px 40px rgba(24,40,72,.22);padding:6px;min-width:214px;z-index:40;}
+  .moremenu[hidden]{display:none;}
+  .moremenu button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;color:var(--ink);font:inherit;font-size:13.5px;font-weight:600;padding:9px 11px;border-radius:8px;cursor:pointer;text-align:left;}
+  .moremenu button:hover:not(.soon){background:var(--paper);}
+  .moremenu button.soon{color:var(--faint);cursor:default;}
+  .moremenu button.soon .tagsoon{margin-left:auto;font-size:10px;font-family:var(--mono);}
+  .moremenu .ic{width:17px;text-align:center;}
+  .moremenu .sep{height:1px;background:var(--line-2);margin:5px 4px;}
+
+  /* templates / sent / didn't-send lists */
+  .panelcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);overflow:hidden;}
+  .panelhd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line);gap:10px;}
+  .panelhd b{font-size:15px;color:var(--navy);}
+  .panelhd .sub{font-size:12px;color:var(--faint);font-family:var(--mono);}
+  .lrow{display:flex;align-items:center;gap:13px;padding:13px 16px;border-bottom:1px solid var(--line-2);}
+  .lrow:last-child{border-bottom:0;}
+  .lrow .ic2{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;flex:none;color:#fff;font-size:14px;}
+  .ic-text2{background:var(--blue);} .ic-email2{background:var(--terracotta);} .ic-batch2{background:var(--navy-3);}
+  .lrow .main2{min-width:0;flex:1;}
+  .lrow .main2 .t1{font-size:14px;font-weight:650;color:var(--ink);display:flex;align-items:center;gap:8px;}
+  .lrow .main2 .t2{font-size:12.5px;color:var(--sub);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62ch;}
+  .lrow .r2{font-size:12px;color:var(--faint);font-family:var(--mono);white-space:nowrap;text-align:right;display:flex;flex-direction:column;gap:4px;align-items:flex-end;}
+  .statuspill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;}
+  .sp-delivered{color:var(--soi);background:var(--soi-bg);} .sp-read{color:var(--blue-2);background:var(--blue-soft);}
+  .sp-skip{color:var(--faint);background:var(--nurture-bg);} .sp-bounce{color:var(--hot);background:var(--hot-bg);}
+  .chan-mini{font-size:10.5px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:999px;}
+  .cm-text{color:var(--blue-2);background:var(--blue-soft);} .cm-email{color:var(--terracotta);background:var(--hot-bg);}
+  .usecount{font-size:11.5px;color:var(--faint);font-family:var(--mono);}
+  .newbtn{border:1px solid var(--line);background:var(--card);color:var(--navy);font:inherit;font-weight:650;font-size:12.5px;padding:7px 13px;border-radius:8px;cursor:pointer;}
+  .newbtn:hover{border-color:var(--navy-3);}
+
+  /* toast */
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--navy);color:#fff;padding:11px 18px;border-radius:10px;font-size:13.5px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.28);z-index:80;max-width:90vw;text-align:center;}
+  .toast[hidden]{display:none;}
+
+  /* add-new menu */
+  .addwrap{position:relative;}
+  .addmenu{position:absolute;top:calc(100% + 6px);right:0;background:var(--card);border:1px solid var(--line);border-radius:11px;box-shadow:0 12px 40px rgba(24,40,72,.22);padding:6px;min-width:206px;z-index:50;}
+  .addmenu[hidden]{display:none;}
+  .addmenu button{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;color:var(--ink);font:inherit;font-size:13.5px;font-weight:600;padding:9px 11px;border-radius:8px;cursor:pointer;text-align:left;}
+  .addmenu button:hover{background:var(--paper);}
+  .addmenu .ic{width:17px;text-align:center;}
+  .addmenu .sep{height:1px;background:var(--line-2);margin:5px 4px;}
+
+  /* name-it modal (new pipeline / segment) */
+  .nm-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:80;padding:20px;}
+  .nm-overlay[hidden]{display:none;}
+  .nm-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 16px 50px rgba(24,40,72,.28);max-width:360px;width:100%;padding:22px 24px;}
+  .nm-card h3{margin:0 0 12px;color:var(--navy);font-size:17px;font-weight:750;}
+  .nm-card input{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:14px;color:var(--ink);background:var(--card);}
+  .nm-card input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .nm-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;}
+  .nm-cancel{border:0;background:transparent;color:var(--faint);font:inherit;font-weight:650;font-size:13.5px;padding:9px 14px;cursor:pointer;}
+  .nm-add{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 22px;border-radius:9px;cursor:pointer;}
+
+  /* search bar */
+  .searchbar{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:9px 13px;margin-bottom:14px;max-width:460px;box-shadow:var(--shadow);}
+  .searchbar .s-ic{color:var(--faint);font-size:14px;}
+  .searchbar input{border:0;background:transparent;outline:none;font:inherit;font-size:14px;color:var(--ink);width:100%;}
+  .searchbar input::placeholder{color:var(--faint);}
+
+  /* filters button + popover */
+  .filterswrap{position:relative;}
+  .filterbtn2{border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:9px;padding:9px 14px;font:inherit;font-size:13px;font-weight:650;cursor:pointer;display:inline-flex;align-items:center;gap:7px;}
+  .filterbtn2:hover{border-color:var(--navy-3);}
+  .filterbtn2 .fbadge{background:var(--terracotta);color:#fff;font-size:10.5px;font-weight:750;border-radius:999px;padding:1px 6px;font-family:var(--mono);}
+  .filterbtn2 .fbadge[hidden]{display:none;}
+  .filters-pop{position:absolute;top:calc(100% + 6px);right:0;width:330px;max-width:86vw;max-height:72vh;overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 14px 44px rgba(24,40,72,.24);padding:14px;z-index:55;}
+  .filters-pop[hidden]{display:none;}
+  .fp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .fp-head b{font-size:14px;color:var(--navy);}
+  .fp-clear{border:0;background:transparent;color:var(--blue-2);font:inherit;font-size:12.5px;font-weight:650;cursor:pointer;}
+  .fp-sec{margin-bottom:13px;}
+  .fp-lab{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--mono);margin-bottom:7px;}
+  .fp-chips{display:flex;gap:6px;flex-wrap:wrap;}
+
+  @media (max-width:900px){ .kpis{grid-template-columns:repeat(2,1fr);} }
+</style>
+
+<div class="page">
+  <div class="masthead">
+    <div class="brandmark">E</div>
+    <div>
+      <h1>Leads</h1>
+      <div class="sub">mockup · Lofty layout · your pipeline + follow-up system · Elevation brain</div>
+    </div>
+    <div class="m-right">
+      <div class="filterswrap">
+        <button class="filterbtn2" onclick="toggleFilters(event)">⛃ Filters <span class="fbadge" id="filterbadge" hidden>0</span></button>
+        <div class="filters-pop" id="filterspop" hidden>
+          <div class="fp-head"><b>Filter by</b><button class="fp-clear" onclick="clearFilters()">Clear all</button></div>
+          <div class="fp-sec"><div class="fp-lab">Tags</div><div class="fp-chips" data-dim="tags">
+            <button class="chip sm" data-tag="First-time buyer">First-time buyer</button>
+            <button class="chip sm" data-tag="Upsizing">Upsizing</button>
+            <button class="chip sm" data-tag="Downsizing">Downsizing</button>
+            <button class="chip sm" data-tag="Investor">Investor</button>
+            <button class="chip sm" data-tag="Pre-approved">Pre-approved</button>
+            <button class="chip sm" data-tag="Needs to sell first">Needs to sell first</button>
+            <button class="chip sm" data-tag="Move-in ready">Move-in ready</button>
+            <button class="chip sm" data-tag="Kamloops">Kamloops</button>
+            <button class="chip sm" data-tag="Kelowna">Kelowna</button>
+            <button class="chip sm" data-tag="Wants rural">Wants rural</button>
+            <button class="chip sm" data-tag="Urban core">Urban core</button>
+            <button class="chip sm" data-tag="Past Client">Past Client</button>
+            <button class="chip sm" data-tag="Referral">Referral</button>
+            <button class="chip sm" data-tag="Spring 2026">Spring 2026</button>
+          </div></div>
+          <div class="fp-sec"><div class="fp-lab">Pipeline</div><div class="fp-chips" data-dim="stage">
+            <button class="chip sm on" data-p="all">All</button>
+            <button class="chip sm" data-p="new">New Lead</button>
+            <button class="chip sm" data-p="attempted">Attempted</button>
+            <button class="chip sm" data-p="prospect">Prospect</button>
+            <button class="chip sm" data-p="client">Client</button>
+            <button class="chip sm" data-p="pending">Pending Deal</button>
+            <button class="chip sm" data-p="closed">Closed</button>
+            <button class="chip sm" data-p="referred">Referred</button>
+            <button class="chip sm" data-p="realtor">Realtor Contact</button>
+            <button class="chip sm" data-p="trash">Trash</button>
+          </div></div>
+          <div class="fp-sec"><div class="fp-lab">Segment</div><div class="fp-chips" data-dim="temp">
+            <button class="chip sm on" data-t="all">All</button>
+            <button class="chip sm" data-t="hot">Hot</button>
+            <button class="chip sm" data-t="warm">Warm</button>
+            <button class="chip sm" data-t="lukewarm">Lukewarm</button>
+            <button class="chip sm" data-t="cool">Cool</button>
+            <button class="chip sm" data-t="soi">SOI</button>
+            <button class="chip sm" data-t="nurture">Nurture</button>
+          </div></div>
+          <div class="fp-sec"><div class="fp-lab">Source</div><div class="fp-chips" data-dim="source">
+            <button class="chip sm on" data-s="all">All</button>
+            <button class="chip sm" data-s="paid">Paid ads</button>
+            <button class="chip sm" data-s="imessage">Apple Messages</button>
+            <button class="chip sm" data-s="gmail">Gmail</button>
+            <button class="chip sm" data-s="instagram">Instagram</button>
+            <button class="chip sm" data-s="lofty">Lofty CRM</button>
+            <button class="chip sm" data-s="website">Website</button>
+            <button class="chip sm" data-s="referral">Referral</button>
+            <button class="chip sm" data-s="realtorca">Realtor.ca</button>
+            <button class="chip sm" data-s="signcall">Sign call</button>
+            <button class="chip sm" data-s="youtube">YouTube</button>
+            <button class="chip sm" data-s="doorknock">Door knocking</button>
+          </div></div>
+        </div>
+      </div>
+      <div class="addwrap">
+        <button class="addbtn" onclick="toggleAddMenu(event)">＋ Add New ▾</button>
+        <div class="addmenu" id="addmenu" hidden>
+          <button onclick="addNew('lead')"><span class="ic">👤</span>New lead</button>
+          <div class="sep"></div>
+          <button onclick="addNew('pipeline')"><span class="ic">⛁</span>New pipeline stage</button>
+          <button onclick="addNew('segment')"><span class="ic">🌡</span>New segment</button>
+          <button onclick="addNew('tag')"><span class="ic">🏷</span>New tag</button>
+        </div>
+      </div>
+      <button class="iconbtn" title="More">⋯</button>
+    </div>
+  </div>
+
+  <div class="views">
+    <button class="on" onclick="showSection('leads',this)">Leads</button>
+    <button onclick="showSection('templates',this)">Templates</button>
+    <button onclick="showSection('sent',this)">Sent</button>
+    <button onclick="showSection('didnt',this)">Didn't Send</button>
+    <span class="lastrun">⟳ Last run · <b>Daily outreach delivery</b> · 9h ago</span>
+  </div>
+
+  <div id="section-leads" class="section">
+
+  <div class="kpis">
+    <div class="kpi"><div class="n">34</div><div class="l"><b>New</b> in the last 7 days</div></div>
+    <div class="kpi"><div class="n">12</div><div class="l"><b>Hot</b> (0–30 days)</div></div>
+    <div class="kpi accent"><div class="pin">approve</div><div class="n">8</div><div class="l"><b>Drafts</b> waiting on you</div></div>
+    <div class="kpi"><div class="n">6 min</div><div class="l">Avg <b>first touch</b></div></div>
+    <div class="kpi"><div class="n">41%</div><div class="l"><b>Reply rate</b>, 30 days</div></div>
+  </div>
+
+  <!-- two-tier filter: pipeline stage (primary) + temperature (secondary) -->
+  <div class="searchbar">
+    <span class="s-ic">🔍</span>
+    <input id="searchbox" type="text" placeholder="Search a lead by name…" autocomplete="off">
+  </div>
+
+  <div class="quickfilters">
+    <div class="qf" data-dim="source">
+      <button class="qf-btn" onclick="toggleQF(this,event)"><span class="qf-lab">Source</span><b class="qf-val">All</b><span class="qf-car">▾</span></button>
+      <div class="qf-menu" hidden>
+        <button class="chip on" data-s="all">All <span class="c">2,624</span></button>
+        <button class="chip" data-s="paid"><span class="tdot" style="background:var(--terracotta)"></span>Paid ads <span class="c">146</span></button>
+        <button class="chip" data-s="imessage"><span class="tdot" style="background:var(--blue)"></span>Apple Messages <span class="c">140</span></button>
+        <button class="chip" data-s="gmail"><span class="tdot" style="background:var(--hot)"></span>Gmail <span class="c">22</span></button>
+        <button class="chip" data-s="instagram"><span class="tdot" style="background:var(--referred)"></span>Instagram <span class="c">24</span></button>
+        <button class="chip" data-s="lofty"><span class="tdot" style="background:var(--navy-3)"></span>Lofty CRM <span class="c">2,355</span></button>
+        <button class="chip" data-s="website"><span class="tdot" style="background:var(--soi)"></span>Website <span class="c">318</span></button>
+        <button class="chip" data-s="referral"><span class="tdot" style="background:var(--warm)"></span>Referral <span class="c">64</span></button>
+        <button class="chip" data-s="realtorca"><span class="tdot" style="background:var(--closed)"></span>Realtor.ca <span class="c">128</span></button>
+        <button class="chip" data-s="signcall"><span class="tdot" style="background:var(--terracotta)"></span>Sign call <span class="c">47</span></button>
+        <button class="chip" data-s="youtube"><span class="tdot" style="background:var(--referred)"></span>YouTube <span class="c">31</span></button>
+        <button class="chip" data-s="doorknock"><span class="tdot" style="background:var(--nurture)"></span>Door knocking <span class="c">22</span></button>
+      </div>
+    </div>
+    <div class="qf" data-dim="stage">
+      <button class="qf-btn" onclick="toggleQF(this,event)"><span class="qf-lab">Pipeline</span><b class="qf-val">All</b><span class="qf-car">▾</span></button>
+      <div class="qf-menu" hidden>
+        <button class="chip on" data-p="all">All <span class="c">2,624</span></button>
+        <button class="chip" data-p="new"><span class="tdot" style="background:var(--blue)"></span>New Lead <span class="c">1,180</span></button>
+        <button class="chip" data-p="attempted"><span class="tdot" style="background:var(--warm)"></span>Attempted <span class="c">96</span></button>
+        <button class="chip" data-p="prospect"><span class="tdot" style="background:var(--navy-3)"></span>Prospect <span class="c">214</span></button>
+        <button class="chip" data-p="client"><span class="tdot" style="background:var(--soi)"></span>Client <span class="c">41</span></button>
+        <button class="chip" data-p="pending"><span class="tdot" style="background:var(--terracotta)"></span>Pending Deal <span class="c">8</span></button>
+        <button class="chip" data-p="closed"><span class="tdot" style="background:var(--closed)"></span>Closed <span class="c">132</span></button>
+        <button class="chip" data-p="referred"><span class="tdot" style="background:var(--referred)"></span>Referred <span class="c">27</span></button>
+        <button class="chip" data-p="realtor"><span class="tdot" style="background:var(--nurture)"></span>Realtor Contact <span class="c">63</span></button>
+        <button class="chip" data-p="trash"><span class="tdot" style="background:var(--faint)"></span>Trash <span class="c">512</span></button>
+      </div>
+    </div>
+    <div class="qf" data-dim="temp">
+      <button class="qf-btn" onclick="toggleQF(this,event)"><span class="qf-lab">Temp</span><b class="qf-val">All</b><span class="qf-car">▾</span></button>
+      <div class="qf-menu" hidden>
+        <button class="chip on" data-t="all">All</button>
+        <button class="chip" data-t="hot"><span class="tdot" style="background:var(--hot)"></span>Hot <span class="c">12</span></button>
+        <button class="chip" data-t="warm"><span class="tdot" style="background:var(--warm)"></span>Warm <span class="c">34</span></button>
+        <button class="chip" data-t="lukewarm"><span class="tdot" style="background:var(--lukewarm)"></span>Lukewarm <span class="c">41</span></button>
+        <button class="chip" data-t="cool"><span class="tdot" style="background:var(--cool)"></span>Cool <span class="c">188</span></button>
+        <button class="chip" data-t="soi"><span class="tdot" style="background:var(--soi)"></span>SOI <span class="c">152</span></button>
+        <button class="chip" data-t="nurture"><span class="tdot" style="background:var(--nurture)"></span>Nurture <span class="c">1,980</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="selbar" id="selbar">
+    <span class="cnt"><b id="selcount">0</b> selected</span>
+    <button class="sb-btn sb-primary" onclick="bulkAction('Mass Email')">✉ Mass Email</button>
+    <button class="sb-btn" onclick="bulkAction('Mass Text')">💬 Mass Text</button>
+    <button class="sb-btn" onclick="bulkAction('Assign to agent')">Assign to agent</button>
+    <div class="sb-more">
+      <button class="sb-btn" onclick="toggleMore(event)">More ▾</button>
+      <div class="moremenu" id="moremenu" hidden>
+        <button onclick="bulkAction('Send to Dialer')"><span class="ic">📞</span>Send to Dialer</button>
+        <div class="sep"></div>
+        <button onclick="bulkAction('Change Pipeline')"><span class="ic">⛁</span>Change Pipeline</button>
+        <button onclick="bulkAction('Change Segments')"><span class="ic">🌡</span>Change Segments</button>
+        <button onclick="bulkAction('Change Tags')"><span class="ic">🏷</span>Change Tags</button>
+        <div class="sep"></div>
+        <button class="soon"><span class="ic">✉</span>Send Postcards<span class="tagsoon">soon</span></button>
+        <button class="soon"><span class="ic">📄</span>Send Letters<span class="tagsoon">soon</span></button>
+      </div>
+    </div>
+    <button class="sb-btn sb-clear" onclick="clearSel()">Clear</button>
+  </div>
+
+  <div class="tablewrap">
+    <div class="tscroll">
+      <div class="thead">
+        <div class="th"><span class="cbox" style="border-color:var(--faint)" onclick="toggleAll(this)"></span></div>
+        <div class="th">Name <span class="sort">▲▼</span></div>
+        <div class="th">Pipeline stage</div>
+        <div class="th">Contact</div>
+        <div class="th">Source</div>
+        <div class="th">Next / AI</div>
+        <div class="th">Activity <span class="sort">▲▼</span></div>
+        <div class="th"></div>
+      </div>
+
+      <div id="rows">
+
+        <!-- PROSPECT · Hot · draft (text) -->
+        <div class="leadgroup" data-stage="prospect" data-temp="hot">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star on" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">★</button>
+              <div class="avatar" data-heat="hot">TB</div>
+              <div class="nm"><div class="n">Tara Bourassa <span class="verified" title="Verified">✓</span></div><div class="t"><span class="tpill hot">Hot</span> Buyer · relocating</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-prospect"></span>Prospect <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">tara.bourassa@gmail.com</div><div class="p">+1 250-320-7741</div></div>
+            <div class="src">Website<span class="sub">saved search</span></div>
+            <div><span class="ai-draft" onclick="event.stopPropagation();toggleDraft(this)">✦ Reply drafted 💬</span></div>
+            <div class="activity">2h ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+          <div class="draftpanel" hidden data-channel="text">
+            <div class="dp-head">
+              <span class="channel text">💬 Text · +1 250-320-7741</span>
+              <span class="dp-meta">drafted in your voice · replying to her last text</span>
+              <button class="dp-switch" onclick="switchChannel(this)">Switch to email</button>
+            </div>
+            <textarea class="dp-body">Hi Tara! Love that Sahali keeps catching your eye, it is such a good pocket for what you are after. Want me to line up a couple showings this weekend so you can get a real feel in person? I can do Saturday morning or Sunday afternoon, whichever is easier with the kids.</textarea>
+            <div class="dp-actions">
+              <button class="dp-send" onclick="sendDraft(this,'now')">Send now</button>
+              <button class="dp-later" onclick="openScheduler(this)">Send later ▾</button>
+              <span class="dp-voice">142 chars · 1 SMS</span>
+              <button class="dp-skip" onclick="skipDraft(this)">Skip</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PROSPECT · Hot · draft (text) -->
+        <div class="leadgroup" data-stage="prospect" data-temp="hot">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="hot">ML</div>
+              <div class="nm"><div class="n">Mark Liu</div><div class="t"><span class="tpill hot">Hot</span> Buyer · opened listing 3×</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-prospect"></span>Prospect <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">markliu88@outlook.com</div><div class="p">+1 236-421-9006</div></div>
+            <div class="src">Paid ad<span class="sub">Making It Rain</span></div>
+            <div><span class="ai-draft" onclick="event.stopPropagation();toggleDraft(this)">✦ Reply drafted 💬</span></div>
+            <div class="activity">5h ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+          <div class="draftpanel" hidden data-channel="text">
+            <div class="dp-head">
+              <span class="channel text">💬 Text · +1 236-421-9006</span>
+              <span class="dp-meta">drafted in your voice · he keeps re-opening Aberdeen</span>
+              <button class="dp-switch" onclick="switchChannel(this)">Switch to email</button>
+            </div>
+            <textarea class="dp-body">Hi Mark, I noticed you have been back looking at the Aberdeen place a few times, it is a good one. Want me to get you in before it gets busy? I can do Thursday evening or Saturday morning. No pressure either way, I just don't want you to miss it if it is the one.</textarea>
+            <div class="dp-actions">
+              <button class="dp-send" onclick="sendDraft(this,'now')">Send now</button>
+              <button class="dp-later" onclick="openScheduler(this)">Send later ▾</button>
+              <span class="dp-voice">148 chars · 1 SMS</span>
+              <button class="dp-skip" onclick="skipDraft(this)">Skip</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PENDING DEAL · Hot -->
+        <div class="leadgroup" data-stage="pending" data-temp="hot">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star on" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">★</button>
+              <div class="avatar" data-heat="hot">NO</div>
+              <div class="nm"><div class="n">Nadia &amp; Sam Okafor</div><div class="t"><span class="tpill hot">Hot</span> Buyer · under contract</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-pending"></span>Pending Deal <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">okafor.ns@gmail.com</div><div class="p">+1 250-682-9931</div></div>
+            <div class="src">Referral<span class="sub">past client</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> Subjects due Fri</span></div>
+            <div class="activity">3h ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- NEW LEAD · Warm · draft (email) -->
+        <div class="leadgroup" data-stage="new" data-temp="warm">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="warm">IB</div>
+              <div class="nm"><div class="n">Iva Bigun</div><div class="t"><span class="tpill warm">Warm</span> Seller · home valuation</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-new"></span>New Lead <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">iva.bigun@eagereverest.com</div><div class="p">+1 555-250-8285</div></div>
+            <div class="src">Gmail<span class="sub">inbound inquiry</span></div>
+            <div><span class="ai-draft" onclick="event.stopPropagation();toggleDraft(this)">✦ First touch drafted ✉️</span></div>
+            <div class="activity">1d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+          <div class="draftpanel" hidden data-channel="email">
+            <div class="dp-head">
+              <span class="channel email">✉️ Email · iva.bigun@eagereverest.com</span>
+              <span class="dp-meta">drafted in your voice · first touch</span>
+              <button class="dp-switch" onclick="switchChannel(this)">Switch to text</button>
+            </div>
+            <input class="dp-subject" value="Your home value — a real number, not an auto-estimate">
+            <textarea class="dp-body">Hi Iva, thanks for requesting a value on your place! I would love to put together a proper number for you rather than the auto-estimate the site spits out, those can be off by a lot. Are you thinking of selling this year, or just keeping an eye on the market for now? Either way I am happy to help. Take this one with a grain of salt until I run the real comps.</textarea>
+            <div class="dp-actions">
+              <button class="dp-send" onclick="sendDraft(this,'now')">Send now</button>
+              <button class="dp-later" onclick="openScheduler(this)">Send later ▾</button>
+              <span class="dp-voice">Gmail draft · from skyleigh.mccallum@gmail.com</span>
+              <button class="dp-skip" onclick="skipDraft(this)">Skip</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- PROSPECT · Warm -->
+        <div class="leadgroup" data-stage="prospect" data-temp="warm">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="warm">SH</div>
+              <div class="nm"><div class="n">Shannon Hogan <span class="verified" title="Verified">✓</span></div><div class="t"><span class="tpill warm">Warm</span> Buyer · 60–90 days</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-prospect"></span>Prospect <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">shannon3hogan@gmail.com</div><div class="p">+1 250-852-8062</div></div>
+            <div class="src">Facebook ad<span class="sub">buyer form</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> Weekly check-in due</span></div>
+            <div class="activity">1d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- CLIENT · Lukewarm -->
+        <div class="leadgroup" data-stage="client" data-temp="lukewarm">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="lukewarm">DK</div>
+              <div class="nm"><div class="n">Dana &amp; Kyle Reimer</div><div class="t"><span class="tpill lukewarm">Lukewarm</span> Buyer · signed BAEC</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-client"></span>Client <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">reimer.dk@gmail.com</div><div class="p">+1 250-374-1180</div></div>
+            <div class="src">Referral<span class="sub">past client</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> Monthly market email</span></div>
+            <div class="activity">22d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- ATTEMPTED CONTACT · Cool -->
+        <div class="leadgroup" data-stage="attempted" data-temp="cool">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="cool">WM</div>
+              <div class="nm"><div class="n">Warren Milliken</div><div class="t"><span class="tpill cool">Cool</span> Seller · far out</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-attempted"></span>Attempted <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">warren.milliken@me.com</div><div class="p">—</div></div>
+            <div class="src">Sign call<span class="sub">yard sign</span></div>
+            <div><span class="ai-muted">Needs a phone #</span></div>
+            <div class="activity">2mo ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- CLOSED · SOI -->
+        <div class="leadgroup" data-stage="closed" data-temp="soi">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star on" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">★</button>
+              <div class="avatar" data-heat="soi">CJ</div>
+              <div class="nm"><div class="n">Cam &amp; Jill Foster</div><div class="t"><span class="tpill soi">SOI</span> Past client · 2023</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-closed"></span>Closed <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">cjfoster@telus.net</div><div class="p">+1 250-571-2288</div></div>
+            <div class="src">Apple Messages<span class="sub">text history</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> Home anniversary in 6d</span></div>
+            <div class="activity">40d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- NEW LEAD · Nurture -->
+        <div class="leadgroup" data-stage="new" data-temp="nurture">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="nurture">GP</div>
+              <div class="nm"><div class="n">Greg Paulsen</div><div class="t"><span class="tpill nurture">Nurture</span> Buyer · 12+ months</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-new"></span>New Lead <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">gpaulsen@shaw.ca</div><div class="p">+1 250-682-4413</div></div>
+            <div class="src">YouTube<span class="sub">video inquiry</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> On quarterly drip</span></div>
+            <div class="activity">3mo ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- REFERRED · Cool -->
+        <div class="leadgroup" data-stage="referred" data-temp="cool">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar" data-heat="cool">BC</div>
+              <div class="nm"><div class="n">Brett Cormier</div><div class="t"><span class="tpill cool">Cool</span> Buyer · moved to Kelowna</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-referred"></span>Referred <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">brett.cormier@gmail.com</div><div class="p">+1 250-899-4402</div></div>
+            <div class="src">Realtor.ca<span class="sub">out-of-area</span></div>
+            <div><span class="ai-next"><span class="spark">✦</span> Referred to K. Adams · 25% fee</span></div>
+            <div class="activity">18d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- REALTOR CONTACT · no temp -->
+        <div class="leadgroup" data-stage="realtor" data-temp="none">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar">DB</div>
+              <div class="nm"><div class="n">Dylan Brooks</div><div class="t">ReMax · co-op agent</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-realtor"></span>Realtor Contact <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">dylan@remax-kam.ca</div><div class="p">+1 250-434-1177</div></div>
+            <div class="src">Transaction<span class="sub">125 Corry sale</span></div>
+            <div><span class="ai-muted">Industry contact</span></div>
+            <div class="activity">1mo ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+        <!-- TRASH · no temp -->
+        <div class="leadgroup" data-stage="trash" data-temp="none">
+          <div class="trow" onclick="toggleDraft(this)">
+            <div><span class="cbox" onclick="event.stopPropagation();toggleCheck(this)"></span></div>
+            <div class="namecell">
+              <button class="star" onclick="event.stopPropagation();this.classList.toggle('on')" aria-label="Favorite">☆</button>
+              <div class="avatar">?</div>
+              <div class="nm"><div class="n">No Name</div><div class="t">Junk · bad number</div></div>
+            </div>
+            <div><span class="stage"><span class="dot s-trash"></span>Trash <span class="chev">▾</span></span></div>
+            <div class="contact"><div class="e">chafer.dragon9400@eagerever…</div><div class="p">—</div></div>
+            <div class="src">Website<span class="sub">bot fill</span></div>
+            <div><span class="ai-muted">Marked as trash</span></div>
+            <div class="activity">6d ago</div>
+            <div class="chev-cell">›</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="pager">
+      <span class="rng" id="rng">12 of 2,624</span>
+      <div class="nums">
+        <button>‹</button>
+        <button class="on">1</button>
+        <button>2</button>
+        <button>3</button>
+        <span class="dots">…</span>
+        <button>53</button>
+        <button>›</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>Three ways to slice it, all stacking:</b> <b>Source</b> (where they came from — paid ads, Apple Messages, Gmail, Instagram, Lofty, website, referral), <b>Pipeline</b> (their stage), and <b>Temperature</b> (your follow-up cadence). <b>Check any rows</b> and the bulk bar appears: Mass Email / Mass Text, Send to Dialer, Assign to agent, and <b>More →</b> Change Pipeline / Segments / Tags. <b>Templates</b>, <b>Sent</b>, and <b>Didn't Send</b> are up in the tabs. Click a row (or the <b>✦ drafted</b> chip) to edit the message inline, pick text or email, Send now or Send later.
+  </div>
+  </div><!-- /section-leads -->
+
+  <!-- ============ TEMPLATES ============ -->
+  <div id="section-templates" class="section" hidden>
+    <div class="panelcard">
+      <div class="panelhd"><div><b>Templates</b> <span class="sub">reused in your voice · merge fields auto-fill</span></div><button class="newbtn">＋ New template</button></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">New lead — first touch <span class="chan-mini cm-text">SMS</span></div><div class="t2">Hi {first}! It's Skyleigh. Saw you were looking at homes around {area}, what's caught your eye?</div></div><div class="r2"><span class="usecount">used 214×</span></div></div>
+      <div class="lrow"><div class="ic2 ic-email2">✉</div><div class="main2"><div class="t1">Buyer value follow-up <span class="chan-mini cm-email">Email</span></div><div class="t2">Hi {first}, here's a real number on {address} instead of the auto-estimate…</div></div><div class="r2"><span class="usecount">used 88×</span></div></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">Just Listed alert <span class="chan-mini cm-text">SMS</span></div><div class="t2">New one just hit in {area} at {price} — want me to send the link?</div></div><div class="r2"><span class="usecount">used 156×</span></div></div>
+      <div class="lrow"><div class="ic2 ic-email2">✉</div><div class="main2"><div class="t1">Price Improved <span class="chan-mini cm-email">Email</span></div><div class="t2">{address} just got a price improvement — here's the new number…</div></div><div class="r2"><span class="usecount">used 43×</span></div></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">Home anniversary <span class="chan-mini cm-text">SMS</span></div><div class="t2">Happy {n} years in the home, {first}! Crazy how fast it goes. All good over there?</div></div><div class="r2"><span class="usecount">used 61×</span></div></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">Open house invite <span class="chan-mini cm-text">SMS</span></div><div class="t2">Doing an open house Sat 1–3 at {address}, come by if you're around!</div></div><div class="r2"><span class="usecount">used 39×</span></div></div>
+    </div>
+  </div>
+
+  <!-- ============ SENT ============ -->
+  <div id="section-sent" class="section" hidden>
+    <div class="panelcard">
+      <div class="panelhd"><div><b>Sent</b> <span class="sub">everything that went out · newest first</span></div></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">Tara Bourassa</div><div class="t2">"Hi Tara! Love that Sahali keeps catching your eye, it is such a good pocket…"</div></div><div class="r2"><span class="statuspill sp-read">Read</span><span>2h ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-text2">💬</div><div class="main2"><div class="t1">Mark Liu</div><div class="t2">"Hi Mark, I noticed you have been back looking at the Aberdeen place a few times…"</div></div><div class="r2"><span class="statuspill sp-delivered">Delivered</span><span>5h ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-batch2">📣</div><div class="main2"><div class="t1">Monthly newsletter <span class="chan-mini cm-email">Email</span></div><div class="t2">Sent to 1,980 contacts — your minimum monthly touch</div></div><div class="r2"><span class="statuspill sp-delivered">Delivered</span><span>1d ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-email2">✉</div><div class="main2"><div class="t1">Iva Bigun</div><div class="t2">"Your home value — a real number, not an auto-estimate"</div></div><div class="r2"><span class="statuspill sp-read">Read</span><span>1d ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-email2">✉</div><div class="main2"><div class="t1">Greg Paulsen</div><div class="t2">"Quarterly market update — where Kamloops sits right now"</div></div><div class="r2"><span class="statuspill sp-delivered">Delivered</span><span>3d ago</span></div></div>
+    </div>
+  </div>
+
+  <!-- ============ DIDN'T SEND ============ -->
+  <div id="section-didnt" class="section" hidden>
+    <div class="panelcard">
+      <div class="panelhd"><div><b>Didn't Send</b> <span class="sub">skipped, bounced, or waiting — nothing goes silent</span></div></div>
+      <div class="lrow"><div class="ic2 ic-batch2">⚠</div><div class="main2"><div class="t1">Warren Milliken <span class="statuspill sp-skip">Skipped</span></div><div class="t2">No phone number on file — add one to text him.</div></div><div class="r2"><span>2mo ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-batch2">✎</div><div class="main2"><div class="t1">Lisa Denham <span class="statuspill sp-skip">Skipped</span></div><div class="t2">You edited the draft but didn't send it.</div></div><div class="r2"><span>1d ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-batch2">⚠</div><div class="main2"><div class="t1">Jordan Kwan <span class="statuspill sp-bounce">Failed</span></div><div class="t2">Number is a landline — not textable. Try email or a call.</div></div><div class="r2"><span>4d ago</span></div></div>
+      <div class="lrow"><div class="ic2 ic-batch2">🗑</div><div class="main2"><div class="t1">No Name <span class="statuspill sp-skip">Blocked</span></div><div class="t2">Marked as trash — bot fill, bad number.</div></div><div class="r2"><span>6d ago</span></div></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<div id="namemodal" class="nm-overlay" hidden onclick="if(event.target===this)closeNameModal()">
+  <div class="nm-card">
+    <h3 id="nm-title">New pipeline stage</h3>
+    <input id="nm-input" placeholder="Name it…" onkeydown="if(event.key==='Enter')confirmName()">
+    <div class="nm-actions"><button class="nm-cancel" onclick="closeNameModal()">Cancel</button><button class="nm-add" onclick="confirmName()">Add</button></div>
+  </div>
+</div>
+
+<script>
+  var root=document.documentElement;
+  (function(){try{var mq=matchMedia('(prefers-color-scheme:dark)');if(!root.getAttribute('data-theme'))root.setAttribute('data-theme',mq.matches?'dark':'light');}catch(e){}})();
+
+  function toggleDraft(el){
+    var group=el.closest('.leadgroup'); if(!group)return;
+    var panel=group.querySelector('.draftpanel'); if(!panel)return;
+    var open=panel.hidden; panel.hidden=!open; group.classList.toggle('open',open);
+  }
+  function switchChannel(btn){
+    var panel=btn.closest('.draftpanel');
+    var chan=panel.querySelector('.channel');
+    var subject=panel.querySelector('.dp-subject');
+    var toEmail=panel.dataset.channel==='text';
+    if(toEmail){
+      panel.dataset.channel='email'; chan.className='channel email';
+      chan.textContent='✉️ Email · '+ (panel.closest('.leadgroup').querySelector('.contact .e').textContent);
+      btn.textContent='Switch to text';
+      if(!subject){ var s=document.createElement('input'); s.className='dp-subject'; s.value='Quick note from Skyleigh'; panel.querySelector('.dp-body').before(s); }
+    }else{
+      panel.dataset.channel='text'; chan.className='channel text';
+      chan.textContent='💬 Text · '+ (panel.closest('.leadgroup').querySelector('.contact .p').textContent);
+      btn.textContent='Switch to email';
+      if(subject) subject.remove();
+    }
+  }
+  function sendDraft(btn,when){
+    var group=btn.closest('.leadgroup');
+    var panel=group.querySelector('.draftpanel');
+    var cell=group.querySelector('.trow .ai-draft');
+    if(cell){ cell.parentElement.innerHTML = when==='now' ? '<span class="ai-sent">✓ Sent · just now</span>' : '<span class="ai-sent">✓ Scheduled</span>'; }
+    panel.hidden=true; group.classList.remove('open');
+  }
+  function openScheduler(btn){
+    var panel=btn.closest('.draftpanel');
+    var existing=panel.querySelector('.dp-schedule');
+    if(existing){ existing.remove(); return; }
+    var d=new Date(); d.setDate(d.getDate()+1); d.setHours(9,0,0,0);
+    var pad=function(n){return String(n).padStart(2,'0');};
+    var val=d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+    var wrap=document.createElement('div'); wrap.className='dp-schedule';
+    wrap.innerHTML='<span class="lab">Hold the send until</span>'+
+      '<input type="datetime-local" value="'+val+'" min="'+val.slice(0,10)+'T00:00">'+
+      '<button class="go">Schedule</button><button class="cancel">Cancel</button>';
+    panel.appendChild(wrap);
+    wrap.querySelector('.cancel').onclick=function(){ wrap.remove(); };
+    wrap.querySelector('.go').onclick=function(){
+      var v=wrap.querySelector('input').value; if(!v)return;
+      var when=new Date(v);
+      if(isNaN(when.getTime())||when.getTime()<=Date.now()){ alert('Pick a date and time in the future.'); return; }
+      var label=when.toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+      var group=panel.closest('.leadgroup');
+      var cell=group.querySelector('.trow .ai-draft');
+      if(cell){ cell.parentElement.innerHTML='<span class="ai-sent">✓ Scheduled · '+label+'</span>'; }
+      panel.hidden=true; group.classList.remove('open');
+    };
+  }
+  function skipDraft(btn){
+    var group=btn.closest('.leadgroup');
+    group.querySelector('.draftpanel').hidden=true; group.classList.remove('open');
+    var cell=group.querySelector('.trow .ai-draft');
+    if(cell){ cell.parentElement.innerHTML='<span class="ai-muted">Draft skipped</span>'; }
+  }
+
+  // assign each row its source + tags (by name)
+  var SRC={'Tara Bourassa':'website','Mark Liu':'paid','Nadia & Sam Okafor':'referral','Iva Bigun':'gmail','Shannon Hogan':'paid','Dana & Kyle Reimer':'referral','Warren Milliken':'signcall','Cam & Jill Foster':'imessage','Greg Paulsen':'youtube','Brett Cormier':'realtorca','Dylan Brooks':'realtor','No Name':'website'};
+  var TAGS={
+    'Tara Bourassa':'Pre-approved|Kamloops|Upsizing|First-time buyer',
+    'Mark Liu':'Kamloops|Investor|Urban core',
+    'Nadia & Sam Okafor':'Pre-approved|Referral|Move-in ready',
+    'Iva Bigun':'Needs to sell first|Downsizing',
+    'Shannon Hogan':'Pre-approved|Kamloops|PPC Lead|Upsizing|Spring 2026',
+    'Dana & Kyle Reimer':'Pre-approved|Past Client|Kamloops',
+    'Warren Milliken':'Wants rural',
+    'Cam & Jill Foster':'Past Client|Kamloops',
+    'Greg Paulsen':'Kelowna',
+    'Brett Cormier':'Referral|Kelowna',
+    'Dylan Brooks':'',
+    'No Name':''
+  };
+  document.querySelectorAll('#rows .leadgroup').forEach(function(g){
+    var el=g.querySelector('.nm .n'); var nm=el?el.firstChild.textContent.trim():'';
+    g.dataset.source = SRC[nm] || 'website';
+    g.dataset.tags = TAGS[nm] || '';
+  });
+
+  // unified filter state (source / pipeline / temp single-select, tags multi, plus name search)
+  var F={source:'all',stage:'all',temp:'all',tags:new Set(),q:''};
+  var DIM_ATTR={source:'s',stage:'p',temp:'t'};
+  function applyFilters(){
+    var vis=0;
+    document.querySelectorAll('#rows .leadgroup').forEach(function(g){
+      var okS=F.source==='all'||g.dataset.source===F.source;
+      var okP=F.stage==='all' ||g.dataset.stage===F.stage;
+      var okT=F.temp==='all'  ||g.dataset.temp===F.temp;
+      var tg=(g.dataset.tags||'').split('|').filter(Boolean);
+      var okTg=F.tags.size===0||tg.some(function(t){return F.tags.has(t);});
+      var nmEl=g.querySelector('.nm .n'); var name=nmEl?(nmEl.firstChild.textContent||'').toLowerCase():'';
+      var okQ=!F.q||name.indexOf(F.q)>=0;
+      var show=okS&&okP&&okT&&okTg&&okQ; g.hidden=!show; if(show)vis++;
+    });
+    document.getElementById('rng').textContent=vis+' of 2,624';
+    updateFilterBadge();
+  }
+  // single-select dims: sync highlight across BOTH the row chips and the Filters-popover chips
+  function setSingle(dim,val){
+    F[dim]=val; var a=DIM_ATTR[dim];
+    document.querySelectorAll('[data-dim="'+dim+'"] .chip').forEach(function(c){ c.classList.toggle('on', c.dataset[a]===val); });
+    var qf=document.querySelector('.qf[data-dim="'+dim+'"]');
+    if(qf){
+      var sel=qf.querySelector('.chip.on');
+      var label = sel ? sel.textContent.replace(/\s+[\d,]+$/,'').trim() : 'All';
+      qf.querySelector('.qf-val').textContent=label;
+      qf.classList.toggle('active', val!=='all');
+      qf.querySelector('.qf-menu').hidden=true;
+    }
+    applyFilters();
+  }
+  // open/close a filter dropdown
+  function toggleQF(btn,e){
+    e.stopPropagation();
+    var menu=btn.nextElementSibling; var open=!menu.hidden;
+    document.querySelectorAll('.qf-menu').forEach(function(m){m.hidden=true;});
+    menu.hidden=open;
+  }
+  function closeQF(){ document.querySelectorAll('.qf-menu').forEach(function(m){m.hidden=true;}); }
+  document.addEventListener('click',function(e){ if(!e.target.closest('.qf')) closeQF(); });
+
+  // clicking a row's chevron opens that lead's contact card (mockup: links to the card artifact)
+  var CARD_URL='https://claude.ai/code/artifact/9373134f-84b8-41a7-ae89-45bd73088f35';
+  document.querySelectorAll('.chev-cell').forEach(function(c){
+    var a=document.createElement('a'); a.href=CARD_URL; a.target='_blank'; a.rel='noopener';
+    a.textContent='›'; a.title='Open contact card';
+    a.addEventListener('click',function(e){ e.stopPropagation(); });
+    c.textContent=''; c.appendChild(a);
+  });
+  function toggleTag(chip){
+    var t=chip.dataset.tag;
+    if(F.tags.has(t)) F.tags.delete(t); else F.tags.add(t);
+    document.querySelectorAll('[data-dim="tags"] .chip').forEach(function(c){ c.classList.toggle('on', F.tags.has(c.dataset.tag)); });
+    applyFilters();
+  }
+  // one delegated handler for every filter chip (rows + popover)
+  document.addEventListener('click',function(e){
+    var chip=e.target.closest('.chip'); if(!chip)return;
+    var host=chip.closest('[data-dim]'); if(!host)return;
+    var dim=host.dataset.dim;
+    if(dim==='tags'){ toggleTag(chip); return; }
+    setSingle(dim, chip.dataset[DIM_ATTR[dim]]);
+  });
+  // name search
+  document.getElementById('searchbox').addEventListener('input',function(){ F.q=this.value.trim().toLowerCase(); applyFilters(); });
+  // filters popover
+  function toggleFilters(e){ e.stopPropagation(); var p=document.getElementById('filterspop'); p.hidden=!p.hidden; }
+  function closeFilters(){ var p=document.getElementById('filterspop'); if(p)p.hidden=true; }
+  document.addEventListener('click',function(e){ if(!e.target.closest('.filterswrap')) closeFilters(); });
+  function updateFilterBadge(){
+    var n=0; if(F.source!=='all')n++; if(F.stage!=='all')n++; if(F.temp!=='all')n++; n+=F.tags.size;
+    var b=document.getElementById('filterbadge'); if(!b)return;
+    if(n>0){ b.textContent=n; b.hidden=false; } else b.hidden=true;
+  }
+  function clearFilters(){
+    F.source='all'; F.stage='all'; F.temp='all'; F.tags.clear(); F.q='';
+    document.getElementById('searchbox').value='';
+    ['source','stage','temp'].forEach(function(dim){
+      var a=DIM_ATTR[dim];
+      document.querySelectorAll('[data-dim="'+dim+'"] .chip').forEach(function(c){ c.classList.toggle('on', c.dataset[a]==='all'); });
+    });
+    document.querySelectorAll('[data-dim="tags"] .chip').forEach(function(c){ c.classList.remove('on'); });
+    ['source','stage','temp'].forEach(function(dim){
+      var qf=document.querySelector('.qf[data-dim="'+dim+'"]');
+      if(qf){ qf.querySelector('.qf-val').textContent='All'; qf.classList.remove('active'); }
+    });
+    applyFilters();
+  }
+  applyFilters();
+
+  // section tabs
+  function showSection(name, el){
+    document.querySelectorAll('.views button').forEach(function(b){b.classList.remove('on');});
+    el.classList.add('on');
+    ['leads','templates','sent','didnt'].forEach(function(s){
+      var sec=document.getElementById('section-'+s); if(sec) sec.hidden=(s!==name);
+    });
+    closeMore();
+  }
+
+  // bulk selection + actions
+  function toggleCheck(el){ el.classList.toggle('checked'); updateSel(); }
+  function toggleAll(el){
+    var on=!el.classList.contains('checked'); el.classList.toggle('checked',on);
+    document.querySelectorAll('#rows .leadgroup:not([hidden]) .cbox').forEach(function(c){ c.classList.toggle('checked',on); });
+    updateSel();
+  }
+  function updateSel(){
+    var n=document.querySelectorAll('#rows .cbox.checked').length;
+    document.getElementById('selcount').textContent=n;
+    document.getElementById('selbar').classList.toggle('on', n>0);
+    if(n===0) closeMore();
+  }
+  function clearSel(){
+    document.querySelectorAll('.cbox.checked').forEach(function(c){c.classList.remove('checked');});
+    updateSel();
+  }
+  function toggleMore(e){ e.stopPropagation(); var m=document.getElementById('moremenu'); m.hidden=!m.hidden; }
+  function closeMore(){ var m=document.getElementById('moremenu'); if(m)m.hidden=true; }
+  document.addEventListener('click',function(e){ if(!e.target.closest('.sb-more')) closeMore(); });
+  function bulkAction(name){
+    var n=document.querySelectorAll('#rows .cbox.checked').length;
+    closeMore();
+    var verb = name.indexOf('Change')===0 ? ' updated'
+      : (name.indexOf('Assign')===0 ? ' reassigned' : ' — draft-first, waiting your OK');
+    showToast(name+' · '+n+' lead'+(n===1?'':'s')+verb);
+  }
+  var toastT=null;
+  function showToast(msg){
+    var t=document.getElementById('toast'); t.textContent=msg; t.hidden=false;
+    if(toastT) clearTimeout(toastT);
+    toastT=setTimeout(function(){ t.hidden=true; }, 2600);
+  }
+
+  // collapsible filter rows
+  function toggleRow(btn){
+    var frow=btn.closest('.frow');
+    frow.dataset.open = (frow.dataset.open==='0') ? '1' : '0';
+    updateRowSummary(frow);
+  }
+  function updateRowSummary(frow){
+    if(!frow)return;
+    var sum=frow.querySelector('.rsum'); if(!sum)return;
+    var active=frow.querySelector('.track .chip.on');
+    var label=active ? active.textContent.replace(/\s+[\d,]+$/,'').trim() : 'All';
+    sum.textContent=': '+label;
+  }
+
+  // Add New menu -> lead / pipeline stage / segment / tag
+  function escapeHtml(s){ return s.replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function toggleAddMenu(e){ e.stopPropagation(); var m=document.getElementById('addmenu'); m.hidden=!m.hidden; }
+  function closeAddMenu(){ var m=document.getElementById('addmenu'); if(m)m.hidden=true; }
+  document.addEventListener('click',function(e){ if(!e.target.closest('.addwrap')) closeAddMenu(); });
+  var pendingAdd=null;
+  function addNew(type){
+    closeAddMenu();
+    if(type==='lead'){ showToast('Opens the Add Lead form'); return; }
+    if(type==='tag'){ showToast('Tags are added on a lead’s card — open any lead to tag them'); return; }
+    pendingAdd=type;
+    document.getElementById('nm-title').textContent = type==='pipeline' ? 'New pipeline stage' : 'New segment';
+    var inp=document.getElementById('nm-input'); inp.value='';
+    inp.placeholder = type==='pipeline' ? 'e.g. Under Contract' : 'e.g. This-week hot';
+    document.getElementById('namemodal').hidden=false;
+    setTimeout(function(){ inp.focus(); }, 30);
+  }
+  function closeNameModal(){ document.getElementById('namemodal').hidden=true; pendingAdd=null; }
+  function confirmName(){
+    var v=document.getElementById('nm-input').value.trim(); if(!v)return;
+    var slug=v.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+    if(pendingAdd==='pipeline'){
+      var b=document.createElement('button'); b.className='chip'; b.dataset.p='cust-'+slug;
+      b.innerHTML='<span class="tdot" style="background:var(--navy-3)"></span>'+escapeHtml(v)+' <span class="c">0</span>';
+      document.getElementById('pipechips').appendChild(b);
+    } else if(pendingAdd==='segment'){
+      var b2=document.createElement('button'); b2.className='chip sm'; b2.dataset.t='cust-'+slug;
+      b2.innerHTML='<span class="tdot" style="background:var(--nurture)"></span>'+escapeHtml(v)+' <span class="c">0</span>';
+      document.getElementById('tempchips').appendChild(b2);
+    }
+    var label=pendingAdd; closeNameModal();
+    showToast('Added '+label+' “'+v+'”');
+  }
+
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'){ closeNameModal(); closeAddMenu(); closeMore(); closeFilters(); closeQF(); } });
+</script>
+
+</body>
+</html>
