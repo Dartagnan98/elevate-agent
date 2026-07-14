@@ -81,6 +81,92 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_exact_beta_approval_respond_requires_and_targets_request_id(monkeypatch):
+    from tools import approval as approval_module
+
+    sid = "approval-sid"
+    session_key = "approval-session"
+    first = approval_module._ApprovalEntry({"command": "first"})
+    second = approval_module._ApprovalEntry({"command": "second"})
+    server._sessions[sid] = {"session_key": session_key}
+    approval_module._gateway_queues[session_key] = [first, second]
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        "elevate_cli.diagnostics.session_recorder.record_session_event",
+        lambda *args, **kwargs: True,
+    )
+
+    try:
+        missing = server._methods["approval.respond"](
+            1,
+            {"choice": "once", "session_id": sid},
+        )
+        assert missing["error"] == {
+            "code": 4009,
+            "message": "approval request id is required",
+        }
+        assert not first.event.is_set()
+        assert not second.event.is_set()
+
+        targeted = server._methods["approval.respond"](
+            2,
+            {
+                "choice": "deny",
+                "request_id": second.request_id,
+                "session_id": sid,
+            },
+        )
+        assert targeted["result"] == {"resolved": 1}
+        assert second.event.is_set()
+        assert second.result == "deny"
+        assert not first.event.is_set()
+
+        stale = server._methods["approval.respond"](
+            3,
+            {
+                "choice": "once",
+                "request_id": second.request_id,
+                "session_id": sid,
+            },
+        )
+        assert stale["error"] == {
+            "code": 4009,
+            "message": "no pending approval request",
+        }
+        assert approval_module._gateway_queues[session_key] == [first]
+        assert not first.event.is_set()
+    finally:
+        server._sessions.pop(sid, None)
+        approval_module._gateway_queues.pop(session_key, None)
+
+
+def test_nonexact_tui_approval_keeps_legacy_fifo_compatibility(monkeypatch):
+    from tools import approval as approval_module
+
+    sid = "stable-approval-sid"
+    session_key = "stable-approval-session"
+    entry = approval_module._ApprovalEntry({"command": "legacy"})
+    server._sessions[sid] = {"session_key": session_key}
+    approval_module._gateway_queues[session_key] = [entry]
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    monkeypatch.setattr(
+        "elevate_cli.diagnostics.session_recorder.record_session_event",
+        lambda *args, **kwargs: True,
+    )
+
+    try:
+        response = server._methods["approval.respond"](
+            4,
+            {"choice": "once", "session_id": sid},
+        )
+        assert response["result"] == {"resolved": 1}
+        assert entry.event.is_set()
+        assert entry.result == "once"
+    finally:
+        server._sessions.pop(sid, None)
+        approval_module._gateway_queues.pop(session_key, None)
+
+
 def test_debug_trace_log_redacts_secrets(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_elevate_home", tmp_path)
 

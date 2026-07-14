@@ -89,6 +89,7 @@ export interface DelegationStatus {
 export interface ApprovalReq {
   command: string
   description: string
+  requestId: string
 }
 
 export interface ConfirmReq {

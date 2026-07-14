@@ -8,7 +8,6 @@ Supports multiple concurrent approvals (parallel subagents, execute_code)
 via a per-session queue.
 """
 
-import asyncio
 import os
 import threading
 import time
@@ -19,7 +18,7 @@ import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from gateway.session import SessionSource
 
 
 def _make_source() -> SessionSource:
@@ -155,6 +154,156 @@ class TestBlockingGatewayApproval:
         assert e1.result == "once"
         assert not e2.event.is_set()
         assert len(_gateway_queues[session_key]) == 1
+
+    def test_entry_emits_opaque_id_and_retains_root_lineage(self):
+        from tools.approval import _ApprovalEntry
+
+        entry = _ApprovalEntry(
+            {
+                "command": "rm -rf /important",
+                "correlation_id": "corr_0123456789abcdef0123456789abcdef",
+                "request_id": "caller-controlled-id",
+            }
+        )
+
+        assert len(entry.request_id) == 32
+        assert all(char in "0123456789abcdef" for char in entry.request_id)
+        assert entry.request_id != "caller-controlled-id"
+        assert entry.data["request_id"] == entry.request_id
+        assert entry.data["requestId"] == entry.request_id
+        assert entry.data["correlation_id"] == "corr_0123456789abcdef0123456789abcdef"
+
+        semantic = _ApprovalEntry(
+            {
+                "command": "rm -rf /important",
+                "correlation_id": "customer@example.com",
+                "session_id": "telegram:user-123:chat-456",
+            }
+        )
+        assert semantic.correlation_id == ""
+        assert semantic.session_id == ""
+        assert "correlation_id" not in semantic.data
+        assert "session_id" not in semantic.data
+
+    def test_entry_reads_opaque_tui_root_from_bound_message_context(self):
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.approval import _ApprovalEntry
+
+        root = "0123456789abcdef0123456789abcdef"
+        tokens = set_session_vars(message_id=root)
+        try:
+            entry = _ApprovalEntry({"command": "danger"})
+        finally:
+            clear_session_vars(tokens)
+
+        assert entry.correlation_id == root
+        assert entry.data["correlation_id"] == root
+
+    def test_receipt_never_persists_raw_session_or_semantic_lineage(self):
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        session_key = "telegram:user@example.com:customer-name"
+        entry = _ApprovalEntry(
+            {
+                "command": "danger",
+                "correlation_id": "closing-for-Smith-family",
+                "session_id": session_key,
+            }
+        )
+        _gateway_queues[session_key] = [entry]
+
+        with patch(
+            "elevate_cli.diagnostics.session_recorder.record_session_event",
+            return_value=True,
+        ) as record_event:
+            assert resolve_gateway_approval(
+                session_key,
+                "deny",
+                request_id=entry.request_id,
+            ) == 1
+
+        receipt = record_event.call_args
+        assert receipt.kwargs["session_id"] is None
+        assert receipt.kwargs["correlation_id"] is None
+        serialized = repr(receipt)
+        assert "user@example.com" not in serialized
+        assert "customer-name" not in serialized
+        assert "Smith-family" not in serialized
+
+    def test_request_id_resolves_out_of_order_and_stale_id_touches_nothing(self):
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        session_key = "test-targeted"
+        first = _ApprovalEntry({"command": "first"})
+        second = _ApprovalEntry({"command": "second"})
+        _gateway_queues[session_key] = [first, second]
+
+        with patch(
+            "elevate_cli.diagnostics.session_recorder.record_session_event",
+            return_value=True,
+        ) as record_event:
+            assert resolve_gateway_approval(
+                session_key,
+                "deny",
+                request_id=second.request_id,
+            ) == 1
+            assert second.event.is_set()
+            assert second.result == "deny"
+            assert not first.event.is_set()
+
+            record_event.reset_mock()
+            assert resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id="stale-or-wrong-id",
+            ) == 0
+            assert not first.event.is_set()
+            assert _gateway_queues[session_key] == [first]
+            record_event.assert_not_called()
+
+            assert resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id=first.request_id,
+            ) == 1
+            assert first.event.is_set()
+            assert first.result == "once"
+            receipt = record_event.call_args
+            assert receipt.args[0] == "approval.decision"
+            assert receipt.kwargs["payload"] == {
+                "request_id": first.request_id,
+                "outcome": "once",
+                "reason": "user_response",
+                "status": "resolved",
+            }
+
+    def test_invalid_choice_fails_closed_without_consuming_request(self):
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        session_key = "test-invalid-choice"
+        entry = _ApprovalEntry({"command": "danger"})
+        _gateway_queues[session_key] = [entry]
+
+        assert resolve_gateway_approval(
+            session_key,
+            "not-a-real-choice",
+            request_id=entry.request_id,
+        ) == 0
+        assert _gateway_queues[session_key] == [entry]
+        assert not entry.event.is_set()
+        assert entry.result is None
 
     def test_unregister_signals_all_entries(self):
         """unregister_gateway_notify signals all waiting entries to prevent hangs."""
@@ -385,7 +534,7 @@ class TestBlockingApprovalE2E:
         t = threading.Thread(target=agent_thread)
         t.start()
 
-        for _ in range(50):
+        for _ in range(100):
             if notified:
                 break
             time.sleep(0.05)
@@ -475,12 +624,24 @@ class TestBlockingApprovalE2E:
                 os.environ.pop("ELEVATE_SESSION_KEY", None)
                 reset_current_session_key(token)
 
-        t = threading.Thread(target=agent_thread)
-        t.start()
-        t.join(timeout=10)
+        with patch(
+            "elevate_cli.diagnostics.session_recorder.record_session_event",
+            return_value=True,
+        ) as record_event:
+            t = threading.Thread(target=agent_thread)
+            t.start()
+            t.join(timeout=10)
 
         assert result_holder[0]["approved"] is False
         assert "timed out" in result_holder[0]["message"]
+        timeout_receipts = [
+            call
+            for call in record_event.call_args_list
+            if call.args[0] == "approval.decision"
+            and call.kwargs["payload"].get("outcome") == "timeout"
+        ]
+        assert len(timeout_receipts) == 1
+        assert timeout_receipts[0].kwargs["payload"]["reason"] == "wait_timeout"
         unregister_gateway_notify(session_key)
 
     def test_parallel_subagent_approvals(self):
@@ -600,6 +761,69 @@ class TestBlockingApprovalE2E:
         assert sum("BLOCKED" in (r.get("message") or "") for r in results) == 1
         unregister_gateway_notify(session_key)
 
+    def test_parallel_requests_resolve_by_id_not_queue_order(self):
+        """Out-of-order UI decisions stay attached to their own commands."""
+        from tools.approval import (
+            check_all_command_guards,
+            register_gateway_notify,
+            reset_current_session_key,
+            resolve_gateway_approval,
+            set_current_session_key,
+            unregister_gateway_notify,
+        )
+
+        session_key = "e2e-targeted"
+        notified = []
+        results = {}
+        register_gateway_notify(session_key, lambda data: notified.append(data))
+
+        def run(command):
+            token = set_current_session_key(session_key)
+            try:
+                results[command] = check_all_command_guards(command, "local")
+            finally:
+                reset_current_session_key(token)
+
+        commands = ["rm -rf /approve-me", "rm -rf /deny-me"]
+        with patch(
+            "tools.approval._is_gateway_approval_context",
+            return_value=True,
+        ), patch(
+            "elevate_cli.diagnostics.session_recorder.record_session_event",
+            return_value=True,
+        ):
+            threads = [threading.Thread(target=run, args=(command,)) for command in commands]
+            for thread in threads:
+                thread.start()
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(notified) < 2:
+                time.sleep(0.05)
+
+            by_command = {item["command"]: item for item in notified}
+            assert set(by_command) == set(commands)
+            assert all(item["requestId"] == item["request_id"] for item in notified)
+
+            # Resolve the second prompt first, proving queue order is irrelevant.
+            assert resolve_gateway_approval(
+                session_key,
+                "deny",
+                request_id=by_command["rm -rf /deny-me"]["request_id"],
+            ) == 1
+            assert resolve_gateway_approval(
+                session_key,
+                "once",
+                request_id=by_command["rm -rf /approve-me"]["request_id"],
+            ) == 1
+
+            for thread in threads:
+                thread.join(timeout=5)
+
+        assert results["rm -rf /approve-me"]["approved"] is True
+        assert results["rm -rf /deny-me"]["approved"] is False
+        assert "BLOCKED" in results["rm -rf /deny-me"]["message"]
+        unregister_gateway_notify(session_key)
+
 
 # ------------------------------------------------------------------
 # Fallback: no gateway callback (cron/batch mode)
@@ -618,7 +842,7 @@ class TestFallbackNoCallback:
         to ``pending_approval`` to make the state distinguishable from a
         failed tool call.
         """
-        from tools.approval import check_all_command_guards, _pending
+        from tools.approval import check_all_command_guards
 
         os.environ["ELEVATE_EXEC_ASK"] = "1"
         os.environ["ELEVATE_SESSION_KEY"] = "no-callback-test"

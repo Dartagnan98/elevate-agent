@@ -59,6 +59,7 @@ export interface OverlayState {
   agents: boolean
   agentsInitialHistoryIndex: number
   approval: ApprovalReq | null
+  approvalQueue: ApprovalReq[]
   clarify: ClarifyReq | null
   confirm: ConfirmReq | null
   modelPicker: boolean

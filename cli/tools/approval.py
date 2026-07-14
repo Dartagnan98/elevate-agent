@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -506,16 +507,148 @@ _permanent_approved: set = set()
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result")
+    __slots__ = (
+        "correlation_id",
+        "data",
+        "event",
+        "receipt_outcome",
+        "request_id",
+        "resolution_reason",
+        "result",
+        "session_id",
+    )
 
     def __init__(self, data: dict):
+        # Never derive this identifier from a command, session, platform, or
+        # caller-provided value.  It crosses the UI boundary, so it must be an
+        # opaque capability identifying exactly one pending decision.
+        self.request_id = uuid.uuid4().hex
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        self.data = dict(data)    # command, description, pattern_keys, …
+        self.data["request_id"] = self.request_id
+        self.data["requestId"] = self.request_id
+        self.correlation_id = _opaque_approval_lineage_id(
+            self.data.get("correlation_id") or _current_approval_correlation_id()
+        )
+        self.data.pop("correlation_id", None)
+        if self.correlation_id:
+            self.data["correlation_id"] = self.correlation_id
+        self.session_id = _opaque_approval_lineage_id(
+            self.data.get("session_id") or _current_approval_session_id()
+        )
+        self.data.pop("session_id", None)
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
+        self.resolution_reason = ""
+        self.receipt_outcome: Optional[str] = None
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+
+_VALID_GATEWAY_APPROVAL_CHOICES = frozenset({"once", "session", "always", "deny"})
+_OPAQUE_APPROVAL_LINEAGE_RE = re.compile(
+    r"^(?:"
+    r"[0-9a-f]{32}|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+    r"(?:corr_|attempt_)[0-9a-f]{32}|"
+    r"(?:request|wake)\.[0-9a-f]{32}"
+    r")$"
+)
+
+
+def _opaque_approval_lineage_id(value: object) -> str:
+    """Keep canonical random lineage only; never persist semantic wire IDs."""
+    candidate = str(value or "").strip()
+    return candidate if _OPAQUE_APPROVAL_LINEAGE_RE.fullmatch(candidate) else ""
+
+
+def _current_approval_correlation_id() -> str:
+    """Return the immutable accepted-turn root when the gateway bound one."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return (
+            get_session_env("ELEVATE_SESSION_CORRELATION_ID", "")
+            or get_session_env("ELEVATE_SESSION_MESSAGE_ID", "")
+            or ""
+        )
+    except Exception:
+        return (
+            os.getenv("ELEVATE_SESSION_CORRELATION_ID", "")
+            or os.getenv("ELEVATE_SESSION_MESSAGE_ID", "")
+            or ""
+        )
+
+
+def _current_approval_session_id() -> str:
+    """Return a durable session identifier when one exists in local context."""
+    try:
+        from gateway.session_context import get_session_env
+
+        return get_session_env("ELEVATE_SESSION_ID", "") or ""
+    except Exception:
+        return os.getenv("ELEVATE_SESSION_ID", "") or ""
+
+
+def _record_approval_event(
+    event_type: str,
+    entry: _ApprovalEntry,
+    _session_key: str,
+    *,
+    outcome: str,
+    reason: str,
+) -> bool:
+    """Append a content-free approval audit event to the local recorder."""
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        return bool(
+            record_session_event(
+                event_type,
+                # Never write a raw gateway session/chat/user key. Opaque
+                # correlation + request IDs are enough to join the receipt.
+                session_id=entry.session_id or None,
+                correlation_id=entry.correlation_id or None,
+                payload={
+                    "request_id": entry.request_id,
+                    "outcome": outcome,
+                    "reason": reason,
+                    "status": "pending" if event_type == "approval.requested" else "resolved",
+                },
+                severity="warning" if outcome in {"deny", "timeout"} else "info",
+                source="approval",
+                component="tools.approval",
+            )
+        )
+    except Exception:
+        logger.debug("approval receipt write failed", exc_info=True)
+        return False
+
+
+def _record_approval_receipt(
+    entry: _ApprovalEntry,
+    session_key: str,
+    *,
+    outcome: str,
+    reason: str,
+) -> None:
+    """Record one durable terminal receipt for a pending approval entry."""
+    with _lock:
+        if entry.receipt_outcome is not None:
+            return
+        entry.receipt_outcome = outcome
+    if not _record_approval_event(
+        "approval.decision",
+        entry,
+        session_key,
+        outcome=outcome,
+        reason=reason,
+    ):
+        # The recorder is best-effort and must never turn an explicit deny
+        # into an approval.  Allow the waiting path to retry the receipt once.
+        with _lock:
+            if entry.receipt_outcome == outcome:
+                entry.receipt_outcome = None
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -540,35 +673,78 @@ def unregister_gateway_notify(session_key: str) -> None:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
     for entry in entries:
+        entry.result = "deny"
+        entry.resolution_reason = "gateway_unregistered"
         entry.event.set()
+        _record_approval_receipt(
+            entry,
+            session_key,
+            outcome="deny",
+            reason=entry.resolution_reason,
+        )
 
 
-def resolve_gateway_approval(session_key: str, choice: str,
-                             resolve_all: bool = False) -> int:
+def resolve_gateway_approval(
+    session_key: str,
+    choice: str,
+    resolve_all: bool = False,
+    *,
+    request_id: str | None = None,
+    reason: str = "user_response",
+) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
-    When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    When *request_id* is provided, only that exact pending entry may be
+    resolved.  Unknown or stale IDs return zero and leave the whole queue
+    untouched.  The ID-targeted path is used by the in-app/TUI UI.
+
+    The FIFO and *resolve_all* paths remain only for compatibility with the
+    existing Stable text commands (``/approve``, ``/deny``, and their ``all``
+    variants), whose message protocols do not yet return an approval ID.
 
     Returns the number of approvals resolved (0 means nothing was pending).
     """
+    normalized_choice = str(choice or "").strip().lower()
+    if normalized_choice not in _VALID_GATEWAY_APPROVAL_CHOICES:
+        return 0
+    target_id = str(request_id or "").strip()
+
     with _lock:
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
-        if resolve_all:
+        if target_id:
+            target = next(
+                (entry for entry in queue if entry.request_id == target_id),
+                None,
+            )
+            if target is None:
+                return 0
+            targets = [target]
+            queue.remove(target)
+        elif resolve_all:
             targets = list(queue)
             queue.clear()
         else:
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
+        # Publish result + event atomically with queue removal.  Otherwise a
+        # waiter at its timeout boundary can observe "not queued" but still
+        # see a missing result and record a false timeout.
+        for entry in targets:
+            entry.result = normalized_choice
+            entry.resolution_reason = reason
+            entry.event.set()
 
     for entry in targets:
-        entry.result = choice
-        entry.event.set()
+        _record_approval_receipt(
+            entry,
+            session_key,
+            outcome=normalized_choice,
+            reason=reason,
+        )
     return len(targets)
 
 
@@ -620,7 +796,14 @@ def clear_session(session_key: str) -> None:
         # Session-boundary cleanup should cancel any blocked approval waits
         # immediately so the old run can unwind instead of idling until timeout.
         entry.result = "deny"
+        entry.resolution_reason = "session_cleared"
         entry.event.set()
+        _record_approval_receipt(
+            entry,
+            session_key,
+            outcome="deny",
+            reason=entry.resolution_reason,
+        )
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -1861,6 +2044,8 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
+                "correlation_id": _current_approval_correlation_id(),
+                "session_id": _current_approval_session_id(),
             }
             entry = _ApprovalEntry(approval_data)
             with _lock:
@@ -1877,11 +2062,13 @@ def check_all_command_guards(command: str, env_type: str,
                 pattern_keys=list(all_keys),
                 session_key=session_key,
                 surface="gateway",
+                request_id=entry.request_id,
+                correlation_id=entry.correlation_id,
             )
 
             # Notify the user (bridges sync agent thread → async gateway)
             try:
-                notify_cb(approval_data)
+                notify_cb(entry.data)
             except Exception as exc:
                 logger.warning("Gateway approval notify failed: %s", exc)
                 with _lock:
@@ -1890,12 +2077,30 @@ def check_all_command_guards(command: str, env_type: str,
                         queue.remove(entry)
                     if not queue:
                         _gateway_queues.pop(session_key, None)
+                entry.result = "deny"
+                entry.resolution_reason = "notify_failed"
+                _record_approval_receipt(
+                    entry,
+                    session_key,
+                    outcome="deny",
+                    reason=entry.resolution_reason,
+                )
                 return {
                     "approved": False,
                     "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
                     "pattern_key": primary_key,
                     "description": combined_desc,
                 }
+
+            # The UI notification stays ahead of best-effort disk I/O so a
+            # cold recorder import cannot delay or hide the approval prompt.
+            _record_approval_event(
+                "approval.requested",
+                entry,
+                session_key,
+                outcome="pending",
+                reason="dangerous_command",
+            )
 
             # Block until the user responds or timeout (default 5 min).
             # Poll in short slices so we can fire activity heartbeats every
@@ -1944,12 +2149,22 @@ def check_all_command_guards(command: str, env_type: str,
                     _gateway_queues.pop(session_key, None)
 
             choice = entry.result
+            if choice is not None and entry.event.is_set():
+                resolved = True
             # Normalize outcome for the post hook. Unresolved (timeout) and
             # None both mean the user never responded; report that explicitly
             # so plugins can distinguish timeout from explicit deny.
             _outcome = (
                 "timeout" if not resolved
                 else (choice if choice else "timeout")
+            )
+            if _outcome == "timeout":
+                entry.resolution_reason = "wait_timeout"
+            _record_approval_receipt(
+                entry,
+                session_key,
+                outcome=_outcome,
+                reason=entry.resolution_reason or "user_response",
             )
             _fire_approval_hook(
                 "post_approval_response",
@@ -1960,10 +2175,22 @@ def check_all_command_guards(command: str, env_type: str,
                 session_key=session_key,
                 surface="gateway",
                 choice=_outcome,
+                request_id=entry.request_id,
+                correlation_id=entry.correlation_id,
             )
 
             if not resolved or choice is None or choice == "deny":
-                reason = "timed out" if not resolved else "denied by user"
+                if not resolved or choice is None:
+                    reason = "timed out"
+                elif entry.resolution_reason in {
+                    "gateway_unregistered",
+                    "session_cleared",
+                    "session_interrupted",
+                    "session_stopped",
+                }:
+                    reason = "cancelled because the approval session ended"
+                else:
+                    reason = "denied by user"
                 return {
                     "approved": False,
                     "message": f"BLOCKED: Command {reason}. Do NOT retry this command.",

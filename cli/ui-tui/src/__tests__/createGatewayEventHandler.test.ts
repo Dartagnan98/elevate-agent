@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
-import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
+import { advanceApprovalQueue, getOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
 import { getTurnState, resetTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
@@ -390,7 +390,11 @@ describe('createGatewayEventHandler', () => {
     onEvent({ payload: { line: 'Traceback: noisy but non-fatal' }, type: 'gateway.stderr' } as any)
     onEvent({ payload: { preview: 'bad framing' }, type: 'gateway.protocol_error' } as any)
     onEvent({
-      payload: { command: 'rm -rf /tmp/nope', description: 'dangerous command' },
+      payload: { command: 'rm -rf /tmp/nope', description: 'dangerous command', request_id: 'approval-123' },
+      type: 'approval.request'
+    } as any)
+    onEvent({
+      payload: { command: 'rm -rf /tmp/later', description: 'second command', request_id: 'approval-456' },
       type: 'approval.request'
     } as any)
     onEvent({ payload: {}, type: 'gateway.ready' } as any)
@@ -398,7 +402,19 @@ describe('createGatewayEventHandler', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(getOverlayState().approval).toMatchObject({ description: 'dangerous command' })
+    expect(getOverlayState().approval).toMatchObject({
+      description: 'dangerous command',
+      requestId: 'approval-123'
+    })
+    expect(getOverlayState().approvalQueue).toMatchObject([
+      { description: 'second command', requestId: 'approval-456' }
+    ])
+    expect(advanceApprovalQueue()).toBe(true)
+    expect(getOverlayState().approval).toMatchObject({
+      description: 'second command',
+      requestId: 'approval-456'
+    })
+    expect(getOverlayState().approvalQueue).toEqual([])
     expect(getTurnState().activity).toMatchObject([
       { text: 'Traceback: noisy but non-fatal', tone: 'info' },
       { text: 'protocol noise detected · /logs to inspect', tone: 'info' },

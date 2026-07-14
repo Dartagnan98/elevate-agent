@@ -405,7 +405,27 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'approval.request': {
         const description = String(ev.payload.description ?? 'dangerous command')
 
-        patchOverlayState({ approval: { command: String(ev.payload.command ?? ''), description } })
+        const approval = {
+          command: String(ev.payload.command ?? ''),
+          description,
+          requestId: String(ev.payload.requestId ?? ev.payload.request_id ?? '')
+        }
+
+        patchOverlayState(state => {
+          if (state.approval?.requestId === approval.requestId) {
+            return state
+          }
+
+          if (state.approvalQueue.some(queued => queued.requestId === approval.requestId)) {
+            return state
+          }
+
+          if (!state.approval) {
+            return { ...state, approval }
+          }
+
+          return { ...state, approvalQueue: [...state.approvalQueue, approval] }
+        })
         setStatus('approval needed')
 
         return

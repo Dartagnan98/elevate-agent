@@ -467,6 +467,7 @@ type PendingPrompt =
   | {
       command: string;
       description: string;
+      requestId: string;
       type: "approval";
     }
   | {
@@ -3775,6 +3776,9 @@ export default function ChatPage() {
       : null,
   );
   const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
+  const pendingApprovalQueueRef = useRef<
+    Extract<PendingPrompt, { type: "approval" }>[]
+  >([]);
   const [promptValue, setPromptValue] = useState("");
   const [modelOpen, setModelOpen] = useState(false);
   const [composerAgents, setComposerAgents] = useState<ComposerAgent[]>(
@@ -4985,6 +4989,7 @@ export default function ChatPage() {
           reconnectRunRef.current,
         ),
       );
+      pendingApprovalQueueRef.current = [];
       setPendingPrompt(null);
       setPromptValue("");
       setBusy(false);
@@ -6186,10 +6191,31 @@ export default function ChatPage() {
       gw.on("approval.request", (ev) => {
         if (!accepts(ev)) return;
         const payload = compactToolPayload(ev.payload);
-        setPendingPrompt({
+        const approvalPrompt: Extract<PendingPrompt, { type: "approval" }> = {
           command: String(payload.command ?? ""),
           description: String(payload.description ?? "Approval needed"),
+          requestId: String(payload.requestId ?? payload.request_id ?? ""),
           type: "approval",
+        };
+        setPendingPrompt((current) => {
+          if (
+            current?.type === "approval" &&
+            current.requestId === approvalPrompt.requestId
+          ) {
+            return current;
+          }
+          if (
+            pendingApprovalQueueRef.current.some(
+              (queued) => queued.requestId === approvalPrompt.requestId,
+            )
+          ) {
+            return current;
+          }
+          if (current) {
+            pendingApprovalQueueRef.current.push(approvalPrompt);
+            return current;
+          }
+          return approvalPrompt;
         });
         setStatusText("Approval needed");
       }),
@@ -8273,6 +8299,7 @@ export default function ChatPage() {
       if (pendingPrompt.type === "approval") {
         await gw.request("approval.respond", {
           choice: value,
+          request_id: pendingPrompt.requestId,
           session_id: sessionId,
         });
       } else {
@@ -8293,9 +8320,10 @@ export default function ChatPage() {
           request_id: pendingPrompt.requestId,
         });
       }
-      setPendingPrompt(null);
+      const nextApproval = pendingApprovalQueueRef.current.shift() ?? null;
+      setPendingPrompt(nextApproval);
       setPromptValue("");
-      setStatusText("Running...");
+      setStatusText(nextApproval ? "Approval needed" : "Running...");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // "no pending ... request" (gateway error 4009) means the request the
@@ -8304,9 +8332,10 @@ export default function ChatPage() {
       // box can never be answered, so dismiss it instead of leaving a dead
       // form on screen that re-errors on every Send.
       if (/no pending .* request/i.test(message)) {
-        setPendingPrompt(null);
+        const nextApproval = pendingApprovalQueueRef.current.shift() ?? null;
+        setPendingPrompt(nextApproval);
         setPromptValue("");
-        setStatusText("Question expired");
+        setStatusText(nextApproval ? "Approval needed" : "Question expired");
         return;
       }
       appendMessage("system", message, { status: "error" });

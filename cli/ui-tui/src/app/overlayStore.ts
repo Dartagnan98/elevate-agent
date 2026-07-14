@@ -6,6 +6,7 @@ const buildOverlayState = (): OverlayState => ({
   agents: false,
   agentsInitialHistoryIndex: 0,
   approval: null,
+  approvalQueue: [],
   clarify: null,
   confirm: null,
   modelPicker: false,
@@ -28,6 +29,15 @@ export const getOverlayState = () => $overlayState.get()
 
 export const patchOverlayState = (next: Partial<OverlayState> | ((state: OverlayState) => OverlayState)) =>
   $overlayState.set(typeof next === 'function' ? next($overlayState.get()) : { ...$overlayState.get(), ...next })
+
+export const advanceApprovalQueue = () => {
+  const state = $overlayState.get()
+  const [approval = null, ...approvalQueue] = state.approvalQueue
+
+  $overlayState.set({ ...state, approval, approvalQueue })
+
+  return Boolean(approval)
+}
 
 /** Full reset — used by session/turn teardown and tests. */
 export const resetOverlayState = () => $overlayState.set(buildOverlayState())

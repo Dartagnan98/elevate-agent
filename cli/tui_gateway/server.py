@@ -28,7 +28,7 @@ from agent.result_outcome import (
     agent_result_pending,
     agent_result_succeeded,
 )
-from elevate_constants import get_elevate_home
+from elevate_constants import exact_realtor_beta_active, get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
     StdioTransport,
@@ -4085,7 +4085,12 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.approval import resolve_gateway_approval
 
-        resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
+        resolve_gateway_approval(
+            session["session_key"],
+            "deny",
+            resolve_all=True,
+            reason="session_interrupted",
+        )
     except Exception:
         pass
     if was_running:
@@ -4136,7 +4141,12 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.approval import resolve_gateway_approval
 
-        resolve_gateway_approval(session["session_key"], "deny", resolve_all=True)
+        resolve_gateway_approval(
+            session["session_key"],
+            "deny",
+            resolve_all=True,
+            reason="session_stopped",
+        )
     except Exception:
         pass
     if was_running:
@@ -6958,15 +6968,30 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.approval import resolve_gateway_approval
 
+        request_id = str(
+            params.get("request_id") or params.get("requestId") or ""
+        ).strip()
+        choice = str(params.get("choice") or "deny").strip().lower()
+        if choice not in {"once", "session", "always", "deny"}:
+            return _err(rid, 4002, "invalid approval choice")
+        # The Realtor Beta desktop always receives an opaque request ID with
+        # approval.request.  Missing identity must fail closed rather than
+        # falling back to the oldest concurrent command.  Stable retains the
+        # legacy FIFO path for compatibility with older bundled frontends.
+        if exact_realtor_beta_active() and not request_id:
+            return _err(rid, 4009, "approval request id is required")
+
+        resolved = resolve_gateway_approval(
+            session["session_key"],
+            choice,
+            resolve_all=bool(params.get("all", False)) and not request_id,
+            request_id=request_id or None,
+        )
+        if request_id and not resolved:
+            return _err(rid, 4009, "no pending approval request")
         return _ok(
             rid,
-            {
-                "resolved": resolve_gateway_approval(
-                    session["session_key"],
-                    params.get("choice", "deny"),
-                    resolve_all=params.get("all", False),
-                )
-            },
+            {"resolved": resolved},
         )
     except Exception as e:
         return _err(rid, 5004, str(e))

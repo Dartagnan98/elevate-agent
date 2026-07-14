@@ -12,7 +12,7 @@ import { isAction, isMac, isVoiceToggleKey } from '../lib/platform.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
 import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
-import { $isBlocked, $overlayState, patchOverlayState } from './overlayStore.js'
+import { $isBlocked, $overlayState, advanceApprovalQueue, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -48,8 +48,19 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (overlay.approval) {
       return gateway
-        .rpc<ApprovalRespondResponse>('approval.respond', { choice: 'deny', session_id: getUiState().sid })
-        .then(r => r && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
+        .rpc<ApprovalRespondResponse>('approval.respond', {
+          choice: 'deny',
+          request_id: overlay.approval.requestId,
+          session_id: getUiState().sid
+        })
+        .then(r => {
+          if (!r) {
+            return
+          }
+
+          advanceApprovalQueue()
+          patchTurnState({ outcome: 'denied' })
+        })
     }
 
     if (overlay.sudo) {

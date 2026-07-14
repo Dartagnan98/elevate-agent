@@ -24,7 +24,7 @@ import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
-import { $overlayState, patchOverlayState } from './overlayStore.js'
+import { $overlayState, advanceApprovalQueue, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { $turnState, patchTurnState } from './turnStore.js'
 import { $uiState, getUiState, patchUiState } from './uiStore.js'
@@ -587,13 +587,20 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const answerApproval = useCallback(
-    (choice: string) =>
-      respondWith('approval.respond', { choice, session_id: ui.sid }, () => {
-        patchOverlayState({ approval: null })
+    (choice: string) => {
+      if (!overlay.approval) {
+        return
+      }
+
+      return respondWith('approval.respond', { choice, request_id: overlay.approval.requestId, session_id: ui.sid }, () => {
+        const hasNextApproval = advanceApprovalQueue()
+
         patchTurnState({ outcome: choice === 'deny' ? 'denied' : `approved (${choice})` })
-        patchUiState({ status: 'running…' })
-      }),
-    [respondWith, ui.sid]
+        patchUiState({ status: hasNextApproval ? 'approval needed' : 'running…' })
+      })
+    },
+
+    [overlay.approval, respondWith, ui.sid]
   )
 
   const answerSudo = useCallback(
