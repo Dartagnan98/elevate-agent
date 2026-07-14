@@ -9,6 +9,7 @@ const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
 const { sanitizeFileName } = require("builder-util/out/filename");
 const asar = require("@electron/asar");
+const { hashRuntimeCodeTree } = require("./runtime-code-hash");
 const {
   downloadAliasFileNames,
   releaseArtifactNames,
@@ -22,6 +23,7 @@ const WEB_BUILD_RECEIPT = path.join(DIST, "candidate-web.json");
 const CANDIDATE_RECEIPT = path.join(DIST, "candidate-receipt.json");
 const CHANNELS = new Set(["latest", "beta"]);
 const ARCHITECTURES = ["x64", "arm64"];
+const PRE_SIGN_EVIDENCE_SCHEMA_VERSION = 1;
 const PUBLIC_BASE_URL = "https://api.elevationrealestatehq.com/updates";
 const TRUSTED_APPLE_TEAM_ID = "G5TK395RYH";
 const SMOKE_EVIDENCE_SCHEMA_VERSION = 1;
@@ -76,6 +78,24 @@ function writeAtomicJson(filePath, value) {
   const temp = `${filePath}.tmp-${process.pid}`;
   fs.writeFileSync(temp, `${JSON.stringify(canonicalize(value), null, 2)}\n`, { flag: "wx" });
   fs.renameSync(temp, filePath);
+}
+
+function writeExclusiveAtomicJson(filePath, value, label = path.basename(filePath)) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temp = `${filePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  fs.writeFileSync(temp, `${JSON.stringify(canonicalize(value), null, 2)}\n`, { flag: "wx" });
+  try {
+    // Linking a complete temp inode is an atomic no-replace publication. A
+    // stale or concurrent evidence file therefore cannot be silently reused.
+    fs.linkSync(temp, filePath);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error(`[candidate] refusing to replace immutable ${label}`);
+    }
+    throw error;
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
 }
 
 function writeImmutableReceipt(filePath, receipt, idKey) {
@@ -171,6 +191,44 @@ function excludedByMode(relativePath, mode) {
   return false;
 }
 
+function treeEntryPermissions(stat, mode) {
+  if (mode !== "cli-packaging") return stat.mode & 0o777;
+  // electron-builder canonicalizes copied resource modes. Model the bytes that
+  // it actually emits so an otherwise-clean checkout with restrictive local
+  // read bits (for example 0600 instead of Git's 0644) cannot invalidate the
+  // source contract after an expensive signed build.
+  if (stat.isSymbolicLink()) return 0o777;
+  if (stat.isDirectory()) return 0o755;
+  if (stat.isFile()) return stat.mode & 0o111 ? 0o755 : 0o644;
+  return stat.mode & 0o777;
+}
+
+function assertCanonicalPackagedPermissions(root, label = path.basename(root)) {
+  if (!fs.existsSync(root)) throw new Error(`[candidate] missing packaged tree: ${root}`);
+
+  function walk(directory) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      const stat = fs.lstatSync(absolute);
+      if ((stat.mode & 0o7000) !== 0) {
+        throw new Error(`[candidate] ${label} contains special permission bits: ${absolute}`);
+      }
+      const actual = stat.mode & 0o777;
+      const expected = treeEntryPermissions(stat, "cli-packaging");
+      if (actual !== expected) {
+        throw new Error(
+          `[candidate] ${label} has unsafe/noncanonical permissions at ${absolute}: `
+          + `${actual.toString(8)} (expected ${expected.toString(8)})`,
+        );
+      }
+      if (stat.isDirectory()) walk(absolute);
+    }
+  }
+
+  walk(root);
+  return true;
+}
+
 function hashTree(root, { mode = "default" } = {}) {
   if (!fs.existsSync(root)) throw new Error(`[candidate] missing tree: ${root}`);
   const hash = crypto.createHash("sha256");
@@ -185,7 +243,7 @@ function hashTree(root, { mode = "default" } = {}) {
       if (excludedByMode(relative, mode)) continue;
       const absolute = path.join(directory, entry.name);
       const stat = fs.lstatSync(absolute);
-      const permissions = (stat.mode & 0o777).toString(8).padStart(3, "0");
+      const permissions = treeEntryPermissions(stat, mode).toString(8).padStart(3, "0");
       if (stat.isSymbolicLink()) {
         hash.update(`l\0${relative}\0${permissions}\0${fs.readlinkSync(absolute)}\0`);
       } else if (stat.isDirectory()) {
@@ -288,6 +346,139 @@ function treeRecord(root, mode, relativeTo = REPO, { portable = false } = {}) {
   return record;
 }
 
+function preSignEvidencePath(distRoot, architecture) {
+  const arch = normalizeArchitecture(architecture);
+  if (!ARCHITECTURES.includes(arch)) throw new Error(`[candidate] unsupported architecture: ${architecture}`);
+  return path.join(distRoot, `candidate-pre-sign-${arch}.json`);
+}
+
+function createPreSignEvidence({
+  appPath,
+  architecture,
+  sourceReceiptId,
+  webBuildId,
+  outputPath,
+  createdAt = new Date().toISOString(),
+} = {}) {
+  const arch = normalizeArchitecture(architecture);
+  if (!ARCHITECTURES.includes(arch)) throw new Error(`[candidate] unsupported architecture: ${architecture}`);
+  if (!/^[a-f0-9]{64}$/.test(sourceReceiptId || "")) {
+    throw new Error("[candidate] pre-sign evidence requires a valid source receipt ID");
+  }
+  if (!appPath || !fs.existsSync(appPath) || !fs.statSync(appPath).isDirectory()) {
+    throw new Error(`[candidate] missing pre-sign app bundle: ${appPath || "<unset>"}`);
+  }
+  if (!outputPath) throw new Error("[candidate] pre-sign evidence output path is required");
+  const resources = path.join(appPath, "Contents", "Resources");
+  const evidence = {
+    schema_version: PRE_SIGN_EVIDENCE_SCHEMA_VERSION,
+    kind: "elevate-pre-sign-app-contract",
+    created_at: createdAt,
+    architecture: arch,
+    source_receipt_id: sourceReceiptId,
+    web_build_id: webBuildId || null,
+    app_bundle_name: path.basename(appPath),
+    embedded_cli: hashTree(path.join(resources, "cli"), { mode: "cli-packaging" }),
+    embedded_web: {
+      ...hashTree(path.join(resources, "cli", "elevate_cli", "web_dist")),
+      portable: hashPortableTree(path.join(resources, "cli", "elevate_cli", "web_dist")),
+    },
+    embedded_whatsapp: hashTree(
+      path.join(resources, "cli", "scripts", "whatsapp-bridge"),
+      { mode: "whatsapp" },
+    ),
+    embedded_runtime: hashTree(path.join(resources, "runtime", "python"), { mode: "runtime" }),
+  };
+  evidence.pre_sign_evidence_id = receiptId(evidence, "pre_sign_evidence_id");
+  writeExclusiveAtomicJson(outputPath, evidence, `${arch} pre-sign evidence`);
+  return evidence;
+}
+
+function assertTreeContract(actual, expected, label) {
+  if (!actual || !expected
+      || actual.sha256 !== expected.sha256
+      || actual.file_count !== expected.file_count
+      || actual.size !== expected.size) {
+    throw new Error(`[candidate] ${label} does not match the source contract`);
+  }
+  return true;
+}
+
+function assertRuntimeCodeContract(actual, expected, label) {
+  assertTreeContract(actual, expected, label);
+  if (!actual?.algorithm
+      || actual.algorithm !== expected?.algorithm
+      || actual.macho_file_count !== expected?.macho_file_count) {
+    throw new Error(`[candidate] ${label} signature-neutral code manifest mismatch`);
+  }
+  return true;
+}
+
+function validatePreSignEvidence(evidence, {
+  architecture,
+  source,
+  webBuild,
+  appBundleName,
+} = {}) {
+  const arch = normalizeArchitecture(architecture);
+  if (!ARCHITECTURES.includes(arch)) throw new Error(`[candidate] unsupported architecture: ${architecture}`);
+  if (!evidence
+      || evidence.schema_version !== PRE_SIGN_EVIDENCE_SCHEMA_VERSION
+      || evidence.kind !== "elevate-pre-sign-app-contract"
+      || receiptId(evidence, "pre_sign_evidence_id") !== evidence.pre_sign_evidence_id) {
+    throw new Error(`[candidate] invalid ${arch} pre-sign evidence`);
+  }
+  if (evidence.architecture !== arch) throw new Error(`[candidate] ${arch} pre-sign architecture mismatch`);
+  if (!source?.source_receipt_id || evidence.source_receipt_id !== source.source_receipt_id) {
+    throw new Error(`[candidate] ${arch} pre-sign source receipt mismatch`);
+  }
+  if (appBundleName && evidence.app_bundle_name !== appBundleName) {
+    throw new Error(`[candidate] ${arch} pre-sign app bundle mismatch`);
+  }
+  assertTreeContract(
+    evidence.embedded_cli,
+    source.inputs?.["cli/package-input"],
+    `${arch} pre-sign embedded CLI`,
+  );
+  assertTreeContract(
+    evidence.embedded_whatsapp,
+    source.inputs?.["cli/whatsapp-bridge"],
+    `${arch} pre-sign embedded WhatsApp bridge`,
+  );
+  if (!webBuild?.web_build_id || evidence.web_build_id !== webBuild.web_build_id) {
+    throw new Error(`[candidate] ${arch} pre-sign web build receipt mismatch`);
+  }
+  assertTreeContract(
+    evidence.embedded_web,
+    webBuild.generated_web?.manifest,
+    `${arch} pre-sign embedded web`,
+  );
+  assertTreeContract(
+    evidence.embedded_web?.portable,
+    webBuild.generated_web?.portable,
+    `${arch} pre-sign portable embedded web`,
+  );
+  assertTreeContract(
+    evidence.embedded_runtime,
+    source.inputs?.[`runtime/${arch}`],
+    `${arch} pre-sign embedded runtime`,
+  );
+  return evidence;
+}
+
+function verifyPreSignEvidence({ evidencePath, architecture, source, webBuild, appBundleName } = {}) {
+  const arch = normalizeArchitecture(architecture);
+  if (!evidencePath || !fs.existsSync(evidencePath)) {
+    throw new Error(`[candidate] missing ${arch} pre-sign evidence: ${evidencePath || "<unset>"}`);
+  }
+  return validatePreSignEvidence(readJson(evidencePath), {
+    architecture: arch,
+    source,
+    webBuild,
+    appBundleName,
+  });
+}
+
 function compareSemver(left, right) {
   const parse = (value) => String(value || "").split(".").map((part) => Number.parseInt(part, 10) || 0);
   const a = parse(left);
@@ -366,6 +557,13 @@ function sourceInputs({ repoRoot = REPO, desktopRoot = DESKTOP } = {}) {
     const absolute = path.join(repoRoot, relative);
     return [relative, { kind: "file", ...fileRecord(absolute, repoRoot) }];
   }));
+  const x64Runtime = path.join(desktopRoot, "runtime", "x64", "python");
+  const arm64Runtime = path.join(desktopRoot, "runtime", "arm64", "python");
+  const runtimeRecord = (root) => ({
+    kind: "tree",
+    ...treeRecord(root, "runtime", repoRoot),
+    code_normalized: hashRuntimeCodeTree(root),
+  });
   const trees = {
     "desktop/src": { kind: "tree", ...treeRecord(path.join(desktopRoot, "src"), "default", repoRoot, { portable: true }) },
     "desktop/scripts": { kind: "tree", ...treeRecord(path.join(desktopRoot, "scripts"), "default", repoRoot) },
@@ -373,8 +571,8 @@ function sourceInputs({ repoRoot = REPO, desktopRoot = DESKTOP } = {}) {
     "cli/package-input": { kind: "tree", ...treeRecord(path.join(repoRoot, "cli"), "cli-packaging", repoRoot) },
     "cli/web-source": { kind: "tree", ...treeRecord(path.join(repoRoot, "cli", "web"), "web-source", repoRoot) },
     "cli/whatsapp-bridge": { kind: "tree", ...treeRecord(path.join(repoRoot, "cli", "scripts", "whatsapp-bridge"), "whatsapp", repoRoot) },
-    "runtime/x64": { kind: "tree", ...treeRecord(path.join(desktopRoot, "runtime", "x64", "python"), "runtime", repoRoot) },
-    "runtime/arm64": { kind: "tree", ...treeRecord(path.join(desktopRoot, "runtime", "arm64", "python"), "runtime", repoRoot) },
+    "runtime/x64": runtimeRecord(x64Runtime),
+    "runtime/arm64": runtimeRecord(arm64Runtime),
   };
   return { ...files, ...trees };
 }
@@ -507,6 +705,7 @@ function runMacBuilders({
   webArgs = ["--prefix", "../cli/web", "run", "build"],
   webOutputPath = path.join(REPO, "cli", "elevate_cli", "web_dist"),
   webReceiptPath = WEB_BUILD_RECEIPT,
+  preSignEvidenceDirectory = DIST,
   cwd = DESKTOP,
   env = process.env,
   stdio = "inherit",
@@ -522,10 +721,14 @@ function runMacBuilders({
   }
   createWebBuildReceipt({ sourceReceiptId, webOutputPath, outputPath: webReceiptPath });
   for (const architecture of ARCHITECTURES) {
+    fs.rmSync(preSignEvidencePath(preSignEvidenceDirectory, architecture), { force: true });
+  }
+  for (const architecture of ARCHITECTURES) {
     const current = verifySource();
     if (current.source_receipt_id !== sourceReceiptId) {
       throw new Error("[candidate] source receipt changed between architecture builds");
     }
+    fs.rmSync(preSignEvidencePath(preSignEvidenceDirectory, architecture), { force: true });
     const result = spawnSync(builderCommand, [
       ...builderPrefixArgs,
       "--config", "electron-builder.config.js", "--mac", "dmg", "zip",
@@ -677,6 +880,7 @@ function appRecord(
   if (!schemes.includes(profile.protocolScheme)) throw new Error(`[candidate] ${arch} protocol identity drift`);
   const expectedCache = `${sanitizeFileName(profile.packageName).toLowerCase()}-updater`;
   if (update.updaterCacheDirName !== expectedCache) throw new Error(`[candidate] ${arch} updater cache identity drift`);
+  const embeddedRuntimeRoot = path.join(resources, "runtime", "python");
   return {
     architecture: arch,
     app_path: path.relative(relativeTo, appPath),
@@ -687,7 +891,10 @@ function appRecord(
       portable: hashPortableTree(path.join(resources, "cli", "elevate_cli", "web_dist")),
     },
     embedded_whatsapp: hashTree(path.join(resources, "cli", "scripts", "whatsapp-bridge"), { mode: "whatsapp" }),
-    embedded_runtime: hashTree(path.join(resources, "runtime", "python"), { mode: "runtime" }),
+    embedded_runtime: {
+      ...hashTree(embeddedRuntimeRoot, { mode: "runtime" }),
+      code_normalized: hashRuntimeCodeTree(embeddedRuntimeRoot),
+    },
     embedded_desktop_src: embeddedDesktopSrc,
     info_plist: {
       sha256: sha256File(path.join(appPath, "Contents", "Info.plist")),
@@ -972,6 +1179,7 @@ function createFinalReceipt({
   repoRoot = REPO,
   publicFeeds,
   dmgEvidence,
+  preSignEvidenceDirectory,
   createdAt = new Date().toISOString(),
 } = {}) {
   const source = verifySourceReceipt({ receiptPath: sourceReceiptPath, repoRoot });
@@ -985,6 +1193,14 @@ function createFinalReceipt({
   assertPublicFeedsUnchanged(source.public_feeds, publicFeeds, "candidate build; run a fresh preflight");
   const stableUntouched = release.channel !== "beta"
     || source.public_feeds?.latest?.sha256 === publicFeeds?.latest?.sha256;
+  const preSignRoot = preSignEvidenceDirectory || path.join(desktopRoot, "dist");
+  const preSignContracts = Object.fromEntries(ARCHITECTURES.map((arch) => [arch, verifyPreSignEvidence({
+    evidencePath: preSignEvidencePath(preSignRoot, arch),
+    architecture: arch,
+    source,
+    webBuild,
+    appBundleName: release.profile.appBundleName,
+  })]));
 
   const apps = {
     x64: appRecord(path.join(desktopRoot, "dist", "mac", release.profile.appBundleName), "x64", release, desktopRoot, source.source_receipt_id, source.inputs["desktop/src"].portable.sha256),
@@ -1002,9 +1218,11 @@ function createFinalReceipt({
     if (apps[arch].embedded_whatsapp.sha256 !== source.inputs["cli/whatsapp-bridge"].sha256) {
       throw new Error(`[candidate] ${arch} embedded WhatsApp bridge does not match the source contract`);
     }
-    if (apps[arch].embedded_runtime.sha256 !== source.inputs[`runtime/${arch}`].sha256) {
-      throw new Error(`[candidate] ${arch} embedded runtime does not match the source contract`);
-    }
+    assertRuntimeCodeContract(
+      apps[arch].embedded_runtime.code_normalized,
+      source.inputs[`runtime/${arch}`].code_normalized,
+      `${arch} signed runtime code`,
+    );
   }
 
   const artifacts = Object.fromEntries(release.artifact_names.map((name) => {
@@ -1028,6 +1246,7 @@ function createFinalReceipt({
     source_receipt_id: source.source_receipt_id,
     source,
     web_build: webBuild,
+    pre_sign_contracts: preSignContracts,
     release,
     apps,
     artifacts,
@@ -1075,6 +1294,14 @@ function verifyCandidateReceipt({
     if (webBuild.web_build_id !== receipt.web_build?.web_build_id) {
       throw new Error("[candidate] web build receipt changed after finalization");
     }
+    for (const arch of ARCHITECTURES) {
+      validatePreSignEvidence(receipt.pre_sign_contracts?.[arch], {
+        architecture: arch,
+        source: receipt.source,
+        webBuild: receipt.web_build,
+        appBundleName: receipt.release.profile.appBundleName,
+      });
+    }
   }
   for (const [name, record] of Object.entries(receipt.artifacts || {})) {
     assertFileRecord(path.join(desktopRoot, record.path), record, name);
@@ -1095,6 +1322,11 @@ function verifyCandidateReceipt({
       for (const field of ["embedded_cli", "embedded_web", "embedded_whatsapp", "embedded_runtime"]) {
         if (actual[field].sha256 !== expected[field].sha256) throw new Error(`[candidate] ${arch} ${field} changed after finalization`);
       }
+      assertRuntimeCodeContract(
+        actual.embedded_runtime.code_normalized,
+        receipt.source.inputs[`runtime/${arch}`].code_normalized,
+        `${arch} signed runtime code`,
+      );
       assertEmbeddedWebMatchesBuild({ [arch]: actual, [arch === "x64" ? "arm64" : "x64"]: receipt.apps[arch === "x64" ? "arm64" : "x64"] }, receipt.web_build);
     }
   }
@@ -1135,6 +1367,11 @@ function verifyAppAgainstReceipt({ receiptPath, appPath, architecture }) {
   for (const field of ["bundle_manifest", "embedded_cli", "embedded_web", "embedded_whatsapp", "embedded_runtime"]) {
     if (actual[field].sha256 !== expected[field].sha256) throw new Error(`[candidate] ${architecture} ${field} mismatch`);
   }
+  assertRuntimeCodeContract(
+    actual.embedded_runtime.code_normalized,
+    receipt.source.inputs[`runtime/${architecture}`].code_normalized,
+    `${architecture} signed runtime code`,
+  );
   if (actual.embedded_web.sha256 !== receipt.web_build.generated_web.manifest.sha256
       || actual.embedded_web.portable.sha256 !== receipt.web_build.generated_web.portable.sha256) {
     throw new Error(`[candidate] ${architecture} embedded web build receipt mismatch`);
@@ -1156,6 +1393,8 @@ function evidenceIntegrity(evidence) {
 }
 
 function normalizeArchitecture(value) {
+  if (value === 1 || value === "1") return "x64";
+  if (value === 3 || value === "3") return "arm64";
   const architecture = String(value || "").toLowerCase();
   if (architecture === "aarch64") return "arm64";
   if (architecture === "x86_64" || architecture === "amd64") return "x64";
@@ -1394,6 +1633,7 @@ if (require.main === module) {
 module.exports = {
   ARCHITECTURES,
   CANDIDATE_RECEIPT,
+  PRE_SIGN_EVIDENCE_SCHEMA_VERSION,
   REQUIRED_LIVE_AI_CHECK_IDS,
   REQUIRED_SMOKE_CHECK_IDS,
   SOURCE_RECEIPT,
@@ -1401,11 +1641,13 @@ module.exports = {
   TRUSTED_APPLE_TEAM_ID,
   WEB_BUILD_RECEIPT,
   assertBundleManifest,
+  assertCanonicalPackagedPermissions,
   assertEmbeddedWebMatchesBuild,
   assertFileRecord,
   assertGloballyNewVersion,
   assertPackagedMetadata,
   assertPublicFeedsUnchanged,
+  assertRuntimeCodeContract,
   assertTrustedSignerEvidence,
   archiveSuccessfulRelease,
   buildRemotePublishTransaction,
@@ -1413,6 +1655,7 @@ module.exports = {
   collectAppSigningEvidence,
   compareSemver,
   createFinalReceipt,
+  createPreSignEvidence,
   createSourceReceipt,
   createWebBuildReceipt,
   evidenceIntegrity,
@@ -1422,6 +1665,7 @@ module.exports = {
   hashPortableTree,
   normalizeArchitecture,
   portableAsarDirectoryHash,
+  preSignEvidencePath,
   receiptId,
   runMacBuilders,
   sha256File,
@@ -1429,6 +1673,7 @@ module.exports = {
   validateSmokeEvidence,
   validateZipEntries,
   verifyCandidateReceipt,
+  verifyPreSignEvidence,
   verifySourceReceipt,
   verifyWebBuildReceipt,
   validateFeed,

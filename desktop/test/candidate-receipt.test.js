@@ -12,23 +12,29 @@ const {
   REQUIRED_SMOKE_CHECK_IDS,
   archiveSuccessfulRelease,
   assertBundleManifest,
+  assertCanonicalPackagedPermissions,
   assertFileRecord,
   assertGloballyNewVersion,
   assertPackagedMetadata,
   assertPublicFeedsUnchanged,
+  assertRuntimeCodeContract,
   assertTrustedSignerEvidence,
   assertEmbeddedWebMatchesBuild,
   buildRemotePublishTransaction,
   canonicalJson,
+  createPreSignEvidence,
   evidenceIntegrity,
   fileRecord,
   hashPortableTree,
   hashTree,
+  normalizeArchitecture,
   portableAsarDirectoryHash,
+  preSignEvidencePath,
   receiptId,
   runMacBuilders,
   sha256File,
   verifyCandidateReceipt,
+  verifyPreSignEvidence,
   verifyReleaseArchive,
   verifySourceReceipt,
   validateFeed,
@@ -182,6 +188,7 @@ test("the real build runner exports one verified source ID into both builder con
   const web = path.join(root, "fake-web.js");
   const webOutput = path.join(root, "web-dist");
   const webReceipt = path.join(root, "candidate-web.json");
+  const preSignEvidenceDirectory = path.join(root, "pre-sign");
   const log = path.join(root, "build-log.jsonl");
   const configPath = path.resolve(__dirname, "../electron-builder.config.js");
   fs.writeFileSync(builder, `
@@ -192,6 +199,8 @@ test("the real build runner exports one verified source ID into both builder con
       args: process.argv.slice(2),
       envId: process.env.ELEVATE_SOURCE_RECEIPT_ID,
       configId: config.extraMetadata.elevateSourceReceiptId,
+      preSignEvidenceExists: ["x64", "arm64"].map((arch) =>
+        fs.existsSync(process.env.TEST_PRE_SIGN_DIR + "/candidate-pre-sign-" + arch + ".json")),
     }) + "\\n");
   `);
   fs.writeFileSync(merge, `
@@ -206,6 +215,10 @@ test("the real build runner exports one verified source ID into both builder con
     fs.writeFileSync(process.env.TEST_WEB_OUTPUT + "/index.html", "source-bound web");
   `);
   const sourceReceiptId = "b".repeat(64);
+  fs.mkdirSync(preSignEvidenceDirectory);
+  for (const arch of ["x64", "arm64"]) {
+    fs.writeFileSync(preSignEvidencePath(preSignEvidenceDirectory, arch), "stale evidence");
+  }
   assert.equal(runMacBuilders({
     verifySource: () => ({ source_receipt_id: sourceReceiptId }),
     builderCommand: process.execPath,
@@ -216,12 +229,14 @@ test("the real build runner exports one verified source ID into both builder con
     webArgs: [web],
     webOutputPath: webOutput,
     webReceiptPath: webReceipt,
+    preSignEvidenceDirectory,
     cwd: path.resolve(__dirname, ".."),
     env: {
       ...process.env,
       ELEVATE_RELEASE_CHANNEL: "beta",
       TEST_BUILDER_CONFIG: configPath,
       TEST_BUILD_LOG: log,
+      TEST_PRE_SIGN_DIR: preSignEvidenceDirectory,
       TEST_WEB_OUTPUT: webOutput,
     },
     stdio: "pipe",
@@ -230,17 +245,28 @@ test("the real build runner exports one verified source ID into both builder con
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.slice(0, 2).map((row) => row.envId), [sourceReceiptId, sourceReceiptId]);
   assert.deepEqual(rows.slice(0, 2).map((row) => row.configId), [sourceReceiptId, sourceReceiptId]);
+  assert.deepEqual(rows[0].preSignEvidenceExists, [false, false]);
   assert.ok(rows[0].args.includes("--x64"));
   assert.ok(rows[1].args.includes("--arm64"));
   assert.equal(rows[2].envId, sourceReceiptId);
   const generatedWebReceipt = JSON.parse(fs.readFileSync(webReceipt, "utf8"));
   assert.equal(generatedWebReceipt.source_receipt_id, sourceReceiptId);
+  for (const arch of ["x64", "arm64"]) {
+    assert.equal(fs.existsSync(preSignEvidencePath(preSignEvidenceDirectory, arch)), false);
+  }
   const scripts = require("../package.json").scripts;
   assert.match(scripts["build:mac"], /candidate-receipt\.js build-mac/);
   assert.doesNotMatch(scripts["release:mac"], /ship:mac/);
   assert.match(scripts["smoke:mac:live"], /--live-candidate/);
   assert.match(scripts["smoke:mac:live"], /live-ai\.json/);
   assert.doesNotMatch(scripts["smoke:mac:live"], /--skip-sidecar/);
+});
+
+test("electron-builder numeric architecture enums normalize to release names", () => {
+  assert.equal(normalizeArchitecture(1), "x64");
+  assert.equal(normalizeArchitecture(3), "arm64");
+  assert.equal(normalizeArchitecture("x64"), "x64");
+  assert.equal(normalizeArchitecture("arm64"), "arm64");
 });
 
 test("final app metadata rejects a missing or wrong embedded source ID", () => {
@@ -299,6 +325,149 @@ test("tree manifests change when packaged bytes change", (t) => {
   fs.writeFileSync(path.join(root, "nested", "payload.txt"), "after");
   const after = hashTree(root);
   assert.notEqual(after.sha256, before.sha256);
+});
+
+test("CLI packaging hashes canonicalize copied modes but still bind file bytes", (t) => {
+  const root = temporaryDirectory(t);
+  const source = path.join(root, "source");
+  const packaged = path.join(root, "packaged");
+  for (const directory of [source, packaged]) {
+    fs.mkdirSync(path.join(directory, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(directory, "nested", "plain.txt"), "same bytes");
+    fs.writeFileSync(path.join(directory, "nested", "run.sh"), "#!/bin/sh\nexit 0\n");
+    fs.symlinkSync("plain.txt", path.join(directory, "nested", "plain-link"));
+  }
+  fs.chmodSync(path.join(source, "nested"), 0o700);
+  fs.chmodSync(path.join(source, "nested", "plain.txt"), 0o600);
+  fs.chmodSync(path.join(source, "nested", "run.sh"), 0o700);
+  fs.chmodSync(path.join(packaged, "nested"), 0o755);
+  fs.chmodSync(path.join(packaged, "nested", "plain.txt"), 0o644);
+  fs.chmodSync(path.join(packaged, "nested", "run.sh"), 0o755);
+
+  assert.deepEqual(
+    hashTree(source, { mode: "cli-packaging" }),
+    hashTree(packaged, { mode: "cli-packaging" }),
+  );
+  fs.writeFileSync(path.join(packaged, "nested", "plain.txt"), "byte drift");
+  assert.notEqual(
+    hashTree(source, { mode: "cli-packaging" }).sha256,
+    hashTree(packaged, { mode: "cli-packaging" }).sha256,
+  );
+});
+
+test("packaged CLI permission policy rejects writable or noncanonical output", (t) => {
+  const root = temporaryDirectory(t);
+  const nested = path.join(root, "nested");
+  const payload = path.join(nested, "payload.txt");
+  fs.mkdirSync(nested, { mode: 0o755 });
+  fs.writeFileSync(payload, "approved", { mode: 0o644 });
+  fs.chmodSync(root, 0o755);
+  fs.chmodSync(nested, 0o755);
+  fs.chmodSync(payload, 0o644);
+
+  assert.equal(assertCanonicalPackagedPermissions(root, "fixture CLI"), true);
+  fs.chmodSync(payload, 0o666);
+  assert.throws(
+    () => assertCanonicalPackagedPermissions(root, "fixture CLI"),
+    /unsafe\/noncanonical permissions/,
+  );
+});
+
+test("pre-sign evidence is source-bound and rejects stale receipts or runtime drift", (t) => {
+  const root = temporaryDirectory(t);
+  const appPath = path.join(root, "Elevate Beta.app");
+  const resources = path.join(appPath, "Contents", "Resources");
+  const cli = path.join(resources, "cli");
+  const web = path.join(cli, "elevate_cli", "web_dist");
+  const whatsapp = path.join(cli, "scripts", "whatsapp-bridge");
+  const runtime = path.join(resources, "runtime", "python");
+  for (const directory of [web, whatsapp, runtime]) fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(cli, "elevate_cli", "core.py"), "APPROVED = True\n");
+  fs.writeFileSync(path.join(web, "index.html"), "source-bound web");
+  fs.writeFileSync(path.join(whatsapp, "bridge.js"), "module.exports = true;\n");
+  fs.writeFileSync(path.join(runtime, "python3.12"), "unsigned runtime bytes");
+
+  const sourceReceiptId = "a".repeat(64);
+  const source = {
+    source_receipt_id: sourceReceiptId,
+    inputs: {
+      "cli/package-input": hashTree(cli, { mode: "cli-packaging" }),
+      "cli/whatsapp-bridge": hashTree(whatsapp, { mode: "whatsapp" }),
+      "runtime/x64": hashTree(runtime, { mode: "runtime" }),
+    },
+  };
+  const webBuild = {
+    schema_version: 1,
+    source_receipt_id: sourceReceiptId,
+    generated_web: {
+      manifest: hashTree(web),
+      portable: hashPortableTree(web),
+    },
+  };
+  webBuild.web_build_id = receiptId(webBuild, "web_build_id");
+  const evidencePath = path.join(root, "candidate-pre-sign-x64.json");
+  const written = createPreSignEvidence({
+    appPath,
+    architecture: "x64",
+    sourceReceiptId,
+    webBuildId: webBuild.web_build_id,
+    outputPath: evidencePath,
+    createdAt: "2026-07-14T00:00:00.000Z",
+  });
+  const immutableBytes = fs.readFileSync(evidencePath, "utf8");
+  assert.throws(() => createPreSignEvidence({
+    appPath,
+    architecture: "x64",
+    sourceReceiptId,
+    webBuildId: webBuild.web_build_id,
+    outputPath: evidencePath,
+    createdAt: "2026-07-14T00:00:01.000Z",
+  }), /refusing to replace immutable x64 pre-sign evidence/);
+  assert.equal(fs.readFileSync(evidencePath, "utf8"), immutableBytes);
+  assert.equal(verifyPreSignEvidence({
+    evidencePath,
+    architecture: "x64",
+    source,
+    webBuild,
+    appBundleName: "Elevate Beta.app",
+  }).pre_sign_evidence_id, written.pre_sign_evidence_id);
+
+  assert.throws(() => verifyPreSignEvidence({
+    evidencePath,
+    architecture: "x64",
+    source: { ...source, source_receipt_id: "b".repeat(64) },
+    webBuild,
+    appBundleName: "Elevate Beta.app",
+  }), /pre-sign source receipt mismatch/);
+
+  const wrongRuntimeSource = structuredClone(source);
+  wrongRuntimeSource.inputs["runtime/x64"].sha256 = "c".repeat(64);
+  assert.throws(() => verifyPreSignEvidence({
+    evidencePath,
+    architecture: "x64",
+    source: wrongRuntimeSource,
+    webBuild,
+    appBundleName: "Elevate Beta.app",
+  }), /pre-sign embedded runtime does not match/);
+});
+
+test("signature-neutral runtime contracts bind algorithm, bytes, and Mach-O count", () => {
+  const approved = {
+    algorithm: "elevate-runtime-code-tree-v1",
+    sha256: "a".repeat(64),
+    file_count: 100,
+    size: 12345,
+    macho_file_count: 9,
+  };
+  assert.equal(assertRuntimeCodeContract(structuredClone(approved), approved, "runtime"), true);
+  assert.throws(
+    () => assertRuntimeCodeContract({ ...approved, sha256: "b".repeat(64) }, approved, "runtime"),
+    /does not match the source contract/,
+  );
+  assert.throws(
+    () => assertRuntimeCodeContract({ ...approved, macho_file_count: 8 }, approved, "runtime"),
+    /signature-neutral code manifest mismatch/,
+  );
 });
 
 test("artifact and public read-back verification rejects same-size wrong bytes", (t) => {
