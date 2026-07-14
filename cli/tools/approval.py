@@ -735,6 +735,14 @@ def resolve_gateway_approval(
     normalized_choice = str(choice or "").strip().lower()
     if normalized_choice not in _VALID_GATEWAY_APPROVAL_CHOICES:
         return 0
+    if (
+        _beta_approval_policy_active()
+        and normalized_choice in {"once", "session", "always"}
+    ):
+        # Record and publish the scope that the exact-Beta runtime will
+        # actually honor.  This also protects callers that consume the queue
+        # result directly instead of going through check_all_command_guards().
+        normalized_choice = "once"
     target_id = str(request_id or "").strip()
 
     with _lock:
@@ -789,6 +797,11 @@ def submit_pending(session_key: str, approval: dict):
 
 def approve_session(session_key: str, pattern_key: str):
     """Approve a pattern for this session only."""
+    # Exact Realtor Beta only accepts a human decision for the command that
+    # is currently being reviewed.  Do not let a legacy UI choice create a
+    # reusable authorization that silently approves later commands.
+    if _beta_approval_policy_active():
+        return
     with _lock:
         _session_approved.setdefault(session_key, set()).add(pattern_key)
 
@@ -1496,6 +1509,12 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
     Accept both the current canonical key and the legacy regex-derived key so
     existing command_allowlist entries continue to work after key migrations.
     """
+    # A stored allowlist is legacy state, not proof that a person reviewed
+    # this particular command.  Exact Realtor Beta therefore ignores both
+    # permanent and session entries while Stable keeps its existing behavior.
+    if _beta_approval_policy_active():
+        return False
+
     aliases = _approval_key_aliases(pattern_key)
     with _lock:
         if any(alias in _permanent_approved for alias in aliases):
@@ -1506,6 +1525,8 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
 
 def approve_permanent(pattern_key: str):
     """Add a pattern to the permanent allowlist."""
+    if _beta_approval_policy_active():
+        return
     with _lock:
         _permanent_approved.add(pattern_key)
 
@@ -1699,9 +1720,10 @@ def _get_approval_mode() -> str:
     """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
     mode = _get_approval_config().get("mode", "manual")
     normalized = _normalize_approval_mode(mode)
-    # Exact Beta never treats stale ``approvals.mode=off`` state as an
-    # authorization decision.  Stable keeps its long-standing compatibility.
-    if _beta_approval_policy_active() and normalized == "off":
+    # Exact Beta requires a human decision for every flagged command.  This
+    # disables both ``off`` and LLM-driven ``smart`` approvals (as well as any
+    # unknown legacy value) while Stable keeps its existing behavior.
+    if _beta_approval_policy_active():
         return "manual"
     return normalized
 
@@ -1772,6 +1794,45 @@ def _cron_dangerous_block_result(description: str) -> dict:
             f"jobs run without a user present to approve it. {guidance}"
         ),
     }
+
+
+def _beta_unattended_dangerous_block_result(
+    description: str,
+    *,
+    pattern_key: str | None = None,
+) -> dict:
+    """Build the exact-Beta denial for a command with no human prompt."""
+    result = {
+        "approved": False,
+        "status": "human_approval_required",
+        "description": description,
+        "message": (
+            f"BLOCKED: Realtor Beta flagged this command as dangerous "
+            f"({description}), but this one-shot or unattended run has no "
+            "person available to review it. Start an interactive Realtor "
+            "Beta session and approve that specific command when prompted."
+        ),
+    }
+    if pattern_key:
+        result["pattern_key"] = pattern_key
+    return result
+
+
+def _approval_choice_for_current_command(choice: object) -> object:
+    """Return the effective decision for the command currently under review.
+
+    Stable retains its four approval scopes.  Exact Realtor Beta treats every
+    affirmative human response as one-time approval, so stale ``session`` or
+    ``always`` controls cannot authorize a later command.  Unknown callback
+    results fail closed instead of accidentally counting as approval.
+    """
+    if not _beta_approval_policy_active():
+        return choice
+
+    normalized = str(choice or "").strip().lower()
+    if normalized in {"once", "session", "always"}:
+        return "once"
+    return "deny"
 
 
 def _smart_approve(command: str, description: str) -> str:
@@ -1874,6 +1935,11 @@ def check_dangerous_command(command: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
 
     if not is_cli and not is_gateway:
+        if _beta_approval_policy_active():
+            return _beta_unattended_dangerous_block_result(
+                description,
+                pattern_key=pattern_key,
+            )
         # Cron sessions: respect cron_mode config
         if env_var_enabled("ELEVATE_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
@@ -1898,8 +1964,13 @@ def check_dangerous_command(command: str, env_type: str,
             ),
         }
 
-    choice = prompt_dangerous_approval(command, description,
-                                       approval_callback=approval_callback)
+    choice = prompt_dangerous_approval(
+        command,
+        description,
+        allow_permanent=not _beta_approval_policy_active(),
+        approval_callback=approval_callback,
+    )
+    choice = _approval_choice_for_current_command(choice)
 
     if choice == "deny":
         return {
@@ -1994,9 +2065,35 @@ def check_all_command_guards(command: str, env_type: str,
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("ELEVATE_EXEC_ASK")
 
-    # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
-    # flows, we do not block on approvals and we skip external guard work.
+    # Stable preserves its existing non-interactive behavior. Exact Beta has
+    # no human available to approve, so it still scans and denies any warning.
     if not is_cli and not is_gateway and not is_ask:
+        if _beta_approval_policy_active():
+            try:
+                from tools.tirith_security import check_command_security
+
+                tirith_result = check_command_security(command)
+            except ImportError:
+                tirith_result = {"action": "allow", "findings": [], "summary": ""}
+
+            if tirith_result["action"] in {"block", "warn"}:
+                findings = tirith_result.get("findings") or []
+                rule_id = (
+                    findings[0].get("rule_id", "unknown")
+                    if findings
+                    else "unknown"
+                )
+                return _beta_unattended_dangerous_block_result(
+                    _format_tirith_description(tirith_result),
+                    pattern_key=f"tirith:{rule_id}",
+                )
+
+            is_dangerous, pattern_key, description = detect_dangerous_command(command)
+            if is_dangerous:
+                return _beta_unattended_dangerous_block_result(
+                    description,
+                    pattern_key=pattern_key,
+                )
         # Cron sessions: respect cron_mode config
         if env_var_enabled("ELEVATE_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
@@ -2204,7 +2301,7 @@ def check_all_command_guards(command: str, env_type: str,
                 if not queue:
                     _gateway_queues.pop(session_key, None)
 
-            choice = entry.result
+            choice = _approval_choice_for_current_command(entry.result)
             if choice is not None and entry.event.is_set():
                 resolved = True
             # Normalize outcome for the post hook. Unresolved (timeout) and
@@ -2303,8 +2400,12 @@ def check_all_command_guards(command: str, env_type: str,
         surface="cli",
     )
     choice = prompt_dangerous_approval(command, combined_desc,
-                                       allow_permanent=not has_tirith,
+                                       allow_permanent=(
+                                           not has_tirith
+                                           and not _beta_approval_policy_active()
+                                       ),
                                        approval_callback=approval_callback)
+    choice = _approval_choice_for_current_command(choice)
     _fire_approval_hook(
         "post_approval_response",
         command=command,
