@@ -1,6 +1,7 @@
 import { useInput } from '@elevate/ink'
 import { useStore } from '@nanostores/react'
 
+import { approvalBypassAvailable } from '../domain/approval.js'
 import type {
   ApprovalRespondResponse,
   ConfigSetResponse,
@@ -409,6 +410,10 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     // shift-tab flips yolo without spending a turn (claude-code parity)
     if (key.shift && key.tab && !cState.completions.length) {
+      if (!approvalBypassAvailable()) {
+        return void actions.sys('Realtor Beta keeps command review on')
+      }
+
       if (!live.sid) {
         return void actions.sys('yolo needs an active session')
       }

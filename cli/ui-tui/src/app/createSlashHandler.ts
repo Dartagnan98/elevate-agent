@@ -1,3 +1,4 @@
+import { approvalBypassAvailable, isApprovalBypassCommand } from '../domain/approval.js'
 import { parseSlashCommand } from '../domain/slash.js'
 import type { SlashExecResponse } from '../gatewayTypes.js'
 import { asCommandDispatch, rpcErrorMessage } from '../lib/rpc.js'
@@ -36,6 +37,12 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
     }
 
     const runCtx: SlashRunCtx = { ...ctx, flight, guarded, guardedErr, sid, stale, ui }
+
+    if (!approvalBypassAvailable() && isApprovalBypassCommand(parsed.name)) {
+      sys('Realtor Beta keeps command review on')
+
+      return true
+    }
 
     const found = findSlashCommand(parsed.name)
 

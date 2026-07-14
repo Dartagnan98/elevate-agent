@@ -167,6 +167,79 @@ def test_nonexact_tui_approval_keeps_legacy_fifo_compatibility(monkeypatch):
         approval_module._gateway_queues.pop(session_key, None)
 
 
+@pytest.mark.parametrize("choice", ["session", "always"])
+def test_exact_beta_approval_rejects_persistent_scopes_without_consuming_request(
+    monkeypatch, choice
+):
+    from tools import approval as approval_module
+
+    sid = "beta-persistent-approval-sid"
+    session_key = "beta-persistent-approval-session"
+    entry = approval_module._ApprovalEntry({"command": "sensitive"})
+    server._sessions[sid] = {"session_key": session_key}
+    approval_module._gateway_queues[session_key] = [entry]
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    try:
+        response = server._methods["approval.respond"](
+            5,
+            {
+                "choice": choice,
+                "request_id": entry.request_id,
+                "session_id": sid,
+            },
+        )
+
+        assert response["error"] == {
+            "code": 4008,
+            "message": "Realtor Beta approvals apply to one request only",
+        }
+        assert approval_module._gateway_queues[session_key] == [entry]
+        assert not entry.event.is_set()
+        assert entry.result is None
+    finally:
+        server._sessions.pop(sid, None)
+        approval_module._gateway_queues.pop(session_key, None)
+
+
+@pytest.mark.parametrize("release_channel", [None, "Beta"])
+def test_nonexact_approval_keeps_persistent_scope_compatibility(
+    monkeypatch, release_channel
+):
+    from tools import approval as approval_module
+
+    sid = "compat-persistent-approval-sid"
+    session_key = "compat-persistent-approval-session"
+    entry = approval_module._ApprovalEntry({"command": "compat"})
+    server._sessions[sid] = {"session_key": session_key}
+    approval_module._gateway_queues[session_key] = [entry]
+    if release_channel is None:
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    else:
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", release_channel)
+    monkeypatch.setattr(
+        "elevate_cli.diagnostics.session_recorder.record_session_event",
+        lambda *args, **kwargs: True,
+    )
+
+    try:
+        response = server._methods["approval.respond"](
+            6,
+            {
+                "choice": "session",
+                "request_id": entry.request_id,
+                "session_id": sid,
+            },
+        )
+
+        assert response["result"] == {"resolved": 1}
+        assert entry.event.is_set()
+        assert entry.result == "session"
+    finally:
+        server._sessions.pop(sid, None)
+        approval_module._gateway_queues.pop(session_key, None)
+
+
 def test_debug_trace_log_redacts_secrets(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_elevate_home", tmp_path)
 
@@ -912,6 +985,158 @@ def test_config_set_yolo_is_rejected_in_exact_beta(monkeypatch):
     finally:
         clear_session("session-key")
         server._sessions.clear()
+
+
+@pytest.mark.parametrize(
+    "requested",
+    ["bypassPermissions", "smart", "off", "acceptEdits"],
+)
+def test_config_set_permission_mode_canonicalizes_unsupported_exact_beta_modes(
+    monkeypatch, requested
+):
+    from tools.approval import clear_session, get_session_permission_mode
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "beta-permission-set",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "permission_mode",
+                    "value": requested,
+                },
+            }
+        )
+
+        assert response["result"] == {
+            "canonicalized": True,
+            "key": "permission_mode",
+            "reason": "beta_human_review_required",
+            "value": "default",
+        }
+        assert get_session_permission_mode("session-key") == "default"
+    finally:
+        clear_session("session-key")
+        server._sessions.clear()
+
+
+@pytest.mark.parametrize("requested", ["default", "plan"])
+def test_config_set_permission_mode_keeps_supported_exact_beta_modes(
+    monkeypatch, requested
+):
+    from tools.approval import clear_session, get_session_permission_mode
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "beta-permission-supported",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "permission_mode",
+                    "value": requested,
+                },
+            }
+        )
+
+        assert response["result"] == {
+            "key": "permission_mode",
+            "value": requested,
+        }
+        assert get_session_permission_mode("session-key") == requested
+    finally:
+        clear_session("session-key")
+        server._sessions.clear()
+
+
+def test_config_get_permission_mode_canonicalizes_stale_exact_beta_override(
+    monkeypatch,
+):
+    from tools.approval import clear_session, set_session_permission_mode
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    server._sessions["sid"] = _session()
+    set_session_permission_mode("session-key", "bypassPermissions")
+    try:
+        response = server.handle_request(
+            {
+                "id": "beta-permission-get",
+                "method": "config.get",
+                "params": {"session_id": "sid", "key": "permission_mode"},
+            }
+        )
+
+        assert response["result"] == {
+            "canonicalized": True,
+            "reason": "beta_human_review_required",
+            "value": "default",
+        }
+    finally:
+        clear_session("session-key")
+        server._sessions.clear()
+
+
+@pytest.mark.parametrize("release_channel", [None, "Beta"])
+def test_nonexact_permission_mode_keeps_bypass_compatibility(
+    monkeypatch, release_channel
+):
+    from tools.approval import clear_session, get_session_permission_mode
+
+    if release_channel is None:
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    else:
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", release_channel)
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "compat-permission-set",
+                "method": "config.set",
+                "params": {
+                    "session_id": "sid",
+                    "key": "permission_mode",
+                    "value": "bypassPermissions",
+                },
+            }
+        )
+
+        assert response["result"] == {
+            "key": "permission_mode",
+            "value": "bypassPermissions",
+        }
+        assert get_session_permission_mode("session-key") == "bypassPermissions"
+    finally:
+        clear_session("session-key")
+        server._sessions.clear()
+
+
+@pytest.mark.parametrize("release_channel", [None, "Beta"])
+@pytest.mark.parametrize("requested", ["smart", "off"])
+def test_nonexact_permission_mode_keeps_unknown_mode_rejection(
+    monkeypatch, release_channel, requested
+):
+    if release_channel is None:
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    else:
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", release_channel)
+
+    response = server.handle_request(
+        {
+            "id": "compat-permission-unknown",
+            "method": "config.set",
+            "params": {"key": "permission_mode", "value": requested},
+        }
+    )
+
+    assert response["error"] == {
+        "code": 4002,
+        "message": f"unknown permission_mode: {requested}",
+    }
 
 
 def test_config_get_statusbar_survives_non_dict_display(monkeypatch):

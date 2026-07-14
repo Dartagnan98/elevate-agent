@@ -1,38 +1,45 @@
 import { Box, Text, useInput } from '@elevate/ink'
 import { useState } from 'react'
 
+import { type ApprovalChoice, approvalChoicesForRelease } from '../domain/approval.js'
 import { isMac } from '../lib/platform.js'
 import type { Theme } from '../theme.js'
 import type { ApprovalReq, ClarifyReq, ConfirmReq } from '../types.js'
 
 import { TextInput } from './textInput.js'
 
-const OPTS = ['once', 'session', 'always', 'deny'] as const
-const LABELS = { always: 'Always allow', deny: 'Deny', once: 'Allow once', session: 'Allow this session' } as const
+const LABELS: Record<ApprovalChoice, string> = {
+  always: 'Always allow',
+  deny: 'Deny',
+  once: 'Allow once',
+  session: 'Allow this session'
+}
+
 const CMD_PREVIEW_LINES = 10
 
 export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
   const [sel, setSel] = useState(0)
+  const options = approvalChoicesForRelease()
 
   useInput((ch, key) => {
     if (key.upArrow && sel > 0) {
       setSel(s => s - 1)
     }
 
-    if (key.downArrow && sel < OPTS.length - 1) {
+    if (key.downArrow && sel < options.length - 1) {
       setSel(s => s + 1)
     }
 
     const n = parseInt(ch, 10)
 
-    if (n >= 1 && n <= OPTS.length) {
-      onChoice(OPTS[n - 1]!)
+    if (n >= 1 && n <= options.length) {
+      onChoice(options[n - 1]!)
 
       return
     }
 
     if (key.return) {
-      onChoice(OPTS[sel]!)
+      onChoice(options[sel]!)
     }
   })
 
@@ -62,7 +69,7 @@ export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
 
       <Text />
 
-      {OPTS.map((o, i) => (
+      {options.map((o, i) => (
         <Text key={o}>
           <Text bold={sel === i} color={sel === i ? t.color.warn : t.color.dim} inverse={sel === i}>
             {sel === i ? '▸ ' : '  '}
@@ -71,7 +78,9 @@ export function ApprovalPrompt({ onChoice, req, t }: ApprovalPromptProps) {
         </Text>
       ))}
 
-      <Text color={t.color.dim}>↑/↓ select · Enter confirm · 1-4 quick pick · Ctrl+C deny</Text>
+      <Text color={t.color.dim}>
+        ↑/↓ select · Enter confirm · 1-{options.length} quick pick · Ctrl+C deny
+      </Text>
     </Box>
   )
 }

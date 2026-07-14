@@ -57,6 +57,10 @@ import {
   type StatusResponse,
 } from "@/lib/api";
 import { resolveMemoryPolicyState } from "@/lib/beta-runtime";
+import {
+  approvalSurfacePolicyForStatus,
+  filterApprovalSettingsSchema,
+} from "@/lib/approval-ui-policy";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
 import { CRM_PRESETS, applyPreset, findPresetForForm, type CrmPreset } from "@/lib/crmPresets";
 import { useToast } from "@/hooks/useToast";
@@ -2409,6 +2413,14 @@ export default function ConfigPage() {
   }, [loadRuntimeStatus]);
 
   const memoryPolicyState = resolveMemoryPolicyState(status);
+  const approvalSchema = useMemo(
+    () =>
+      filterApprovalSettingsSchema(
+        schema,
+        approvalSurfacePolicyForStatus(status),
+      ),
+    [schema, status],
+  );
 
   // Load YAML when switching to YAML mode
   useEffect(() => {
@@ -2424,12 +2436,12 @@ export default function ConfigPage() {
 
   /* ---- Categories ---- */
   const categories = useMemo(() => {
-    if (!schema) return [];
-    const allCats = [...new Set(Object.values(schema).map((s) => String(s.category ?? "general")))];
+    if (!approvalSchema) return [];
+    const allCats = [...new Set(Object.values(approvalSchema).map((s) => String(s.category ?? "general")))];
     const ordered = categoryOrder.filter((c) => allCats.includes(c));
     const extra = allCats.filter((c) => !categoryOrder.includes(c)).sort();
     return [...ordered, ...extra];
-  }, [schema, categoryOrder]);
+  }, [approvalSchema, categoryOrder]);
 
   const visibleCategories = useMemo(
     () =>
@@ -2451,8 +2463,8 @@ export default function ConfigPage() {
   const lowerSearch = searchQuery.toLowerCase();
 
   const searchMatchedFields = useMemo(() => {
-    if (!isSearching || !schema) return [];
-    return Object.entries(schema).filter(([key, s]) => {
+    if (!isSearching || !approvalSchema) return [];
+    return Object.entries(approvalSchema).filter(([key, s]) => {
       const label = key.split(".").pop() ?? key;
       const humanLabel = label.replace(/_/g, " ");
       return (
@@ -2462,12 +2474,12 @@ export default function ConfigPage() {
         String(s.description ?? "").toLowerCase().includes(lowerSearch)
       );
     });
-  }, [isSearching, lowerSearch, schema]);
+  }, [approvalSchema, isSearching, lowerSearch]);
 
   /* ---- Active tab fields ---- */
   const activeFields = useMemo(() => {
-    if (!schema || isSearching) return [];
-    return Object.entries(schema).filter(([key, s]) => {
+    if (!approvalSchema || isSearching) return [];
+    return Object.entries(approvalSchema).filter(([key, s]) => {
       if (String(s.category ?? "general") !== activeCategory) return false;
       // The PluginsPanel replaces the raw enabled/disabled list inputs.
       if (activeCategory === "plugins" && (key === "plugins.enabled" || key === "plugins.disabled")) {
@@ -2475,7 +2487,7 @@ export default function ConfigPage() {
       }
       return true;
     });
-  }, [schema, activeCategory, isSearching]);
+  }, [approvalSchema, activeCategory, isSearching]);
 
   /* ---- Handlers ---- */
   const handleSave = async () => {

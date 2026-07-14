@@ -6974,6 +6974,12 @@ def _(rid, params: dict) -> dict:
         choice = str(params.get("choice") or "deny").strip().lower()
         if choice not in {"once", "session", "always", "deny"}:
             return _err(rid, 4002, "invalid approval choice")
+        if exact_realtor_beta_active() and choice in {"session", "always"}:
+            return _err(
+                rid,
+                4008,
+                "Realtor Beta approvals apply to one request only",
+            )
         # The Realtor Beta desktop always receives an opaque request ID with
         # approval.request.  Missing identity must fail closed rather than
         # falling back to the oldest concurrent command.  Stable retains the
@@ -7067,6 +7073,15 @@ def _(rid, params: dict) -> dict:
         # Accept case-insensitive input but persist the canonical casing.
         canon = {m.lower(): m for m in allowed_pm}
         resolved = canon.get(nv.lower())
+        canonicalized = False
+        if exact_realtor_beta_active() and nv.lower() in {
+            "acceptedits",
+            "bypasspermissions",
+            "off",
+            "smart",
+        }:
+            resolved = "default"
+            canonicalized = True
         if resolved is None:
             return _err(rid, 4002, f"unknown permission_mode: {value}")
         if session:
@@ -7086,7 +7101,15 @@ def _(rid, params: dict) -> dict:
         else:
             # No session (CLI / headless) → fall back to the global default.
             _write_config_key("approvals.permission_mode", resolved)
-        return _ok(rid, {"key": key, "value": resolved})
+        result = {"key": key, "value": resolved}
+        if canonicalized:
+            result.update(
+                {
+                    "canonicalized": True,
+                    "reason": "beta_human_review_required",
+                }
+            )
+        return _ok(rid, result)
 
     if key == "yolo":
         try:
@@ -7378,6 +7401,18 @@ def _(rid, params: dict) -> dict:
             except Exception:
                 override = None
             if override:
+                if exact_realtor_beta_active() and override not in {
+                    "default",
+                    "plan",
+                }:
+                    return _ok(
+                        rid,
+                        {
+                            "value": "default",
+                            "canonicalized": True,
+                            "reason": "beta_human_review_required",
+                        },
+                    )
                 return _ok(rid, {"value": override})
         approvals = _load_cfg().get("approvals")
         raw = (
@@ -7386,6 +7421,15 @@ def _(rid, params: dict) -> dict:
             else "default"
         )
         nv = canon.get(str(raw or "").strip().lower(), "default")
+        if exact_realtor_beta_active() and nv not in {"default", "plan"}:
+            return _ok(
+                rid,
+                {
+                    "value": "default",
+                    "canonicalized": True,
+                    "reason": "beta_human_review_required",
+                },
+            )
         return _ok(rid, {"value": nv})
     if key == "mtime":
         cfg_path = _elevate_home / "config.yaml"

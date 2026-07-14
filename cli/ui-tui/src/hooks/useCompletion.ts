@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import type { CompletionItem } from '../app/interfaces.js'
+import { filterApprovalCompletions } from '../domain/approval.js'
 import type { GatewayClient } from '../gatewayClient.js'
 import type { CompletionResponse } from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
@@ -61,7 +62,7 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
 
           const r = asRpcResult<CompletionResponse>(raw)
 
-          setCompletions(r?.items ?? [])
+          setCompletions(filterApprovalCompletions(r?.items ?? []))
           setCompIdx(0)
           setCompReplace(isSlash ? (r?.replace_from ?? 1) : pathReplace)
         })

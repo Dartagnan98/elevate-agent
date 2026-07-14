@@ -69,6 +69,14 @@ import {
   type ChatTimelineRole,
 } from "@/lib/chatTimeline";
 import { cn } from "@/lib/utils";
+import {
+  approvalChoicesForPolicy,
+  approvalSurfacePolicyForStatus,
+  permissionModeAvailable,
+  type ApprovalChoice,
+  type ApprovalSurfacePolicy,
+  type PermissionModeId,
+} from "@/lib/approval-ui-policy";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import {
   AlertCircle,
@@ -792,7 +800,7 @@ const DEFAULT_COMPOSER_AGENTS: ComposerAgent[] = [
    dedicated agent-runtime support lands — the selector still presents them
    so the UX is in place. */
 interface PermissionMode {
-  id: "default" | "acceptEdits" | "plan" | "bypassPermissions";
+  id: PermissionModeId;
   label: string;
   short: string;
   description: string;
@@ -837,9 +845,14 @@ const PERMISSION_MODES: PermissionMode[] = [
 
 const DEFAULT_PERMISSION_MODE = PERMISSION_MODES[0];
 
-function resolvePermissionMode(id: string | undefined | null): PermissionMode {
+function resolvePermissionMode(
+  id: string | undefined | null,
+  policy: ApprovalSurfacePolicy,
+): PermissionMode {
   return (
-    PERMISSION_MODES.find((mode) => mode.id === id) ?? DEFAULT_PERMISSION_MODE
+    PERMISSION_MODES.find(
+      (mode) => mode.id === id && permissionModeAvailable(mode.id, policy),
+    ) ?? DEFAULT_PERMISSION_MODE
   );
 }
 
@@ -3840,6 +3853,8 @@ export default function ChatPage() {
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [permissionModeId, setPermissionModeId] = useState<string>("default");
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const [approvalSurfacePolicy, setApprovalSurfacePolicy] =
+    useState<ApprovalSurfacePolicy>("restricted");
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [resumeFallback, setResumeFallback] = useState(false);
   const [portalRoot] = useState<HTMLElement | null>(() =>
@@ -9054,6 +9069,7 @@ export default function ChatPage() {
       .getStatus()
       .then((status) => {
         if (cancelled) return;
+        setApprovalSurfacePolicy(approvalSurfacePolicyForStatus(status));
         const root = status.project_root || status.elevate_home || "";
         const basename = root
           .replace(/\/+$/, "")
@@ -9460,6 +9476,7 @@ export default function ChatPage() {
                     internal file chips pinned for the whole session). */}
                 {pendingPrompt && (
                   <PendingPromptCard
+                    approvalChoices={approvalChoicesForPolicy(approvalSurfacePolicy)}
                     inFlight={
                       promptResponseInFlight ===
                       blockingPromptIdentity(pendingPrompt)
@@ -9696,7 +9713,13 @@ export default function ChatPage() {
                 micDevices={micDevices}
                 selectedMicId={selectedMicId}
                 voiceMenuOpen={voiceMenuOpen}
-                permissionMode={resolvePermissionMode(permissionModeId)}
+                permissionMode={resolvePermissionMode(
+                  permissionModeId,
+                  approvalSurfacePolicy,
+                )}
+                permissionModes={PERMISSION_MODES.filter((mode) =>
+                  permissionModeAvailable(mode.id, approvalSurfacePolicy),
+                )}
                 permissionMenuOpen={permissionMenuOpen}
                 onTogglePermissionMenu={() =>
                   setPermissionMenuOpen((open) => !open)
@@ -10253,6 +10276,7 @@ function ComposerActionBar({
   onToggleVoice,
   onToggleVoiceMenu,
   permissionMode,
+  permissionModes,
   permissionMenuOpen,
   onTogglePermissionMenu,
   onSelectPermissionMode,
@@ -10278,6 +10302,7 @@ function ComposerActionBar({
   onToggleVoice(): void;
   onToggleVoiceMenu(): void;
   permissionMode: PermissionMode;
+  permissionModes: readonly PermissionMode[];
   permissionMenuOpen: boolean;
   onTogglePermissionMenu(): void;
   onSelectPermissionMode(mode: PermissionMode): void;
@@ -10404,7 +10429,7 @@ function ComposerActionBar({
                 <div className={composerMenuLabelClass}>
                   Permission mode
                 </div>
-                {PERMISSION_MODES.map((mode) => (
+                {permissionModes.map((mode) => (
                   <button
                     key={mode.id}
                     type="button"
@@ -11911,12 +11936,14 @@ function ChatActivityDigest({
 }
 
 function PendingPromptCard({
+  approvalChoices,
   inFlight,
   onRespond,
   pendingPrompt,
   promptValue,
   setPromptValue,
 }: {
+  approvalChoices: readonly ApprovalChoice[];
   inFlight: boolean;
   onRespond(value: string): void;
   pendingPrompt: PendingPrompt;
@@ -11924,6 +11951,15 @@ function PendingPromptCard({
   setPromptValue(value: string): void;
 }) {
   if (pendingPrompt.type === "approval") {
+    const choiceUi: Record<
+      ApprovalChoice,
+      { label: string; variant?: "destructive" | "outline" }
+    > = {
+      always: { label: "Always", variant: "outline" },
+      deny: { label: "Deny", variant: "destructive" },
+      once: { label: "Allow Once" },
+      session: { label: "Allow Session", variant: "outline" },
+    };
     return (
       <Card className="rounded-[10px] border-[color-mix(in_srgb,var(--chat-warning)_38%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_10%,var(--chat-bg))] p-3 text-[var(--chat-text)] shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
         <div className="flex items-start gap-3">
@@ -11939,37 +11975,17 @@ function PendingPromptCard({
               </pre>
             )}
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                disabled={inFlight}
-                size="sm"
-                onClick={() => onRespond("once")}
-              >
-                Allow Once
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={inFlight}
-                onClick={() => onRespond("session")}
-              >
-                Allow Session
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={inFlight}
-                onClick={() => onRespond("always")}
-              >
-                Always
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                disabled={inFlight}
-                onClick={() => onRespond("deny")}
-              >
-                Deny
-              </Button>
+              {approvalChoices.map((choice) => (
+                <Button
+                  disabled={inFlight}
+                  key={choice}
+                  onClick={() => onRespond(choice)}
+                  size="sm"
+                  variant={choiceUi[choice].variant}
+                >
+                  {choiceUi[choice].label}
+                </Button>
+              ))}
             </div>
           </div>
         </div>

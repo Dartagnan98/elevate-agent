@@ -75,6 +75,25 @@ describe('createSlashHandler', () => {
     expect(ctx.transcript.sys).toHaveBeenCalledWith(expect.stringContaining('usage: /skills'))
   })
 
+  it('keeps the yolo bypass command local and unavailable in exact Realtor Beta', () => {
+    const previous = process.env.ELEVATE_RELEASE_CHANNEL
+    process.env.ELEVATE_RELEASE_CHANNEL = 'beta'
+    const ctx = buildCtx()
+
+    try {
+      expect(createSlashHandler(ctx)('/yolo')).toBe(true)
+      expect(ctx.transcript.sys).toHaveBeenCalledWith('Realtor Beta keeps command review on')
+      expect(ctx.gateway.rpc).not.toHaveBeenCalled()
+      expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
+    } finally {
+      if (previous === undefined) {
+        delete process.env.ELEVATE_RELEASE_CHANNEL
+      } else {
+        process.env.ELEVATE_RELEASE_CHANNEL = previous
+      }
+    }
+  })
+
   it('cycles details mode and persists it', async () => {
     const ctx = buildCtx()
 
