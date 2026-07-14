@@ -52,4 +52,10 @@ describe("chat prompt queue", () => {
       __chatPageTestables.settleQueuedDelivery(current, "queued-1", true),
     ).toEqual([current[1]]);
   });
+
+  it("uses the durable user message id as the prompt correlation root", () => {
+    expect(source).toMatch(
+      /payload\.user_message_id = effectiveUserMessageId;\s*payload\.correlation_id = effectiveUserMessageId;/,
+    );
+  });
 });

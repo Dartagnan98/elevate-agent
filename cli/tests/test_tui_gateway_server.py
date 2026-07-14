@@ -206,11 +206,15 @@ def test_background_terminal_payload_marks_clarification_needs_input():
 def test_tui_session_context_is_explicit_and_session_keyed():
     from gateway.session_context import get_session_env
 
-    tokens = server._set_session_context("session-key-1")
+    tokens = server._set_session_context(
+        "session-key-1",
+        correlation_id="user-turn-1",
+    )
     try:
         assert get_session_env("ELEVATE_SESSION_PLATFORM") == "tui"
         assert get_session_env("ELEVATE_SESSION_CHAT_ID") == "session-key-1"
         assert get_session_env("ELEVATE_SESSION_KEY") == "session-key-1"
+        assert get_session_env("ELEVATE_SESSION_MESSAGE_ID") == "user-turn-1"
     finally:
         server._clear_session_context(tokens)
 
@@ -225,7 +229,10 @@ def test_emit_records_content_free_session_breadcrumb(monkeypatch):
         "record_session_event",
         lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
     )
-    server._sessions["sid"] = {"events_seq": 7}
+    server._sessions["sid"] = {
+        "correlation_id": "user-turn-1",
+        "events_seq": 7,
+    }
     try:
         server._emit(
             "message.complete",
@@ -249,6 +256,7 @@ def test_emit_records_content_free_session_breadcrumb(monkeypatch):
     event_type, kwargs = calls[0]
     assert event_type == "message.complete"
     assert kwargs["session_id"] == "sid"
+    assert kwargs["correlation_id"] == "user-turn-1"
     assert kwargs["source"] == "tui_gateway"
     assert kwargs["component"] == "tui_gateway.server"
     assert kwargs["payload"] == {
@@ -261,6 +269,55 @@ def test_emit_records_content_free_session_breadcrumb(monkeypatch):
         "reasoning_chars": len("private reasoning"),
         "text_chars": len("raw answer"),
     }
+
+
+def test_emit_preserves_tool_identity_under_root_correlation(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    calls = []
+    monkeypatch.setattr(server, "write_json", lambda _obj: True)
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: calls.append((event_type, kwargs)) or True,
+    )
+    server._sessions["sid"] = {
+        "correlation_id": "user-turn-1",
+        "events_seq": 8,
+    }
+    try:
+        server._emit(
+            "tool.start",
+            "sid",
+            {
+                "tool_id": "tool-1",
+                "name": "document_search",
+                "child_session_id": "child-1",
+                "task_id": "task-1",
+                "context": "private tool arguments",
+            },
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert calls == [
+        (
+            "tool.start",
+            {
+                "session_id": "sid",
+                "correlation_id": "user-turn-1",
+                "payload": {
+                    "event_seq": 8,
+                    "child_session_id": "child-1",
+                    "task_id": "task-1",
+                    "tool_id": "tool-1",
+                    "tool_name": "document_search",
+                },
+                "source": "tui_gateway",
+                "component": "tui_gateway.server",
+            },
+        )
+    ]
 
 
 def test_emit_throttles_delta_recorder(monkeypatch):
@@ -1811,11 +1868,17 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
 
     db = SessionDB(db_path=tmp_path / "state.db")
     db.create_session("session-key", source="tui")
-    calls = {"runs": 0}
+    calls = {"correlation_ids": [], "runs": 0}
+    recorder_calls = _capture_session_recorder(monkeypatch)
 
     class _Agent:
         def run_conversation(self, prompt, conversation_history=None, **kwargs):
+            from gateway.session_context import get_session_env
+
             calls["runs"] += 1
+            calls["correlation_ids"].append(
+                get_session_env("ELEVATE_SESSION_MESSAGE_ID")
+            )
             return {
                 "final_response": "",
                 "messages": [
@@ -1837,7 +1900,9 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
             assert [(row["role"], row["content"]) for row in rows] == [
                 ("user", "prepare the listing"),
             ]
-            assert db.get_recoverable_prompt_receipt("session-key")["status"] == "pending"
+            receipt = db.get_recoverable_prompt_receipt("session-key")
+            assert receipt["status"] == "pending"
+            assert receipt["payload"]["correlation_id"] == "user-receipt-1"
 
     class _ImmediateThread:
         def __init__(self, target=None, daemon=None):
@@ -1856,6 +1921,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
     request = {
         "method": "prompt.submit",
         "params": {
+            "correlation_id": "client-cannot-override-root",
             "session_id": "sid",
             "text": "prepare the listing",
             "user_message_id": "user-receipt-1",
@@ -1865,8 +1931,19 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
         first = server.handle_request({"id": "rpc-1", **request})
 
         assert first["result"]["status"] == "streaming"
+        assert first["result"]["correlation_id"] == "user-receipt-1"
+        assert server._sessions["sid"]["correlation_id"] == "user-receipt-1"
         assert calls["runs"] == 0
         assert db.get_messages("session-key")[0]["client_message_id"] == "user-receipt-1"
+        accepted = [call for call in recorder_calls if call[0] == "prompt.accepted"]
+        assert len(accepted) == 1
+        assert accepted[0][1]["correlation_id"] == "user-receipt-1"
+        assert accepted[0][1]["payload"] == {
+            "assistant_message_id": first["result"]["message_id"],
+            "recovered": False,
+            "status": "accepted",
+            "user_message_id": "user-receipt-1",
+        }
 
         # Simulate a process crash after commit but before the worker target ran:
         # all in-memory ack/claim state disappears, while state.db survives.
@@ -1885,6 +1962,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
 
         assert server._recover_pending_prompt("sid", server._sessions["sid"]) is True
         assert calls["runs"] == 1
+        assert calls["correlation_ids"] == ["user-receipt-1"]
         assert len(db.get_messages("session-key")) == 1
         assert db.get_recoverable_prompt_receipt("session-key") is None
     finally:

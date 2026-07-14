@@ -7131,6 +7131,7 @@ export default function ChatPage() {
         // external transcript-store flag is off.
         if (effectiveUserMessageId) {
           payload.user_message_id = effectiveUserMessageId;
+          payload.correlation_id = effectiveUserMessageId;
         }
 
         const accepted = await gw.request<{

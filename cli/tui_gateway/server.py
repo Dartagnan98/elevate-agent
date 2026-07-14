@@ -591,7 +591,11 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
 
     clean: dict[str, Any] = {}
     session = _sessions.get(sid)
+    correlation_id = str(payload.get("correlation_id") or "")
     if session is not None:
+        correlation_id = correlation_id or str(
+            session.get("correlation_id") or ""
+        )
         try:
             clean["event_seq"] = int(session.get("events_seq", 0) or 0)
         except (TypeError, ValueError):
@@ -610,6 +614,7 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
         "source",
         "status",
         "task_id",
+        "tool_id",
         "turn_id",
         "user_message_id",
         "where",
@@ -617,6 +622,10 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
         value = payload.get(key)
         if isinstance(value, str) and value:
             clean[key] = value
+
+    tool_name = payload.get("tool_name") or payload.get("name")
+    if isinstance(tool_name, str) and tool_name:
+        clean["tool_name"] = tool_name
 
     for key in ("followup", "failed", "noop", "running", "success"):
         value = payload.get(key)
@@ -650,6 +659,7 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
         record_session_event(
             event,
             session_id=sid,
+            correlation_id=correlation_id or None,
             payload=clean,
             source="tui_gateway",
             component="tui_gateway.server",
@@ -668,13 +678,20 @@ def _record_backend_event(
 ) -> None:
     if not sid:
         return
-    clean = payload if isinstance(payload, dict) else {}
+    clean = dict(payload) if isinstance(payload, dict) else {}
+    session = _sessions.get(sid)
+    correlation_id = str(clean.pop("correlation_id", "") or "")
+    if session is not None:
+        correlation_id = correlation_id or str(
+            session.get("correlation_id") or ""
+        )
     try:
         from elevate_cli.diagnostics.session_recorder import record_session_event
 
         record_session_event(
             event,
             session_id=sid,
+            correlation_id=correlation_id or None,
             payload=clean,
             severity=severity,
             source=source,
@@ -761,6 +778,7 @@ def _tool_error_kind(result: str, data: dict | None) -> str | None:
 
 def _record_tool_completion_friction(
     sid: str,
+    tool_call_id: str,
     name: str,
     result: str,
     duration_s: float | None,
@@ -773,6 +791,7 @@ def _record_tool_completion_friction(
         if kind:
             outcome = "recovered" if kind == "fallback" else "failed"
             payload = {
+                "tool_id": tool_call_id,
                 "tool_name": name,
                 "stage": _tool_stage(name),
                 "friction_kind": kind,
@@ -794,6 +813,7 @@ def _record_tool_completion_friction(
     error_kind = _tool_error_kind(result or "", data)
     if error_kind:
         payload = {
+            "tool_id": tool_call_id,
             "tool_name": name,
             "stage": _tool_stage(name),
             "friction_kind": error_kind,
@@ -1157,7 +1177,7 @@ def _save_cfg(cfg: dict):
             _cfg_mtime = None
 
 
-def _set_session_context(session_key: str) -> list:
+def _set_session_context(session_key: str, *, correlation_id: str = "") -> list:
     try:
         from gateway.session_context import set_session_vars
 
@@ -1171,6 +1191,7 @@ def _set_session_context(session_key: str) -> list:
             platform="tui",
             chat_id=session_key,
             session_key=session_key,
+            message_id=correlation_id,
         )
     except Exception:
         return []
@@ -1961,7 +1982,7 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     duration_s = completed_at - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
-    _record_tool_completion_friction(sid, name, result, duration_s)
+    _record_tool_completion_friction(sid, tool_call_id, name, result, duration_s)
     try:
         from agent.display import _detect_tool_failure
 
@@ -4542,6 +4563,7 @@ def _recover_pending_prompt(sid: str, session: dict) -> bool:
         "session_id": sid,
         "text": payload.get("text", ""),
         "user_message_id": receipt.get("client_message_id"),
+        "correlation_id": receipt.get("client_message_id"),
     }
     if isinstance(payload.get("persist_user_message"), str):
         params["persist_user_message"] = payload["persist_user_message"]
@@ -4806,7 +4828,12 @@ def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
     return False
 
 
-def _make_async_delegate_sink(sid: str, session: dict):
+def _make_async_delegate_sink(
+    sid: str,
+    session: dict,
+    *,
+    correlation_id: str = "",
+):
     """Build the completion callback delegate_task invokes when an async
     (non-blocking) delegation finishes.
 
@@ -4858,6 +4885,11 @@ def _make_async_delegate_sink(sid: str, session: dict):
                         **({"error": error} if error else {}),
                         "summary": str(r.get("summary") or "")[:600],
                         "child_session_id": r.get("child_session_id"),
+                        **(
+                            {"correlation_id": correlation_id}
+                            if correlation_id
+                            else {}
+                        ),
                         "goal": r.get("goal"),
                     },
                 )
@@ -4868,7 +4900,15 @@ def _make_async_delegate_sink(sid: str, session: dict):
             _emit(
                 "delegate.complete",
                 sid,
-                {"task_id": task_id, "status": "complete"},
+                {
+                    "task_id": task_id,
+                    "status": "complete",
+                    **(
+                        {"correlation_id": correlation_id}
+                        if correlation_id
+                        else {}
+                    ),
+                },
             )
 
             # 3) Park the result, then watch for idle. If the user is mid-turn
@@ -5048,6 +5088,7 @@ def _(rid, params: dict) -> dict:
                         "status": "streaming",
                         "duplicate": True,
                         "started": False,
+                        "correlation_id": turn_ids["user"],
                         "user_message_id": turn_ids["user"],
                         "message_id": last_ack.get("message_id"),
                     },
@@ -5065,6 +5106,7 @@ def _(rid, params: dict) -> dict:
                 if isinstance(persist_user_message, str)
                 else None
             ),
+            "correlation_id": turn_ids["user"],
             "text": text,
         }
         with _prompt_claims_lock:
@@ -5082,6 +5124,7 @@ def _(rid, params: dict) -> dict:
                         "status": "streaming",
                         "duplicate": True,
                         "started": False,
+                        "correlation_id": turn_ids["user"],
                         "user_message_id": turn_ids["user"],
                         "message_id": active.get("message_id"),
                     },
@@ -5126,6 +5169,7 @@ def _(rid, params: dict) -> dict:
                             if receipt_status == "waiting_input"
                             else receipt_status
                         ),
+                        "correlation_id": turn_ids["user"],
                         "user_message_id": turn_ids["user"],
                         "message_id": turn_ids["assistant"],
                     },
@@ -5139,6 +5183,7 @@ def _(rid, params: dict) -> dict:
                         "status": "streaming",
                         "duplicate": True,
                         "started": False,
+                        "correlation_id": turn_ids["user"],
                         "user_message_id": turn_ids["user"],
                         "message_id": turn_ids["assistant"],
                     },
@@ -5160,6 +5205,7 @@ def _(rid, params: dict) -> dict:
             _trim_recovered_prompt_from_history(session, turn_ids["user"])
         session["running"] = True
         session["last_prompt_ack"] = {
+            "correlation_id": turn_ids["user"],
             "message_id": turn_ids["assistant"],
             "text": receipt_text,
             "user_message_id": turn_ids["user"],
@@ -5176,9 +5222,21 @@ def _(rid, params: dict) -> dict:
         session["attached_videos"] = []
         files = list(canonical_payload.get("attached_files") or [])
         session["attached_files"] = []
+        session["correlation_id"] = turn_ids["user"]
 
     receipt_user_id = turn_ids["user"]
     receipt_assistant_id = turn_ids["assistant"]
+    _record_backend_event(
+        "prompt.accepted",
+        sid,
+        {
+            "assistant_message_id": receipt_assistant_id,
+            "correlation_id": receipt_user_id,
+            "recovered": not receipt_inserted,
+            "status": "accepted",
+            "user_message_id": receipt_user_id,
+        },
+    )
 
     def run():
         approval_token = None
@@ -5268,7 +5326,11 @@ def _(rid, params: dict) -> dict:
             # the parent. Interactive dashboard sessions only — CLI/cron never
             # set this, so they keep the synchronous path. Idempotent per turn.
             try:
-                agent._async_delegate_sink = _make_async_delegate_sink(sid, session)
+                agent._async_delegate_sink = _make_async_delegate_sink(
+                    sid,
+                    session,
+                    correlation_id=receipt_user_id,
+                )
             except Exception:
                 logger.debug("could not attach async delegate sink", exc_info=True)
             from tools.approval import (
@@ -5277,7 +5339,10 @@ def _(rid, params: dict) -> dict:
             )
 
             approval_token = set_current_session_key(session["session_key"])
-            session_tokens = _set_session_context(session["session_key"])
+            session_tokens = _set_session_context(
+                session["session_key"],
+                correlation_id=receipt_user_id,
+            )
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
@@ -5825,6 +5890,7 @@ def _(rid, params: dict) -> dict:
             "status": "streaming",
             "duplicate": not receipt_inserted,
             "recovered": not receipt_inserted,
+            "correlation_id": ack_user_id,
             "user_message_id": ack_user_id,
             "message_id": ack_assistant_id,
         },

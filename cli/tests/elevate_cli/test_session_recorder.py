@@ -287,6 +287,47 @@ def test_collect_matches_child_and_task_ids(recorder_home):
     assert [event["task_id"] for event in by_task["events"]] == ["task-2"]
 
 
+def test_collect_filters_correlation_and_preserves_subordinate_ids(recorder_home):
+    assert recorder.record_session_event(
+        "tool.complete",
+        session_id="parent",
+        correlation_id="user-turn-1",
+        payload={
+            "child_session_id": "child-1",
+            "status": "complete",
+            "task_id": "task-1",
+            "tool_id": "tool-1",
+            "tool_name": "document_search",
+        },
+    )
+    assert recorder.record_session_event(
+        "tool.complete",
+        session_id="parent",
+        correlation_id="user-turn-2",
+        payload={
+            "status": "complete",
+            "tool_id": "tool-2",
+            "tool_name": "terminal",
+        },
+    )
+
+    result = recorder.collect_session_events(
+        correlation_id="user-turn-1",
+        since_seconds=60,
+    )
+
+    assert result["report"]["events_written"] == 1
+    event = result["events"][0]
+    assert event["correlation_id"] == "user-turn-1"
+    assert event["payload"] == {
+        "child_session_id": "child-1",
+        "status": "complete",
+        "task_id": "task-1",
+        "tool_id": "tool-1",
+        "tool_name": "document_search",
+    }
+
+
 def test_kill_switch_prevents_file_creation(recorder_home, monkeypatch):
     monkeypatch.setenv("ELEVATE_SESSION_RECORDER", "off")
 

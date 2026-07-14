@@ -86,6 +86,7 @@ _SAFE_STATE_KEYS = {
     "backend_build",
     "child_session_id",
     "component",
+    "correlation_id",
     "end_reason",
     "error_class",
     "error_message",
@@ -103,6 +104,7 @@ _SAFE_STATE_KEYS = {
     "stage",
     "status",
     "task_id",
+    "tool_id",
     "tool_name",
     "turn_id",
     "user_message_id",
@@ -338,6 +340,7 @@ def sanitize_recorded_event(event: dict[str, Any]) -> tuple[dict[str, Any], dict
         "session_id",
         "parent_session_id",
         "child_session_id",
+        "correlation_id",
         "turn_id",
         "task_id",
         "app_version",
@@ -370,6 +373,7 @@ def build_session_event(
     component: str | None = None,
     parent_session_id: str | None = None,
     child_session_id: str | None = None,
+    correlation_id: str | None = None,
     task_id: str | None = None,
     app_version: str | None = None,
     frontend_asset: str | None = None,
@@ -402,6 +406,7 @@ def build_session_event(
         "session_id": session_id,
         "parent_session_id": parent_session_id,
         "child_session_id": child_session_id,
+        "correlation_id": correlation_id,
         "turn_id": turn_id,
         "task_id": task_id,
         "app_version": app_version,
@@ -559,6 +564,7 @@ def record_session_event(
     component: str | None = None,
     parent_session_id: str | None = None,
     child_session_id: str | None = None,
+    correlation_id: str | None = None,
     task_id: str | None = None,
     app_version: str | None = None,
     frontend_asset: str | None = None,
@@ -580,6 +586,7 @@ def record_session_event(
         component=component,
         parent_session_id=parent_session_id,
         child_session_id=child_session_id,
+        correlation_id=correlation_id,
         task_id=task_id,
         app_version=app_version,
         frontend_asset=frontend_asset,
@@ -669,10 +676,20 @@ def _matches_event(
     *,
     session_id: str | None,
     child_session_id: str | None,
+    correlation_id: str | None,
     task_id: str | None,
     include_lineage: bool,
 ) -> bool:
-    wanted = {v for v in (session_id, child_session_id, task_id) if v}
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if (
+        correlation_id
+        and event.get("correlation_id") != correlation_id
+        and payload.get("correlation_id") != correlation_id
+    ):
+        return False
+
+    wanted = {value for value in (session_id, child_session_id, task_id) if value}
     if not wanted:
         return True
 
@@ -683,11 +700,9 @@ def _matches_event(
     for field in fields:
         if event.get(field) in wanted:
             return True
-    payload = event.get("payload")
-    if isinstance(payload, dict):
-        for field in fields:
-            if payload.get(field) in wanted:
-                return True
+    for field in fields:
+        if payload.get(field) in wanted:
+            return True
     return False
 
 
@@ -695,6 +710,7 @@ def collect_session_events(
     session_id: str | None = None,
     *,
     child_session_id: str | None = None,
+    correlation_id: str | None = None,
     task_id: str | None = None,
     since_seconds: int | float | None = 1800,
     include_lineage: bool = True,
@@ -735,6 +751,7 @@ def collect_session_events(
                 event,
                 session_id=session_id,
                 child_session_id=child_session_id,
+                correlation_id=correlation_id,
                 task_id=task_id,
                 include_lineage=include_lineage,
             ):
