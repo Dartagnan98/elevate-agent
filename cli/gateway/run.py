@@ -996,6 +996,103 @@ def _try_resolve_fallback_provider() -> dict | None:
     return None
 
 
+def _cached_agent_for_model_switch(runner: "GatewayRunner", session_key: str):
+    """Read the current cached agent without mutating cache state."""
+    cache_lock = getattr(runner, "_agent_cache_lock", None)
+    cache = getattr(runner, "_agent_cache", None)
+    if not cache_lock or cache is None:
+        return None
+    with cache_lock:
+        entry = cache.get(session_key)
+    if entry and entry[0] is not None:
+        return entry[0]
+    return None
+
+
+def _resolve_beta_gateway_model_switch_runtime(
+    *,
+    requested_model,
+    requested_provider,
+    current_model,
+    current_provider,
+    cached_agent=None,
+) -> dict | None:
+    """Validate a Beta model switch and return current-profile Codex runtime.
+
+    This function is intentionally called both before generic model-switch
+    resolution and again immediately before state mutation.  The first call
+    prevents alternate-provider discovery/clients; the second validates the
+    exact cached agent and live config/env/auth state that will be mutated.
+    """
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    if not beta_provider_policy_active():
+        return None
+
+    canonical_beta_provider(requested_provider, source="requested model provider")
+    canonical_beta_provider(current_provider, source="current model provider")
+    canonical_current_model = beta_model_or_default(
+        current_model, source="current model"
+    )
+    canonical_requested_model = beta_model_or_default(
+        requested_model or canonical_current_model,
+        source="requested model",
+    )
+
+    if cached_agent is not None:
+        canonical_beta_provider(
+            getattr(cached_agent, "provider", None),
+            source="cached agent provider",
+        )
+        beta_model_or_default(
+            getattr(cached_agent, "model", None),
+            source="cached agent model",
+        )
+
+    from elevate_cli.auth import DEFAULT_CODEX_BASE_URL
+    from elevate_cli.runtime_provider import resolve_runtime_provider
+
+    runtime = resolve_runtime_provider(
+        requested=BETA_ALLOWED_PROVIDER,
+        target_model=canonical_requested_model,
+    )
+    canonical_beta_provider(runtime.get("provider"), source="resolved model provider")
+    expected_auth_store = str(get_elevate_home() / "auth.json")
+    if (
+        runtime.get("api_mode") != "codex_responses"
+        or runtime.get("source") != "elevate-auth-store"
+        or runtime.get("auth_store") != expected_auth_store
+        or runtime.get("credential_pool") is not None
+        or str(runtime.get("base_url") or "").rstrip("/")
+        != DEFAULT_CODEX_BASE_URL.rstrip("/")
+        or not str(runtime.get("api_key") or "").strip()
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta model switching requires current-profile OpenAI "
+            "Codex provider-state auth.",
+            code="beta_codex_runtime_not_local",
+        )
+
+    return {
+        "current_model": canonical_current_model,
+        "requested_model": canonical_requested_model,
+        "provider": BETA_ALLOWED_PROVIDER,
+        "runtime": runtime,
+    }
+
+
+def _beta_gateway_model_switch_error(exc: Exception) -> str:
+    """Keep typed Beta policy failures visible on chat command surfaces."""
+    code = getattr(exc, "code", "beta_provider_policy_failed")
+    return f"Error [{code}]: {exc}"
+
+
 def _build_media_placeholder(event) -> str:
     """Build a text placeholder for media-only events so they aren't dropped.
 
@@ -8090,10 +8187,16 @@ class GatewayRunner:
 
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
+        show_picker = not model_input and not explicit_provider
 
         # Read current model/provider from config
         current_model = ""
-        current_provider = "openrouter"
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        # Stable keeps its historical OpenRouter default.  Exact Beta uses
+        # ``auto`` so an absent provider is canonicalized to Codex instead of
+        # looking like a real, configured OpenRouter selection.
+        current_provider = "auto" if beta_provider_policy_active() else "openrouter"
         current_base_url = ""
         current_api_key = ""
         user_provs = None
@@ -8127,8 +8230,39 @@ class GatewayRunner:
             current_base_url = override.get("base_url", current_base_url)
             current_api_key = override.get("api_key", current_api_key)
 
+        cached_agent = _cached_agent_for_model_switch(self, session_key)
+        try:
+            beta_switch = _resolve_beta_gateway_model_switch_runtime(
+                requested_model=model_input or current_model,
+                requested_provider=explicit_provider,
+                current_model=current_model,
+                current_provider=current_provider,
+                cached_agent=cached_agent,
+            )
+        except Exception as exc:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                return _beta_gateway_model_switch_error(exc)
+            raise
+
+        if beta_switch is not None:
+            safe_runtime = beta_switch["runtime"]
+            current_model = beta_switch["current_model"]
+            current_provider = beta_switch["provider"]
+            current_base_url = safe_runtime["base_url"]
+            current_api_key = safe_runtime["api_key"]
+            # Beta never exposes custom/alternate provider definitions to the
+            # generic switch pipeline.  A provider-only command resolves to
+            # the server-owned default model instead of endpoint discovery.
+            user_provs = None
+            custom_provs = None
+            if not show_picker:
+                model_input = beta_switch["requested_model"]
+                explicit_provider = beta_switch["provider"]
+
         # No args: show interactive picker (Telegram/Discord) or text list
-        if not model_input and not explicit_provider:
+        if show_picker:
             # Try interactive picker if the platform supports it
             adapter = self.adapters.get(source.platform)
             has_picker = (
@@ -8137,16 +8271,29 @@ class GatewayRunner:
             )
 
             if has_picker:
-                try:
-                    providers = list_authenticated_providers(
-                        current_provider=current_provider,
-                        current_base_url=current_base_url,
-                        user_providers=user_provs,
-                        custom_providers=custom_provs,
-                        max_models=50,
-                    )
-                except Exception:
-                    providers = []
+                if beta_switch is not None:
+                    from elevate_cli.beta_provider_policy import BETA_ALLOWED_MODELS
+
+                    providers = [
+                        {
+                            "slug": beta_switch["provider"],
+                            "name": "OpenAI Codex",
+                            "models": list(BETA_ALLOWED_MODELS),
+                            "total_models": len(BETA_ALLOWED_MODELS),
+                            "is_current": True,
+                        }
+                    ]
+                else:
+                    try:
+                        providers = list_authenticated_providers(
+                            current_provider=current_provider,
+                            current_base_url=current_base_url,
+                            user_providers=user_provs,
+                            custom_providers=custom_provs,
+                            max_models=50,
+                        )
+                    except Exception:
+                        providers = []
 
                 if providers:
                     # Build a callback closure for when the user picks a model.
@@ -8162,35 +8309,102 @@ class GatewayRunner:
                         _chat_id: str, model_id: str, provider_slug: str
                     ) -> str:
                         """Perform the model switch and return confirmation text."""
+                        live_current_model = _cur_model
+                        live_current_provider = _cur_provider
+                        live_current_base_url = _cur_base_url
+                        live_current_api_key = _cur_api_key
+                        live_user_provs = user_provs
+                        live_custom_provs = custom_provs
+                        if beta_switch is not None:
+                            live_override = _self._session_model_overrides.get(
+                                _session_key, {}
+                            )
+                            if live_override:
+                                live_current_model = live_override.get(
+                                    "model", live_current_model
+                                )
+                                live_current_provider = live_override.get(
+                                    "provider", live_current_provider
+                                )
+                            live_beta = _resolve_beta_gateway_model_switch_runtime(
+                                requested_model=model_id,
+                                requested_provider=provider_slug,
+                                current_model=live_current_model,
+                                current_provider=live_current_provider,
+                                cached_agent=_cached_agent_for_model_switch(
+                                    _self, _session_key
+                                ),
+                            )
+                            live_runtime = live_beta["runtime"]
+                            model_id = live_beta["requested_model"]
+                            provider_slug = live_beta["provider"]
+                            live_current_model = live_beta["current_model"]
+                            live_current_provider = live_beta["provider"]
+                            live_current_base_url = live_runtime["base_url"]
+                            live_current_api_key = live_runtime["api_key"]
+                            live_user_provs = None
+                            live_custom_provs = None
+
                         result = _switch_model(
                             raw_input=model_id,
-                            current_provider=_cur_provider,
-                            current_model=_cur_model,
-                            current_base_url=_cur_base_url,
-                            current_api_key=_cur_api_key,
+                            current_provider=live_current_provider,
+                            current_model=live_current_model,
+                            current_base_url=live_current_base_url,
+                            current_api_key=live_current_api_key,
                             is_global=False,
                             explicit_provider=provider_slug,
-                            user_providers=user_provs,
-                            custom_providers=custom_provs,
+                            user_providers=live_user_provs,
+                            custom_providers=live_custom_provs,
                         )
                         if not result.success:
                             return f"Error: {result.error_message}"
 
-                        # Update cached agent in-place
-                        cached_entry = None
-                        _cache_lock = getattr(_self, "_agent_cache_lock", None)
-                        _cache = getattr(_self, "_agent_cache", None)
-                        if _cache_lock and _cache is not None:
-                            with _cache_lock:
-                                cached_entry = _cache.get(_session_key)
-                        if cached_entry and cached_entry[0] is not None:
+                        effective_model = result.new_model
+                        effective_provider = result.target_provider
+                        effective_api_key = result.api_key
+                        effective_base_url = result.base_url
+                        effective_api_mode = result.api_mode
+                        effective_provider_label = (
+                            result.provider_label or effective_provider
+                        )
+                        exact_cached_agent = _cached_agent_for_model_switch(
+                            _self, _session_key
+                        )
+                        if beta_switch is not None:
+                            post_override = _self._session_model_overrides.get(
+                                _session_key, {}
+                            )
+                            post_current_model = post_override.get(
+                                "model", live_current_model
+                            )
+                            post_current_provider = post_override.get(
+                                "provider", live_current_provider
+                            )
+                            post_beta = _resolve_beta_gateway_model_switch_runtime(
+                                requested_model=result.new_model,
+                                requested_provider=result.target_provider,
+                                current_model=post_current_model,
+                                current_provider=post_current_provider,
+                                cached_agent=exact_cached_agent,
+                            )
+                            post_runtime = post_beta["runtime"]
+                            effective_model = post_beta["requested_model"]
+                            effective_provider = post_beta["provider"]
+                            effective_api_key = post_runtime["api_key"]
+                            effective_base_url = post_runtime["base_url"]
+                            effective_api_mode = post_runtime["api_mode"]
+                            effective_provider_label = "OpenAI Codex"
+
+                        # Every Beta validation and auth read above completed
+                        # before the first cached-agent or runner-state mutation.
+                        if exact_cached_agent is not None:
                             try:
-                                cached_entry[0].switch_model(
-                                    new_model=result.new_model,
-                                    new_provider=result.target_provider,
-                                    api_key=result.api_key,
-                                    base_url=result.base_url,
-                                    api_mode=result.api_mode,
+                                exact_cached_agent.switch_model(
+                                    new_model=effective_model,
+                                    new_provider=effective_provider,
+                                    api_key=effective_api_key,
+                                    base_url=effective_base_url,
+                                    api_mode=effective_api_mode,
                                 )
                             except Exception as exc:
                                 logger.warning("Picker model switch failed for cached agent: %s", exc)
@@ -8199,16 +8413,16 @@ class GatewayRunner:
                         if not hasattr(_self, "_pending_model_notes"):
                             _self._pending_model_notes = {}
                         _self._pending_model_notes[_session_key] = (
-                            f"[Note: model was just switched from {_cur_model} to {result.new_model} "
-                            f"via {result.provider_label or result.target_provider}. "
+                            f"[Note: model was just switched from {live_current_model} to {effective_model} "
+                            f"via {effective_provider_label}. "
                             f"Adjust your self-identification accordingly.]"
                         )
                         _self._session_model_overrides[_session_key] = {
-                            "model": result.new_model,
-                            "provider": result.target_provider,
-                            "api_key": result.api_key,
-                            "base_url": result.base_url,
-                            "api_mode": result.api_mode,
+                            "model": effective_model,
+                            "provider": effective_provider,
+                            "api_key": effective_api_key,
+                            "base_url": effective_base_url,
+                            "api_mode": effective_api_mode,
                         }
 
                         # Evict cached agent so the next turn creates a fresh
@@ -8217,8 +8431,8 @@ class GatewayRunner:
                         _self._evict_cached_agent(_session_key)
 
                         # Build confirmation text
-                        plabel = result.provider_label or result.target_provider
-                        lines = [f"Model switched to `{result.new_model}`"]
+                        plabel = effective_provider_label
+                        lines = [f"Model switched to `{effective_model}`"]
                         lines.append(f"Provider: {plabel}")
                         mi = result.model_info
                         if mi:
@@ -8250,13 +8464,26 @@ class GatewayRunner:
             lines = [f"Current: `{current_model or 'unknown'}` on {provider_label}", ""]
 
             try:
-                providers = list_authenticated_providers(
-                    current_provider=current_provider,
-                    current_base_url=current_base_url,
-                    user_providers=user_provs,
-                    custom_providers=custom_provs,
-                    max_models=5,
-                )
+                if beta_switch is not None:
+                    from elevate_cli.beta_provider_policy import BETA_ALLOWED_MODELS
+
+                    providers = [
+                        {
+                            "slug": beta_switch["provider"],
+                            "name": "OpenAI Codex",
+                            "models": list(BETA_ALLOWED_MODELS)[:5],
+                            "total_models": len(BETA_ALLOWED_MODELS),
+                            "is_current": True,
+                        }
+                    ]
+                else:
+                    providers = list_authenticated_providers(
+                        current_provider=current_provider,
+                        current_base_url=current_base_url,
+                        user_providers=user_provs,
+                        custom_providers=custom_provs,
+                        max_models=5,
+                    )
                 for p in providers:
                     tag = " (current)" if p["is_current"] else ""
                     lines.append(f"**{p['name']}** `--provider {p['slug']}`{tag}:")
@@ -8276,37 +8503,69 @@ class GatewayRunner:
             return "\n".join(lines)
 
         # Perform the switch
-        result = _switch_model(
-            raw_input=model_input,
-            current_provider=current_provider,
-            current_model=current_model,
-            current_base_url=current_base_url,
-            current_api_key=current_api_key,
-            is_global=persist_global,
-            explicit_provider=explicit_provider,
-            user_providers=user_provs,
-            custom_providers=custom_provs,
-        )
+        try:
+            result = _switch_model(
+                raw_input=model_input,
+                current_provider=current_provider,
+                current_model=current_model,
+                current_base_url=current_base_url,
+                current_api_key=current_api_key,
+                is_global=persist_global,
+                explicit_provider=explicit_provider,
+                user_providers=user_provs,
+                custom_providers=custom_provs,
+            )
+        except Exception as exc:
+            if beta_switch is not None:
+                return _beta_gateway_model_switch_error(exc)
+            raise
 
         if not result.success:
             return f"Error: {result.error_message}"
 
-        # If there's a cached agent, update it in-place
-        cached_entry = None
-        _cache_lock = getattr(self, "_agent_cache_lock", None)
-        _cache = getattr(self, "_agent_cache", None)
-        if _cache_lock and _cache is not None:
-            with _cache_lock:
-                cached_entry = _cache.get(session_key)
-
-        if cached_entry and cached_entry[0] is not None:
+        effective_model = result.new_model
+        effective_provider = result.target_provider
+        effective_api_key = result.api_key
+        effective_base_url = result.base_url
+        effective_api_mode = result.api_mode
+        effective_provider_label = result.provider_label or effective_provider
+        exact_cached_agent = _cached_agent_for_model_switch(self, session_key)
+        if beta_switch is not None:
+            # Re-read every mutable input after the generic resolver returns.
+            # No await or mutation occurs between this validation and the
+            # state updates below, so a hostile result or stale cache cannot
+            # smuggle alternate credentials into the session.
+            post_override = self._session_model_overrides.get(session_key, {})
+            post_current_model = post_override.get("model", current_model)
+            post_current_provider = post_override.get("provider", current_provider)
             try:
-                cached_entry[0].switch_model(
-                    new_model=result.new_model,
-                    new_provider=result.target_provider,
-                    api_key=result.api_key,
-                    base_url=result.base_url,
-                    api_mode=result.api_mode,
+                post_beta = _resolve_beta_gateway_model_switch_runtime(
+                    requested_model=result.new_model,
+                    requested_provider=result.target_provider,
+                    current_model=post_current_model,
+                    current_provider=post_current_provider,
+                    cached_agent=exact_cached_agent,
+                )
+            except Exception as exc:
+                return _beta_gateway_model_switch_error(exc)
+            post_runtime = post_beta["runtime"]
+            effective_model = post_beta["requested_model"]
+            effective_provider = post_beta["provider"]
+            effective_api_key = post_runtime["api_key"]
+            effective_base_url = post_runtime["base_url"]
+            effective_api_mode = post_runtime["api_mode"]
+            effective_provider_label = "OpenAI Codex"
+
+        # Every Beta provider/auth check above completed before the first
+        # cached-agent, session, config, or persistence mutation.
+        if exact_cached_agent is not None:
+            try:
+                exact_cached_agent.switch_model(
+                    new_model=effective_model,
+                    new_provider=effective_provider,
+                    api_key=effective_api_key,
+                    base_url=effective_base_url,
+                    api_mode=effective_api_mode,
                 )
             except Exception as exc:
                 logger.warning("In-place model switch failed for cached agent: %s", exc)
@@ -8316,18 +8575,18 @@ class GatewayRunner:
         if not hasattr(self, "_pending_model_notes"):
             self._pending_model_notes = {}
         self._pending_model_notes[session_key] = (
-            f"[Note: model was just switched from {current_model} to {result.new_model} "
-            f"via {result.provider_label or result.target_provider}. "
+            f"[Note: model was just switched from {current_model} to {effective_model} "
+            f"via {effective_provider_label}. "
             f"Adjust your self-identification accordingly.]"
         )
 
         # Store session override so next agent creation uses the new model
         self._session_model_overrides[session_key] = {
-            "model": result.new_model,
-            "provider": result.target_provider,
-            "api_key": result.api_key,
-            "base_url": result.base_url,
-            "api_mode": result.api_mode,
+            "model": effective_model,
+            "provider": effective_provider,
+            "api_key": effective_api_key,
+            "base_url": effective_base_url,
+            "api_mode": effective_api_mode,
         }
 
         # Evict cached agent so the next turn creates a fresh agent from the
@@ -8343,18 +8602,18 @@ class GatewayRunner:
                 else:
                     cfg = {}
                 model_cfg = cfg.setdefault("model", {})
-                model_cfg["default"] = result.new_model
-                model_cfg["provider"] = result.target_provider
-                if result.base_url:
-                    model_cfg["base_url"] = result.base_url
+                model_cfg["default"] = effective_model
+                model_cfg["provider"] = effective_provider
+                if effective_base_url:
+                    model_cfg["base_url"] = effective_base_url
                 from elevate_cli.config import save_config
                 save_config(cfg)
             except Exception as e:
                 logger.warning("Failed to persist model switch: %s", e)
 
         # Build confirmation message with full metadata
-        provider_label = result.provider_label or result.target_provider
-        lines = [f"Model switched to `{result.new_model}`"]
+        provider_label = effective_provider_label
+        lines = [f"Model switched to `{effective_model}`"]
         lines.append(f"Provider: {provider_label}")
 
         # Rich metadata from models.dev
@@ -8371,10 +8630,10 @@ class GatewayRunner:
             try:
                 from agent.model_metadata import get_model_context_length
                 ctx = get_model_context_length(
-                    result.new_model,
-                    base_url=result.base_url or current_base_url,
-                    api_key=result.api_key or current_api_key,
-                    provider=result.target_provider,
+                    effective_model,
+                    base_url=effective_base_url or current_base_url,
+                    api_key=effective_api_key or current_api_key,
+                    provider=effective_provider,
                 )
                 lines.append(f"Context: {ctx:,} tokens")
             except Exception:
@@ -8382,8 +8641,8 @@ class GatewayRunner:
 
         # Cache notice
         cache_enabled = (
-            (base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower())
-            or result.api_mode == "anthropic_messages"
+            (base_url_host_matches(effective_base_url or "", "openrouter.ai") and "claude" in effective_model.lower())
+            or effective_api_mode == "anthropic_messages"
         )
         if cache_enabled:
             lines.append("Prompt caching: enabled")

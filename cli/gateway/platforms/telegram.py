@@ -2010,11 +2010,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 await query.answer(text="Picker expired.")
                 return
 
+            beta_switch_failed = False
+            beta_error_code = ""
             try:
                 result_text = await callback(chat_id, model_id, provider_slug)
             except Exception as exc:
                 logger.error("Model picker switch failed: %s", exc)
-                result_text = f"Error switching model: {exc}"
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                if beta_provider_policy_active():
+                    beta_switch_failed = True
+                    beta_error_code = getattr(
+                        exc, "code", "beta_provider_policy_failed"
+                    )
+                    result_text = f"Error [{beta_error_code}]: {exc}"
+                else:
+                    # Preserve the existing Stable failure presentation and
+                    # picker cleanup semantics byte-for-byte.
+                    result_text = f"Error switching model: {exc}"
 
             # Edit message to show confirmation, remove buttons
             try:
@@ -2033,6 +2046,16 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                 except Exception:
                     pass
+            if beta_switch_failed:
+                # The callback contract is fail-before-mutation in exact Beta.
+                # Keep the same picker-state object available so a failed auth
+                # or provider validation cannot masquerade as a completed
+                # switch or destroy the user's retry context.
+                await query.answer(
+                    text=f"Model switch blocked [{beta_error_code}]."
+                )
+                return
+
             await query.answer(text="Model switched!")
 
             # Clean up state
