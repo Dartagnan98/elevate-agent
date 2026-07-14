@@ -12,7 +12,7 @@ Why tools instead of just shelling out to ``hermes kanban``?
    / Modal / Singularity / SSH would run ``hermes kanban complete …``
    inside the container, where ``hermes`` isn't installed and the DB
    isn't mounted. Tools run in the agent's Python process, so they
-   always reach ``~/.elevate/kanban.db`` regardless of terminal backend.
+   always reach the central operational store regardless of terminal backend.
 
 2. **No shell-quoting footguns.** Passing ``--metadata '{"x": [...]}'``
    through shlex+argparse is fragile. Structured tool args skip it.
@@ -31,9 +31,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
 from typing import Any, Optional
 
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -161,19 +162,28 @@ def _enforce_worker_task_ownership(tid: str) -> Optional[str]:
     return None
 
 
+@contextmanager
 def _connect(board: Optional[str] = None):
-    """Import + connect lazily so the module imports cleanly in non-kanban
-    contexts (e.g. test rigs that import every tool module).
+    """Yield the Kanban module and a live normal operational connection.
 
-    When ``board`` is provided it's forwarded to :func:`kb.connect`, which
-    routes the connection to that board's sqlite file. ``None`` (the
-    default) preserves the legacy resolution chain
-    (``ELEVATE_KANBAN_DB`` → ``ELEVATE_KANBAN_BOARD`` env → current symlink
-    → ``default``). Per-tool ``board`` lets a Telegram-side agent override
-    the env-pinned active board without restarting Hermes.
+    Import lazily so this tool module still loads in non-Kanban contexts.
+    ``board`` is forwarded only for source compatibility: the Postgres-backed
+    Kanban store currently collapses all legacy boards into one tableset.
     """
     from elevate_cli import kanban_db as kb
-    return kb, kb.connect(board=board)
+
+    with kb.connect(board=board) as conn:
+        yield kb, conn
+
+
+@contextmanager
+def _connect_read_only():
+    """Yield Kanban reads through the initialized-store-only boundary."""
+    from elevate_cli import kanban_db as kb
+    from elevate_cli.data.connection import connect_ready_read_only
+
+    with connect_ready_read_only() as conn:
+        yield kb, conn
 
 
 def _ok(**fields: Any) -> str:
@@ -260,10 +270,10 @@ def _handle_show(args: dict, **kw) -> str:
         return tool_error(
             "task_id is required (or set ELEVATE_KANBAN_TASK in the env)"
         )
-    board = args.get("board")
+    from elevate_cli.data.connection import OperationalStoreNotReady
+
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect_read_only() as (kb, conn):
             task = kb.get_task(conn, tid)
             if task is None:
                 return tool_error(f"task {tid} not found")
@@ -318,10 +328,16 @@ def _handle_show(args: dict, **kw) -> str:
                 # dispatcher at spawn time.
                 "worker_context": kb.build_worker_context(conn, tid),
             })
-        finally:
-            conn.close()
+    except OperationalStoreNotReady:
+        return tool_result(
+            success=False,
+            error="operational_store_not_ready",
+            message=(
+                "Kanban data is still starting for the active account. "
+                "Wait for Elevate startup to complete, then retry once."
+            ),
+        )
     except ValueError as e:
-        # Invalid board slug surfaces as ValueError from _normalize_board_slug.
         return tool_error(f"kanban_show: {e}")
     except Exception as e:
         logger.exception("kanban_show failed")
@@ -352,8 +368,7 @@ def _handle_list(args: dict, **kw) -> str:
         return tool_error(f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             # Match CLI list: dependencies that cleared since the last
             # dispatcher tick should be visible to orchestrators immediately.
             promoted = kb.recompute_ready(conn)
@@ -380,8 +395,6 @@ def _handle_list(args: dict, **kw) -> str:
                 ),
                 "promoted": promoted,
             })
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_list: {e}")
     except Exception as e:
@@ -467,8 +480,7 @@ def _handle_complete(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -502,8 +514,6 @@ def _handle_complete(args: dict, **kw) -> str:
                 )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_complete: {e}")
     except Exception as e:
@@ -526,8 +536,7 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error("reason is required — explain what input you need")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             ok = kb.block_task(
                 conn, tid,
                 reason=reason,
@@ -540,8 +549,6 @@ def _handle_block(args: dict, **kw) -> str:
                 )
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_block: {e}")
     except Exception as e:
@@ -570,8 +577,7 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     note = args.get("note")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             # Extend the claim TTL first. The dispatcher pins
             # ELEVATE_KANBAN_CLAIM_LOCK in the worker env at spawn time
             # (see _default_spawn in kanban_db.py); falling back to the
@@ -591,8 +597,6 @@ def _handle_heartbeat(args: dict, **kw) -> str:
                     f"could not heartbeat {tid} (unknown id or not running)"
                 )
             return _ok(task_id=tid)
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_heartbeat: {e}")
     except Exception as e:
@@ -623,12 +627,9 @@ def _handle_comment(args: dict, **kw) -> str:
     author = os.environ.get("ELEVATE_PROFILE") or "worker"
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             cid = kb.add_comment(conn, tid, author=author, body=str(body))
             return _ok(task_id=tid, comment_id=cid)
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_comment: {e}")
     except Exception as e:
@@ -683,8 +684,7 @@ def _handle_create(args: dict, **kw) -> str:
         )
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -711,8 +711,6 @@ def _handle_create(args: dict, **kw) -> str:
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
             )
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_create: {e}")
     except Exception as e:
@@ -733,14 +731,11 @@ def _handle_unblock(args: dict, **kw) -> str:
         return ownership_err
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             ok = kb.unblock_task(conn, str(tid))
             if not ok:
                 return tool_error(f"could not unblock {tid} (not blocked or unknown)")
             return _ok(task_id=str(tid), status="ready")
-        finally:
-            conn.close()
     except ValueError as e:
         return tool_error(f"kanban_unblock: {e}")
     except Exception as e:
@@ -756,12 +751,9 @@ def _handle_link(args: dict, **kw) -> str:
         return tool_error("both parent_id and child_id are required")
     board = args.get("board")
     try:
-        kb, conn = _connect(board=board)
-        try:
+        with _connect(board=board) as (kb, conn):
             kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
             return _ok(parent_id=parent_id, child_id=child_id)
-        finally:
-            conn.close()
     except ValueError as e:
         # Covers cycle + self-parent rejections
         return tool_error(f"kanban_link: {e}")
@@ -780,12 +772,9 @@ _DESC_TASK_ID_DEFAULT = (
 )
 
 _DESC_BOARD = (
-    "Kanban board slug to target. When omitted, the call resolves the "
-    "active board the usual way: ELEVATE_KANBAN_DB env → "
-    "ELEVATE_KANBAN_BOARD env → the 'current' symlink under the kanban "
-    "home → 'default'. Pass an explicit slug only when the caller (e.g. "
-    "a Telegram routing layer) needs to override the env-pinned active "
-    "board for this one call."
+    "Legacy board slug retained for client compatibility. The current "
+    "Postgres-backed Kanban store uses one central tableset, so this value "
+    "does not select or isolate a different board."
 )
 
 
@@ -1222,6 +1211,7 @@ registry.register(
     handler=_handle_show,
     check_fn=_check_kanban_mode,
     emoji="📋",
+    effects={"read:kanban"},
 )
 
 registry.register(
