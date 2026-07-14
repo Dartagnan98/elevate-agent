@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from elevate_cli.config import get_env_value, load_env, save_env_value
+from elevate_cli import config as _config
 
 
 _AGENT_TELEGRAM_BOT_TOKEN_RE = re.compile(r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$")
@@ -27,8 +27,8 @@ def _agent_segment_is_executive(segment: str) -> bool:
 
 def _executive_telegram_token() -> str:
     return str(
-        get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY)
-        or get_env_value("TELEGRAM_BOT_TOKEN")
+        _config.get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY)
+        or _config.get_env_value("TELEGRAM_BOT_TOKEN")
         or ""
     ).strip()
 
@@ -37,7 +37,7 @@ def _non_executive_duplicate_agent_token(value: str) -> str:
     candidate = value.strip()
     if not candidate:
         return ""
-    for key, existing in load_env().items():
+    for key, existing in _config.load_env().items():
         match = _AGENT_TELEGRAM_BOT_TOKEN_RE.fullmatch(key)
         if not match or _agent_segment_is_executive(match.group(1)):
             continue
@@ -60,10 +60,14 @@ def _reject_shared_agent_token(segment: str, value: str) -> None:
 
 def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
     """Keep legacy gateway Telegram keys and the Executive agent lane aligned."""
-    old_shared_token = str(get_env_value("TELEGRAM_BOT_TOKEN") or "").strip()
-    old_shared_channel = str(get_env_value("TELEGRAM_HOME_CHANNEL") or "").strip()
-    old_executive_token = str(get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY) or "").strip()
-    old_executive_channel = str(get_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY) or "").strip()
+    old_shared_token = str(_config.get_env_value("TELEGRAM_BOT_TOKEN") or "").strip()
+    old_shared_channel = str(_config.get_env_value("TELEGRAM_HOME_CHANNEL") or "").strip()
+    old_executive_token = str(
+        _config.get_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY) or ""
+    ).strip()
+    old_executive_channel = str(
+        _config.get_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY) or ""
+    ).strip()
     synced: list[str] = []
 
     if key == "TELEGRAM_BOT_TOKEN":
@@ -76,7 +80,7 @@ def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
                 ),
             )
         if value and (not old_executive_token or old_executive_token == old_shared_token):
-            save_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY, value)
+            _config.save_env_value(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY, value)
             synced.append(_EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY)
     elif key == _EXECUTIVE_TELEGRAM_BOT_TOKEN_KEY:
         if _non_executive_duplicate_agent_token(value):
@@ -88,15 +92,15 @@ def _sync_executive_telegram_aliases(key: str, value: str) -> list[str]:
                 ),
             )
         if value and (not old_shared_token or old_shared_token == old_executive_token):
-            save_env_value("TELEGRAM_BOT_TOKEN", value)
+            _config.save_env_value("TELEGRAM_BOT_TOKEN", value)
             synced.append("TELEGRAM_BOT_TOKEN")
     elif key == "TELEGRAM_HOME_CHANNEL":
         if value and (not old_executive_channel or old_executive_channel == old_shared_channel):
-            save_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY, value)
+            _config.save_env_value(_EXECUTIVE_TELEGRAM_CHANNEL_KEY, value)
             synced.append(_EXECUTIVE_TELEGRAM_CHANNEL_KEY)
     elif key == _EXECUTIVE_TELEGRAM_CHANNEL_KEY:
         if value and (not old_shared_channel or old_shared_channel == old_executive_channel):
-            save_env_value("TELEGRAM_HOME_CHANNEL", value)
+            _config.save_env_value("TELEGRAM_HOME_CHANNEL", value)
             synced.append("TELEGRAM_HOME_CHANNEL")
 
     return synced
