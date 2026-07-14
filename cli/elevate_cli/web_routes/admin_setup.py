@@ -335,7 +335,9 @@ def _preflight_beta_agent_setup_update(
     valid_keys = {str(item["key"]) for item in _DEFAULT_ITEMS}
     seen: set[str] = set()
     submitted_primary: Dict[str, Any] | None = None
-    for item in items:
+    canonical_items: List[Dict[str, Any]] = []
+    for raw_item in items:
+        item = dict(raw_item)
         key = str(item.get("key") or "").strip()
         if not key:
             raise ValueError("agent setup item key is required")
@@ -349,17 +351,40 @@ def _preflight_beta_agent_setup_update(
             raise ValueError(f"invalid agent setup status {status!r}")
         if key == "model_primary":
             submitted_primary = item
+        elif key == "memory_store":
+            item.update(
+                {
+                    "status": "configured",
+                    "provider": "sqlite_local",
+                    "value": {"mode": "local"},
+                    "notes": "Realtor Beta stores memory locally on this Mac.",
+                }
+            )
+        elif key == "model_embedding":
+            item.update(
+                {
+                    "status": "skipped",
+                    "provider": None,
+                    "value": {
+                        "policyBlocked": True,
+                        "blockedReason": "unsupported_beta_embedding",
+                    },
+                    "notes": (
+                        "Realtor Beta uses local memory without embedding-based recall."
+                    ),
+                }
+            )
+        canonical_items.append(item)
 
     auth_status = read_beta_codex_auth_status(get_elevate_home())
-    canonical_items = list(items)
     if submitted_primary is not None:
         canonical_primary = validate_beta_primary_item(
             submitted_primary,
             auth_status,
         )
         canonical_items = [
-            canonical_primary if item is submitted_primary else item
-            for item in items
+            canonical_primary if item.get("key") == "model_primary" else item
+            for item in canonical_items
         ]
         return canonical_items
 
@@ -452,7 +477,27 @@ def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
     me = items.get("model_embedding") or {}
     eprov = str(me.get("provider") or "").strip()
     emodel = str((me.get("value") or {}).get("model") or "").strip()
-    if eprov:
+    if beta_provider_policy_active():
+        plugins = cfg.get("plugins")
+        if not isinstance(plugins, dict):
+            plugins = {}
+            cfg["plugins"] = plugins
+        store = plugins.get("elevate-memory-store")
+        if not isinstance(store, dict):
+            store = {}
+            plugins["elevate-memory-store"] = store
+        for key in (
+            "embedding_provider",
+            "embedding_model",
+            "embedding_dimensions",
+            "embedding_base_url",
+            "embedding_api_key_env",
+        ):
+            store.pop(key, None)
+        store["embedding_enabled"] = False
+        changed = True
+        applied["embedding"] = {"status": "skipped"}
+    elif eprov:
         plugins = cfg.get("plugins")
         if not isinstance(plugins, dict):
             plugins = {}
@@ -469,7 +514,15 @@ def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
 
     mm = items.get("memory_store") or {}
     mprov = str(mm.get("provider") or "").strip()
-    if mprov:
+    if beta_provider_policy_active():
+        mem = cfg.get("memory")
+        if not isinstance(mem, dict):
+            mem = {}
+            cfg["memory"] = mem
+        mem["provider"] = "holographic"
+        changed = True
+        applied["memory"] = {"provider": "holographic"}
+    elif mprov:
         canon_mem = _WIZARD_MEMORY_TO_CONFIG.get(mprov, mprov)
         mem = cfg.get("memory")
         if not isinstance(mem, dict):

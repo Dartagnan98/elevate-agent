@@ -26,11 +26,47 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from agent.memory_provider import MemoryProvider
 
 logger = logging.getLogger(__name__)
 
-_MEMORY_PLUGINS_DIR = Path(__file__).parent
+_BUNDLED_MEMORY_PLUGINS_DIR = Path(__file__).resolve().parent
+_MEMORY_PLUGINS_DIR = _BUNDLED_MEMORY_PLUGINS_DIR
+
+
+def _beta_policy_active() -> bool:
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    return beta_provider_policy_active()
+
+
+def _trusted_beta_holographic_dir() -> Optional[Path]:
+    """Return only the code-relative, nonsymlinked bundled provider path."""
+    try:
+        root = _BUNDLED_MEMORY_PLUGINS_DIR.resolve(strict=True)
+        candidate = root / "holographic"
+        if candidate.is_symlink():
+            return None
+        candidate = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if candidate.parent != root or not candidate.is_dir():
+        return None
+    init_file = candidate / "__init__.py"
+    if not init_file.is_file() or init_file.is_symlink():
+        return None
+    for source_file in candidate.glob("*.py"):
+        if source_file.is_symlink():
+            return None
+        try:
+            if source_file.resolve(strict=True).parent != candidate:
+                return None
+        except OSError:
+            return None
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +105,10 @@ def _iter_provider_dirs() -> List[Tuple[str, Path]]:
     Scans bundled first, then user-installed.  Bundled takes precedence
     on name collisions (first-seen wins via ``seen`` set).
     """
+    if _beta_policy_active():
+        trusted = _trusted_beta_holographic_dir()
+        return [("holographic", trusted)] if trusted else []
+
     seen: set = set()
     dirs: List[Tuple[str, Path]] = []
 
@@ -102,6 +142,11 @@ def find_provider_dir(name: str) -> Optional[Path]:
 
     Checks bundled first, then user-installed.
     """
+    if _beta_policy_active():
+        if str(name or "").strip().lower() != "holographic":
+            return None
+        return _trusted_beta_holographic_dir()
+
     # Bundled
     bundled = _MEMORY_PLUGINS_DIR / name
     if bundled.is_dir() and (bundled / "__init__.py").exists():
@@ -188,15 +233,42 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
     - A register(ctx) function (plugin-style) — we simulate a ctx
     - A top-level class that extends MemoryProvider — we instantiate it
     """
+    provider_dir = Path(provider_dir)
+    trusted_beta_dir: Optional[Path] = None
+    if _beta_policy_active():
+        trusted_beta_dir = _trusted_beta_holographic_dir()
+        if provider_dir.is_symlink() or trusted_beta_dir is None:
+            return None
+        try:
+            if provider_dir.resolve(strict=True) != trusted_beta_dir:
+                return None
+        except OSError:
+            return None
+
     name = provider_dir.name
     # Use a separate namespace for user-installed plugins so they don't
     # collide with bundled providers in sys.modules.
-    _is_bundled = _MEMORY_PLUGINS_DIR in provider_dir.parents or provider_dir.parent == _MEMORY_PLUGINS_DIR
+    _is_bundled = bool(trusted_beta_dir) or (
+        _MEMORY_PLUGINS_DIR in provider_dir.parents
+        or provider_dir.parent == _MEMORY_PLUGINS_DIR
+    )
     module_name = f"plugins.memory.{name}" if _is_bundled else f"_elevate_user_memory.{name}"
     init_file = provider_dir / "__init__.py"
 
     if not init_file.exists():
         return None
+
+    if trusted_beta_dir is not None:
+        for cached_name in list(sys.modules):
+            if cached_name != module_name and not cached_name.startswith(f"{module_name}."):
+                continue
+            cached_module = sys.modules.get(cached_name)
+            cached_file = getattr(cached_module, "__file__", None)
+            try:
+                cached_path = Path(str(cached_file)).resolve(strict=True)
+                cached_path.relative_to(trusted_beta_dir)
+            except (OSError, ValueError):
+                sys.modules.pop(cached_name, None)
 
     # Check if already loaded
     if module_name in sys.modules:
@@ -342,6 +414,14 @@ def discover_plugin_cli_commands() -> List[dict]:
 
     active_provider = _get_active_memory_provider()
     if not active_provider:
+        return results
+
+    try:
+        from elevate_cli.beta_provider_policy import validate_beta_memory_provider
+
+        validate_beta_memory_provider(active_provider)
+    except ValueError as exc:
+        logger.warning("Memory plugin CLI disabled by release policy: %s", exc)
         return results
 
     # Only look at the active provider's directory

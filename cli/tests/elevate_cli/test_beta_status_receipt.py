@@ -75,6 +75,22 @@ def test_beta_runtime_receipt_reports_only_public_runtime_truth(tmp_path):
         (_config(provider="anthropic"), _auth(), "beta_provider_not_allowed"),
         ({"model": {"default": BETA_DEFAULT_MODEL}}, _auth(), "beta_model_configuration_incomplete"),
         (_config(model="hostile-model"), _auth(), "beta_model_not_allowed"),
+        (
+            {**_config(), "memory": {"provider": "hindsight"}},
+            _auth(),
+            "beta_memory_provider_not_allowed",
+        ),
+        (
+            {
+                **_config(),
+                "memory": {"provider": "holographic"},
+                "plugins": {
+                    "elevate-memory-store": {"embedding_enabled": True},
+                },
+            },
+            _auth(),
+            "beta_memory_embeddings_not_allowed",
+        ),
         (_config(), _auth(ready=False, reason="missing_auth_store"), "missing_auth_store"),
         ({}, _auth(), "missing_beta_provider"),
     ],

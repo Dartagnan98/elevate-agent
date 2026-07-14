@@ -16,6 +16,8 @@ from elevate_cli.beta_provider_policy import (
     canonical_beta_provider,
     read_beta_codex_auth_status,
     require_beta_codex_auth,
+    validate_beta_config_for_persistence,
+    validate_beta_memory_provider,
     validate_beta_primary_item,
 )
 
@@ -94,6 +96,108 @@ def test_beta_provider_and_model_helpers_reject_non_beta_values():
         beta_model_or_default("anthropic/claude-sonnet-4", source="test model")
     assert model_exc.value.code == "beta_model_not_allowed"
     assert beta_model_or_default("") == BETA_DEFAULT_MODEL
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        "builtin",
+        "hindsight",
+        "honcho",
+        "retaindb",
+        "mem0",
+        "byterover",
+        "openviking",
+        "supermemory",
+        "user-memory-plugin",
+    ],
+)
+def test_beta_config_rejects_every_nonlocal_memory_provider(provider):
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        validate_beta_config_for_persistence(
+            {"memory": {"provider": provider}},
+            {"logged_in": True},
+            environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+        )
+
+    assert exc.value.code == "beta_memory_provider_not_allowed"
+
+
+@pytest.mark.parametrize("provider", [None, "", "holographic"])
+@pytest.mark.parametrize(
+    "embedding_enabled",
+    [None, False, 0, "", "0", "false", "no", "off", "disabled"],
+)
+def test_beta_config_allows_builtin_or_local_holographic_without_embeddings(
+    provider,
+    embedding_enabled,
+):
+    validate_beta_config_for_persistence(
+        {
+            "memory": {"provider": provider},
+            "plugins": {
+                "elevate-memory-store": {
+                    "embedding_enabled": embedding_enabled,
+                }
+            },
+        },
+        {"logged_in": True},
+        environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+    )
+
+
+@pytest.mark.parametrize(
+    "embedding_enabled",
+    [True, 1, "1", "true", "yes", "on", "enabled"],
+)
+def test_beta_config_rejects_holographic_embedding_inference(embedding_enabled):
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        validate_beta_config_for_persistence(
+            {
+                "memory": {"provider": "holographic"},
+                "plugins": {
+                    "elevate-memory-store": {
+                        "embedding_enabled": embedding_enabled,
+                    }
+                },
+            },
+            {"logged_in": True},
+            environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+        )
+
+    assert exc.value.code == "beta_memory_embeddings_not_allowed"
+
+
+@pytest.mark.parametrize("channel", ["stable", "Beta", "BETA", " beta"])
+def test_non_exact_beta_channels_keep_external_memory_behavior(channel):
+    validate_beta_config_for_persistence(
+        {
+            "memory": {"provider": "hindsight"},
+            "plugins": {
+                "elevate-memory-store": {"embedding_enabled": True},
+            },
+        },
+        {"logged_in": False},
+        environ={"ELEVATE_RELEASE_CHANNEL": channel},
+    )
+
+
+@pytest.mark.parametrize("provider", [None, "", "HOLOGRAPHIC"])
+def test_beta_memory_entrypoint_helper_allows_only_local_providers(provider):
+    assert validate_beta_memory_provider(
+        provider,
+        environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+    ) in {"", "holographic"}
+
+
+def test_beta_memory_entrypoint_helper_rejects_external_provider():
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        validate_beta_memory_provider(
+            "hindsight",
+            environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+        )
+
+    assert exc.value.code == "beta_memory_provider_not_allowed"
 
 
 def test_require_beta_codex_auth_fails_closed_without_local_store(tmp_path):

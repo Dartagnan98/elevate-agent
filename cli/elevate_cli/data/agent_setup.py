@@ -697,7 +697,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
         }
 
     embedding_key = voyage_key or openai_key or anthropic_token
-    if embedding_key:
+    if embedding_key and not beta_policy_enabled:
         if voyage_key:
             provider, model = "voyage", "voyage-3"
         elif openai_key:
@@ -732,17 +732,24 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
             },
         }
 
-    overlays["memory_store"] = {
-        "status": "configured",
-        "provider": "supabase" if (supabase_url and supabase_key) else "sqlite_local",
-        "value": {
-            "supabaseUrl": supabase_url or "",
-            "supabaseKey": "",
-            "secretPresent": bool(supabase_key),
-            "secretSource": "env" if supabase_key else None,
-            "secretPreview": _token_preview(supabase_key) if supabase_key else "",
-        },
-    }
+    if beta_policy_enabled:
+        overlays["memory_store"] = {
+            "status": "configured",
+            "provider": "sqlite_local",
+            "value": {"mode": "local"},
+        }
+    else:
+        overlays["memory_store"] = {
+            "status": "configured",
+            "provider": "supabase" if (supabase_url and supabase_key) else "sqlite_local",
+            "value": {
+                "supabaseUrl": supabase_url or "",
+                "supabaseKey": "",
+                "secretPresent": bool(supabase_key),
+                "secretSource": "env" if supabase_key else None,
+                "secretPreview": _token_preview(supabase_key) if supabase_key else "",
+            },
+        }
 
     if composio_key:
         overlays["composio_workspace"] = {
@@ -927,6 +934,25 @@ def _apply_runtime_overlay(
         merged["provider"] = overlay["provider"]
         merged["value"] = overlay["value"]
         merged["detected"] = overlay["status"] in READY_STATUSES
+        return merged
+
+    if item_key == "model_embedding" and beta_provider_policy_active():
+        merged = dict(item)
+        merged["status"] = "skipped"
+        merged["provider"] = None
+        merged["value"] = {
+            "policyBlocked": True,
+            "blockedReason": "unsupported_beta_embedding",
+        }
+        merged["detected"] = False
+        return merged
+
+    if item_key == "memory_store" and beta_provider_policy_active():
+        merged = dict(item)
+        merged["status"] = "configured"
+        merged["provider"] = "sqlite_local"
+        merged["value"] = {"mode": "local"}
+        merged["detected"] = True
         return merged
 
     status = item.get("status") or ""

@@ -118,6 +118,19 @@ def _valid_beta_config():
             {"model": {}, "custom_providers": {"hostile": {"base_url": "https://hostile.invalid"}}},
             "beta_custom_provider_not_allowed",
         ),
+        (
+            {"memory": {"provider": "hindsight"}},
+            "beta_memory_provider_not_allowed",
+        ),
+        (
+            {
+                "memory": {"provider": "holographic"},
+                "plugins": {
+                    "elevate-memory-store": {"embedding_enabled": True},
+                },
+            },
+            "beta_memory_embeddings_not_allowed",
+        ),
     ],
 )
 def test_beta_save_rejects_provider_escape_before_profile_mutation(
@@ -166,17 +179,43 @@ def test_beta_valid_codex_config_persists_after_local_auth(beta_home):
     assert written["model"] == _valid_beta_config()["model"]
 
 
+def test_beta_current_local_holographic_profile_shape_persists(beta_home):
+    _write_local_codex_auth(beta_home)
+    config = {
+        **_valid_beta_config(),
+        "memory": {"provider": "holographic"},
+        "plugins": {
+            "elevate-memory-store": {"embedding_enabled": False},
+        },
+    }
+
+    config_module.save_config(config)
+
+    written = yaml.safe_load((beta_home / "config.yaml").read_text(encoding="utf-8"))
+    assert written["model"] == config["model"]
+    assert written["memory"] == config["memory"]
+    assert written["plugins"] == config["plugins"]
+
+
 def test_non_beta_channels_keep_existing_config_behavior(tmp_path, monkeypatch):
     home = tmp_path / "stable"
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
     monkeypatch.setenv("ELEVATE_HOME", str(home))
 
     config_module.save_config(
-        {"model": {"provider": "gemini", "default": "gemini-2.5-flash"}}
+        {
+            "model": {"provider": "gemini", "default": "gemini-2.5-flash"},
+            "memory": {"provider": "hindsight"},
+            "plugins": {
+                "elevate-memory-store": {"embedding_enabled": True},
+            },
+        }
     )
 
     written = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
     assert written["model"]["provider"] == "gemini"
+    assert written["memory"]["provider"] == "hindsight"
+    assert written["plugins"]["elevate-memory-store"]["embedding_enabled"] is True
 
 
 def _config_client(*, load_config_func=lambda: {}, save_config_func=lambda _cfg: None):
@@ -255,6 +294,47 @@ def test_beta_config_routes_accept_valid_local_codex_state(
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert saved == [_valid_beta_config()]
+
+
+@pytest.mark.parametrize("raw_route", [False, True])
+@pytest.mark.parametrize(
+    ("config", "code"),
+    [
+        (
+            {"memory": {"provider": "hindsight"}},
+            "beta_memory_provider_not_allowed",
+        ),
+        (
+            {
+                "memory": {"provider": "holographic"},
+                "plugins": {
+                    "elevate-memory-store": {"embedding_enabled": True},
+                },
+            },
+            "beta_memory_embeddings_not_allowed",
+        ),
+    ],
+)
+def test_beta_config_routes_reject_memory_inference_before_save(
+    beta_home,
+    raw_route,
+    config,
+    code,
+):
+    saved = []
+    client = _config_client(save_config_func=saved.append)
+    if raw_route:
+        response = client.put(
+            "/api/config/raw",
+            json={"yaml_text": yaml.safe_dump(config)},
+        )
+    else:
+        response = client.put("/api/config", json={"config": config})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == code
+    assert saved == []
+    assert not beta_home.exists()
 
 
 def test_raw_config_non_mapping_remains_a_400(beta_home):

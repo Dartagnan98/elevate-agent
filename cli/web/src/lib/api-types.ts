@@ -1686,6 +1686,20 @@ export interface PlatformStatus {
   updated_at: string;
 }
 
+export interface BetaRuntimeReceipt {
+  releaseChannel: "beta";
+  elevateHome: string;
+  providerPolicyVersion: string;
+  allowedModelsVersion: string;
+  allowedProvider: string;
+  configuredProvider: string;
+  configuredModel: string;
+  authReady: boolean;
+  authReason: string | null;
+  runtimeReady: boolean;
+  blockedReason: string | null;
+}
+
 export interface StatusResponse {
   active_sessions: number;
   config_path: string;
@@ -1703,6 +1717,7 @@ export interface StatusResponse {
   latest_config_version: number;
   release_date: string;
   version: string;
+  beta_runtime?: BetaRuntimeReceipt;
 }
 
 export type AgentHandoffStatus =

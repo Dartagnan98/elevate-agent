@@ -9,12 +9,14 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { isRealtorBetaStatus } from "@/lib/beta-runtime";
 import type {
   AdminSetupItemStatus,
   AgentSetupItem,
   AgentSetupItemUpdate,
   AgentSetupSnapshot,
   OAuthProvider,
+  StatusResponse,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
 import { RouteSkeleton } from "@/components/route-skeletons";
@@ -633,11 +635,13 @@ export function AgentSetupLaunch({
   onSetupUpdated,
   forceOnboarding = false,
   onForceOnboardingDone,
+  realtorBeta = false,
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
   forceOnboarding?: boolean;
   onForceOnboardingDone?: () => void;
+  realtorBeta?: boolean;
 }) {
   const [draft, setDraft] = useState<AgentSetupDraft>(() => draftFromSnapshot(setup));
   const [saving, setSaving] = useState(false);
@@ -745,11 +749,9 @@ export function AgentSetupLaunch({
           <div>
             <h2 className="text-[14px] font-semibold text-foreground">Agent onboarding</h2>
             <p className="mt-1 text-[12px] text-muted-foreground">
-              Bring the runtime up. Required: primary LLM + memory store. Embedding model is optional
-              — it sharpens recall, but memory falls back to keyword search without it. Everything
-              else (image gen, Composio, operator channels, sub-agents) is opt-in and can be added
-              later. The database schema is created automatically on completion; backend connectors
-              backfill once you hit launch.
+              {realtorBeta
+                ? "Bring the runtime up with OpenAI Codex and local memory on this Mac. Realtor Beta keeps external memory and embedding-based recall off. Everything else can be added later."
+                : "Bring the runtime up. Required: primary LLM + memory store. Embedding model is optional — it sharpens recall, but memory falls back to keyword search without it. Everything else (image gen, Composio, operator channels, sub-agents) is opt-in and can be added later. The database schema is created automatically on completion; backend connectors backfill once you hit launch."}
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -822,97 +824,121 @@ export function AgentSetupLaunch({
         />
       </ItemCard>
 
-      <ItemCard
-        title="Embedding model"
-        description="Powers memory recall + semantic search. Usually the same provider as your primary LLM."
-        status={embeddingItem?.status ?? "missing"}
-        required
-      >
-        <SelectRow
-          label="Provider"
-          value={draft.embeddingProvider}
-          onChange={(v) => updateField("embeddingProvider", v)}
-          options={[
-            { value: "openai", label: "OpenAI" },
-            { value: "voyage", label: "Voyage AI" },
-            { value: "cohere", label: "Cohere" },
-            { value: "local", label: "Local (sentence-transformers)" },
-          ]}
-        />
-        <FieldRow
-          label="Model ID"
-          value={draft.embeddingModel}
-          onChange={(v) => updateField("embeddingModel", v)}
-          placeholder="text-embedding-3-large  or  voyage-3"
-        />
-        <label className="flex items-center gap-2 text-[12px] text-foreground">
-          <input
-            type="checkbox"
-            checked={draft.embeddingShareKey}
-            onChange={(e) => updateField("embeddingShareKey", e.target.checked)}
-            className="h-3.5 w-3.5 rounded border-border accent-primary"
+      {realtorBeta ? (
+        <ItemCard
+          title="Local recall"
+          description="Realtor Beta uses local keyword and graph recall without an external embedding service."
+          status="skipped"
+        >
+          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[11.5px] leading-5 text-muted-foreground">
+            No embedding account or API key is needed. Remembered details stay in this Elevation profile on your Mac.
+          </div>
+        </ItemCard>
+      ) : (
+        <ItemCard
+          title="Embedding model"
+          description="Powers memory recall + semantic search. Usually the same provider as your primary LLM."
+          status={embeddingItem?.status ?? "missing"}
+          required
+        >
+          <SelectRow
+            label="Provider"
+            value={draft.embeddingProvider}
+            onChange={(v) => updateField("embeddingProvider", v)}
+            options={[
+              { value: "openai", label: "OpenAI" },
+              { value: "voyage", label: "Voyage AI" },
+              { value: "cohere", label: "Cohere" },
+              { value: "local", label: "Local (sentence-transformers)" },
+            ]}
           />
-          Share the primary LLM key
-        </label>
-        {!draft.embeddingShareKey && (
           <FieldRow
-            label="Embedding API key"
-            value={draft.embeddingApiKey}
-            onChange={(v) => updateField("embeddingApiKey", v)}
-            placeholder={
-              draft.embeddingSecretPresent && !draft.embeddingApiKey
-                ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
-                : "sk-…"
-            }
-            type="password"
-            hint={
-              draft.embeddingSecretPresent && !draft.embeddingApiKey
-                ? "Detected from environment. Leave blank to keep using it."
-                : undefined
-            }
+            label="Model ID"
+            value={draft.embeddingModel}
+            onChange={(v) => updateField("embeddingModel", v)}
+            placeholder="text-embedding-3-large  or  voyage-3"
           />
-        )}
-      </ItemCard>
-
-      <ItemCard
-        title="Memory store"
-        description="Where long-term memory lives. Local SQLite is zero-config. Supabase if you want shared multi-device memory."
-        status={memoryItem?.status ?? "missing"}
-        required
-      >
-        <SelectRow
-          label="Provider"
-          value={draft.memoryProvider}
-          onChange={(v) => updateField("memoryProvider", v)}
-          options={[
-            { value: "sqlite_local", label: "Local SQLite (recommended)" },
-            { value: "supabase", label: "Supabase (shared)" },
-          ]}
-        />
-        {draft.memoryProvider === "supabase" && (
-          <>
-            <FieldRow
-              label="Supabase project URL"
-              value={draft.memorySupabaseUrl}
-              onChange={(v) => updateField("memorySupabaseUrl", v)}
-              placeholder="https://xxx.supabase.co"
+          <label className="flex items-center gap-2 text-[12px] text-foreground">
+            <input
+              type="checkbox"
+              checked={draft.embeddingShareKey}
+              onChange={(e) => updateField("embeddingShareKey", e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-border accent-primary"
             />
+            Share the primary LLM key
+          </label>
+          {!draft.embeddingShareKey && (
             <FieldRow
-              label="Supabase service-role key"
-              value={draft.memorySupabaseKey}
-              onChange={(v) => updateField("memorySupabaseKey", v)}
+              label="Embedding API key"
+              value={draft.embeddingApiKey}
+              onChange={(v) => updateField("embeddingApiKey", v)}
               placeholder={
-                draft.memorySecretPresent && !draft.memorySupabaseKey
-                  ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
-                  : "eyJhbGc…"
+                draft.embeddingSecretPresent && !draft.embeddingApiKey
+                  ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
+                  : "sk-…"
               }
               type="password"
               hint={
-                draft.memorySecretPresent && !draft.memorySupabaseKey
+                draft.embeddingSecretPresent && !draft.embeddingApiKey
                   ? "Detected from environment. Leave blank to keep using it."
                   : undefined
               }
             />
+          )}
+        </ItemCard>
+      )}
+
+      <ItemCard
+        title="Memory store"
+        description={
+          realtorBeta
+            ? "Local Holographic memory is included and runs in this Elevation profile on your Mac."
+            : "Where long-term memory lives. Local SQLite is zero-config. Supabase if you want shared multi-device memory."
+        }
+        status={memoryItem?.status ?? "missing"}
+        required
+      >
+        {realtorBeta ? (
+          <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[11.5px] leading-5 text-muted-foreground">
+            Local memory is ready. External memory services stay off in Realtor Beta.
+          </div>
+        ) : (
+          <>
+            <SelectRow
+              label="Provider"
+              value={draft.memoryProvider}
+              onChange={(v) => updateField("memoryProvider", v)}
+              options={[
+                { value: "sqlite_local", label: "Local SQLite (recommended)" },
+                { value: "supabase", label: "Supabase (shared)" },
+              ]}
+            />
+            {draft.memoryProvider === "supabase" && (
+              <>
+                <FieldRow
+                  label="Supabase project URL"
+                  value={draft.memorySupabaseUrl}
+                  onChange={(v) => updateField("memorySupabaseUrl", v)}
+                  placeholder="https://xxx.supabase.co"
+                />
+                <FieldRow
+                  label="Supabase service-role key"
+                  value={draft.memorySupabaseKey}
+                  onChange={(v) => updateField("memorySupabaseKey", v)}
+                  placeholder={
+                    draft.memorySecretPresent && !draft.memorySupabaseKey
+                      ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
+                      : "eyJhbGc…"
+                  }
+                  type="password"
+                  hint={
+                    draft.memorySecretPresent && !draft.memorySupabaseKey
+                      ? "Detected from environment. Leave blank to keep using it."
+                      : undefined
+                  }
+                />
+              </>
+            )}
           </>
         )}
         <p className="text-[10.5px] text-muted-foreground">
@@ -1233,6 +1259,7 @@ type WizardPhase = "welcome" | "wizard" | "form";
 
 export function AgentOnboardingPage() {
   const { loading, setup, error, setSetup, refresh } = useAgentSetup();
+  const [runtimeStatus, setRuntimeStatus] = useState<StatusResponse | null | undefined>();
   const navigate = useNavigate();
   const [forceOnboarding, setForceOnboarding] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -1243,11 +1270,22 @@ export function AgentOnboardingPage() {
     runFlag ? "welcome" : "form",
   );
 
+  const loadRuntimeStatus = useCallback(() => {
+    return api
+      .getStatus({ refresh: true })
+      .then(setRuntimeStatus)
+      .catch(() => setRuntimeStatus(null));
+  }, []);
+
   useEffect(() => {
     if (runFlag && wizardPhase === "form") {
       setWizardPhase("welcome");
     }
   }, [runFlag, wizardPhase]);
+
+  useEffect(() => {
+    void loadRuntimeStatus();
+  }, [loadRuntimeStatus]);
 
   const clearRunFlag = useCallback(() => {
     if (!searchParams.has("run")) return;
@@ -1275,8 +1313,27 @@ export function AgentOnboardingPage() {
     }
   }, [setSetup]);
 
-  if (loading) {
+  if (loading || runtimeStatus === undefined) {
     return <RouteSkeleton path="/agent-onboarding" className="p-4" />;
+  }
+  if (runtimeStatus === null) {
+    return (
+      <div className="m-4 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-[12px] text-warning">
+        <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+        Elevation could not confirm this profile&apos;s release policy. Onboarding controls are paused.
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-3"
+          onClick={() => {
+            setRuntimeStatus(undefined);
+            void loadRuntimeStatus();
+          }}
+        >
+          Retry
+        </Button>
+      </div>
+    );
   }
   if (error) {
     return (
@@ -1292,6 +1349,7 @@ export function AgentOnboardingPage() {
   if (!setup) return null;
 
   const showOnboarding = !setup.complete || forceOnboarding;
+  const realtorBeta = isRealtorBetaStatus(runtimeStatus);
 
   if (showOnboarding && wizardPhase === "welcome") {
     return (
@@ -1305,6 +1363,7 @@ export function AgentOnboardingPage() {
     return (
       <AgentOnboardingWizard
         setup={setup}
+        realtorBeta={realtorBeta}
         onSetupUpdated={setSetup}
         onFinishLater={finishOnboardingLater}
         onFinish={() => {
@@ -1363,6 +1422,7 @@ export function AgentOnboardingPage() {
 
       <AgentSetupLaunch
         setup={setup}
+        realtorBeta={realtorBeta}
         onSetupUpdated={setSetup}
         forceOnboarding={forceOnboarding}
         onForceOnboardingDone={() => setForceOnboarding(false)}

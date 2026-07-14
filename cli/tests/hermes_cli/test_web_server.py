@@ -1581,11 +1581,14 @@ class TestNewEndpoints:
         from elevate_cli.config import get_config_path, get_env_path, save_config
         from elevate_cli.data import connect
 
-        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        # Seed a legacy invalid profile through the ordinary Stable writer,
+        # then enter exact Beta to exercise stale-state rejection atomically.
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
         home = get_elevate_home()
         save_config(
             {"model": {"provider": "gemini", "default": "gemini-2.5-flash"}}
         )
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
         env_path = get_env_path()
         env_path.write_text("EXISTING_MARKER=unchanged\n", encoding="utf-8")
         expiry = base64.urlsafe_b64encode(

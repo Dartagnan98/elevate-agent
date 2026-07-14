@@ -15,6 +15,10 @@ import sys
 from pathlib import Path
 
 from elevate_constants import get_elevate_home
+from elevate_cli.beta_provider_policy import (
+    beta_provider_policy_active,
+    validate_beta_memory_provider,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -105,9 +109,9 @@ def _install_dependencies(provider_name: str) -> None:
     import shutil
     uv_path = shutil.which("uv")
     if not uv_path:
-        print(f"  ⚠ uv not found — cannot install dependencies")
-        print(f"  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        print(f"  Then re-run: elevate memory setup")
+        print("  ⚠ uv not found — cannot install dependencies")
+        print("  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh")
+        print("  Then re-run: elevate memory setup")
         return
 
     try:
@@ -149,6 +153,15 @@ def _get_available_providers() -> list:
 
     Returns list of (name, description, provider_instance) tuples.
     """
+    if beta_provider_policy_active():
+        try:
+            from plugins.memory import load_memory_provider
+
+            provider = load_memory_provider("holographic")
+        except Exception:
+            provider = None
+        return [("holographic", "local", provider)] if provider else []
+
     try:
         from plugins.memory import discover_memory_providers, load_memory_provider
         raw = discover_memory_providers()
@@ -184,8 +197,35 @@ def _get_available_providers() -> list:
 # Setup wizard
 # ---------------------------------------------------------------------------
 
+def _save_beta_local_memory(provider_name: str) -> None:
+    """Persist one of Beta's two local memory modes without plugin setup."""
+    provider = validate_beta_memory_provider(provider_name)
+    from elevate_cli.config import load_config, save_config
+
+    config = load_config()
+    if not isinstance(config.get("memory"), dict):
+        config["memory"] = {}
+    config["memory"]["provider"] = provider
+
+    if not isinstance(config.get("plugins"), dict):
+        config["plugins"] = {}
+    if not isinstance(config["plugins"].get("elevate-memory-store"), dict):
+        config["plugins"]["elevate-memory-store"] = {}
+    config["plugins"]["elevate-memory-store"]["embedding_enabled"] = False
+
+    save_config(config)
+    label = "Holographic local memory" if provider else "built-in memory"
+    print(f"\n  ✓ Realtor Beta memory: {label}")
+    print("  External memory services and embedding-based recall stay off.\n")
+
+
 def cmd_setup_provider(provider_name: str) -> None:
     """Run memory setup for a specific provider, skipping the picker."""
+    if beta_provider_policy_active():
+        provider = validate_beta_memory_provider(provider_name)
+        _save_beta_local_memory(provider)
+        return
+
     from elevate_cli.config import load_config, save_config
 
     providers = _get_available_providers()
@@ -217,11 +257,23 @@ def cmd_setup_provider(provider_name: str) -> None:
     config["memory"]["provider"] = name
     save_config(config)
     print(f"\n  Memory provider: {name}")
-    print(f"  Activation saved to config.yaml\n")
+    print("  Activation saved to config.yaml\n")
 
 
 def cmd_setup(args) -> None:
     """Interactive memory provider setup wizard."""
+    if beta_provider_policy_active():
+        selected = _curses_select(
+            "Realtor Beta memory setup",
+            [
+                ("Holographic", "— local memory on this Mac"),
+                ("Built-in only", "— MEMORY.md / USER.md"),
+            ],
+            default=0,
+        )
+        _save_beta_local_memory("holographic" if selected == 0 else "")
+        return
+
     from elevate_cli.config import load_config, save_config
 
     providers = _get_available_providers()
@@ -349,12 +401,12 @@ def cmd_setup(args) -> None:
         _write_env_vars(env_path, env_writes)
 
     print(f"\n  Memory provider: {name}")
-    print(f"  Activation saved to config.yaml")
+    print("  Activation saved to config.yaml")
     if provider_config:
-        print(f"  Provider config saved")
+        print("  Provider config saved")
     if env_writes:
-        print(f"  API keys saved to .env")
-    print(f"\n  Start a new session to activate.\n")
+        print("  API keys saved to .env")
+    print("\n  Start a new session to activate.\n")
 
 
 def _write_env_vars(env_path: Path, env_writes: dict) -> None:
@@ -448,8 +500,8 @@ def cmd_status(args) -> None:
     mem_config = config.get("memory", {})
     provider_name = mem_config.get("provider", "")
 
-    print(f"\nMemory status\n" + "─" * 40)
-    print(f"  Built-in:  always active")
+    print("\nMemory status\n" + "─" * 40)
+    print("  Built-in:  always active")
     print(f"  Provider:  {provider_name or '(none — built-in only)'}")
 
     if provider_name:
@@ -462,20 +514,20 @@ def cmd_status(args) -> None:
         providers = _get_available_providers()
         found = any(name == provider_name for name, _, _ in providers)
         if found:
-            print(f"\n  Plugin:    installed ✓")
+            print("\n  Plugin:    installed ✓")
             for pname, _, p in providers:
                 if pname == provider_name:
                     if p.is_available():
-                        print(f"  Status:    available ✓")
+                        print("  Status:    available ✓")
                         if provider_name == "holographic":
                             _print_holographic_journal_status(config)
                     else:
-                        print(f"  Status:    not available ✗")
+                        print("  Status:    not available ✗")
                         schema = p.get_config_schema() if hasattr(p, "get_config_schema") else []
                         # Check all fields that have env_var (both secret and non-secret)
                         required_fields = [f for f in schema if f.get("env_var")]
                         if required_fields:
-                            print(f"  Missing:")
+                            print("  Missing:")
                             for f in required_fields:
                                 env_var = f.get("env_var", "")
                                 url = f.get("url", "")
@@ -487,12 +539,12 @@ def cmd_status(args) -> None:
                                 print(line)
                     break
         else:
-            print(f"\n  Plugin:    NOT installed ✗")
+            print("\n  Plugin:    NOT installed ✗")
             print(f"  Install the '{provider_name}' memory plugin to ~/.elevate/plugins/")
 
     providers = _get_available_providers()
     if providers:
-        print(f"\n  Installed plugins:")
+        print("\n  Installed plugins:")
         for pname, desc, _ in providers:
             active = " ← active" if pname == provider_name else ""
             print(f"    • {pname}  ({desc}){active}")

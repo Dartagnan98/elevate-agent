@@ -276,11 +276,13 @@ export function AgentOnboardingWizard({
   onSetupUpdated,
   onFinishLater,
   onFinish,
+  realtorBeta = false,
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
   onFinishLater: () => void;
   onFinish: () => void;
+  realtorBeta?: boolean;
 }) {
   const [draft, setDraft] = useState<AgentSetupDraft>(() => draftFromSnapshot(setup));
   const [saving, setSaving] = useState(false);
@@ -501,20 +503,22 @@ export function AgentOnboardingWizard({
       // gpt-5.5 via Codex) have no embedding key, so never hard-block
       // onboarding on it. Only enforce a key when a *cloud* embedding is fully
       // configured; keyless providers (local/ollama) and the empty case pass.
-      const embeddingConfigured = Boolean(
-        draft.embeddingProvider.trim() && draft.embeddingModel.trim(),
-      );
-      const keylessEmbedding =
-        draft.embeddingProvider === "local" || draft.embeddingProvider === "ollama";
-      if (embeddingConfigured && !keylessEmbedding) {
-        const embeddingHasKey =
-          Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
-        if (!draft.embeddingShareKey && !embeddingHasKey) {
-          return "Paste an embedding API key, or check 'share the primary key.'";
+      if (!realtorBeta) {
+        const embeddingConfigured = Boolean(
+          draft.embeddingProvider.trim() && draft.embeddingModel.trim(),
+        );
+        const keylessEmbedding =
+          draft.embeddingProvider === "local" || draft.embeddingProvider === "ollama";
+        if (embeddingConfigured && !keylessEmbedding) {
+          const embeddingHasKey =
+            Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
+          if (!draft.embeddingShareKey && !embeddingHasKey) {
+            return "Paste an embedding API key, or check 'share the primary key.'";
+          }
         }
       }
     }
-    if (step.id === "memory") {
+    if (step.id === "memory" && !realtorBeta) {
       if (draft.memoryProvider === "supabase") {
         const memoryHasKey =
           Boolean(draft.memorySupabaseKey.trim()) || draft.memorySecretPresent;
@@ -533,6 +537,7 @@ export function AgentOnboardingWizard({
     oauthProviders,
     primaryItem,
     primaryDirectSecretPresent,
+    realtorBeta,
   ]);
 
   const canAdvance = missingMessage == null;
@@ -653,7 +658,9 @@ export function AgentOnboardingWizard({
             {step.title}
           </h2>
           <p className="onboarding-rise-delay-2 mt-3 max-w-xl text-[14px] leading-7 text-muted-foreground">
-            {step.subtitle}
+            {realtorBeta && step.id === "memory"
+              ? "Realtor Beta keeps long-term memory in this Elevation profile on your Mac. No external memory account is needed."
+              : step.subtitle}
           </p>
 
           <div className="onboarding-rise-delay-3 mt-8 flex flex-col gap-5">
@@ -742,59 +749,70 @@ export function AgentOnboardingWizard({
                   </p>
                 </WizardSection>
 
-                <WizardSection title="Embedding model (optional)" hint="Sharpens semantic recall. Skip it and memory uses keyword search — fine for most realtors.">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardSelect
-                      label="Provider"
-                      value={draft.embeddingProvider}
-                      onChange={(v) => updateField("embeddingProvider", v)}
-                      options={[
-                        { value: "", label: "— pick one —" },
-                        { value: "openai", label: "OpenAI" },
-                        { value: "voyage", label: "Voyage AI" },
-                        { value: "cohere", label: "Cohere" },
-                        { value: "ollama", label: "Ollama (local server)" },
-                        { value: "local", label: "Local (sentence-transformers)" },
-                      ]}
-                    />
-                    <WizardField
-                      label="Model ID"
-                      value={draft.embeddingModel}
-                      onChange={(v) => updateField("embeddingModel", v)}
-                      placeholder="text-embedding-3-large  or  voyage-3"
-                    />
-                  </div>
-                  <label className="mt-3 flex items-center gap-2 text-[12.5px] text-foreground">
-                    <input
-                      type="checkbox"
-                      checked={draft.embeddingShareKey}
-                      onChange={(e) => updateField("embeddingShareKey", e.target.checked)}
-                      className="h-3.5 w-3.5 rounded border-border accent-primary"
-                    />
-                    Share the primary LLM key
-                  </label>
-                  {!draft.embeddingShareKey && (
-                    <div className="mt-3">
+                {realtorBeta ? (
+                  <WizardSection
+                    title="Local recall"
+                    hint="Included with Realtor Beta. No embedding account or API key is needed."
+                  >
+                    <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
+                      Elevation uses local keyword and graph recall. External embedding services stay off.
+                    </div>
+                  </WizardSection>
+                ) : (
+                  <WizardSection title="Embedding model (optional)" hint="Sharpens semantic recall. Skip it and memory uses keyword search — fine for most realtors.">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <WizardSelect
+                        label="Provider"
+                        value={draft.embeddingProvider}
+                        onChange={(v) => updateField("embeddingProvider", v)}
+                        options={[
+                          { value: "", label: "— pick one —" },
+                          { value: "openai", label: "OpenAI" },
+                          { value: "voyage", label: "Voyage AI" },
+                          { value: "cohere", label: "Cohere" },
+                          { value: "ollama", label: "Ollama (local server)" },
+                          { value: "local", label: "Local (sentence-transformers)" },
+                        ]}
+                      />
                       <WizardField
-                        label="Embedding API key"
-                        value={draft.embeddingApiKey}
-                        onChange={(v) => updateField("embeddingApiKey", v)}
-                        placeholder={
-                          draft.embeddingSecretPresent && !draft.embeddingApiKey
-                            ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
-                            : "sk-…"
-                        }
-                        type="password"
-                        fullWidth
-                        hint={
-                          draft.embeddingSecretPresent && !draft.embeddingApiKey
-                            ? "Detected from environment. Leave blank to keep using it."
-                            : undefined
-                        }
+                        label="Model ID"
+                        value={draft.embeddingModel}
+                        onChange={(v) => updateField("embeddingModel", v)}
+                        placeholder="text-embedding-3-large  or  voyage-3"
                       />
                     </div>
-                  )}
-                </WizardSection>
+                    <label className="mt-3 flex items-center gap-2 text-[12.5px] text-foreground">
+                      <input
+                        type="checkbox"
+                        checked={draft.embeddingShareKey}
+                        onChange={(e) => updateField("embeddingShareKey", e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-border accent-primary"
+                      />
+                      Share the primary LLM key
+                    </label>
+                    {!draft.embeddingShareKey && (
+                      <div className="mt-3">
+                        <WizardField
+                          label="Embedding API key"
+                          value={draft.embeddingApiKey}
+                          onChange={(v) => updateField("embeddingApiKey", v)}
+                          placeholder={
+                            draft.embeddingSecretPresent && !draft.embeddingApiKey
+                              ? `Already set — ${draft.embeddingSecretPreview} (paste to replace)`
+                              : "sk-…"
+                          }
+                          type="password"
+                          fullWidth
+                          hint={
+                            draft.embeddingSecretPresent && !draft.embeddingApiKey
+                              ? "Detected from environment. Leave blank to keep using it."
+                              : undefined
+                          }
+                        />
+                      </div>
+                    )}
+                  </WizardSection>
+                )}
               </>
             )}
 
@@ -828,44 +846,56 @@ export function AgentOnboardingWizard({
             {step.id === "memory" && (
               <WizardSection
                 title="Where memory lives"
-                hint="Local is the safe default. Switch to Supabase when you want shared memory."
+                hint={
+                  realtorBeta
+                    ? "Local Holographic memory is included with Realtor Beta."
+                    : "Local is the safe default. Switch to Supabase when you want shared memory."
+                }
               >
-                <WizardSelect
-                  label="Provider"
-                  value={draft.memoryProvider}
-                  onChange={(v) => updateField("memoryProvider", v)}
-                  options={[
-                    { value: "sqlite_local", label: "Local SQLite (recommended)" },
-                    { value: "supabase", label: "Supabase (shared across devices)" },
-                  ]}
-                />
-                {draft.memoryProvider === "supabase" && (
-                  <div className="mt-4 grid gap-4 md:grid-cols-2">
-                    <WizardField
-                      label="Supabase project URL"
-                      value={draft.memorySupabaseUrl}
-                      onChange={(v) => updateField("memorySupabaseUrl", v)}
-                      placeholder="https://xxx.supabase.co"
-                      fullWidth
-                    />
-                    <WizardField
-                      label="Service-role key"
-                      value={draft.memorySupabaseKey}
-                      onChange={(v) => updateField("memorySupabaseKey", v)}
-                      placeholder={
-                        draft.memorySecretPresent && !draft.memorySupabaseKey
-                          ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
-                          : "eyJhbGc…"
-                      }
-                      type="password"
-                      fullWidth
-                      hint={
-                        draft.memorySecretPresent && !draft.memorySupabaseKey
-                          ? "Detected from environment. Leave blank to keep using it."
-                          : undefined
-                      }
-                    />
+                {realtorBeta ? (
+                  <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
+                    Local memory is ready in this Elevation profile. External memory services stay off.
                   </div>
+                ) : (
+                  <>
+                    <WizardSelect
+                      label="Provider"
+                      value={draft.memoryProvider}
+                      onChange={(v) => updateField("memoryProvider", v)}
+                      options={[
+                        { value: "sqlite_local", label: "Local SQLite (recommended)" },
+                        { value: "supabase", label: "Supabase (shared across devices)" },
+                      ]}
+                    />
+                    {draft.memoryProvider === "supabase" && (
+                      <div className="mt-4 grid gap-4 md:grid-cols-2">
+                        <WizardField
+                          label="Supabase project URL"
+                          value={draft.memorySupabaseUrl}
+                          onChange={(v) => updateField("memorySupabaseUrl", v)}
+                          placeholder="https://xxx.supabase.co"
+                          fullWidth
+                        />
+                        <WizardField
+                          label="Service-role key"
+                          value={draft.memorySupabaseKey}
+                          onChange={(v) => updateField("memorySupabaseKey", v)}
+                          placeholder={
+                            draft.memorySecretPresent && !draft.memorySupabaseKey
+                              ? `Already set — ${draft.memorySecretPreview} (paste to replace)`
+                              : "eyJhbGc…"
+                          }
+                          type="password"
+                          fullWidth
+                          hint={
+                            draft.memorySecretPresent && !draft.memorySupabaseKey
+                              ? "Detected from environment. Leave blank to keep using it."
+                              : undefined
+                          }
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
                 <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
                   On finish, Elevation creates the operational tables (contacts, conversations, deals, tasks) via migrations.

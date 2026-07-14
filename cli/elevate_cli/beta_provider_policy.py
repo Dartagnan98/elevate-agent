@@ -21,6 +21,7 @@ BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1"
 BETA_ALLOWED_PROVIDER = "openai-codex"
 BETA_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 BETA_DEFAULT_MODEL = "gpt-5.5"
+BETA_ALLOWED_MEMORY_PROVIDERS = ("", "holographic")
 BETA_ALLOWED_MODELS = (
     "gpt-5.5",
     "gpt-5.4-mini",
@@ -80,6 +81,62 @@ def beta_model_or_default(value: Any, *, source: str = "model") -> str:
     return model
 
 
+def validate_beta_memory_provider(
+    value: Any,
+    *,
+    environ: Mapping[str, str] | None = None,
+    source: str = "memory provider",
+) -> str:
+    """Normalize a memory provider and reject nonlocal providers in Beta."""
+    provider = str(value or "").strip().lower()
+    if (
+        beta_provider_policy_active(environ)
+        and provider not in BETA_ALLOWED_MEMORY_PROVIDERS
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta keeps memory local and does not allow external "
+            f"{source} {provider!r}. Use built-in memory or Holographic.",
+            code="beta_memory_provider_not_allowed",
+        )
+    return provider
+
+
+def _beta_memory_embeddings_enabled(config: Mapping[str, Any]) -> bool:
+    """Return the Holographic embedding toggle using its runtime semantics."""
+    plugins = config.get("plugins")
+    if not isinstance(plugins, Mapping):
+        return False
+    memory_store = plugins.get("elevate-memory-store")
+    if not isinstance(memory_store, Mapping):
+        return False
+    value = memory_store.get("embedding_enabled")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enabled",
+    }
+
+
+def _validate_beta_memory_config(
+    config: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Keep automatic Realtor Beta memory local and inference-free."""
+    memory = config.get("memory")
+    provider_value = memory.get("provider") if isinstance(memory, Mapping) else ""
+    validate_beta_memory_provider(provider_value, environ=environ)
+    if _beta_memory_embeddings_enabled(config):
+        raise BetaProviderPolicyError(
+            "Realtor Beta keeps memory local and does not allow embedding-based recall.",
+            code="beta_memory_embeddings_not_allowed",
+        )
+
+
 def validate_beta_config_for_persistence(
     config: Mapping[str, Any],
     auth_status: Mapping[str, Any],
@@ -101,6 +158,8 @@ def validate_beta_config_for_persistence(
             "Realtor Beta configuration must be a mapping.",
             code="beta_config_invalid",
         )
+
+    _validate_beta_memory_config(config, environ=environ)
 
     for key in ("fallback_model", "fallback_providers"):
         value = config.get(key)

@@ -54,7 +54,9 @@ import {
   type IntegrationTestResponse,
   type SourceConnectorsResponse,
   type SourceConnectorStatus,
+  type StatusResponse,
 } from "@/lib/api";
+import { resolveMemoryPolicyState } from "@/lib/beta-runtime";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
 import { CRM_PRESETS, applyPreset, findPresetForForm, type CrmPreset } from "@/lib/crmPresets";
 import { useToast } from "@/hooks/useToast";
@@ -1933,9 +1935,10 @@ function ChannelsPanel({ config, setConfig }: ChannelsPanelProps) {
 interface MemoryPanelProps {
   config: Record<string, unknown> | null;
   setConfig: (next: Record<string, unknown>) => void;
+  realtorBeta: boolean;
 }
 
-function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
+function MemoryPanel({ config, setConfig, realtorBeta }: MemoryPanelProps) {
   const { showToast } = useToast();
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
@@ -1978,6 +1981,21 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
   const graphRecall = Boolean(get("plugins.elevate-memory-store.graph_recall_enabled"));
   const recentRecall = Boolean(get("plugins.elevate-memory-store.recent_recall_enabled"));
   const embeddingEnabled = Boolean(get("plugins.elevate-memory-store.embedding_enabled"));
+  const useBetaLocalMemory = () => {
+    setDraft((current) => {
+      if (!current) return current;
+      const withProvider = setNestedValue(
+        current,
+        "memory.provider",
+        "holographic",
+      ) as Record<string, unknown>;
+      return setNestedValue(
+        withProvider,
+        "plugins.elevate-memory-store.embedding_enabled",
+        false,
+      ) as Record<string, unknown>;
+    });
+  };
 
   return (
     <section className="space-y-6">
@@ -2031,22 +2049,46 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
           </div>
         </div>
 
-        <div>
-          <label className="block text-xs text-muted-foreground">External provider</label>
-          <select
-            className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
-            value={provider}
-            onChange={(e) => set("memory.provider", e.target.value)}
-          >
-            <option value="">Built-in only</option>
-            <option value="openviking">OpenViking</option>
-            <option value="mem0">Mem0</option>
-            <option value="hindsight">Hindsight</option>
-            <option value="holographic">Holographic</option>
-            <option value="retaindb">RetainDB</option>
-            <option value="byterover">Byterover</option>
-          </select>
-        </div>
+        {realtorBeta ? (
+          <div className="rounded-md border border-border/60 bg-muted/20 p-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
+              Local memory only
+            </div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              Realtor Beta keeps remembered details in this Elevation profile on your Mac.
+              External memory services and embedding-based recall stay off.
+            </p>
+            {(provider !== "" && provider !== "holographic") || embeddingEnabled ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={useBetaLocalMemory}
+              >
+                Use local memory
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <div>
+            <label className="block text-xs text-muted-foreground">External provider</label>
+            <select
+              className="mt-1 h-8 w-full rounded-md border border-border bg-background px-2 text-sm"
+              value={provider}
+              onChange={(e) => set("memory.provider", e.target.value)}
+            >
+              <option value="">Built-in only</option>
+              <option value="openviking">OpenViking</option>
+              <option value="mem0">Mem0</option>
+              <option value="hindsight">Hindsight</option>
+              <option value="holographic">Holographic</option>
+              <option value="retaindb">RetainDB</option>
+              <option value="byterover">Byterover</option>
+            </select>
+          </div>
+        )}
       </div>
 
       <div className="rounded-lg border border-border/60 p-4 space-y-3">
@@ -2080,10 +2122,12 @@ function MemoryPanel({ config, setConfig }: MemoryPanelProps) {
           <Switch checked={graphRecall} onCheckedChange={(v) => set("plugins.elevate-memory-store.graph_recall_enabled", v)} aria-label="Graph recall" />
         </label>
 
-        <label className="flex items-center justify-between gap-3">
-          <span className="text-sm text-foreground/90">Embedding-based recall</span>
-          <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} aria-label="Embedding-based recall" />
-        </label>
+        {!realtorBeta && (
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-sm text-foreground/90">Embedding-based recall</span>
+            <Switch checked={embeddingEnabled} onCheckedChange={(v) => set("plugins.elevate-memory-store.embedding_enabled", v)} aria-label="Embedding-based recall" />
+          </label>
+        )}
       </div>
     </section>
   );
@@ -2284,6 +2328,7 @@ function PluginsPanel({ config, setConfig }: PluginsPanelProps) {
 
 export default function ConfigPage() {
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  const [status, setStatus] = useState<StatusResponse | null | undefined>();
   const [schema, setSchema] = useState<Record<string, Record<string, unknown>> | null>(null);
   const [categoryOrder, setCategoryOrder] = useState<string[]>([]);
   const [defaults, setDefaults] = useState<Record<string, unknown> | null>(null);
@@ -2346,8 +2391,13 @@ export default function ConfigPage() {
     return cat.charAt(0).toUpperCase() + cat.slice(1);
   }
 
+  const loadRuntimeStatus = useCallback(() => {
+    return api.getStatus({ refresh: true }).then(setStatus).catch(() => setStatus(null));
+  }, []);
+
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => {});
+    void loadRuntimeStatus();
     api
       .getSchema()
       .then((resp) => {
@@ -2356,7 +2406,9 @@ export default function ConfigPage() {
       })
       .catch(() => {});
     api.getDefaults().then(setDefaults).catch(() => {});
-  }, []);
+  }, [loadRuntimeStatus]);
+
+  const memoryPolicyState = resolveMemoryPolicyState(status);
 
   // Load YAML when switching to YAML mode
   useEffect(() => {
@@ -2766,7 +2818,42 @@ export default function ConfigPage() {
           {activePane === "channels" && config && <ChannelsPanel config={config} setConfig={setConfig} />}
 
           {/* ---- Memory pane ---- */}
-          {activePane === "memory" && config && <MemoryPanel config={config} setConfig={setConfig} />}
+          {activePane === "memory" && config && memoryPolicyState === "loading" && (
+            <PageSkeleton rows={4} variant="form" />
+          )}
+          {activePane === "memory" && config && memoryPolicyState === "unavailable" && (
+            <section className="rounded-lg border border-border/60 bg-muted/20 p-4">
+              <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
+                Memory settings unavailable
+              </h2>
+              <p className="mt-2 max-w-prose text-sm leading-6 text-muted-foreground">
+                Elevation could not confirm this profile&apos;s release policy, so memory provider controls are paused.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => {
+                  setStatus(undefined);
+                  void loadRuntimeStatus();
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                Retry
+              </Button>
+            </section>
+          )}
+          {activePane === "memory" && config && (
+            memoryPolicyState === "beta" || memoryPolicyState === "stable"
+          ) && (
+            <MemoryPanel
+              config={config}
+              setConfig={setConfig}
+              realtorBeta={memoryPolicyState === "beta"}
+            />
+          )}
 
           {/* ---- Composio pane ---- */}
           {activePane === "composio" && <ComposioPanel />}
