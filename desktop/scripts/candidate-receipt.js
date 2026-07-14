@@ -851,6 +851,8 @@ function appRecord(
 ) {
   const plist = plistJson(appPath);
   const resources = path.join(appPath, "Contents", "Resources");
+  const embeddedCliRoot = path.join(resources, "cli");
+  assertCanonicalPackagedPermissions(embeddedCliRoot, `${arch} packaged CLI`);
   const updatePath = path.join(resources, "app-update.yml");
   const update = yaml.load(fs.readFileSync(updatePath, "utf8")) || {};
   const asarPath = path.join(resources, "app.asar");
@@ -885,7 +887,7 @@ function appRecord(
     architecture: arch,
     app_path: path.relative(relativeTo, appPath),
     bundle_manifest: hashTree(appPath),
-    embedded_cli: hashTree(path.join(resources, "cli"), { mode: "cli-packaging" }),
+    embedded_cli: hashTree(embeddedCliRoot, { mode: "cli-packaging" }),
     embedded_web: {
       ...hashTree(path.join(resources, "cli", "elevate_cli", "web_dist")),
       portable: hashPortableTree(path.join(resources, "cli", "elevate_cli", "web_dist")),
