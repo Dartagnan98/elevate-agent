@@ -1962,6 +1962,69 @@ def run_job(
         return _run_job_impl(job, session_id=session_id)
 
 
+def _beta_cron_provider_error(error: Exception) -> str:
+    """Keep an exact-Beta provider rejection typed in saved/delivered output."""
+    from elevate_cli.runtime_provider import format_runtime_provider_error
+
+    code = str(getattr(error, "code", "") or "beta_provider_policy_failed")
+    return f"Error [{code}]: {format_runtime_provider_error(error)}"
+
+
+def _validate_beta_cron_runtime(runtime: dict, model: str) -> tuple[dict, str]:
+    """Return a minimal current-profile Codex payload for Beta agent creation.
+
+    ``resolve_runtime_provider`` owns provider discovery and auth refresh.  This
+    call-site check is deliberately narrower: immediately before ``AIAgent`` is
+    constructed, verify that the fresh result still describes the canonical
+    current-profile Codex transport and copy only that payload forward.
+    """
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        canonical_beta_provider,
+    )
+
+    if not isinstance(runtime, dict):
+        raise BetaProviderPolicyError(
+            "Realtor Beta cron provider resolution returned an invalid payload.",
+            code="beta_codex_runtime_not_local",
+        )
+
+    canonical_beta_provider(runtime.get("provider"), source="cron runtime provider")
+    canonical_model = beta_model_or_default(model, source="cron model")
+    expected_auth_store = str(_get_elevate_home() / "auth.json")
+    if (
+        runtime.get("api_mode") != "codex_responses"
+        or runtime.get("source") != "elevate-auth-store"
+        or runtime.get("auth_store") != expected_auth_store
+        or runtime.get("credential_pool") is not None
+        or runtime.get("command") not in (None, "")
+        or list(runtime.get("args") or [])
+        or str(runtime.get("base_url") or "").rstrip("/")
+        != BETA_CODEX_BASE_URL.rstrip("/")
+        or not str(runtime.get("api_key") or "").strip()
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta cron execution requires current-profile OpenAI "
+            "Codex provider-state auth.",
+            code="beta_codex_runtime_not_local",
+        )
+
+    return (
+        {
+            "provider": BETA_ALLOWED_PROVIDER,
+            "api_mode": "codex_responses",
+            "base_url": BETA_CODEX_BASE_URL,
+            "api_key": str(runtime["api_key"]),
+            "command": None,
+            "args": [],
+        },
+        canonical_model,
+    )
+
+
 def _run_job_impl(
     job: dict,
     *,
@@ -2360,6 +2423,31 @@ def _run_job_impl(
         # Provider routing
         pr = _cfg.get("provider_routing", {})
 
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_PROVIDER,
+            beta_model_or_default,
+            beta_provider_policy_active,
+            read_beta_codex_auth_status,
+            validate_beta_config_for_persistence,
+        )
+
+        beta_provider_active = beta_provider_policy_active()
+        if beta_provider_active:
+            # Existing hand-edited or pre-policy profiles can still contain
+            # provider escape hatches even though new writes are blocked.  Do
+            # not let a scheduled/headless run silently consume them.
+            try:
+                validate_beta_config_for_persistence(
+                    _cfg,
+                    read_beta_codex_auth_status(_get_elevate_home()),
+                )
+                model = beta_model_or_default(model, source="cron model")
+            except Exception as exc:
+                raise RuntimeError(_beta_cron_provider_error(exc)) from exc
+            # Provider-routing preferences are discovery hints for the normal
+            # multi-provider harness.  They cannot participate in Beta.
+            pr = {}
+
         from elevate_cli.runtime_provider import (
             resolve_runtime_provider,
             format_runtime_provider_error,
@@ -2376,8 +2464,14 @@ def _run_job_impl(
             }
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
+            if beta_provider_active:
+                runtime_kwargs["target_model"] = model
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except AuthError as auth_exc:
+            if beta_provider_active:
+                # Never cross providers when current-profile Codex auth is
+                # missing, expired, or rejected.
+                raise RuntimeError(_beta_cron_provider_error(auth_exc)) from auth_exc
             # Primary provider auth failed — try fallback chain before giving up.
             logger.warning("Job '%s': primary auth failed (%s), trying fallback", job_id, auth_exc)
             fb = _cfg.get("fallback_providers") or _cfg.get("fallback_model")
@@ -2400,13 +2494,21 @@ def _run_job_impl(
             if runtime is None:
                 raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
         except Exception as exc:
-            message = format_runtime_provider_error(exc)
+            message = (
+                _beta_cron_provider_error(exc)
+                if beta_provider_active
+                else format_runtime_provider_error(exc)
+            )
             raise RuntimeError(message) from exc
 
-        fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
+        fallback_model = (
+            None
+            if beta_provider_active
+            else _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
+        )
         credential_pool = None
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
-        if runtime_provider:
+        if runtime_provider and not beta_provider_active:
             try:
                 from agent.credential_pool import load_pool
                 pool = load_pool(runtime_provider)
@@ -2441,6 +2543,21 @@ def _run_job_impl(
                 "Job '%s': MCP initialization failed (non-fatal): %s",
                 job_id, _mcp_exc,
             )
+
+        if beta_provider_active:
+            # Auth can disappear while prompt/MCP setup is in progress.  The
+            # only runtime allowed to reach AIAgent is a fresh, canonical
+            # current-profile Codex resolution performed immediately before
+            # construction.  Do not reuse the earlier result or any pool,
+            # fallback, custom endpoint, or cached provider payload.
+            try:
+                runtime = resolve_runtime_provider(
+                    requested=BETA_ALLOWED_PROVIDER,
+                    target_model=model,
+                )
+                runtime, model = _validate_beta_cron_runtime(runtime, model)
+            except Exception as exc:
+                raise RuntimeError(_beta_cron_provider_error(exc)) from exc
 
         agent = AIAgent(
             model=model,
