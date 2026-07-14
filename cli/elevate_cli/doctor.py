@@ -1373,24 +1373,25 @@ def run_doctor(args):
     # =========================================================================
     # Check: Submodules
     # =========================================================================
-    print()
-    print(color("◆ Submodules", Colors.CYAN, Colors.BOLD))
-    
-    # tinker-atropos (RL training backend)
-    tinker_dir = PROJECT_ROOT / "tinker-atropos"
-    if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
-        if py_version >= (3, 11):
-            try:
-                __import__("tinker_atropos")
-                check_ok("tinker-atropos", "(RL training backend)")
-            except ImportError:
-                install_cmd = f"{_python_install_cmd()} -e ./tinker-atropos"
-                check_warn("tinker-atropos found but not installed", f"(run: {install_cmd})")
-                issues.append(f"Install tinker-atropos: {install_cmd}")
+    if not realtor_beta:
+        print()
+        print(color("◆ Submodules", Colors.CYAN, Colors.BOLD))
+
+        # tinker-atropos (RL training backend)
+        tinker_dir = PROJECT_ROOT / "tinker-atropos"
+        if tinker_dir.exists() and (tinker_dir / "pyproject.toml").exists():
+            if py_version >= (3, 11):
+                try:
+                    __import__("tinker_atropos")
+                    check_ok("tinker-atropos", "(RL training backend)")
+                except ImportError:
+                    install_cmd = f"{_python_install_cmd()} -e ./tinker-atropos"
+                    check_warn("tinker-atropos found but not installed", f"(run: {install_cmd})")
+                    issues.append(f"Install tinker-atropos: {install_cmd}")
+            else:
+                check_warn("tinker-atropos requires Python 3.11+", f"(current: {py_version.major}.{py_version.minor})")
         else:
-            check_warn("tinker-atropos requires Python 3.11+", f"(current: {py_version.major}.{py_version.minor})")
-    else:
-        check_warn("tinker-atropos not found", "(run: git submodule update --init --recursive)")
+            check_warn("tinker-atropos not found", "(run: git submodule update --init --recursive)")
     
     # =========================================================================
     # Check: Tool Availability
@@ -1398,32 +1399,50 @@ def run_doctor(args):
     print()
     print(color("◆ Tool Availability", Colors.CYAN, Colors.BOLD))
     
-    try:
-        # Add project root to path for imports
-        sys.path.insert(0, str(PROJECT_ROOT))
-        from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
-        
-        available, unavailable = check_tool_availability()
-        available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
-        
-        for tid in available:
-            info = TOOLSET_REQUIREMENTS.get(tid, {})
-            check_ok(info.get("name", tid))
-        
-        for item in unavailable:
-            env_vars = item.get("missing_vars") or item.get("env_vars") or []
-            if env_vars:
-                vars_str = ", ".join(env_vars)
-                check_warn(item["name"], f"(missing {vars_str})")
+    if realtor_beta:
+        check_info(
+            "Tool credentials are separate from the OpenAI Codex inference provider"
+        )
+        beta_tool_credentials = (
+            ("Firecrawl tool credential", ("FIRECRAWL_API_KEY",)),
+            ("Tavily tool credential", ("TAVILY_API_KEY",)),
+            ("FAL tool credential", ("FAL_KEY",)),
+            ("ElevenLabs tool credential", ("ELEVENLABS_API_KEY",)),
+            ("GitHub tool credential", ("GITHUB_TOKEN", "GH_TOKEN")),
+        )
+        for label, env_names in beta_tool_credentials:
+            configured = any(bool(os.getenv(name)) for name in env_names)
+            if configured:
+                check_ok(label, "(configured; no network probe)")
             else:
-                check_warn(item["name"], "(system dependency not met)")
+                check_warn(label, "(optional, not configured)")
+    else:
+        try:
+            # Add project root to path for imports
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
 
-        # Count disabled tools with API key requirements
-        api_disabled = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
-        if api_disabled:
-            issues.append("Run 'elevate setup' to configure missing API keys for full tool access")
-    except Exception as e:
-        check_warn("Could not check tool availability", f"({e})")
+            available, unavailable = check_tool_availability()
+            available, unavailable = _apply_doctor_tool_availability_overrides(available, unavailable)
+
+            for tid in available:
+                info = TOOLSET_REQUIREMENTS.get(tid, {})
+                check_ok(info.get("name", tid))
+
+            for item in unavailable:
+                env_vars = item.get("missing_vars") or item.get("env_vars") or []
+                if env_vars:
+                    vars_str = ", ".join(env_vars)
+                    check_warn(item["name"], f"(missing {vars_str})")
+                else:
+                    check_warn(item["name"], "(system dependency not met)")
+
+            # Count disabled tools with API key requirements
+            api_disabled = [u for u in unavailable if (u.get("missing_vars") or u.get("env_vars"))]
+            if api_disabled:
+                issues.append("Run 'elevate setup' to configure missing API keys for full tool access")
+        except Exception as e:
+            check_warn("Could not check tool availability", f"({e})")
     
     # =========================================================================
     # Check: Skills Hub

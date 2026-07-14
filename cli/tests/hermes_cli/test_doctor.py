@@ -490,13 +490,15 @@ def _prepare_beta_doctor(monkeypatch, tmp_path, *, release_channel="beta"):
         "OPENCODE_GO_API_KEY",
     )
     (home / ".env").write_text(
-        "".join(f"{key}=hostile-{key.lower()}\n" for key in provider_keys),
+        "".join(f"{key}=hostile-{key.lower()}\n" for key in provider_keys)
+        + "FIRECRAWL_API_KEY=tool-firecrawl\n",
         encoding="utf-8",
     )
     for key in provider_keys:
         monkeypatch.setenv(key, f"hostile-{key.lower()}")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "hostile-aws-key")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "hostile-aws-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "tool-firecrawl")
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", release_channel)
     monkeypatch.setenv("TERMINAL_ENV", "local")
 
@@ -578,6 +580,14 @@ def test_realtor_beta_doctor_never_reaches_alternate_provider_paths(
         "run",
         forbidden("provider subprocess"),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "model_tools",
+        types.SimpleNamespace(
+            check_tool_availability=forbidden("generic tool availability"),
+            TOOLSET_REQUIREMENTS={},
+        ),
+    )
 
     actual_reader = doctor_mod.read_beta_codex_auth_status
     local_auth_reads = []
@@ -607,7 +617,9 @@ def test_realtor_beta_doctor_never_reaches_alternate_provider_paths(
     assert "Generic config auto-migration disabled in Realtor Beta" in out
     assert "Blocked root-level provider keys: provider, base_url" in out
     assert "Tool Availability" in out
-    assert "Firecrawl (tool credential)" in out
+    assert "Firecrawl tool credential" in out
+    assert "configured; no network probe" in out
+    assert "Submodules" not in out
 
     assert "Nous Portal auth" not in out
     assert "Google Gemini OAuth" not in out
