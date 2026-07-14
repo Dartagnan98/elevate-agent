@@ -8,6 +8,7 @@ import httpx
 
 from agent.anthropic_adapter import _is_oauth_token, resolve_anthropic_token
 from elevate_cli.auth import _read_codex_tokens, resolve_codex_runtime_credentials
+from elevate_cli.beta_provider_policy import beta_provider_policy_active
 from elevate_cli.runtime_provider import resolve_runtime_provider
 
 
@@ -313,6 +314,12 @@ def fetch_account_usage(
 ) -> Optional[AccountUsageSnapshot]:
     normalized = str(provider or "").strip().lower()
     if normalized in {"", "auto", "custom"}:
+        return None
+    # A stale session row must not turn the exact Realtor Beta usage command
+    # into an alternate-provider credential lookup or network request.  Live
+    # Beta agents are Codex-only, but the persisted billing fields predate that
+    # policy and remain attacker-/migration-controlled input.
+    if beta_provider_policy_active() and normalized != "openai-codex":
         return None
     try:
         if normalized == "openai-codex":

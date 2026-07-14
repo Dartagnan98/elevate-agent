@@ -95,6 +95,50 @@ def test_fetch_account_usage_codex(monkeypatch):
     assert "Credits balance: $12.50" in snapshot.details
 
 
+def test_exact_beta_usage_rejects_stale_alternate_provider_before_side_effects(
+    monkeypatch,
+):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("alternate provider usage path must stay unreachable")
+
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        unexpected,
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        unexpected,
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        unexpected,
+    )
+
+    assert fetch_account_usage("anthropic") is None
+    assert fetch_account_usage("openrouter", api_key="hostile") is None
+
+
+def test_non_exact_beta_usage_keeps_existing_provider_behavior(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+    called = []
+    monkeypatch.setattr(
+        "agent.account_usage._fetch_openrouter_account_usage",
+        lambda base_url, api_key: called.append((base_url, api_key)) or "snapshot",
+    )
+
+    assert (
+        fetch_account_usage(
+            "openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key="stable-key",
+        )
+        == "snapshot"
+    )
+    assert called == [("https://openrouter.ai/api/v1", "stable-key")]
+
+
 def test_render_account_usage_lines_includes_reset_and_provider():
     snapshot = AccountUsageSnapshot(
         provider="openai-codex",
