@@ -347,6 +347,52 @@ def _beta_image_setup_requested(item: Dict[str, Any]) -> bool:
     )
 
 
+def _beta_generic_setup_item_requested(item: Dict[str, Any]) -> bool:
+    """Return whether a generic setup row attempts to activate a Beta lane."""
+    return (
+        bool(str(item.get("provider") or "").strip())
+        or str(item.get("status") or "missing").strip()
+        in {"configured", "connected", "manual"}
+        or _has_meaningful_setup_value(item.get("value"))
+    )
+
+
+def _reject_beta_generic_setup_lane(item: Dict[str, Any]) -> None:
+    """Keep signed-pack accounts, channels, and agents out of generic setup."""
+    key = str(item.get("key") or "").strip()
+    if not _beta_generic_setup_item_requested(item):
+        return
+    if key == "composio_workspace":
+        raise BetaProviderPolicyError(
+            "Realtor Beta connects email, calendar, drive, and CRM accounts through "
+            "the active signed realtor pack, not a generic Composio key in Agent setup.",
+            code="beta_pack_account_setup_required",
+        )
+    if key == "operator_channel_telegram":
+        raise BetaProviderPolicyError(
+            "Connect Telegram through the Realtor Beta Telegram pairing step so the "
+            "token, allowlist, aliases, and closed-access policy are saved together.",
+            code="beta_telegram_setup_route_required",
+        )
+    if key.startswith("operator_channel_") and key != "operator_channel_cli":
+        raise BetaProviderPolicyError(
+            "Realtor Beta supports only its private Telegram messaging lane.",
+            code="beta_channel_not_available",
+        )
+    if key.startswith("outbound_"):
+        raise BetaProviderPolicyError(
+            "Realtor Beta messaging follows the active private Telegram lane and cannot "
+            "be expanded from generic Agent setup.",
+            code="beta_outbound_channel_not_available",
+        )
+    if key in {"subagents_pack", "agent_channel_routing"}:
+        raise BetaProviderPolicyError(
+            "Realtor Beta derives its agent roster and routing from active signed pack "
+            "entitlements; generic agent or channel expansion is not available.",
+            code="beta_signed_agent_roster_required",
+        )
+
+
 def _preflight_beta_agent_setup_update(
     conn,
     items: List[Dict[str, Any]],
@@ -366,6 +412,7 @@ def _preflight_beta_agent_setup_update(
     seen: set[str] = set()
     submitted_primary: Dict[str, Any] | None = None
     canonical_items: List[Dict[str, Any]] = []
+    deferred_generic_items: List[Dict[str, Any]] = []
     for raw_item in items:
         item = dict(raw_item)
         key = str(item.get("key") or "").strip()
@@ -415,6 +462,13 @@ def _preflight_beta_agent_setup_update(
                 "Agent setup.",
                 code="beta_image_provider_not_allowed",
             )
+        elif (
+            key == "composio_workspace"
+            or key.startswith("operator_channel_")
+            or key.startswith("outbound_")
+            or key in {"subagents_pack", "agent_channel_routing"}
+        ):
+            deferred_generic_items.append(item)
         canonical_items.append(item)
 
     auth_status = read_beta_codex_auth_status(get_elevate_home())
@@ -427,6 +481,8 @@ def _preflight_beta_agent_setup_update(
             canonical_primary if item.get("key") == "model_primary" else item
             for item in canonical_items
         ]
+        for generic_item in deferred_generic_items:
+            _reject_beta_generic_setup_lane(generic_item)
         return canonical_items
 
     current_primary_items: List[Dict[str, Any]] = []
@@ -471,6 +527,8 @@ def _preflight_beta_agent_setup_update(
 
     for current_primary in current_primary_items:
         validate_beta_primary_item(current_primary, auth_status)
+    for generic_item in deferred_generic_items:
+        _reject_beta_generic_setup_lane(generic_item)
     return canonical_items
 
 

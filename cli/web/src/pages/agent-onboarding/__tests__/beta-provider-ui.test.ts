@@ -12,6 +12,7 @@ import {
   REALTOR_BETA_ALLOWED_MODELS_VERSION,
   REALTOR_BETA_OAUTH_PROVIDER_ID,
   REALTOR_BETA_PROVIDER_POLICY_VERSION,
+  REALTOR_BETA_WIZARD_STEP_IDS,
   canonicalizePrimaryDraftForOnboarding,
   isOAuthProviderAllowedInOnboarding,
   oauthProviderRowsForOnboarding,
@@ -91,6 +92,16 @@ function betaContract(primary = primaryItem()) {
 }
 
 describe("Realtor Beta onboarding provider UI", () => {
+  it("uses the realtor-only five-step setup sequence", () => {
+    expect(REALTOR_BETA_WIZARD_STEP_IDS).toEqual([
+      "models",
+      "memory",
+      "inbound",
+      "tools",
+      "subagents",
+    ]);
+  });
+
   it("recovers from an initial provider failure and publishes Refresh state that unlocks Next", async () => {
     const primary = primaryItem();
     const contract = betaContract(primary);
@@ -191,6 +202,51 @@ describe("Realtor Beta onboarding provider UI", () => {
         apiKey: "",
         usesEnvSecret: false,
       },
+    });
+  });
+
+  it("clears generic credentials, channels, and arbitrary agent routing before Beta saves", () => {
+    const draft = canonicalizePrimaryDraftForOnboarding(
+      {
+        ...browserDraft(),
+        imageProvider: "gemini",
+        imageApiKey: "ambient-image",
+        imageSecretPresent: true,
+        composioApiKey: "ambient-composio",
+        composioWorkspace: "default",
+        telegramBotToken: "malformed",
+        telegramChatId: "*",
+        discordBotToken: "discord",
+        discordChannelId: "all",
+        whatsappProvider: "meta",
+        whatsappToken: "whatsapp",
+        slackWebhookUrl: "https://hooks.invalid",
+        outboundDiscordEnabled: true,
+        subagentsEnabled: true,
+        subagentsPack: "agent_default",
+        agentChannels: { ads: { discord: ["all"] } },
+      },
+      true,
+      betaContract(),
+    );
+
+    expect(draft).toMatchObject({
+      imageProvider: "",
+      imageApiKey: "",
+      imageSecretPresent: false,
+      composioApiKey: "",
+      composioWorkspace: "",
+      telegramBotToken: "",
+      telegramChatId: "",
+      discordBotToken: "",
+      discordChannelId: "",
+      whatsappProvider: "",
+      whatsappToken: "",
+      slackWebhookUrl: "",
+      outboundDiscordEnabled: false,
+      subagentsEnabled: false,
+      subagentsPack: "",
+      agentChannels: {},
     });
   });
 

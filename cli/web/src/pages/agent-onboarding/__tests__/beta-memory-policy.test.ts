@@ -26,4 +26,17 @@ describe("Realtor Beta onboarding memory policy", () => {
     expect(wizard).toContain("No external memory account is needed.");
     expect(wizard).toContain("realtorBeta && step.id === \"memory\"");
   });
+
+  it("replaces the Stable control surface with signed-pack Beta guidance", () => {
+    const page = source("../index.tsx");
+    const wizard = source("../wizard.tsx");
+
+    expect(page).toContain("Photo and listing media");
+    expect(page).toContain("Private Telegram lane");
+    expect(page).toContain("Signed realtor agent team");
+    expect(wizard).toContain("REALTOR_BETA_WIZARD_STEPS");
+    expect(wizard).toContain("Realtor Beta supports Telegram only");
+    expect(wizard).toContain("Tools are assigned automatically");
+    expect(wizard).toContain("Signed realtor agent roster");
+  });
 });

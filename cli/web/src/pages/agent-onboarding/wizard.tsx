@@ -56,6 +56,7 @@ import {
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
 import {
+  REALTOR_BETA_WIZARD_STEP_IDS,
   type BetaPrimaryUiContract,
   canonicalizePrimaryDraftForOnboarding,
   resolveBetaPrimaryUiContract,
@@ -212,6 +213,43 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
     title: "Specialist agents",
     subtitle:
       "Pick which Agent Hub agents run alongside the main agent. Each one gets its own role, prompt, skills, toolsets, and (optional) Telegram lane — configure them inline below.",
+  },
+];
+
+type RealtorBetaWizardStepId = (typeof REALTOR_BETA_WIZARD_STEP_IDS)[number];
+
+const REALTOR_BETA_WIZARD_STEPS: Array<
+  AgentWizardStep & { id: RealtorBetaWizardStepId }
+> = [
+  {
+    id: "models",
+    eyebrow: "Step 1 of 5",
+    title: "Connect Elevation",
+    subtitle: "Sign in to OpenAI Codex for this Realtor Beta profile.",
+  },
+  {
+    id: "memory",
+    eyebrow: "Step 2 of 5",
+    title: "Local memory",
+    subtitle: "Your working memory stays in this Elevation profile on your Mac.",
+  },
+  {
+    id: "inbound",
+    eyebrow: "Step 3 of 5",
+    title: "Connect Telegram",
+    subtitle: "Connect the private Telegram lane used for requests and approvals.",
+  },
+  {
+    id: "tools",
+    eyebrow: "Step 4 of 5",
+    title: "Realtor accounts",
+    subtitle: "Your selected realtor pack controls the accounts and tools available here.",
+  },
+  {
+    id: "subagents",
+    eyebrow: "Step 5 of 5",
+    title: "Your agent team",
+    subtitle: "Elevation activates only the specialist agents included in your signed pack.",
   },
 ];
 
@@ -501,8 +539,11 @@ export function AgentOnboardingWizard({
     return out;
   }, [setup.items]);
 
-  const step = AGENT_WIZARD_STEPS[stepIdx];
-  const isLast = stepIdx === AGENT_WIZARD_STEPS.length - 1;
+  const wizardSteps = realtorBeta
+    ? REALTOR_BETA_WIZARD_STEPS
+    : AGENT_WIZARD_STEPS;
+  const step = wizardSteps[stepIdx] ?? wizardSteps[0];
+  const isLast = stepIdx === wizardSteps.length - 1;
   const isFirst = stepIdx === 0;
   const busy = saving || completing;
 
@@ -682,8 +723,8 @@ export function AgentOnboardingWizard({
       await handleFinish();
       return;
     }
-    setStepIdx((idx) => Math.min(idx + 1, AGENT_WIZARD_STEPS.length - 1));
-  }, [busy, canAdvance, isLast, save, handleFinish]);
+    setStepIdx((idx) => Math.min(idx + 1, wizardSteps.length - 1));
+  }, [busy, canAdvance, isLast, save, handleFinish, wizardSteps.length]);
 
   const handleBack = useCallback(() => {
     if (busy) return;
@@ -716,7 +757,7 @@ export function AgentOnboardingWizard({
           </Button>
         </div>
         <div className="mb-7 flex items-center gap-1.5">
-          {AGENT_WIZARD_STEPS.map((s, idx) => (
+          {wizardSteps.map((s, idx) => (
             <span
               key={s.id}
               aria-hidden
@@ -1008,7 +1049,11 @@ export function AgentOnboardingWizard({
                   onToggle={() => {}}
                   locked
                   title="CLI"
-                  hint="Talk to the agent inside your terminal with `elevate`. Always available — keep on."
+                  hint={
+                    realtorBeta
+                      ? "Elevation's local chat stays available as a private fallback."
+                      : "Talk to the agent inside your terminal with `elevate`. Always available — keep on."
+                  }
                 />
 
                 <ChannelToggle
@@ -1023,7 +1068,11 @@ export function AgentOnboardingWizard({
                     }
                   }}
                   title="Telegram"
-                  hint="Paste your BotFather token, then DM /start to your bot. The bot replies with a pairing code that lights up here."
+                  hint={
+                    realtorBeta
+                      ? "Connect the private Telegram lane used for requests, progress, and approvals. Unknown users must pair first."
+                      : "Paste your BotFather token, then DM /start to your bot. The bot replies with a pairing code that lights up here."
+                  }
                   link={{ href: "https://t.me/BotFather", label: "Open @BotFather" }}
                 >
                   <TelegramPairingPanel
@@ -1043,6 +1092,17 @@ export function AgentOnboardingWizard({
                   />
                 </ChannelToggle>
 
+                {realtorBeta ? (
+                  <WizardSection
+                    title="Private by default"
+                    hint="Realtor Beta supports Telegram only. Every unknown user is ignored or sent through pairing, and each approval stays attached to the exact request."
+                  >
+                    <p className="text-[12px] leading-6 text-muted-foreground">
+                      Additional messaging platforms are not part of this Beta build. They will appear here only after they have the same authorization and audit guarantees.
+                    </p>
+                  </WizardSection>
+                ) : (
+                  <>
                 <ChannelToggle
                   enabled={
                     configuredChannelKeys.has("operator_channel_imessage") ||
@@ -1133,10 +1193,40 @@ export function AgentOnboardingWizard({
                 </WizardSection>
 
                 <ConnectedAgentsRail oauthProviders={oauthProviders ?? []} />
+                  </>
+                )}
               </>
             )}
 
             {step.id === "tools" && (
+              realtorBeta ? (
+                <>
+                  <WizardSection
+                    title="Photo and listing media"
+                    hint="Photo processing is provided by the signed realtor pack. Connect its approved source and photo service from Realtor pack setup; this screen never asks for a second model API key."
+                  >
+                    <p className="text-[12px] leading-6 text-muted-foreground">
+                      Elevation will show photo cleanup and listing-media tools only when the active pack and its account connection are both ready.
+                    </p>
+                  </WizardSection>
+                  <WizardSection
+                    title="Email, calendar, drive, CRM, and forms"
+                    hint="These accounts follow the province and realtor pack selected in app onboarding. Each connection is checked against that signed pack before an agent can use it."
+                  >
+                    <p className="text-[12px] leading-6 text-muted-foreground">
+                      Finish any missing account connections in Realtor pack setup. Elevation will not accept a generic tool broker key here.
+                    </p>
+                  </WizardSection>
+                  <WizardSection
+                    title="Tools are assigned automatically"
+                    hint="The Beta roster exposes only the tools required by your active realtor agents. Unsupported toolsets stay unavailable even if an older profile contains them."
+                  >
+                    <p className="text-[12px] leading-6 text-muted-foreground">
+                      The available tools update when a signed pack is activated or revoked; there is no generic toolset switch in Realtor Beta.
+                    </p>
+                  </WizardSection>
+                </>
+              ) : (
               <>
                 <WizardSection
                   title="Image generation"
@@ -1224,6 +1314,7 @@ export function AgentOnboardingWizard({
                   <ToolsetsBrowser />
                 </WizardSection>
               </>
+              )
             )}
 
             {step.id === "skills" && (
@@ -1297,10 +1388,25 @@ export function AgentOnboardingWizard({
 
             {step.id === "subagents" && (
               <WizardSection
-                title="Agent Hub roster"
-                hint="Configure every Agent Hub agent inline: enable, skills, toolsets, platforms, system prompt, and per-agent Telegram bot. No /hub redirect — everything stays in setup."
+                title={realtorBeta ? "Signed realtor agent roster" : "Agent Hub roster"}
+                hint={
+                  realtorBeta
+                    ? "Your selected pack activates only its included realtor agents. Their roles, tools, and Telegram lanes cannot be expanded from this generic setup screen."
+                    : "Configure every Agent Hub agent inline: enable, skills, toolsets, platforms, system prompt, and per-agent Telegram bot. No /hub redirect — everything stays in setup."
+                }
               >
-                <AgentHubRoster />
+                {realtorBeta ? (
+                  <div className="space-y-3 text-[12px] leading-6 text-muted-foreground">
+                    <p>
+                      Executive Assistant is the core lane. Admin, Sales, Marketing, Social, and CMA appear only when their signed entitlements are active.
+                    </p>
+                    <p>
+                      Finish the province and pack selection in app onboarding to update this roster. Ads and arbitrary custom agents are not part of Realtor Beta.
+                    </p>
+                  </div>
+                ) : (
+                  <AgentHubRoster />
+                )}
               </WizardSection>
             )}
           </div>

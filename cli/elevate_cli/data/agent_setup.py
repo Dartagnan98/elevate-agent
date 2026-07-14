@@ -456,6 +456,20 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     """
     import os
 
+    beta_policy_enabled = beta_provider_policy_active()
+    beta_pack_env_keys: set[str] = set()
+    if beta_policy_enabled:
+        # Exact Beta setup truth is profile-local and entitlement-scoped. Host
+        # shell variables, another profile, and ambient macOS services are not
+        # evidence that this signed Realtor profile can use a capability.
+        from elevate_cli.beta_env_policy import (
+            beta_active_pack_env_metadata,
+            enforce_beta_env_store_local,
+        )
+
+        enforce_beta_env_store_local()
+        beta_pack_env_keys = set(beta_active_pack_env_metadata())
+
     # Pull from os.environ first, then fall back to ~/.elevate/.env so we
     # surface anything the user wrote into the dotenv file even if the
     # running process hasn't reloaded it yet.
@@ -469,9 +483,13 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     def _get(*names: str) -> str | None:
         for name in names:
-            val = os.environ.get(name)
-            if val:
-                return val
+            if beta_policy_enabled:
+                if name not in beta_pack_env_keys:
+                    continue
+            else:
+                val = os.environ.get(name)
+                if val:
+                    return val
             val = file_env.get(name)
             if val:
                 return val
@@ -488,6 +506,11 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     voyage_key = _get("VOYAGE_API_KEY")
     telegram_token = _get("TELEGRAM_BOT_TOKEN")
     telegram_chat = _get("TELEGRAM_CHAT_ID", "TELEGRAM_DEFAULT_CHAT_ID")
+    if beta_policy_enabled and telegram_token:
+        from elevate_cli.web_telegram_aliases import _looks_like_telegram_bot_token
+
+        if not _looks_like_telegram_bot_token(telegram_token):
+            telegram_token = None
     composio_key = _get("COMPOSIO_API_KEY")
     supabase_url = _get("SUPABASE_URL")
     supabase_key = _get("SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY")
@@ -510,8 +533,6 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     _cfg_provider = str(_cfg_model.get("provider") or "").strip()
     _cfg_default = str(_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
-    beta_policy_enabled = beta_provider_policy_active()
-
     if beta_policy_enabled:
         beta_auth_status = read_beta_codex_auth_status(get_elevate_home())
         overlays["model_primary"] = build_beta_primary_overlay(
@@ -720,7 +741,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
             },
         }
 
-    if gemini_key:
+    if gemini_key and not beta_policy_enabled:
         overlays["model_image"] = {
             "status": "configured",
             "provider": "gemini",
@@ -797,7 +818,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     # path flips the channel to configured.
     bluebubbles_url = _get("BLUEBUBBLES_SERVER_URL")
     bluebubbles_password = _get("BLUEBUBBLES_PASSWORD")
-    if bluebubbles_url and bluebubbles_password:
+    if not beta_policy_enabled and bluebubbles_url and bluebubbles_password:
         overlays["operator_channel_imessage"] = {
             "status": "configured",
             "provider": "bluebubbles",
@@ -811,7 +832,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
                 "bluebubblesHomeChannel": _get("BLUEBUBBLES_HOME_CHANNEL") or "",
             },
         }
-    else:
+    elif not beta_policy_enabled:
         try:
             from pathlib import Path
 
@@ -827,7 +848,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     discord_token = _get("DISCORD_BOT_TOKEN")
     discord_channel = _get("DISCORD_CHANNEL_ID")
-    if discord_token and discord_channel:
+    if not beta_policy_enabled and discord_token and discord_channel:
         overlays["operator_channel_discord"] = {
             "status": "configured",
             "provider": "discord",
@@ -845,7 +866,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
     whatsapp_provider = _get("WHATSAPP_PROVIDER") or (
         "meta_cloud_api" if whatsapp_token else None
     )
-    if whatsapp_token and whatsapp_provider:
+    if not beta_policy_enabled and whatsapp_token and whatsapp_provider:
         overlays["operator_channel_whatsapp"] = {
             "status": "configured",
             "provider": "whatsapp",
@@ -861,7 +882,7 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     slack_webhook = _get("SLACK_WEBHOOK_URL")
     slack_channel = _get("SLACK_DEFAULT_CHANNEL", "SLACK_CHANNEL")
-    if slack_webhook:
+    if not beta_policy_enabled and slack_webhook:
         overlays["operator_channel_slack"] = {
             "status": "configured",
             "provider": "slack",
@@ -897,7 +918,18 @@ def _apply_runtime_overlay(
         overlays = _detect_runtime_credentials()
     item_key = item["key"]
     overlay = overlays.get(item_key)
-    if not overlay:
+    beta_managed_item = beta_provider_policy_active() and (
+        item_key in {
+            "model_embedding",
+            "model_image",
+            "composio_workspace",
+            "subagents_pack",
+            "agent_channel_routing",
+        }
+        or item_key.startswith("operator_channel_")
+        or item_key.startswith("outbound_")
+    )
+    if not overlay and not beta_managed_item:
         if item_key == "model_primary" and item.get("provider"):
             merged = dict(item)
             merged["status"] = "missing"
@@ -935,6 +967,110 @@ def _apply_runtime_overlay(
         merged["value"] = overlay["value"]
         merged["detected"] = overlay["status"] in READY_STATUSES
         return merged
+
+    if beta_provider_policy_active() and item_key == "model_image":
+        return {
+            **item,
+            "status": "skipped",
+            "provider": None,
+            "value": {
+                "policyManaged": True,
+                "setupSurface": "realtor_pack",
+                "blockedReason": "signed_realtor_pack_only",
+            },
+            "detected": False,
+        }
+
+    if beta_provider_policy_active() and item_key == "composio_workspace":
+        if overlay and overlay.get("status") in READY_STATUSES:
+            return {
+                **item,
+                "status": "configured",
+                "provider": "composio",
+                "value": {
+                    **dict(overlay.get("value") or {}),
+                    "policyManaged": True,
+                    "setupSurface": "realtor_pack",
+                },
+                "detected": True,
+            }
+        return {
+            **item,
+            "status": "skipped",
+            "provider": None,
+            "value": {
+                "policyManaged": True,
+                "setupSurface": "realtor_pack",
+            },
+            "detected": False,
+        }
+
+    if beta_provider_policy_active() and item_key == "operator_channel_telegram":
+        if overlay and overlay.get("status") in READY_STATUSES:
+            return {
+                **item,
+                "status": "configured",
+                "provider": "telegram",
+                "value": {
+                    **dict(overlay.get("value") or {}),
+                    "policyManaged": True,
+                    "setupSurface": "telegram_pairing",
+                },
+                "detected": True,
+            }
+        return {
+            **item,
+            "status": "missing",
+            "provider": None,
+            "value": {
+                "policyManaged": True,
+                "setupSurface": "telegram_pairing",
+            },
+            "detected": False,
+        }
+
+    if (
+        beta_provider_policy_active()
+        and item_key.startswith("operator_channel_")
+        and item_key != "operator_channel_cli"
+    ):
+        return {
+            **item,
+            "status": "skipped",
+            "provider": None,
+            "value": {
+                "policyBlocked": True,
+                "blockedReason": "unsupported_beta_channel",
+            },
+            "detected": False,
+        }
+
+    if beta_provider_policy_active() and item_key.startswith("outbound_"):
+        return {
+            **item,
+            "status": "skipped",
+            "provider": None,
+            "value": {
+                "policyManaged": True,
+                "setupSurface": "telegram_pairing",
+            },
+            "detected": False,
+        }
+
+    if beta_provider_policy_active() and item_key in {
+        "subagents_pack",
+        "agent_channel_routing",
+    }:
+        return {
+            **item,
+            "status": "skipped",
+            "provider": None,
+            "value": {
+                "policyManaged": True,
+                "setupSurface": "signed_pack",
+            },
+            "detected": False,
+        }
 
     if item_key == "model_embedding" and beta_provider_policy_active():
         merged = dict(item)

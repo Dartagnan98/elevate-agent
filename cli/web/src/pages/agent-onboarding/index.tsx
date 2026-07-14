@@ -1039,6 +1039,29 @@ export function AgentSetupLaunch({
         </p>
       </ItemCard>
 
+      {realtorBeta ? (
+        <>
+          <ItemCard
+            title="Photo and listing media"
+            description="Managed by the signed realtor pack selected during app onboarding. Photo tools appear only after the pack's approved source and service are connected."
+            status={imageItem?.status ?? "skipped"}
+          >
+            <p className="text-[11.5px] leading-5 text-muted-foreground">
+              No generic image provider or second model API key is accepted on this Beta profile.
+            </p>
+          </ItemCard>
+          <ItemCard
+            title="Realtor account connections"
+            description="Email, calendar, drive, CRM, forms, and other tool accounts follow your active signed pack."
+            status={composioItem?.status ?? "skipped"}
+          >
+            <p className="text-[11.5px] leading-5 text-muted-foreground">
+              Finish missing accounts from Realtor pack setup. Generic Composio credentials are not collected here.
+            </p>
+          </ItemCard>
+        </>
+      ) : (
+        <>
       <ItemCard
         title="Image generation (Nano Banana)"
         description="Optional. The Nano Banana Gemini-CLI extension ships pre-installed — drop in a Gemini API key from AI Studio and /generate, /edit, /restore, /icon, /pattern, /story, /diagram light up. Other providers (OpenAI Images, Replicate) also supported."
@@ -1124,7 +1147,32 @@ export function AgentSetupLaunch({
           Open Composio dashboard <ExternalLink className="h-3 w-3" />
         </a>
       </ItemCard>
+        </>
+      )}
 
+      {realtorBeta ? (
+        <>
+          <ItemCard
+            title="Private Telegram lane"
+            description="Realtor Beta uses Telegram for requests, progress, and approvals. Unknown users must pair before they can reach an agent."
+            status={telegramItem?.status ?? "missing"}
+          >
+            <p className="text-[11.5px] leading-5 text-muted-foreground">
+              Connect or repair Telegram from the guided onboarding flow so the bot token, allowlist, and agent aliases are saved together.
+            </p>
+          </ItemCard>
+          <ItemCard
+            title="Signed realtor agent team"
+            description="Executive Assistant is the core lane. Admin, Sales, Marketing, Social, and CMA are activated only by their signed pack entitlements."
+            status={subagentsItem?.status ?? "skipped"}
+          >
+            <p className="text-[11.5px] leading-5 text-muted-foreground">
+              Province and pack onboarding control the roster and routing. Ads and arbitrary custom agents are not part of Realtor Beta.
+            </p>
+          </ItemCard>
+        </>
+      ) : (
+        <>
       <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11.5px] text-muted-foreground">
         <span className="font-medium text-foreground">Operator channels.</span> Where the agent
         pings you for approvals and status. Optional — pick one (or both) if you want push.
@@ -1289,6 +1337,8 @@ export function AgentSetupLaunch({
           })}
         </div>
       </ItemCard>
+        </>
+      )}
 
       <div className="sticky bottom-2 z-10 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/95 px-3 py-2 backdrop-blur">
         <div className="text-[11.5px] text-muted-foreground">

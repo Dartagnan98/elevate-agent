@@ -4,6 +4,13 @@ export const REALTOR_BETA_OAUTH_PROVIDER_ID = "openai-codex";
 export const REALTOR_BETA_PRIMARY_PROVIDER = "openai-codex";
 export const REALTOR_BETA_PROVIDER_POLICY_VERSION = "realtor-beta-codex-v1";
 export const REALTOR_BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1";
+export const REALTOR_BETA_WIZARD_STEP_IDS = [
+  "models",
+  "memory",
+  "inbound",
+  "tools",
+  "subagents",
+] as const;
 
 type PrimaryProviderDraft = {
   primaryProvider: string;
@@ -12,6 +19,60 @@ type PrimaryProviderDraft = {
   primarySecretPresent: boolean;
   primarySecretPreview: string;
 };
+
+type BetaManagedSetupDraft = PrimaryProviderDraft & Partial<{
+  embeddingProvider: string;
+  embeddingModel: string;
+  embeddingApiKey: string;
+  embeddingShareKey: boolean;
+  embeddingSecretPresent: boolean;
+  embeddingSecretPreview: string;
+  imageProvider: string;
+  imageApiKey: string;
+  imageSecretPresent: boolean;
+  imageSecretPreview: string;
+  memoryProvider: string;
+  memorySupabaseUrl: string;
+  memorySupabaseKey: string;
+  memorySecretPresent: boolean;
+  memorySecretPreview: string;
+  composioApiKey: string;
+  composioWorkspace: string;
+  composioSecretPresent: boolean;
+  composioSecretPreview: string;
+  cliEnabled: boolean;
+  telegramBotToken: string;
+  telegramChatId: string;
+  telegramAllowedUsers: string;
+  telegramHomeChannel: string;
+  telegramDmBehavior: string;
+  telegramAllowAllUsers: boolean;
+  telegramSecretPresent: boolean;
+  telegramSecretPreview: string;
+  imessageEnabled: boolean;
+  imessageHandle: string;
+  bluebubblesServerUrl: string;
+  bluebubblesAllowedUsers: string;
+  bluebubblesHomeChannel: string;
+  bluebubblesSecretPresent: boolean;
+  bluebubblesSecretPreview: string;
+  discordBotToken: string;
+  discordChannelId: string;
+  whatsappProvider: string;
+  whatsappToken: string;
+  whatsappPhoneId: string;
+  slackWebhookUrl: string;
+  slackChannel: string;
+  outboundImessageEnabled: boolean;
+  outboundImessageSenderHandle: string;
+  outboundTelegramEnabled: boolean;
+  outboundDiscordEnabled: boolean;
+  outboundWhatsappEnabled: boolean;
+  outboundSlackEnabled: boolean;
+  subagentsEnabled: boolean;
+  subagentsPack: string;
+  agentChannels: Record<string, Record<string, string[]>>;
+}>;
 
 export type BetaPrimaryUiContract =
   | {
@@ -203,7 +264,7 @@ export async function refreshOAuthProvidersForOnboarding({
  * stale snapshot therefore cannot smuggle an older selection back into a save.
  */
 export function canonicalizePrimaryDraftForOnboarding<
-  T extends PrimaryProviderDraft,
+  T extends BetaManagedSetupDraft,
 >(
   draft: T,
   realtorBeta: boolean,
@@ -217,5 +278,56 @@ export function canonicalizePrimaryDraftForOnboarding<
     primaryApiKey: "",
     primarySecretPresent: false,
     primarySecretPreview: "",
-  };
+    embeddingProvider: "",
+    embeddingModel: "",
+    embeddingApiKey: "",
+    embeddingShareKey: false,
+    embeddingSecretPresent: false,
+    embeddingSecretPreview: "",
+    imageProvider: "",
+    imageApiKey: "",
+    imageSecretPresent: false,
+    imageSecretPreview: "",
+    memoryProvider: "sqlite_local",
+    memorySupabaseUrl: "",
+    memorySupabaseKey: "",
+    memorySecretPresent: false,
+    memorySecretPreview: "",
+    composioApiKey: "",
+    composioWorkspace: "",
+    composioSecretPresent: false,
+    composioSecretPreview: "",
+    cliEnabled: true,
+    telegramBotToken: "",
+    telegramChatId: "",
+    telegramAllowedUsers: "",
+    telegramHomeChannel: "",
+    telegramDmBehavior: "",
+    telegramAllowAllUsers: false,
+    telegramSecretPresent: false,
+    telegramSecretPreview: "",
+    imessageEnabled: false,
+    imessageHandle: "",
+    bluebubblesServerUrl: "",
+    bluebubblesAllowedUsers: "",
+    bluebubblesHomeChannel: "",
+    bluebubblesSecretPresent: false,
+    bluebubblesSecretPreview: "",
+    discordBotToken: "",
+    discordChannelId: "",
+    whatsappProvider: "",
+    whatsappToken: "",
+    whatsappPhoneId: "",
+    slackWebhookUrl: "",
+    slackChannel: "",
+    outboundImessageEnabled: false,
+    outboundImessageSenderHandle: "",
+    outboundTelegramEnabled: false,
+    outboundDiscordEnabled: false,
+    outboundWhatsappEnabled: false,
+    outboundSlackEnabled: false,
+    subagentsEnabled: false,
+    subagentsPack: "",
+    agentChannels: {},
+  } as T;
 }
