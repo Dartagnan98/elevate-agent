@@ -7,7 +7,13 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from elevate_cli.config import get_config_path, load_config, save_config
+from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+from elevate_cli.config import (
+    get_config_path,
+    load_config,
+    save_config,
+    validate_config_for_persistence,
+)
 
 
 _EMPTY_MODEL_INFO: dict = {
@@ -102,13 +108,15 @@ def create_config_router(
     @router.put("/api/config")
     async def update_config(body: ConfigUpdate):
         try:
-            save_config_func(
-                _denormalize_config_from_web(
-                    body.config,
-                    load_config_func=load_config_func,
-                )
+            prospective = _denormalize_config_from_web(
+                body.config,
+                load_config_func=load_config_func,
             )
+            validate_config_for_persistence(prospective)
+            save_config_func(prospective)
             return {"ok": True}
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
         except Exception:
             _log.exception("PUT /api/config failed")
             raise HTTPException(status_code=500, detail="Internal server error")
@@ -262,8 +270,13 @@ def create_config_router(
             parsed = yaml.safe_load(body.yaml_text)
             if not isinstance(parsed, dict):
                 raise HTTPException(status_code=400, detail="YAML must be a mapping")
+            validate_config_for_persistence(parsed)
             save_config_func(parsed)
             return {"ok": True}
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
+        except HTTPException:
+            raise
         except yaml.YAMLError as e:
             raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 

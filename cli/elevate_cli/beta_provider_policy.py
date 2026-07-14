@@ -19,6 +19,7 @@ from typing import Any, Mapping
 BETA_PROVIDER_POLICY_VERSION = "realtor-beta-codex-v1"
 BETA_ALLOWED_MODELS_VERSION = "2026-07-14-v1"
 BETA_ALLOWED_PROVIDER = "openai-codex"
+BETA_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 BETA_DEFAULT_MODEL = "gpt-5.5"
 BETA_ALLOWED_MODELS = (
     "gpt-5.5",
@@ -77,6 +78,101 @@ def beta_model_or_default(value: Any, *, source: str = "model") -> str:
             code="beta_model_not_allowed",
         )
     return model
+
+
+def validate_beta_config_for_persistence(
+    config: Mapping[str, Any],
+    auth_status: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Reject Beta provider escape hatches before a config write.
+
+    Empty primary-model state is valid while onboarding is incomplete.  Once
+    any primary provider/model transport state is present, it must describe
+    the current-profile Codex lane and that profile must already have usable
+    Codex auth.  The function is read-only and deliberately does not
+    canonicalize hostile input: rejected writes must leave state byte-identical.
+    """
+    if not beta_provider_policy_active(environ):
+        return
+    if not isinstance(config, Mapping):
+        raise BetaProviderPolicyError(
+            "Realtor Beta configuration must be a mapping.",
+            code="beta_config_invalid",
+        )
+
+    for key in ("fallback_model", "fallback_providers"):
+        value = config.get(key)
+        if value not in (None, "", (), [], {}):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow cross-provider model fallback.",
+                code="beta_fallback_not_allowed",
+            )
+
+    custom_providers = config.get("custom_providers")
+    if custom_providers not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow custom inference providers.",
+            code="beta_custom_provider_not_allowed",
+        )
+
+    model_config = config.get("model")
+    if model_config in (None, "", {}):
+        return
+    if not isinstance(model_config, Mapping):
+        raise BetaProviderPolicyError(
+            "Realtor Beta primary model configuration must include its Codex provider.",
+            code="beta_model_configuration_incomplete",
+        )
+
+    provider = str(model_config.get("provider") or "").strip().lower()
+    model = str(
+        model_config.get("default")
+        or model_config.get("model")
+        or model_config.get("name")
+        or ""
+    ).strip()
+    base_url = str(model_config.get("base_url") or "").strip().rstrip("/")
+    api_mode = str(model_config.get("api_mode") or "").strip()
+    api_key = str(model_config.get("api_key") or "").strip()
+    key_env = str(model_config.get("key_env") or "").strip()
+
+    if provider != BETA_ALLOWED_PROVIDER:
+        if not provider:
+            raise BetaProviderPolicyError(
+                "Realtor Beta primary model configuration is missing its Codex provider.",
+                code="beta_model_configuration_incomplete",
+            )
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow configured provider {provider!r}.",
+            code="beta_provider_not_allowed",
+        )
+    if model and model not in BETA_ALLOWED_MODELS:
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow configured model {model!r}.",
+            code="beta_model_not_allowed",
+        )
+    if base_url and base_url != BETA_CODEX_BASE_URL.rstrip("/"):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow a custom primary-model endpoint.",
+            code="beta_custom_endpoint_not_allowed",
+        )
+    if api_mode and api_mode != "codex_responses":
+        raise BetaProviderPolicyError(
+            "Realtor Beta primary inference must use the Codex Responses transport.",
+            code="beta_api_mode_not_allowed",
+        )
+    if api_key or key_env:
+        raise BetaProviderPolicyError(
+            "Realtor Beta primary inference uses Beta-local Codex auth, not API keys.",
+            code="beta_primary_api_key_not_allowed",
+        )
+    if not auth_status.get("logged_in"):
+        raise BetaProviderPolicyError(
+            "OpenAI Codex auth is required in the current Realtor Beta profile.",
+            code="beta_codex_auth_required",
+        )
 
 
 def _jwt_expiry(access_token: str) -> float | None:

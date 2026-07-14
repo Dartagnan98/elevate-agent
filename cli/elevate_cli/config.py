@@ -3965,6 +3965,7 @@ def save_config(config: Dict[str, Any]):
         return
     from utils import atomic_yaml_write
 
+    validate_config_for_persistence(config)
     ensure_elevate_home()
     config_path = get_config_path()
     current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
@@ -3994,6 +3995,20 @@ def save_config(config: Dict[str, Any]):
     )
     _secure_file(config_path)
     _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+
+
+def validate_config_for_persistence(config: Dict[str, Any]) -> None:
+    """Preflight channel-specific invariants without mutating profile state."""
+    from elevate_cli.beta_provider_policy import (
+        beta_provider_policy_active,
+        read_beta_codex_auth_status,
+        validate_beta_config_for_persistence,
+    )
+
+    if not beta_provider_policy_active():
+        return
+    auth_status = read_beta_codex_auth_status(get_elevate_home())
+    validate_beta_config_for_persistence(config, auth_status)
 
 
 def load_env() -> Dict[str, str]:
