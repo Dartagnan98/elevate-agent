@@ -12,7 +12,7 @@ function makeController(overrides = {}) {
   const chat = overrides.chat || {};
   const controller = createBackendPortController({
     backendBundleMatches: async (port) => Boolean(bundle[port]),
-    backendIsReady: async (port) => Boolean(ready[port]),
+    backendCanServeApp: async (port) => Boolean(ready[port]),
     dashboardChatEnabled: async (port) => Boolean(chat[port]),
     embeddedChat: overrides.embeddedChat !== false,
     execFileSync: overrides.execFileSync || ((command, args) => {
@@ -89,7 +89,7 @@ test("backend port controller picks the first empty fallback port", async () => 
   assert.equal(selectedPort(), 9121);
 });
 
-test("backend port controller does not adopt a preferred backend rejected by readiness", async () => {
+test("backend port controller does not adopt a preferred backend rejected by compatibility", async () => {
   const { controller, selectedPort } = makeController({
     ready: { 9119: false },
     bundle: { 9119: true },

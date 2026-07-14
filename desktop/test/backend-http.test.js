@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { backendIsReady } = require("../src/backend-http");
+const { backendCanServeApp, backendIsReady } = require("../src/backend-http");
 
 const EXPECTED_BETA_RUNTIME = Object.freeze({
   releaseChannel: "beta",
@@ -81,6 +81,15 @@ async function ready(payload, expectedRuntime = EXPECTED_BETA_RUNTIME) {
   });
 }
 
+async function compatible(payload, expectedRuntime = EXPECTED_BETA_RUNTIME) {
+  return backendCanServeApp({
+    http: fakeHttp(payload),
+    host: "127.0.0.1",
+    port: 9139,
+    expectedRuntime,
+  });
+}
+
 test("valid Beta runtime receipt is ready for desktop adoption", async () => {
   assert.equal(await ready(statusPayload()), true);
 });
@@ -132,9 +141,45 @@ test("Beta readiness rejects hostile providers and unready auth", async () => {
   );
 });
 
+test("correct Beta backend can serve onboarding before runtime is ready", async () => {
+  const onboardingReceipt = runtimeReceipt({
+    configuredProvider: "",
+    configuredModel: "",
+    authReady: false,
+    authReason: "missing_auth_store",
+    runtimeReady: false,
+    blockedReason: "missing_beta_provider",
+  });
+
+  assert.equal(await ready(statusPayload(onboardingReceipt)), false);
+  assert.equal(await compatible(statusPayload(onboardingReceipt)), true);
+});
+
+test("onboarding compatibility still rejects wrong channel, home, or policy", async () => {
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ releaseChannel: "latest" }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ elevateHome: "/Users/tester/.elevate" }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ providerPolicyVersion: "old-policy" }))),
+    false,
+  );
+});
+
 test("Stable keeps legacy readiness behavior without a Beta expectation", async () => {
   assert.equal(
     await ready(
+      { version: "0.12.0", gateway_running: false },
+      null,
+    ),
+    true,
+  );
+  assert.equal(
+    await compatible(
       { version: "0.12.0", gateway_running: false },
       null,
     ),

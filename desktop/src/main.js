@@ -168,7 +168,7 @@ const launcherTools = createLauncherTools({
 });
 const backendPorts = createBackendPortController({
   backendBundleMatches,
-  backendIsReady,
+  backendCanServeApp,
   dashboardChatEnabled,
   embeddedChat: EMBEDDED_CHAT,
   execFileSync,
@@ -528,6 +528,15 @@ async function requestJson(pathname, timeoutMs = 2000, port = backendPort) {
 
 async function backendIsReady(port = backendPort) {
   return backendHttp.backendIsReady({
+    http,
+    host: HOST,
+    port,
+    expectedRuntime: BACKEND_RUNTIME_EXPECTATION,
+  });
+}
+
+async function backendCanServeApp(port = backendPort) {
+  return backendHttp.backendCanServeApp({
     http,
     host: HOST,
     port,

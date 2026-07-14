@@ -2,7 +2,7 @@
 
 function createBackendPortController({
   backendBundleMatches,
-  backendIsReady,
+  backendCanServeApp,
   dashboardChatEnabled,
   embeddedChat,
   execFileSync,
@@ -39,7 +39,7 @@ function createBackendPortController({
   }
 
   async function backendMatchesDesktopMode(port = getBackendPort()) {
-    if (!(await backendIsReady(port))) return false;
+    if (!(await backendCanServeApp(port))) return false;
     if (!(await backendBundleMatches(port))) return false;
     if (!embeddedChat) return true;
     return dashboardChatEnabled(port);
@@ -56,7 +56,7 @@ function createBackendPortController({
 
   async function backendProbeSummary(port = getBackendPort()) {
     const [statusReady, bundleMatch, chatEnabled] = await Promise.allSettled([
-      backendIsReady(port),
+      backendCanServeApp(port),
       backendBundleMatches(port),
       dashboardChatEnabled(port),
     ]);
@@ -71,13 +71,13 @@ function createBackendPortController({
     }
 
     if (
-      (await backendIsReady(preferredPort)) &&
+      (await backendCanServeApp(preferredPort)) &&
       !(await backendBundleMatches(preferredPort))
     ) {
       log.info("[elevate-backend] stale-bundle dashboard on preferred port — evicting");
       killProcessOnPort(preferredPort);
       for (let i = 0; i < 20; i += 1) {
-        if (!(await backendIsReady(preferredPort))) break;
+        if (!(await backendCanServeApp(preferredPort))) break;
         await sleep(250);
       }
       setBackendPort(preferredPort);
@@ -89,7 +89,7 @@ function createBackendPortController({
         setBackendPort(port);
         return;
       }
-      if (!(await backendIsReady(port))) {
+      if (!(await backendCanServeApp(port))) {
         setBackendPort(port);
         return;
       }
