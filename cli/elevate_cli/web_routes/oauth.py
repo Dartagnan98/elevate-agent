@@ -714,19 +714,11 @@ def _persist_codex_device_credentials(
             },
             clear_device_code_suppression=True,
         )
-        base_url = BETA_CODEX_BASE_URL
-        # Retain a pool entry for compatibility, but it is supplemental in
-        # Beta and must never make an otherwise successful provider-state save
-        # appear to have failed.
-        try:
-            _add_codex_pool_credential(
-                access_token,
-                refresh_token,
-                base_url=base_url,
-            )
-        except Exception as exc:
-            _log.warning("beta codex pool compatibility add failed: %s", exc)
-        return base_url
+        # The current-profile provider state is the only Beta credential
+        # authority.  Do not duplicate the token into the legacy credential
+        # pool: Beta never reads that pool, and a second persisted copy would
+        # widen the secret surface without providing runtime compatibility.
+        return BETA_CODEX_BASE_URL
 
     base_url = (
         os.getenv("ELEVATE_CODEX_BASE_URL", "").strip().rstrip("/")

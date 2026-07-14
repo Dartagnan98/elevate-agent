@@ -343,15 +343,12 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
     monkeypatch,
 ):
     http_calls = _install_fake_httpx(monkeypatch)
-    pool_calls = []
     monkeypatch.setattr(
         oauth,
         "_add_codex_pool_credential",
-        lambda access_token, refresh_token, *, base_url: pool_calls.append({
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "base_url": base_url,
-        }),
+        lambda *_args, **_kwargs: pytest.fail(
+            "Realtor Beta unexpectedly duplicated Codex auth into the pool"
+        ),
     )
     hostile_url = "https://codex.attacker.invalid/v1"
     monkeypatch.setenv("ELEVATE_CODEX_BASE_URL", hostile_url)
@@ -361,11 +358,6 @@ def test_beta_codex_completion_persists_runtime_provider_state_and_canonical_url
 
     session = oauth._oauth_sessions[session_id]
     assert session["status"] == "approved"
-    assert pool_calls == [{
-        "access_token": "fake-access-token",
-        "refresh_token": "fake-refresh-token",
-        "base_url": BETA_CODEX_BASE_URL,
-    }]
     assert hostile_url not in (tmp_path / "auth.json").read_text(encoding="utf-8")
     assert [call["url"] for call in http_calls] == [
         "https://auth.openai.com/api/accounts/deviceauth/usercode",
