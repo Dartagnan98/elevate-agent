@@ -48,6 +48,39 @@ class _RecordingClient:
         return _FailureResponse(self._status_code)
 
 
+class _SkillListResponse:
+    status_code = 200
+    text = ""
+    is_success = True
+
+    def json(self) -> dict[str, list[Any]]:
+        return {"skills": []}
+
+
+class _CloudRecordingClient:
+    def __init__(
+        self,
+        calls: list[dict[str, Any]],
+        *,
+        base_url: str,
+        **_kwargs: Any,
+    ) -> None:
+        self._calls = calls
+        self._base_url = base_url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def get(self, path: str, *, headers: dict[str, str]) -> _SkillListResponse:
+        self._calls.append(
+            {"base_url": self._base_url, "path": path, "headers": headers}
+        )
+        return _SkillListResponse()
+
+
 @pytest.fixture
 def client() -> TestClient:
     app = FastAPI()
@@ -239,7 +272,7 @@ def test_exact_beta_keeps_post_login_activation_inside_signed_backend_scope(
     observed: list[tuple[str, str]] = []
 
     def login(_email: str, _password: str) -> license_mod.License:
-        observed.append(("login", license_mod.BACKEND_URL))
+        observed.append(("login", license_mod.backend_url()))
         return license_value
 
     def activate_install(
@@ -249,7 +282,7 @@ def test_exact_beta_keeps_post_login_activation_inside_signed_backend_scope(
     ) -> dict[str, Any]:
         assert lic is license_value
         assert sync_skills is True
-        observed.append(("activate", license_mod.BACKEND_URL))
+        observed.append(("activate", license_mod.backend_url()))
         return {"packs": {}, "skill_count": 0, "skill_names": [], "skill_error": None}
 
     monkeypatch.setattr(license_mod, "login", login)
@@ -291,6 +324,49 @@ def test_exact_beta_fails_closed_when_signed_backend_identity_is_missing(
     assert license_mod.BACKEND_URL == before_backend
     assert os.environ["ELEVATE_BACKEND_URL"] == before_env
     _assert_profile_unchanged(protected_profile)
+
+
+def test_exact_beta_web_skill_sync_never_sends_bearer_token_to_stale_backend(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import cloud_skills
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("ELEVATE_BACKEND_URL", ATTACKER_BACKEND)
+    monkeypatch.setattr(license_mod, "BACKEND_URL", ATTACKER_BACKEND)
+    lic = license_mod.License(
+        access_token="bearer-secret",
+        refresh_token="refresh-secret",
+        license_id="license-1",
+        tier="pro",
+        email="agent@example.test",
+        expires_at=4_102_444_800,
+        entitlements=[],
+    )
+    monkeypatch.setattr(license_mod, "load", lambda: lic)
+    monkeypatch.setattr(cloud_skills, "cloud_skills_dir", lambda: tmp_path / "skills")
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cloud_skills.httpx,
+        "Client",
+        lambda **kwargs: _CloudRecordingClient(calls, **kwargs),
+    )
+
+    response = client.post("/api/license/sync-skills")
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "base_url": license_mod.DEFAULT_BACKEND,
+            "path": "/api/skills/list",
+            "headers": {"authorization": "Bearer bearer-secret"},
+        }
+    ]
+    assert calls[0]["base_url"] != ATTACKER_BACKEND
+    assert license_mod.BACKEND_URL == ATTACKER_BACKEND
+    assert os.environ["ELEVATE_BACKEND_URL"] == ATTACKER_BACKEND
 
 
 @pytest.mark.parametrize(

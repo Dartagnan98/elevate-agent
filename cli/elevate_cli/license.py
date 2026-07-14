@@ -110,15 +110,88 @@ class License:
 class LicenseError(Exception):
     """Raised when license is missing, revoked, or cannot be refreshed."""
 
+    def __init__(self, message: str, *, code: str = "license_error") -> None:
+        super().__init__(message)
+        self.code = code
+
+    def as_detail(self) -> dict[str, str]:
+        return {"code": self.code, "message": str(self)}
+
+
+def _exact_realtor_beta_active() -> bool:
+    """Return true only for the signed Realtor Beta release identity."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    return beta_provider_policy_active()
+
+
+def _signed_beta_backend_url() -> str:
+    """Return the backend identity compiled into the signed application."""
+    backend = str(DEFAULT_BACKEND or "").strip().rstrip("/")
+    if not backend:
+        raise LicenseError(
+            "Realtor Beta could not verify its Elevation Real Estate HQ "
+            "sign-in service. Restart the app and try again.",
+            code="beta_backend_identity_unavailable",
+        )
+    return backend
+
 
 def backend_url() -> str:
     """Return the configured Elevation HQ license/skill API origin."""
+    # Exact Beta never trusts the mutable module global or profile/process
+    # environment.  Every caller (login, refresh, device link, cloud skills,
+    # automations, diagnostics, and startup sync) resolves through this
+    # compiled identity at the moment it creates its HTTP client.
+    if _exact_realtor_beta_active():
+        return _signed_beta_backend_url()
     if not BACKEND_URL:
         raise LicenseError(
             "Elevation Real Estate HQ backend URL is not configured. "
             "Set ELEVATE_BACKEND_URL before running `elevate activate`.",
         )
     return BACKEND_URL
+
+
+def configure_backend_override(
+    backend_url_value: Optional[str],
+    *,
+    persist: bool,
+) -> str:
+    """Apply a legacy backend override or reject it for exact Realtor Beta.
+
+    ``None`` means the caller did not request an override.  Empty strings are
+    still rejected in Beta when the option/field was explicitly supplied, so
+    the API and terminal can truthfully report that custom endpoints are not a
+    supported Beta control.  Stable retains the historical mutable behavior.
+    """
+    global BACKEND_URL
+
+    if _exact_realtor_beta_active():
+        if backend_url_value is not None:
+            raise LicenseError(
+                "Realtor Beta connects account sign-in only to Elevation Real "
+                "Estate HQ. Remove the custom backend URL and try again.",
+                code="beta_backend_override_not_allowed",
+            )
+        return _signed_beta_backend_url()
+
+    backend = str(backend_url_value or "").strip().rstrip("/")
+    if not backend:
+        # Preserve Stable's historical no-op semantics. The eventual network
+        # caller remains responsible for reporting a missing backend.
+        return BACKEND_URL
+
+    BACKEND_URL = backend
+    os.environ["ELEVATE_BACKEND_URL"] = backend
+    if persist:
+        try:
+            from elevate_cli.config import save_env_value
+
+            save_env_value("ELEVATE_BACKEND_URL", backend)
+        except Exception:
+            pass
+    return backend
 
 
 def _decode_jwt_exp(token: str) -> int:
@@ -510,17 +583,14 @@ def _format_enabled_packs(packs: dict[str, Any]) -> str:
 def cmd_activate(args) -> int:
     import getpass
 
-    backend = str(getattr(args, "backend_url", "") or "").strip().rstrip("/")
-    if backend:
-        global BACKEND_URL
-        BACKEND_URL = backend
-        os.environ["ELEVATE_BACKEND_URL"] = backend
-        try:
-            from elevate_cli.config import save_env_value
-
-            save_env_value("ELEVATE_BACKEND_URL", backend)
-        except Exception:
-            pass
+    try:
+        configure_backend_override(
+            getattr(args, "backend_url", None),
+            persist=True,
+        )
+    except LicenseError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 2
 
     email = args.email or input("Email: ").strip()
     password = args.password or getpass.getpass("Password: ")
@@ -641,16 +711,14 @@ def link_device(device_label: Optional[str] = None, *, interval_override: Option
 
 
 def cmd_link(args) -> int:
-    backend = str(getattr(args, "backend_url", "") or "").strip().rstrip("/")
-    if backend:
-        global BACKEND_URL
-        BACKEND_URL = backend
-        os.environ["ELEVATE_BACKEND_URL"] = backend
-        try:
-            from elevate_cli.config import save_env_value
-            save_env_value("ELEVATE_BACKEND_URL", backend)
-        except Exception:
-            pass
+    try:
+        configure_backend_override(
+            getattr(args, "backend_url", None),
+            persist=True,
+        )
+    except LicenseError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 2
 
     label = getattr(args, "label", None)
     sync_skills = not getattr(args, "skip_skill_sync", False)

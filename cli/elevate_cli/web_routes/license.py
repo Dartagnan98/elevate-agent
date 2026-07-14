@@ -1,7 +1,5 @@
 """Access and license activation routes for the dashboard."""
 
-import os
-from contextlib import contextmanager
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -38,71 +36,15 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
     """Build routes for local access state and license activation."""
     router = APIRouter()
 
-    def _set_backend_url(lic_mod, backend_url: Optional[str], *, persist: bool) -> None:
-        if not backend_url:
-            return
-        lic_mod.BACKEND_URL = backend_url.rstrip("/")
-        os.environ["ELEVATE_BACKEND_URL"] = lic_mod.BACKEND_URL
-        if not persist:
-            return
+    def _configure_backend(lic_mod, backend_url: Optional[str], *, persist: bool) -> None:
+        """Apply Stable compatibility or return a typed Beta policy error."""
         try:
-            from elevate_cli.config import save_env_value
-
-            save_env_value("ELEVATE_BACKEND_URL", lic_mod.BACKEND_URL)
-        except Exception:
-            pass
-
-    @contextmanager
-    def _license_backend_scope(lic_mod, backend_url: Optional[str], *, persist: bool):
-        """Select the auth backend without letting Beta profiles replace it.
-
-        Stable retains its historical configurable-backend behavior.  Exact
-        Realtor Beta instead uses the backend compiled into the signed app and
-        rejects even a syntactically valid caller override before credentials
-        can leave the process.  The module global is restored in ``finally``
-        so a rejected or failed sign-in leaves process state unchanged; Beta
-        never writes the override to ``os.environ`` or the profile ``.env``.
-        """
-        from elevate_cli.beta_provider_policy import beta_provider_policy_active
-
-        if not beta_provider_policy_active():
-            _set_backend_url(lic_mod, backend_url, persist=persist)
-            yield
-            return
-
-        if backend_url is not None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "code": "beta_backend_override_not_allowed",
-                    "message": (
-                        "Realtor Beta connects account sign-in only to Elevation "
-                        "Real Estate HQ. Remove the custom backend URL and try again."
-                    ),
-                },
+            lic_mod.configure_backend_override(backend_url, persist=persist)
+        except lic_mod.LicenseError as exc:
+            status_code = (
+                409 if exc.code == "beta_backend_override_not_allowed" else 503
             )
-
-        signed_backend = (
-            str(getattr(lic_mod, "DEFAULT_BACKEND", "") or "").strip().rstrip("/")
-        )
-        if not signed_backend:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "code": "beta_backend_identity_unavailable",
-                    "message": (
-                        "Realtor Beta could not verify its Elevation Real Estate HQ "
-                        "sign-in service. Restart the app and try again."
-                    ),
-                },
-            )
-
-        previous_backend = lic_mod.BACKEND_URL
-        lic_mod.BACKEND_URL = signed_backend
-        try:
-            yield
-        finally:
-            lic_mod.BACKEND_URL = previous_backend
+            raise HTTPException(status_code=status_code, detail=exc.as_detail())
 
     @router.get("/api/access")
     async def get_access_status():
@@ -144,15 +86,15 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
 
         from elevate_cli import license as lic_mod
 
-        with _license_backend_scope(lic_mod, body.backend_url, persist=True):
-            try:
-                lic = lic_mod.login(body.email, body.password)
-            except lic_mod.LicenseError as exc:
-                raise HTTPException(status_code=401, detail=str(exc))
-            activation = lic_mod.activate_install(
-                lic,
-                sync_skills=not body.skip_skill_sync,
-            )
+        _configure_backend(lic_mod, body.backend_url, persist=True)
+        try:
+            lic = lic_mod.login(body.email, body.password)
+        except lic_mod.LicenseError as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        activation = lic_mod.activate_install(
+            lic,
+            sync_skills=not body.skip_skill_sync,
+        )
 
         return {
             "authenticated": True,
@@ -173,20 +115,20 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
 
         from elevate_cli import license as lic_mod
 
-        with _license_backend_scope(lic_mod, body.backend_url, persist=True):
-            try:
-                lic = lic_mod.create_account(
-                    body.email,
-                    body.password,
-                    first_name=body.first_name,
-                    last_name=body.last_name,
-                )
-            except lic_mod.LicenseError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            activation = lic_mod.activate_install(
-                lic,
-                sync_skills=not body.skip_skill_sync,
+        _configure_backend(lic_mod, body.backend_url, persist=True)
+        try:
+            lic = lic_mod.create_account(
+                body.email,
+                body.password,
+                first_name=body.first_name,
+                last_name=body.last_name,
             )
+        except lic_mod.LicenseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        activation = lic_mod.activate_install(
+            lic,
+            sync_skills=not body.skip_skill_sync,
+        )
 
         return {
             "authenticated": True,
@@ -207,9 +149,9 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
 
         from elevate_cli import license as lic_mod
 
+        _configure_backend(lic_mod, body.backend_url, persist=False)
         try:
-            with _license_backend_scope(lic_mod, body.backend_url, persist=False):
-                lic_mod.request_login_code(body.email)
+            lic_mod.request_login_code(body.email)
         except lic_mod.LicenseError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"ok": True}
@@ -220,15 +162,15 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
 
         from elevate_cli import license as lic_mod
 
-        with _license_backend_scope(lic_mod, body.backend_url, persist=False):
-            try:
-                lic = lic_mod.login_with_code(body.email, body.code)
-            except lic_mod.LicenseError as exc:
-                raise HTTPException(status_code=401, detail=str(exc))
-            activation = lic_mod.activate_install(
-                lic,
-                sync_skills=not body.skip_skill_sync,
-            )
+        _configure_backend(lic_mod, body.backend_url, persist=False)
+        try:
+            lic = lic_mod.login_with_code(body.email, body.code)
+        except lic_mod.LicenseError as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        activation = lic_mod.activate_install(
+            lic,
+            sync_skills=not body.skip_skill_sync,
+        )
 
         return {
             "authenticated": True,
