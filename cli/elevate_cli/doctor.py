@@ -11,23 +11,16 @@ import shutil
 import time
 from pathlib import Path
 
-from elevate_cli.config import get_project_root, get_elevate_home, get_env_path
+from elevate_cli.config import get_project_root, get_elevate_home
+from elevate_cli.env_loader import load_elevate_dotenv
 from elevate_constants import display_elevate_home
 
 PROJECT_ROOT = get_project_root()
 ELEVATE_HOME = get_elevate_home()
 _DHH = display_elevate_home()  # user-facing display path (e.g. ~/.elevate or ~/.elevate/profiles/coder)
 
-# Load environment variables from ~/.elevate/.env so API key checks work
-from dotenv import load_dotenv
-_env_path = get_env_path()
-if _env_path.exists():
-    try:
-        load_dotenv(_env_path, encoding="utf-8")
-    except UnicodeDecodeError:
-        load_dotenv(_env_path, encoding="latin-1")
-# Also try project .env as dev fallback
-load_dotenv(PROJECT_ROOT / ".env", override=False, encoding="utf-8")
+# Load credentials without allowing data files to redefine launch identity.
+load_elevate_dotenv(elevate_home=ELEVATE_HOME, project_env=PROJECT_ROOT / ".env")
 
 from elevate_cli.colors import Colors, color
 from elevate_cli.models import _ELEVATE_USER_AGENT

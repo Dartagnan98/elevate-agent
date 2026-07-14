@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from elevate_constants import get_elevate_home
 from elevate_cli._subprocess_compat import windows_hide_flags
 from elevate_cli.config import load_config, _expand_env_vars
+from elevate_cli.env_loader import load_elevate_dotenv
 from elevate_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
@@ -2350,11 +2351,7 @@ def _run_job_impl(
     try:
         # Re-read .env and config.yaml fresh every run so provider/key
         # changes take effect without a gateway restart.
-        from dotenv import load_dotenv
-        try:
-            load_dotenv(str(_get_elevate_home() / ".env"), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            load_dotenv(str(_get_elevate_home() / ".env"), override=True, encoding="latin-1")
+        load_elevate_dotenv(elevate_home=_get_elevate_home())
 
         delivery_target = _resolve_delivery_target(job)
         if delivery_target:

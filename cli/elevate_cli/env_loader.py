@@ -29,6 +29,33 @@ _WARNED_KEYS: set[str] = set()
 # the .env case and they don't know Bitwarden is wired up).
 _SECRET_SOURCES: dict[str, str] = {}
 
+# These values identify the already-running application/runtime.  They are
+# supplied by the desktop launcher (or an explicit CLI/profile launch) and must
+# never be redefined by profile/project data loaded after process start.  In
+# particular, allowing a profile ``.env`` to replace the release channel or
+# home directory would let it disable Beta-only safety policy and make one
+# profile read another profile's state.  Receipt metadata is protected for the
+# same reason: status must describe the binary that actually launched.
+_LAUNCH_IDENTITY_ENV_VARS = frozenset(
+    {
+        "ELEVATE_HOME",
+        "ELEVATE_RELEASE_CHANNEL",
+        "ELEVATE_APP_VERSION",
+        "ELEVATE_APP_ARCHITECTURE",
+        "ELEVATE_APP_BUNDLE_NAME",
+        "ELEVATE_SOURCE_RECEIPT_ID",
+    }
+)
+
+
+def _restore_launch_identity(snapshot: dict[str, str | None]) -> None:
+    """Restore launcher-owned identity and remove values injected by data files."""
+    for name, value in snapshot.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
 
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
@@ -191,6 +218,10 @@ def load_elevate_dotenv(
     - if no user env exists, the project `.env` also overrides stale shell vars.
     """
     loaded: list[Path] = []
+    launch_identity = {
+        name: os.environ[name] if name in os.environ else None
+        for name in _LAUNCH_IDENTITY_ENV_VARS
+    }
 
     home_path = Path(elevate_home or os.getenv("ELEVATE_HOME", Path.home() / ".elevate"))
     user_env = home_path / ".env"
@@ -202,15 +233,21 @@ def load_elevate_dotenv(
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
 
-    if user_env.exists():
-        _load_dotenv_with_fallback(user_env, override=True)
-        loaded.append(user_env)
+    try:
+        if user_env.exists():
+            _load_dotenv_with_fallback(user_env, override=True)
+            loaded.append(user_env)
 
-    if project_env_path and project_env_path.exists():
-        _load_dotenv_with_fallback(project_env_path, override=not loaded)
-        loaded.append(project_env_path)
+        if project_env_path and project_env_path.exists():
+            _load_dotenv_with_fallback(project_env_path, override=not loaded)
+            loaded.append(project_env_path)
 
-    _apply_external_secret_sources(home_path)
+        _apply_external_secret_sources(home_path)
+    finally:
+        # Profile/project files and external secret mappings are configuration
+        # data, not launch authority.  Restore even when a loader raises so a
+        # partially loaded file cannot leave process identity in a drifted state.
+        _restore_launch_identity(launch_identity)
 
     return loaded
 

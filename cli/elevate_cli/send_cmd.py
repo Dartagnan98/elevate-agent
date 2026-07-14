@@ -214,29 +214,18 @@ def _load_elevate_env() -> None:
     intentionally reimplement the minimum needed here so ``elevate send``
     doesn't pull in the full gateway module just to resolve a home channel.
     """
-    # Step 1: dotenv
-    try:
-        from dotenv import load_dotenv
-    except Exception:
-        load_dotenv = None  # type: ignore[assignment]
-
     try:
         from elevate_cli.config import get_elevate_home
         home = get_elevate_home()
     except Exception:
         return
 
-    env_path = home / ".env"
-    if load_dotenv and env_path.exists():
-        try:
-            load_dotenv(str(env_path), override=True, encoding="utf-8")
-        except UnicodeDecodeError:
-            try:
-                load_dotenv(str(env_path), override=True, encoding="latin-1")
-            except Exception:
-                pass
-        except Exception:
-            pass
+    try:
+        from elevate_cli.env_loader import load_elevate_dotenv
+
+        load_elevate_dotenv(elevate_home=home)
+    except Exception:
+        pass
 
     # Step 2: bridge top-level config.yaml values into the environment so
     # gateway.config.load_gateway_config() sees them. Scalars only; don't
