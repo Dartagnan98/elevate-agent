@@ -5441,6 +5441,67 @@ def _define_discord_view_classes() -> None:
                 )
                 return
 
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                # Keep exact Beta controls and view state untouched until the
+                # gateway callback has revalidated provider/model/auth and
+                # completed its fail-before-mutation switch.  A transient
+                # marker prevents duplicate callbacks without becoming part
+                # of the view's post-failure state.
+                if getattr(self, "_beta_model_switch_in_flight", False):
+                    await interaction.response.send_message(
+                        "Model switch already in progress~", ephemeral=True
+                    )
+                    return
+
+                had_in_flight_marker = "_beta_model_switch_in_flight" in self.__dict__
+                prior_in_flight = getattr(
+                    self, "_beta_model_switch_in_flight", False
+                )
+                self._beta_model_switch_in_flight = True
+                model_id = interaction.data["values"][0]
+                try:
+                    # Acknowledge Discord's interaction deadline without
+                    # clearing or disabling the retryable controls.
+                    await interaction.response.defer()
+                    try:
+                        result_text = await self.on_model_selected(
+                            str(interaction.channel_id),
+                            model_id,
+                            self._selected_provider,
+                        )
+                    except Exception as exc:
+                        code = getattr(
+                            exc, "code", "beta_provider_policy_failed"
+                        )
+                        await interaction.edit_original_response(
+                            embed=discord.Embed(
+                                title="⚙ Model Switch Blocked",
+                                description=f"Error [{code}]: {exc}",
+                                color=discord.Color.red(),
+                            ),
+                            view=self,
+                        )
+                        return
+
+                    self.resolved = True
+                    self.clear_items()
+                    await interaction.edit_original_response(
+                        embed=discord.Embed(
+                            title="⚙ Model Switched",
+                            description=result_text,
+                            color=discord.Color.green(),
+                        ),
+                        view=None,
+                    )
+                    return
+                finally:
+                    if had_in_flight_marker:
+                        self._beta_model_switch_in_flight = prior_in_flight
+                    else:
+                        self.__dict__.pop("_beta_model_switch_in_flight", None)
+
             self.resolved = True
             model_id = interaction.data["values"][0]
             self.clear_items()

@@ -1100,14 +1100,24 @@ def test_beta_tui_model_switch_replaces_stale_agent_credentials(monkeypatch):
     # into later tests in the same worker.
     monkeypatch.delenv("ELEVATE_MODEL", raising=False)
     monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
-    safe_runtime = {
+    initial_runtime = {
         "provider": "openai-codex",
         "base_url": "https://chatgpt.com/backend-api/codex",
-        "api_key": "fresh-local-token",
+        "api_key": "initial-local-token",
         "api_mode": "codex_responses",
     }
-    monkeypatch.setattr(server, "_resolve_tui_runtime", lambda: safe_runtime)
+    final_runtime = {
+        **initial_runtime,
+        "api_key": "final-local-token",
+    }
     seen = {}
+    runtime_calls = []
+
+    def _resolve_runtime():
+        runtime_calls.append(len(runtime_calls) + 1)
+        return initial_runtime if len(runtime_calls) == 1 else final_runtime
+
+    monkeypatch.setattr(server, "_resolve_tui_runtime", _resolve_runtime)
 
     class _Agent:
         provider = "openai-codex"
@@ -1141,12 +1151,97 @@ def test_beta_tui_model_switch_replaces_stale_agent_credentials(monkeypatch):
     )
 
     assert response["value"] == "gpt-5.4"
-    assert seen["pipeline"]["current_base_url"] == safe_runtime["base_url"]
-    assert seen["pipeline"]["current_api_key"] == safe_runtime["api_key"]
+    assert runtime_calls == [1, 2]
+    assert seen["pipeline"]["current_base_url"] == initial_runtime["base_url"]
+    assert seen["pipeline"]["current_api_key"] == initial_runtime["api_key"]
     assert seen["agent"]["new_provider"] == "openai-codex"
-    assert seen["agent"]["base_url"] == safe_runtime["base_url"]
-    assert seen["agent"]["api_key"] == safe_runtime["api_key"]
+    assert seen["agent"]["base_url"] == final_runtime["base_url"]
+    assert seen["agent"]["api_key"] == final_runtime["api_key"]
     assert seen["agent"]["api_mode"] == "codex_responses"
+
+
+def test_beta_tui_model_switch_final_auth_race_has_zero_mutation(monkeypatch):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.delenv("ELEVATE_MODEL", raising=False)
+    monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
+    initial_runtime = {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "initial-local-token",
+        "api_mode": "codex_responses",
+    }
+    runtime_calls = 0
+
+    def _resolve_runtime():
+        nonlocal runtime_calls
+        runtime_calls += 1
+        if runtime_calls == 1:
+            return initial_runtime
+        raise BetaProviderPolicyError(
+            "OpenAI Codex auth disappeared before model-switch commit.",
+            code="beta_codex_auth_required",
+        )
+
+    monkeypatch.setattr(server, "_resolve_tui_runtime", _resolve_runtime)
+
+    class _Agent:
+        provider = "openai-codex"
+        model = "gpt-5.5"
+        base_url = "https://cached.attacker.invalid/v1"
+        api_key = "cached-evil-key"
+        api_mode = "anthropic_messages"
+
+        def switch_model(self, **_kwargs):
+            pytest.fail("agent mutated after final Beta auth failure")
+
+    agent = _Agent()
+    result = types.SimpleNamespace(
+        success=True,
+        new_model="gpt-5.4",
+        target_provider="openai-codex",
+        api_key="pipeline-evil-key",
+        base_url="https://pipeline.attacker.invalid/v1",
+        api_mode="anthropic_messages",
+        warning_message="",
+    )
+    monkeypatch.setattr(
+        "elevate_cli.model_switch.switch_model", lambda **_kwargs: result
+    )
+    persist = MagicMock()
+    monkeypatch.setattr(server, "_persist_model_switch", persist)
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda _session: pytest.fail("slash worker restarted after auth failure"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda *_args, **_kwargs: pytest.fail("session event emitted after auth failure"),
+    )
+    agent_before = dict(vars(agent))
+    env_before = {
+        key: os.environ.get(key)
+        for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER")
+    }
+    result_before = dict(vars(result))
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        server._apply_model_switch(
+            "sid", _session(agent=agent), "gpt-5.4 --global"
+        )
+
+    assert exc.value.code == "beta_codex_auth_required"
+    assert runtime_calls == 2
+    assert dict(vars(agent)) == agent_before
+    assert dict(vars(result)) == result_before
+    assert {
+        key: os.environ.get(key)
+        for key in ("ELEVATE_MODEL", "ELEVATE_INFERENCE_PROVIDER")
+    } == env_before
+    persist.assert_not_called()
 
 
 def test_config_set_personality_rejects_unknown_name(monkeypatch):

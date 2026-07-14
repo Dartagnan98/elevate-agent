@@ -1628,40 +1628,57 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
+    effective_result = result
     if beta_active:
         canonical_beta_provider(
             result.target_provider, source="resolved TUI model-switch provider"
         )
         beta_model_or_default(result.new_model, source="resolved TUI model-switch model")
-        # Ignore any credentials or endpoint the generic model-switch pipeline
-        # carried forward.  Beta applies only the runtime freshly resolved
-        # from this profile's local Codex auth store.
-        result.target_provider = str(beta_runtime.get("provider") or "")
-        result.api_key = str(beta_runtime.get("api_key") or "")
-        result.base_url = str(beta_runtime.get("base_url") or "")
-        result.api_mode = str(beta_runtime.get("api_mode") or "")
+        # Re-resolve after the generic pipeline returns so config, environment,
+        # and current-profile provider-state auth cannot change between the
+        # earlier guard and the first live model-switch mutation.  Preserve the
+        # generic result object and apply only a private safe copy.
+        final_beta_runtime = _resolve_tui_runtime()
+        canonical_beta_provider(
+            final_beta_runtime.get("provider"),
+            source="final TUI model-switch runtime provider",
+        )
+        effective_result = copy.copy(result)
+        effective_result.target_provider = str(
+            final_beta_runtime.get("provider") or ""
+        )
+        effective_result.api_key = str(final_beta_runtime.get("api_key") or "")
+        effective_result.base_url = str(
+            final_beta_runtime.get("base_url") or ""
+        )
+        effective_result.api_mode = str(
+            final_beta_runtime.get("api_mode") or ""
+        )
 
     if agent:
         agent.switch_model(
-            new_model=result.new_model,
-            new_provider=result.target_provider,
-            api_key=result.api_key,
-            base_url=result.base_url,
-            api_mode=result.api_mode,
+            new_model=effective_result.new_model,
+            new_provider=effective_result.target_provider,
+            api_key=effective_result.api_key,
+            base_url=effective_result.base_url,
+            api_mode=effective_result.api_mode,
         )
         _restart_slash_worker(session)
         _emit("session.info", sid, _session_info(agent))
 
-    os.environ["ELEVATE_MODEL"] = result.new_model
+    os.environ["ELEVATE_MODEL"] = effective_result.new_model
     # Keep the process-level provider env var in sync with the user's explicit
     # choice so any ambient re-resolution (credential pool refresh, compressor
     # rebuild, aux clients) resolves to the new provider instead of the
     # original one persisted in config or env.
-    if result.target_provider:
-        os.environ["ELEVATE_INFERENCE_PROVIDER"] = result.target_provider
+    if effective_result.target_provider:
+        os.environ["ELEVATE_INFERENCE_PROVIDER"] = effective_result.target_provider
     if persist_global:
-        _persist_model_switch(result)
-    return {"value": result.new_model, "warning": result.warning_message or ""}
+        _persist_model_switch(effective_result)
+    return {
+        "value": effective_result.new_model,
+        "warning": effective_result.warning_message or "",
+    }
 
 
 def _estimate_compaction_request_tokens(agent, history: list[dict]) -> int:
