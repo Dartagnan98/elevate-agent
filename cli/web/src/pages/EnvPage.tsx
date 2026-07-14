@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCachedResource } from "@/hooks/useCachedResource";
 import {
   Eye,
@@ -16,7 +16,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { EnvVarInfo } from "@/lib/api";
+import type { EnvVarInfo, StatusResponse } from "@/lib/api";
+import { resolveEnvProviderUiPolicy } from "@/pages/env-provider-ui-policy";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { Toast } from "@/components/Toast";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
@@ -371,9 +372,37 @@ export default function EnvPage() {
   const [showAdvanced, setShowAdvanced] = useState(true); // Show all providers by default
   const { toast, showToast } = useToast();
   const { t } = useI18n();
+  const [runtimeStatus, setRuntimeStatus] = useState<StatusResponse | null | undefined>();
 
-  // Shares the "agent-hub-envvars" cache with Agent Hub, so switching between
-  // them is instant and they stay in sync.
+  useEffect(() => {
+    let active = true;
+    void api
+      .getStatus({ refresh: true })
+      .then((status) => {
+        if (active) setRuntimeStatus(status);
+      })
+      .catch(() => {
+        if (active) setRuntimeStatus(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const retryRuntimeStatus = useCallback(async () => {
+    setRuntimeStatus(undefined);
+    try {
+      setRuntimeStatus(await api.getStatus({ refresh: true }));
+    } catch {
+      setRuntimeStatus(null);
+    }
+  }, []);
+
+  const providerUiPolicy = resolveEnvProviderUiPolicy(runtimeStatus);
+
+  // Stable keeps sharing Agent Hub's cache. Realtor Beta intentionally uses a
+  // separate cache so a prior Stable profile cannot leak provider rows into
+  // the policy-contained view while the backend refresh is in flight.
   const {
     data: varsData,
     loading,
@@ -381,9 +410,9 @@ export default function EnvPage() {
     refresh: refreshVars,
     mutate: mutateVars,
   } = useCachedResource(
-    "agent-hub-envvars",
+    providerUiPolicy.envCacheKey,
     () => api.getEnvVars(),
-    { ttl: 10000 },
+    { ttl: 10000, enabled: providerUiPolicy.showCredentialControls },
   );
   const vars = varsData ?? null;
 
@@ -500,6 +529,22 @@ export default function EnvPage() {
     return { providerGroups: groups, nonProviderGrouped: nonProvider };
   }, [vars, showAdvanced, t]);
 
+  if (!providerUiPolicy.showCredentialControls) {
+    if (providerUiPolicy.state === "loading") {
+      return <RouteSkeleton path="/env" />;
+    }
+    return (
+      <div className="flex flex-col gap-6">
+        <Toast toast={toast} />
+        <RouteLoadError
+          title="Account settings are paused"
+          error="Elevation could not verify this profile's release policy, so no provider controls are available. Retry now; if verification still fails, reopen Elevation Beta."
+          onRetry={retryRuntimeStatus}
+        />
+      </div>
+    );
+  }
+
   if (loading && !vars) {
     return (
       <RouteSkeleton path="/env" />
@@ -566,47 +611,58 @@ export default function EnvPage() {
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
           <p className="text-sm text-muted-foreground">
-            {t.env.description} <code>~/.elevate/.env</code>
+            {providerUiPolicy.realtorBeta ? (
+              "Connect the accounts Elevation can use for your real estate work."
+            ) : (
+              <>{t.env.description} <code>~/.elevate/.env</code></>
+            )}
           </p>
           <p className="text-[0.7rem] text-muted-foreground/70">
-            {t.env.changesNote}
+            {providerUiPolicy.realtorBeta
+              ? "Only services supported by this Realtor Beta profile are shown."
+              : t.env.changesNote}
           </p>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)}>
-          {showAdvanced ? t.env.hideAdvanced : t.env.showAdvanced}
-        </Button>
+        {providerUiPolicy.showGenericProviderControls && (
+          <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)}>
+            {showAdvanced ? t.env.hideAdvanced : t.env.showAdvanced}
+          </Button>
+        )}
       </div>
 
       {/* ═══════════════ OAuth Logins ══ */}
       <OAuthProvidersCard
+        realtorBeta={providerUiPolicy.realtorBeta}
         onError={(msg) => showToast(msg, "error")}
         onSuccess={(msg) => showToast(msg, "success")}
       />
 
       {/* ═══════════════ LLM Providers (grouped) ═══════════════ */}
-      <Card>
-        <CardHeader className="border-b border-border bg-card">
-          <div className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-muted-foreground" />
-            <CardTitle className="text-base">{t.env.llmProviders}</CardTitle>
-          </div>
-          <CardDescription>
-            {t.env.providersConfigured.replace("{configured}", String(configuredProviders)).replace("{total}", String(totalProviders))}
-          </CardDescription>
-        </CardHeader>
+      {providerUiPolicy.showGenericProviderControls && (
+        <Card>
+          <CardHeader className="border-b border-border bg-card">
+            <div className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-muted-foreground" />
+              <CardTitle className="text-base">{t.env.llmProviders}</CardTitle>
+            </div>
+            <CardDescription>
+              {t.env.providersConfigured.replace("{configured}", String(configuredProviders)).replace("{total}", String(totalProviders))}
+            </CardDescription>
+          </CardHeader>
 
-        <CardContent className="grid gap-0 p-0">
-          {providerGroups.map((group) => (
-            <ProviderGroupCard
-              key={group.name}
-              group={group}
-              edits={edits} setEdits={setEdits} revealed={revealed} saving={saving}
-              onSave={handleSave} onClear={keyClear.requestDelete} onReveal={handleReveal} onCancelEdit={cancelEdit}
-              clearDialogOpen={keyClear.isOpen}
-            />
-          ))}
-        </CardContent>
-      </Card>
+          <CardContent className="grid gap-0 p-0">
+            {providerGroups.map((group) => (
+              <ProviderGroupCard
+                key={group.name}
+                group={group}
+                edits={edits} setEdits={setEdits} revealed={revealed} saving={saving}
+                onSave={handleSave} onClear={keyClear.requestDelete} onReveal={handleReveal} onCancelEdit={cancelEdit}
+                clearDialogOpen={keyClear.isOpen}
+              />
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* ═══════════════ Other categories (flat) ═══════════════ */}
       {nonProviderGrouped.map(({ label, icon: Icon, setEntries, unsetEntries, totalEntries, category }) => {
