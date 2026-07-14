@@ -5284,6 +5284,12 @@ class ElevateCLI:
         """
         from elevate_cli.model_switch import switch_model, parse_model_flags, list_authenticated_providers
         from elevate_cli.providers import get_label
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_MODELS,
+            BETA_ALLOWED_PROVIDER,
+            BETA_DEFAULT_MODEL,
+            beta_provider_policy_active,
+        )
 
         # Parse args from the original command
         parts = cmd_original.split(None, 1)  # split off '/model'
@@ -5297,22 +5303,33 @@ class ElevateCLI:
 
         # No args at all: open prompt_toolkit-native picker modal
         if not model_input and not explicit_provider:
-            model_display = self.model or "unknown"
-            provider_display = get_label(self.provider) if self.provider else "unknown"
-
             user_provs = None
             custom_provs = None
-            try:
-                from elevate_cli.config import get_compatible_custom_providers, load_config
-                cfg = load_config()
-                user_provs = cfg.get("providers")
-                custom_provs = get_compatible_custom_providers(cfg)
-            except Exception:
-                pass
+
+            if beta_provider_policy_active():
+                # Do not echo a stale pre-policy session or load generic
+                # provider definitions into the exact-Beta picker.
+                live_model = str(self.model or "").strip()
+                model_display = (
+                    live_model if live_model in BETA_ALLOWED_MODELS else BETA_DEFAULT_MODEL
+                )
+                provider_display = "OpenAI Codex"
+                current_provider = BETA_ALLOWED_PROVIDER
+            else:
+                model_display = self.model or "unknown"
+                provider_display = get_label(self.provider) if self.provider else "unknown"
+                current_provider = self.provider or ""
+                try:
+                    from elevate_cli.config import get_compatible_custom_providers, load_config
+                    cfg = load_config()
+                    user_provs = cfg.get("providers")
+                    custom_provs = get_compatible_custom_providers(cfg)
+                except Exception:
+                    pass
 
             try:
                 providers = list_authenticated_providers(
-                    current_provider=self.provider or "",
+                    current_provider=current_provider,
                     user_providers=user_provs,
                     custom_providers=custom_provs,
                     max_models=50,
