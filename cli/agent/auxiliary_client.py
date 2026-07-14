@@ -3298,6 +3298,196 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     return AsyncOpenAI(**async_kwargs), model
 
 
+def _beta_auxiliary_policy_active() -> bool:
+    """Return true only for the exact Realtor Beta release channel."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    return beta_provider_policy_active()
+
+
+def _validate_beta_auxiliary_inputs(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    api_mode: Optional[str],
+    fallback_chain: Any = None,
+    source: str,
+) -> Tuple[str, Optional[str]]:
+    """Validate one Beta auxiliary input source without applying precedence."""
+    from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        canonical_beta_provider,
+    )
+
+    canonical = canonical_beta_provider(provider, source=f"{source} provider")
+    validated_model = None
+    if str(model or "").strip():
+        validated_model = beta_model_or_default(
+            model, source=f"{source} model"
+        )
+    if str(base_url or "").strip():
+        raise BetaProviderPolicyError(
+            "Realtor Beta auxiliary inference does not allow endpoint overrides.",
+            code="beta_auxiliary_endpoint_not_allowed",
+        )
+    if str(api_key or "").strip():
+        raise BetaProviderPolicyError(
+            "Realtor Beta auxiliary inference uses current-profile Codex auth, "
+            "not API keys.",
+            code="beta_auxiliary_api_key_not_allowed",
+        )
+    normalized_mode = str(api_mode or "").strip().lower()
+    if normalized_mode and normalized_mode != "codex_responses":
+        raise BetaProviderPolicyError(
+            "Realtor Beta auxiliary inference requires the Codex Responses API.",
+            code="beta_auxiliary_api_mode_not_allowed",
+        )
+    if fallback_chain not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta auxiliary inference does not allow provider fallback.",
+            code="beta_auxiliary_fallback_not_allowed",
+        )
+    return canonical, validated_model
+
+
+def _beta_auxiliary_model(requested_model: Optional[str]) -> str:
+    """Choose an allowed model from the explicit request or primary config."""
+    from elevate_cli.beta_provider_policy import beta_model_or_default
+    from elevate_cli.config import load_config
+
+    if str(requested_model or "").strip():
+        return beta_model_or_default(
+            requested_model, source="resolved auxiliary model"
+        )
+    config = load_config()
+    raw_model = config.get("model") if isinstance(config, dict) else None
+    if isinstance(raw_model, dict):
+        configured_model = raw_model.get("default") or raw_model.get("model")
+    elif isinstance(raw_model, str):
+        configured_model = raw_model
+    else:
+        configured_model = None
+    return beta_model_or_default(
+        configured_model, source="configured primary model"
+    )
+
+
+def _build_beta_auxiliary_client(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    async_mode: bool = False,
+    raw_codex: bool = False,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    api_mode: Optional[str] = None,
+    is_vision: bool = False,
+) -> Tuple[Any, str]:
+    """Build a fresh current-profile Codex client without pools or cache."""
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+    )
+    from elevate_cli.runtime_provider import resolve_runtime_provider
+
+    canonical, _ = _validate_beta_auxiliary_inputs(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+        source="resolved auxiliary",
+    )
+    final_model = _beta_auxiliary_model(model)
+
+    # This is intentionally the last authority consulted before client
+    # construction. The Beta branch in resolve_runtime_provider reads only the
+    # current profile's Codex state and skips credential pools entirely.
+    runtime = resolve_runtime_provider(
+        requested=canonical,
+        target_model=final_model,
+    )
+    runtime_provider = str(runtime.get("provider") or "").strip().lower()
+    runtime_mode = str(runtime.get("api_mode") or "").strip().lower()
+    runtime_base_url = str(runtime.get("base_url") or "").strip().rstrip("/")
+    runtime_key = str(runtime.get("api_key") or "").strip()
+    runtime_source = str(runtime.get("source") or "").strip()
+    runtime_auth_store = str(runtime.get("auth_store") or "").strip()
+    expected_auth_store = str(get_elevate_home() / "auth.json")
+    forbidden_runtime_state = any(
+        runtime.get(key) not in (None, "", (), [], {})
+        for key in (
+            "credential_pool",
+            "fallback_chain",
+            "fallback_provider",
+            "command",
+        )
+    )
+    if (
+        runtime_provider != BETA_ALLOWED_PROVIDER
+        or runtime_mode != "codex_responses"
+        or runtime_base_url != BETA_CODEX_BASE_URL.rstrip("/")
+        or not runtime_key
+        or runtime_source != "elevate-auth-store"
+        or runtime_auth_store != expected_auth_store
+        or forbidden_runtime_state
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta auxiliary runtime was not resolved from the current "
+            "profile's canonical Codex boundary.",
+            code="beta_auxiliary_runtime_not_local",
+        )
+
+    real_client = OpenAI(
+        api_key=runtime_key,
+        base_url=BETA_CODEX_BASE_URL,
+        default_headers=_codex_cloudflare_headers(runtime_key),
+    )
+    if raw_codex:
+        return real_client, final_model
+    client = CodexAuxiliaryClient(real_client, final_model)
+    if async_mode:
+        return _to_async_client(
+            client, final_model, is_vision=is_vision
+        )
+    return client, final_model
+
+
+def _validate_beta_auxiliary_response(response: Any, task: str = None) -> Any:
+    """Reject structurally valid but empty Beta auxiliary completions."""
+    response = _validate_llm_response(response, task)
+    message = response.choices[0].message
+    content = getattr(message, "content", None)
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls and not str(content or "").strip():
+        raise AuxiliaryResponseRejectedError(
+            f"Auxiliary {task or 'call'}: Codex returned an empty completion"
+        )
+    return response
+
+
+def _beta_vision_available_from_local_state() -> bool:
+    """Read Beta vision readiness without refresh, discovery, or network I/O."""
+    from elevate_cli.beta_provider_policy import (
+        read_beta_codex_auth_status,
+        validate_beta_config_for_persistence,
+    )
+    from elevate_cli.config import load_config
+
+    try:
+        config = load_config()
+        auth_status = read_beta_codex_auth_status(get_elevate_home())
+        validate_beta_config_for_persistence(config, auth_status)
+        _resolve_task_provider_model("vision")
+    except Exception:
+        return False
+    return bool(auth_status.get("logged_in"))
+
+
 def _normalize_resolved_model(model_name: Optional[str], provider: str) -> Optional[str]:
     """Normalize a resolved model for the provider that will receive it."""
     if not model_name:
@@ -3351,6 +3541,18 @@ def resolve_provider_client(
     Returns:
         (client, resolved_model) or (None, None) if auth is unavailable.
     """
+    if _beta_auxiliary_policy_active():
+        return _build_beta_auxiliary_client(
+            provider=provider,
+            model=model,
+            async_mode=async_mode,
+            raw_codex=raw_codex,
+            base_url=explicit_base_url,
+            api_key=explicit_api_key,
+            api_mode=api_mode,
+            is_vision=is_vision,
+        )
+
     _validate_proxy_env_urls()
     # Preserve the original provider name before alias normalization so a
     # user-declared ``custom_providers`` entry whose name coincidentally
@@ -4015,6 +4217,13 @@ def get_available_vision_backends() -> List[str]:
     source of truth for setup, tool gating, and runtime auto-routing of
     vision tasks.
     """
+    if _beta_auxiliary_policy_active():
+        return (
+            ["openai-codex"]
+            if _beta_vision_available_from_local_state()
+            else []
+        )
+
     available: List[str] = []
     # 1. Active provider — if the user configured a provider, try it first.
     main_provider = _read_main_provider()
@@ -4051,6 +4260,18 @@ def resolve_vision_provider_client(
     requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         "vision", provider, model, base_url, api_key
     )
+    if _beta_auxiliary_policy_active():
+        client, final_model = _build_beta_auxiliary_client(
+            provider=requested,
+            model=resolved_model,
+            async_mode=async_mode,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            is_vision=True,
+        )
+        return "openai-codex", client, final_model
+
     requested = _normalize_vision_provider(requested)
 
     def _finalize(resolved_provider: str, sync_client: Any, default_model: Optional[str]):
@@ -4455,6 +4676,17 @@ def _get_cached_client(
     preventing the fd-exhaustion that previously occurred in long-running
     gateways where recycled worker threads created unbounded entries (#10200).
     """
+    if _beta_auxiliary_policy_active():
+        return _build_beta_auxiliary_client(
+            provider=provider,
+            model=model,
+            async_mode=async_mode,
+            base_url=base_url,
+            api_key=api_key,
+            api_mode=api_mode,
+            is_vision=is_vision,
+        )
+
     # Resolve the current event loop for async clients so we can validate
     # cached entries.  Loop identity is NOT in the cache key — instead we
     # check at hit time whether the cached loop is still current and open.
@@ -4560,6 +4792,29 @@ def _resolve_task_provider_model(
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
+
+    if _beta_auxiliary_policy_active():
+        # Validate both sources independently before applying precedence. A
+        # safe explicit override must not hide a hostile persisted task lane.
+        _validate_beta_auxiliary_inputs(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            api_mode=None,
+            source="explicit auxiliary",
+        )
+        _validate_beta_auxiliary_inputs(
+            provider=cfg_provider,
+            model=cfg_model,
+            base_url=cfg_base_url,
+            api_key=cfg_api_key,
+            api_mode=cfg_api_mode,
+            fallback_chain=(
+                task_config.get("fallback_chain") if task else None
+            ),
+            source=f"auxiliary.{task}" if task else "auxiliary config",
+        )
 
     resolved_model = model or cfg_model
     resolved_api_mode = cfg_api_mode
@@ -4777,7 +5032,9 @@ def _build_call_kwargs(
 
     # Provider-specific extra_body
     merged_extra = dict(extra_body or {})
-    if provider == "nous" or auxiliary_is_nous:
+    if provider == "nous" or (
+        auxiliary_is_nous and not _beta_auxiliary_policy_active()
+    ):
         merged_extra.setdefault("tags", []).extend(_nous_portal_tags())
     if merged_extra:
         kwargs["extra_body"] = merged_extra
@@ -5004,6 +5261,38 @@ def call_llm(
     effective_extra_body.update(extra_body or {})
     effective_extra_body = _apply_codex_compression_reasoning_default(
         task, resolved_provider, effective_extra_body)
+
+    if _beta_auxiliary_policy_active():
+        resolved_provider = "openai-codex"
+        effective_extra_body = _apply_codex_compression_reasoning_default(
+            task, resolved_provider, effective_extra_body
+        )
+        client, final_model = _build_beta_auxiliary_client(
+            provider=resolved_provider,
+            model=resolved_model,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            is_vision=(task == "vision"),
+        )
+        effective_timeout = (
+            timeout if timeout is not None else _get_task_timeout(task)
+        )
+        client_base = str(getattr(client, "base_url", "") or "")
+        kwargs = _build_call_kwargs(
+            resolved_provider,
+            final_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=effective_timeout,
+            extra_body=effective_extra_body,
+            base_url=client_base,
+        )
+        return _validate_beta_auxiliary_response(
+            client.chat.completions.create(**kwargs), task
+        )
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -5410,6 +5699,39 @@ async def async_call_llm(
     effective_extra_body.update(extra_body or {})
     effective_extra_body = _apply_codex_compression_reasoning_default(
         task, resolved_provider, effective_extra_body)
+
+    if _beta_auxiliary_policy_active():
+        resolved_provider = "openai-codex"
+        effective_extra_body = _apply_codex_compression_reasoning_default(
+            task, resolved_provider, effective_extra_body
+        )
+        client, final_model = _build_beta_auxiliary_client(
+            provider=resolved_provider,
+            model=resolved_model,
+            async_mode=True,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            api_mode=resolved_api_mode,
+            is_vision=(task == "vision"),
+        )
+        effective_timeout = (
+            timeout if timeout is not None else _get_task_timeout(task)
+        )
+        client_base = str(getattr(client, "base_url", "") or "")
+        kwargs = _build_call_kwargs(
+            resolved_provider,
+            final_model,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=effective_timeout,
+            extra_body=effective_extra_body,
+            base_url=client_base,
+        )
+        return _validate_beta_auxiliary_response(
+            await client.chat.completions.create(**kwargs), task
+        )
 
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
