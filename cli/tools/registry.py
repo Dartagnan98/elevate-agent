@@ -15,13 +15,16 @@ Import chain (circular-import safe):
 """
 
 import ast
+import hashlib
 import importlib
 import json
 import logging
+import math
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -110,16 +113,21 @@ class ToolEntry:
     """Metadata for a single registered tool."""
 
     __slots__ = (
-        "name", "toolset", "schema", "handler", "check_fn",
+        "entry_id", "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
         "effects", "effect_resolver",
     )
 
-    def __init__(self, name, toolset, schema, handler, check_fn,
+    def __init__(self, entry_id, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None,
                  effects=None, effect_resolver=None):
+        # Unique within one ToolRegistry instance and never reused.  Unlike the
+        # registry-wide generation, this changes only when this exact name is
+        # registered again, so unrelated MCP/toolset churn does not invalidate
+        # a prepared call.
+        self.entry_id = entry_id
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -143,6 +151,124 @@ class ToolEntry:
         # adapters explicitly invoke the effect-policy evaluator.
         self.effects = effects
         self.effect_resolver = effect_resolver
+
+
+_USE_CURRENT_EXECUTION_POLICY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallContext:
+    """Durable identity bound to one accepted-turn tool invocation."""
+
+    session_id: str
+    invocation_id: str
+    accepted_turn_id: str
+    policy_revision: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("session_id", "invocation_id", "accepted_turn_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string")
+            value = value.strip()
+            if not value:
+                raise ValueError(f"{field_name} is required")
+            object.__setattr__(self, field_name, value)
+        if isinstance(self.policy_revision, bool) or not isinstance(
+            self.policy_revision,
+            int,
+        ):
+            raise TypeError("policy_revision must be an integer")
+        if self.policy_revision < 0:
+            raise ValueError("policy_revision cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedToolCall:
+    """Immutable shadow snapshot of one registry tool call.
+
+    The canonical JSON text is the authoritative argument snapshot.  Both the
+    effect resolver and handler receive a fresh decode of that same text, so a
+    caller mutating its original dict after preparation cannot change what was
+    authorized or executed.
+    """
+
+    tool_name: str
+    context: ToolCallContext
+    entry_id: Optional[int]
+    registry_generation: int
+    canonical_args_json: Optional[str]
+    args_digest: Optional[str]
+    captured_handler: Optional[Callable] = field(repr=False, compare=False)
+    captured_is_async: bool = False
+    captured_effects: frozenset = frozenset()
+    captured_effect_resolver: Optional[Callable] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    resolved_effects: frozenset = frozenset()
+    execution_policy: Any = field(default=None, repr=False)
+    authorization: Any = None
+    preparation_error: Optional[str] = None
+    effect_resolution_error: Optional[str] = None
+
+    def thaw_args(self) -> dict:
+        """Return a fresh mutable decode of the bound argument snapshot."""
+        if self.canonical_args_json is None:
+            raise ValueError("prepared call has no canonical argument snapshot")
+        value = json.loads(self.canonical_args_json)
+        if not isinstance(value, dict):  # defensive; preparation enforces this
+            raise ValueError("prepared call argument snapshot is not an object")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowToolExecution:
+    """Result of the unused, non-enforcing shadow execution primitive."""
+
+    prepared: PreparedToolCall
+    result: str
+    started: bool
+    start_generation: int
+    stale_reason: Optional[str] = None
+
+
+def _validate_json_value(value: Any, path: str = "$") -> None:
+    """Reject Python values that do not have an exact JSON representation."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path} contains a non-finite number")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path} contains a non-string object key")
+            _validate_json_value(item, f"{path}.{key}")
+        return
+    raise TypeError(f"{path} contains non-JSON value {type(value).__name__}")
+
+
+def _canonicalize_tool_args(args: Any) -> tuple[str, str]:
+    """Return canonical JSON and its SHA-256 digest for one args object."""
+    if not isinstance(args, dict):
+        raise TypeError("tool arguments must be a JSON object")
+    _validate_json_value(args)
+    canonical = json.dumps(
+        args,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return canonical, digest
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +330,9 @@ class ToolRegistry:
         # against it: a cache entry keyed on the generation is valid for as
         # long as the generation hasn't changed.
         self._generation: int = 0
+        # Per-registration identity. Unlike ``_generation``, this is never
+        # bumped by unrelated registry mutations and no value is ever reused.
+        self._next_entry_id: int = 0
 
     def _snapshot_state(self) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
@@ -336,7 +465,9 @@ class ToolRegistry:
                 from tools.approval import normalize_effects
 
                 normalized_effects = normalize_effects(effects)
+            self._next_entry_id += 1
             self._tools[name] = ToolEntry(
+                entry_id=self._next_entry_id,
                 name=name,
                 toolset=toolset,
                 schema=schema,
@@ -437,6 +568,241 @@ class ToolRegistry:
     # ------------------------------------------------------------------
     # Dispatch
     # ------------------------------------------------------------------
+
+    def _prepare_shadow_call(
+        self,
+        name: str,
+        args: Any,
+        context: ToolCallContext,
+        execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
+    ) -> PreparedToolCall:
+        """Freeze one registry entry, argument object, effects, and policy.
+
+        This is deliberately private: production callers continue to use
+        :meth:`dispatch`.  Splitting preparation from start gives the race
+        tests a deterministic seam without exposing a second public workflow.
+        """
+        from tools.approval import (
+            Effect,
+            EffectKind,
+            ExecutionPolicy,
+            authorize_effects,
+            get_current_execution_policy,
+            normalize_effects,
+        )
+
+        if not isinstance(context, ToolCallContext):
+            raise TypeError("context must be a ToolCallContext")
+        if execution_policy is _USE_CURRENT_EXECUTION_POLICY:
+            execution_policy = get_current_execution_policy()
+        elif execution_policy is not None and not isinstance(
+            execution_policy,
+            ExecutionPolicy,
+        ):
+            raise TypeError("execution_policy must be an ExecutionPolicy or None")
+        if (
+            execution_policy is not None
+            and execution_policy.accepted_turn_id != context.accepted_turn_id
+        ):
+            raise ValueError(
+                "context accepted_turn_id does not match execution policy"
+            )
+
+        with self._lock:
+            generation = self._generation
+            entry = self._tools.get(name)
+            if entry is None:
+                entry_id = None
+                handler = None
+                is_async = False
+                static_effects = frozenset()
+                effect_resolver = None
+            else:
+                entry_id = entry.entry_id
+                handler = entry.handler
+                is_async = bool(entry.is_async)
+                static_effects = frozenset(entry.effects or ())
+                effect_resolver = entry.effect_resolver
+
+        canonical_args_json = None
+        args_digest = None
+        preparation_error = "unknown_tool" if entry is None else None
+        try:
+            canonical_args_json, args_digest = _canonicalize_tool_args(args)
+        except Exception as exc:
+            if preparation_error is None:
+                preparation_error = (
+                    f"invalid_arguments:{type(exc).__name__}:{exc}"
+                )
+
+        unknown_effect = Effect(EffectKind.UNKNOWN)
+        resolved_effects = set(static_effects)
+        effect_resolution_error = None
+        if entry is None or canonical_args_json is None:
+            resolved_effects.add(unknown_effect)
+        elif effect_resolver is not None:
+            try:
+                dynamic_effects = normalize_effects(
+                    effect_resolver(json.loads(canonical_args_json))
+                )
+            except Exception as exc:
+                logger.warning("effect_resolver for tool %s raised %s", name, exc)
+                dynamic_effects = frozenset({unknown_effect})
+                effect_resolution_error = (
+                    f"resolver_exception:{type(exc).__name__}:{exc}"
+                )
+            if not dynamic_effects:
+                dynamic_effects = frozenset({unknown_effect})
+                effect_resolution_error = "resolver_returned_no_effects"
+            resolved_effects.update(dynamic_effects)
+        if not resolved_effects:
+            resolved_effects.add(unknown_effect)
+
+        frozen_effects = frozenset(resolved_effects)
+        authorization = authorize_effects(execution_policy, frozen_effects)
+        return PreparedToolCall(
+            tool_name=name,
+            context=context,
+            entry_id=entry_id,
+            registry_generation=generation,
+            canonical_args_json=canonical_args_json,
+            args_digest=args_digest,
+            captured_handler=handler,
+            captured_is_async=is_async,
+            captured_effects=static_effects,
+            captured_effect_resolver=effect_resolver,
+            resolved_effects=frozen_effects,
+            execution_policy=execution_policy,
+            authorization=authorization,
+            preparation_error=preparation_error,
+            effect_resolution_error=effect_resolution_error,
+        )
+
+    def _shadow_start_error(
+        self,
+        prepared: PreparedToolCall,
+        code: str,
+        detail: str,
+        *,
+        stale_reason: Optional[str] = None,
+    ) -> ShadowToolExecution:
+        """Build a deterministic non-start result for the shadow primitive."""
+        with self._lock:
+            generation = self._generation
+        return ShadowToolExecution(
+            prepared=prepared,
+            result=json.dumps({"error": detail, "shadow_status": code}),
+            started=False,
+            start_generation=generation,
+            stale_reason=stale_reason,
+        )
+
+    def _start_prepared_shadow(
+        self,
+        prepared: PreparedToolCall,
+    ) -> ShadowToolExecution:
+        """Revalidate entry identity, then run exactly the captured handler."""
+        if prepared.preparation_error == "unknown_tool":
+            return self._shadow_start_error(
+                prepared,
+                "unknown_tool",
+                f"Unknown tool: {prepared.tool_name}",
+            )
+        if prepared.preparation_error is not None:
+            return self._shadow_start_error(
+                prepared,
+                "invalid_arguments",
+                prepared.preparation_error,
+            )
+
+        # This locked identity check is the start linearization point. A later
+        # replacement cannot swap in its handler; an earlier one prevents this
+        # prepared call from starting. Global generation is diagnostic only.
+        with self._lock:
+            current = self._tools.get(prepared.tool_name)
+            start_generation = self._generation
+            if current is None:
+                stale_reason = "deregistered"
+            elif current.entry_id != prepared.entry_id:
+                stale_reason = "entry_replaced"
+            else:
+                stale_reason = None
+
+        if stale_reason is not None:
+            return ShadowToolExecution(
+                prepared=prepared,
+                result=json.dumps({
+                    "error": (
+                        "Prepared tool registration is stale: "
+                        f"{prepared.tool_name}"
+                    ),
+                    "shadow_status": "stale_registration",
+                    "reason": stale_reason,
+                }),
+                started=False,
+                start_generation=start_generation,
+                stale_reason=stale_reason,
+            )
+
+        try:
+            handler = prepared.captured_handler
+            if handler is None:  # defensive; a valid entry always has one
+                raise RuntimeError("prepared call has no captured handler")
+            args = prepared.thaw_args()
+            if prepared.captured_is_async:
+                from model_tools import _run_async
+
+                result = _run_async(handler(args))
+            else:
+                result = handler(args)
+            if not isinstance(result, str):
+                result = str(result)
+        except Exception as exc:
+            logger.exception(
+                "Tool %s shadow execution error: %s",
+                prepared.tool_name,
+                exc,
+            )
+            raw = f"Tool execution failed: {type(exc).__name__}: {exc}"
+            try:
+                from model_tools import _sanitize_tool_error
+
+                sanitized = _sanitize_tool_error(raw)
+            except Exception:
+                sanitized = raw
+            result = json.dumps({"error": sanitized})
+
+        return ShadowToolExecution(
+            prepared=prepared,
+            result=result,
+            started=True,
+            start_generation=start_generation,
+        )
+
+    def execute_shadow(
+        self,
+        name: str,
+        args: Any,
+        *,
+        context: ToolCallContext,
+        execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
+    ) -> ShadowToolExecution:
+        """Exercise the atomic registry path without enforcing its decision.
+
+        No production dispatch adapter calls this method yet. Authorization is
+        returned for observation only; even a denied call executes after its
+        registration identity has been revalidated.
+        """
+        # TODO(ERB-406 production routing): explicitly model any legacy
+        # non-JSON handler context before cutover. This shadow boundary rejects
+        # arbitrary start-time kwargs so every executable input is prepared.
+        prepared = self._prepare_shadow_call(
+            name,
+            args,
+            context,
+            execution_policy,
+        )
+        return self._start_prepared_shadow(prepared)
 
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
