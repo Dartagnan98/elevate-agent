@@ -55,6 +55,30 @@ def beta_provider_policy_active(environ: Mapping[str, str] | None = None) -> boo
     return env.get("ELEVATE_RELEASE_CHANNEL") == "beta"
 
 
+def canonical_beta_provider(value: Any, *, source: str = "provider") -> str:
+    """Map empty/auto to Codex and reject every non-Codex Beta provider."""
+    provider = str(value or "").strip().lower()
+    if provider in {"", "auto", BETA_ALLOWED_PROVIDER}:
+        return BETA_ALLOWED_PROVIDER
+    raise BetaProviderPolicyError(
+        f"Realtor Beta does not allow {source} {provider!r}; use OpenAI Codex.",
+        code="beta_provider_not_allowed",
+    )
+
+
+def beta_model_or_default(value: Any, *, source: str = "model") -> str:
+    """Return the Beta default for empty input or validate an allowed model."""
+    model = str(value or "").strip()
+    if not model:
+        return BETA_DEFAULT_MODEL
+    if model not in BETA_ALLOWED_MODELS:
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow {source} {model!r}.",
+            code="beta_model_not_allowed",
+        )
+    return model
+
+
 def _jwt_expiry(access_token: str) -> float | None:
     parts = access_token.split(".")
     if len(parts) != 3:
@@ -116,27 +140,10 @@ def read_beta_codex_auth_status(
         return result
 
     current_time = time.time() if now is None else float(now)
-    pool = payload.get("credential_pool")
-    entries = pool.get(BETA_ALLOWED_PROVIDER) if isinstance(pool, dict) else None
-    if isinstance(entries, list):
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("last_status") or "").strip().lower() in {
-                "disabled",
-                "exhausted",
-                "invalid",
-                "revoked",
-            }:
-                continue
-            if _access_token_usable(entry.get("access_token"), now=current_time):
-                result.update(
-                    logged_in=True,
-                    source="credential_pool",
-                    reason=None,
-                )
-                return result
-
+    # Deliberately do not accept credential_pool-only entries here.  The Beta
+    # runtime skips pools to prevent imported/auto-seeded credentials from
+    # bypassing the current profile's Codex provider state, so onboarding must
+    # use the identical readiness rule and never advertise a false-ready state.
     providers = payload.get("providers")
     state = providers.get(BETA_ALLOWED_PROVIDER) if isinstance(providers, dict) else None
     tokens = state.get("tokens") if isinstance(state, dict) else None
@@ -148,6 +155,17 @@ def read_beta_codex_auth_status(
 
     result["reason"] = "codex_auth_missing_or_expired"
     return result
+
+
+def require_beta_codex_auth(elevate_home: Path | str) -> dict[str, Any]:
+    """Return local Codex auth status or fail closed for Beta runtime use."""
+    status = read_beta_codex_auth_status(elevate_home)
+    if not status.get("logged_in"):
+        raise BetaProviderPolicyError(
+            "OpenAI Codex auth is required in the current Realtor Beta profile.",
+            code="beta_codex_auth_required",
+        )
+    return status
 
 
 def build_beta_primary_overlay(

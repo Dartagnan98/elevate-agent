@@ -1269,13 +1269,47 @@ def resolve_skin() -> dict:
 def _resolve_model() -> str:
     env = os.environ.get("ELEVATE_MODEL", "")
     if env:
-        return env
-    m = _load_cfg().get("model", "")
-    if isinstance(m, dict):
-        return m.get("default", "")
-    if isinstance(m, str) and m:
-        return m
-    return "anthropic/claude-sonnet-4"
+        model = env
+    else:
+        configured = _load_cfg().get("model", "")
+        if isinstance(configured, dict):
+            model = configured.get("default", "")
+        elif isinstance(configured, str) and configured:
+            model = configured
+        else:
+            model = ""
+
+    from elevate_cli.beta_provider_policy import (
+        beta_model_or_default,
+        beta_provider_policy_active,
+    )
+
+    if beta_provider_policy_active():
+        return beta_model_or_default(model, source="TUI model")
+    return model or "anthropic/claude-sonnet-4"
+
+
+def _resolve_tui_runtime() -> dict:
+    """Resolve a TUI runtime and enforce the Beta provider invariant."""
+    from elevate_cli.runtime_provider import resolve_runtime_provider
+    from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    try:
+        runtime = resolve_runtime_provider(requested=None)
+        if beta_provider_policy_active():
+            canonical_beta_provider(
+                runtime.get("provider"), source="TUI runtime provider"
+            )
+    except BetaProviderPolicyError as exc:
+        # Session construction runs on a worker thread whose UI boundary only
+        # serializes exception text.  Preserve the typed policy code in that
+        # visible error instead of collapsing it to an unlabelled ValueError.
+        raise RuntimeError(f"{exc.code}: {exc}") from exc
+    return runtime
 
 
 def _write_config_key(key_path: str, value):
@@ -1541,24 +1575,47 @@ def _persist_model_switch(result) -> None:
 
 def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     from elevate_cli.model_switch import parse_model_flags, switch_model
-    from elevate_cli.runtime_provider import resolve_runtime_provider
 
     model_input, explicit_provider, persist_global = parse_model_flags(raw_input)
     if not model_input:
         raise ValueError("model value required")
 
+    from elevate_cli.beta_provider_policy import (
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    beta_active = beta_provider_policy_active()
+    if beta_active:
+        canonical_beta_provider(explicit_provider, source="TUI model-switch provider")
+        beta_model_or_default(model_input, source="TUI model-switch model")
+
     agent = session.get("agent")
+    beta_runtime = None
     if agent:
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or ""
         current_base_url = getattr(agent, "base_url", "") or ""
         current_api_key = getattr(agent, "api_key", "") or ""
     else:
-        runtime = resolve_runtime_provider(requested=None)
+        runtime = _resolve_tui_runtime()
         current_provider = str(runtime.get("provider", "") or "")
         current_model = _resolve_model()
         current_base_url = str(runtime.get("base_url", "") or "")
         current_api_key = str(runtime.get("api_key", "") or "")
+        beta_runtime = runtime if beta_active else None
+
+    if beta_active:
+        canonical_beta_provider(current_provider, source="current TUI provider")
+        current_model = beta_model_or_default(
+            current_model, source="current TUI model"
+        )
+        if beta_runtime is None:
+            beta_runtime = _resolve_tui_runtime()
+        current_provider = str(beta_runtime.get("provider") or "")
+        current_base_url = str(beta_runtime.get("base_url") or "")
+        current_api_key = str(beta_runtime.get("api_key") or "")
 
     result = switch_model(
         raw_input=model_input,
@@ -1571,6 +1628,18 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     )
     if not result.success:
         raise ValueError(result.error_message or "model switch failed")
+    if beta_active:
+        canonical_beta_provider(
+            result.target_provider, source="resolved TUI model-switch provider"
+        )
+        beta_model_or_default(result.new_model, source="resolved TUI model-switch model")
+        # Ignore any credentials or endpoint the generic model-switch pipeline
+        # carried forward.  Beta applies only the runtime freshly resolved
+        # from this profile's local Codex auth store.
+        result.target_provider = str(beta_runtime.get("provider") or "")
+        result.api_key = str(beta_runtime.get("api_key") or "")
+        result.base_url = str(beta_runtime.get("base_url") or "")
+        result.api_mode = str(beta_runtime.get("api_mode") or "")
 
     if agent:
         agent.switch_model(
@@ -2384,14 +2453,42 @@ def _apply_agent_lane(session: dict, agent_id: str) -> None:
 def _background_agent_kwargs(agent, task_id: str) -> dict:
     cfg = _load_cfg()
 
-    return {
-        "base_url": getattr(agent, "base_url", None) or None,
-        "api_key": getattr(agent, "api_key", None) or None,
-        "provider": getattr(agent, "provider", None) or None,
-        "api_mode": getattr(agent, "api_mode", None) or None,
-        "acp_command": getattr(agent, "acp_command", None) or None,
-        "acp_args": getattr(agent, "acp_args", None) or None,
-        "model": getattr(agent, "model", None) or _resolve_model(),
+    base_url = getattr(agent, "base_url", None) or None
+    api_key = getattr(agent, "api_key", None) or None
+    provider = getattr(agent, "provider", None) or None
+    api_mode = getattr(agent, "api_mode", None) or None
+    acp_command = getattr(agent, "acp_command", None) or None
+    acp_args = getattr(agent, "acp_args", None) or None
+    credential_pool = None
+    model = getattr(agent, "model", None) or _resolve_model()
+    fallback_model = getattr(agent, "_fallback_model", None)
+    from elevate_cli.beta_provider_policy import (
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    if beta_provider_policy_active():
+        canonical_beta_provider(provider, source="background TUI provider")
+        model = beta_model_or_default(model, source="background TUI model")
+        runtime = _resolve_tui_runtime()
+        provider = runtime.get("provider")
+        base_url = runtime.get("base_url")
+        api_key = runtime.get("api_key")
+        api_mode = runtime.get("api_mode")
+        acp_command = runtime.get("command")
+        acp_args = runtime.get("args")
+        credential_pool = runtime.get("credential_pool")
+        fallback_model = None
+
+    kwargs = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "provider": provider,
+        "api_mode": api_mode,
+        "acp_command": acp_command,
+        "acp_args": acp_args,
+        "model": model,
         "max_iterations": int(cfg.get("max_turns", 25) or 25),
         "enabled_toolsets": getattr(agent, "enabled_toolsets", None)
         or _load_enabled_toolsets(),
@@ -2414,8 +2511,11 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "platform": "tui",
         "session_db": _get_db(),
-        "fallback_model": getattr(agent, "_fallback_model", None),
+        "fallback_model": fallback_model,
     }
+    if beta_provider_policy_active():
+        kwargs["credential_pool"] = credential_pool
+    return kwargs
 
 
 def _release_agent_memory(agent, *, ended: bool) -> None:
@@ -2492,13 +2592,12 @@ def _make_agent(
     tool_profile: str | None = None,
 ):
     from run_agent import AIAgent
-    from elevate_cli.runtime_provider import resolve_runtime_provider
 
     cfg = _load_cfg()
     system_prompt = (cfg.get("agent") or {}).get("system_prompt", "") or ""
     if not system_prompt:
         system_prompt = _resolve_personality_prompt(cfg)
-    runtime = resolve_runtime_provider(requested=None)
+    runtime = _resolve_tui_runtime()
     return AIAgent(
         model=_resolve_model(),
         provider=runtime.get("provider"),
@@ -6462,13 +6561,29 @@ def _(rid, params: dict) -> dict:
         try:
             from run_agent import AIAgent
 
-            result = AIAgent(
-                model=_resolve_model(),
-                quiet_mode=True,
-                platform="tui",
-                max_iterations=8,
-                enabled_toolsets=[],
-            ).run_conversation(text, conversation_history=snapshot)
+            agent_kwargs = {
+                "model": _resolve_model(),
+                "quiet_mode": True,
+                "platform": "tui",
+                "max_iterations": 8,
+                "enabled_toolsets": [],
+            }
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                runtime = _resolve_tui_runtime()
+                agent_kwargs.update(
+                    provider=runtime.get("provider"),
+                    base_url=runtime.get("base_url"),
+                    api_key=runtime.get("api_key"),
+                    api_mode=runtime.get("api_mode"),
+                    acp_command=runtime.get("command"),
+                    acp_args=runtime.get("args"),
+                    credential_pool=runtime.get("credential_pool"),
+                )
+            result = AIAgent(**agent_kwargs).run_conversation(
+                text, conversation_history=snapshot
+            )
             _emit("btw.complete", sid, _agent_terminal_payload(result))
         except Exception as e:
             _emit(

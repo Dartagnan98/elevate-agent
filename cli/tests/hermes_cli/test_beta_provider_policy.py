@@ -7,11 +7,15 @@ import time
 import pytest
 
 from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_PROVIDER,
     BETA_ALLOWED_MODELS,
     BETA_DEFAULT_MODEL,
     BetaProviderPolicyError,
+    beta_model_or_default,
     beta_provider_policy_active,
+    canonical_beta_provider,
     read_beta_codex_auth_status,
+    require_beta_codex_auth,
     validate_beta_primary_item,
 )
 
@@ -74,6 +78,53 @@ def test_beta_auth_inspection_rejects_symlinked_home(tmp_path):
 
     assert status["logged_in"] is False
     assert status["reason"] == "non_local_auth_store"
+
+
+@pytest.mark.parametrize("value", [None, "", "auto", "openai-codex"])
+def test_beta_provider_canonicalization_maps_only_absent_auto_or_codex(value):
+    assert canonical_beta_provider(value) == BETA_ALLOWED_PROVIDER
+
+
+def test_beta_provider_and_model_helpers_reject_non_beta_values():
+    with pytest.raises(BetaProviderPolicyError) as provider_exc:
+        canonical_beta_provider("anthropic", source="test provider")
+    assert provider_exc.value.code == "beta_provider_not_allowed"
+
+    with pytest.raises(BetaProviderPolicyError) as model_exc:
+        beta_model_or_default("anthropic/claude-sonnet-4", source="test model")
+    assert model_exc.value.code == "beta_model_not_allowed"
+    assert beta_model_or_default("") == BETA_DEFAULT_MODEL
+
+
+def test_require_beta_codex_auth_fails_closed_without_local_store(tmp_path):
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        require_beta_codex_auth(tmp_path)
+
+    assert exc.value.code == "beta_codex_auth_required"
+
+
+def test_beta_auth_pool_only_entry_is_not_runtime_ready(tmp_path):
+    (tmp_path / "auth.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "credential_pool": {
+                    "openai-codex": [
+                        {
+                            "access_token": "pool-only-token",
+                            "last_status": "ok",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = read_beta_codex_auth_status(tmp_path)
+
+    assert status["logged_in"] is False
+    assert status["reason"] == "codex_auth_missing_or_expired"
 
 
 @pytest.mark.parametrize(

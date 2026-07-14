@@ -1,7 +1,6 @@
 """Test that AuthError triggers fallback provider resolution (#7230)."""
 
-import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -71,3 +70,67 @@ class TestResolveRuntimeAgentKwargsAuthFallback:
             from gateway.run import _resolve_runtime_agent_kwargs
             with pytest.raises(RuntimeError):
                 _resolve_runtime_agent_kwargs()
+
+    def test_beta_auth_error_never_tries_configured_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        from elevate_cli.auth import AuthError
+
+        (tmp_path / "config.yaml").write_text(
+            "model:\n  provider: openai-codex\n"
+            "fallback_model:\n  provider: openrouter\n"
+            "  model: meta-llama/llama-4-maverick\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("gateway.run._elevate_home", tmp_path)
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("ELEVATE_INFERENCE_PROVIDER", "openai-codex")
+        calls = []
+
+        def _raise_auth(**kwargs):
+            calls.append(kwargs)
+            raise AuthError("Codex token expired")
+
+        with patch(
+            "elevate_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=_raise_auth,
+        ):
+            from gateway.run import _resolve_runtime_agent_kwargs
+
+            with pytest.raises(RuntimeError, match="Codex token expired"):
+                _resolve_runtime_agent_kwargs()
+
+        assert len(calls) == 1
+
+    def test_beta_policy_error_keeps_typed_code_visible(self, monkeypatch):
+        from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        with patch(
+            "elevate_cli.runtime_provider.resolve_runtime_provider",
+            side_effect=BetaProviderPolicyError(
+                "OpenAI Codex auth is required.",
+                code="beta_codex_auth_required",
+            ),
+        ):
+            from gateway.run import _resolve_runtime_agent_kwargs
+
+            with pytest.raises(
+                RuntimeError,
+                match="beta_codex_auth_required: OpenAI Codex auth is required",
+            ):
+                _resolve_runtime_agent_kwargs()
+
+    def test_beta_agent_fallback_chain_is_disabled(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text(
+            "fallback_providers:\n"
+            "  - provider: anthropic\n"
+            "    model: anthropic/claude-sonnet-4\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("gateway.run._elevate_home", tmp_path)
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        from gateway.run import GatewayRunner
+
+        assert GatewayRunner._load_fallback_model() is None

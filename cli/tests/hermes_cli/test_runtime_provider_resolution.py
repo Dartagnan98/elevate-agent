@@ -1,4 +1,227 @@
+import json
+
+import pytest
+
 from elevate_cli import runtime_provider as rp
+from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+
+def _write_beta_codex_auth(home, *, access_token="local-beta-token"):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "auth.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "providers": {
+                    "openai-codex": {
+                        "tokens": {
+                            "access_token": access_token,
+                            "refresh_token": "local-beta-refresh",
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _enable_beta_runtime(monkeypatch, tmp_path, config=None):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path))
+    monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.delenv("ELEVATE_MODEL", raising=False)
+    monkeypatch.delenv("ELEVATE_CODEX_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: config
+        if config is not None
+        else {"model": {"provider": "openai-codex", "default": "gpt-5.5"}},
+    )
+
+
+@pytest.mark.parametrize("hostile_source", ["requested", "config", "environment"])
+def test_beta_rejects_every_non_codex_provider_before_resolution(
+    monkeypatch, tmp_path, hostile_source
+):
+    config = {"model": {"provider": "openai-codex", "default": "gpt-5.5"}}
+    requested = None
+    if hostile_source == "requested":
+        requested = "anthropic"
+    elif hostile_source == "config":
+        config["model"]["provider"] = "openrouter"
+
+    _enable_beta_runtime(monkeypatch, tmp_path, config)
+    if hostile_source == "environment":
+        monkeypatch.setenv("ELEVATE_INFERENCE_PROVIDER", "google-gemini-cli")
+
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *args, **kwargs: pytest.fail("alternate provider resolution ran"),
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        rp.resolve_runtime_provider(requested=requested)
+
+    assert exc.value.code == "beta_provider_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "explicit_kwargs",
+    [
+        {"explicit_api_key": "host-key"},
+        {"explicit_base_url": "https://proxy.example.test/v1"},
+    ],
+)
+def test_beta_rejects_explicit_credentials_before_resolution(
+    monkeypatch, tmp_path, explicit_kwargs
+):
+    _enable_beta_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *args, **kwargs: pytest.fail("provider resolution ran"),
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        rp.resolve_runtime_provider(**explicit_kwargs)
+
+    assert exc.value.code == "beta_explicit_credentials_not_allowed"
+
+
+def test_beta_rejects_hostile_codex_endpoint_override(monkeypatch, tmp_path):
+    _enable_beta_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "ELEVATE_CODEX_BASE_URL", "https://credential-capture.example.test/v1"
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *args, **kwargs: pytest.fail("provider resolution ran"),
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        rp.resolve_runtime_provider()
+
+    assert exc.value.code == "beta_codex_endpoint_not_allowed"
+
+
+def test_beta_maps_auto_to_local_codex_and_skips_credential_pool(
+    monkeypatch, tmp_path
+):
+    _enable_beta_runtime(
+        monkeypatch,
+        tmp_path,
+        {"model": {"provider": "auto", "default": "gpt-5.5"}},
+    )
+    _write_beta_codex_auth(tmp_path)
+
+    def _resolve_provider(requested, **kwargs):
+        assert requested == "openai-codex"
+        return "openai-codex"
+
+    monkeypatch.setattr(rp, "resolve_provider", _resolve_provider)
+    monkeypatch.setattr(
+        rp,
+        "load_pool",
+        lambda provider: pytest.fail("Beta credential pool was consulted"),
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": rp.DEFAULT_CODEX_BASE_URL,
+            "api_key": "local-beta-token",
+            "source": "elevate-auth-store",
+            "auth_mode": "chatgpt",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="auto")
+
+    assert resolved["provider"] == "openai-codex"
+    assert resolved["requested_provider"] == "openai-codex"
+    assert resolved["api_mode"] == "codex_responses"
+    assert resolved["source"] == "elevate-auth-store"
+    assert resolved["auth_store"] == str(tmp_path / "auth.json")
+
+
+def test_beta_requires_local_auth_before_provider_resolution(monkeypatch, tmp_path):
+    _enable_beta_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *args, **kwargs: pytest.fail("provider resolution ran without local auth"),
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        rp.resolve_runtime_provider(requested="auto")
+
+    assert exc.value.code == "beta_codex_auth_required"
+
+
+@pytest.mark.parametrize(
+    ("credential_patch", "code"),
+    [
+        ({"provider": "anthropic", "source": "elevate-auth-store", "auth_mode": "chatgpt"},
+         "beta_provider_not_allowed"),
+        ({"provider": "openai-codex", "source": "credential-pool", "auth_mode": "chatgpt"},
+         "beta_codex_runtime_not_local"),
+    ],
+)
+def test_beta_rejects_non_codex_or_non_local_final_credentials(
+    monkeypatch, tmp_path, credential_patch, code
+):
+    _enable_beta_runtime(monkeypatch, tmp_path)
+    _write_beta_codex_auth(tmp_path)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *args, **kwargs: "openai-codex")
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: {
+            "base_url": rp.DEFAULT_CODEX_BASE_URL,
+            "api_key": "unexpected-token",
+            **credential_patch,
+        },
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        rp.resolve_runtime_provider()
+
+    assert exc.value.code == code
+
+
+def test_beta_codex_auth_failure_does_not_fall_through_to_openrouter(
+    monkeypatch, tmp_path
+):
+    from elevate_cli.auth import AuthError
+
+    _enable_beta_runtime(monkeypatch, tmp_path)
+    _write_beta_codex_auth(tmp_path)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-be-used")
+    monkeypatch.setattr(rp, "resolve_provider", lambda *args, **kwargs: "openai-codex")
+    monkeypatch.setattr(
+        rp,
+        "resolve_codex_runtime_credentials",
+        lambda: (_ for _ in ()).throw(
+            AuthError(
+                "local Codex session revoked",
+                provider="openai-codex",
+                code="invalid_grant",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        rp,
+        "_resolve_openrouter_runtime",
+        lambda **kwargs: pytest.fail("Beta fell through to OpenRouter"),
+    )
+
+    with pytest.raises(AuthError, match="local Codex session revoked"):
+        rp.resolve_runtime_provider(requested="auto")
 
 
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):

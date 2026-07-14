@@ -30,7 +30,15 @@ from elevate_cli.auth import (
     has_usable_secret,
 )
 from elevate_cli.config import get_compatible_custom_providers, load_config
-from elevate_constants import OPENROUTER_BASE_URL
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_PROVIDER,
+    BetaProviderPolicyError,
+    beta_model_or_default,
+    beta_provider_policy_active,
+    canonical_beta_provider,
+    require_beta_codex_auth,
+)
+from elevate_constants import OPENROUTER_BASE_URL, get_elevate_home
 from utils import base_url_host_matches, base_url_hostname
 
 
@@ -1214,7 +1222,63 @@ def resolve_runtime_provider(
     persisted default. Other callers can leave it None to preserve existing
     behavior (api_mode derived from config).
     """
-    requested_provider = resolve_requested_provider(requested)
+    beta_active = beta_provider_policy_active()
+    beta_model_cfg: Optional[Dict[str, Any]] = None
+    if beta_active:
+        # Validate every provider-bearing input independently.  This is
+        # intentionally stricter than the normal precedence chain: a stale
+        # non-Codex config or environment override must be visible and fixed,
+        # not silently shadowed by another input while Beta is active.
+        raw_config = load_config()
+        raw_model_cfg = raw_config.get("model") if isinstance(raw_config, dict) else None
+        if isinstance(raw_model_cfg, dict):
+            beta_model_cfg = dict(raw_model_cfg)
+        elif isinstance(raw_model_cfg, str) and raw_model_cfg.strip():
+            beta_model_cfg = {"default": raw_model_cfg.strip()}
+        else:
+            beta_model_cfg = {}
+
+        canonical_beta_provider(requested, source="requested provider")
+        canonical_beta_provider(
+            beta_model_cfg.get("provider"), source="configured provider"
+        )
+        canonical_beta_provider(
+            os.getenv("ELEVATE_INFERENCE_PROVIDER"),
+            source="ELEVATE_INFERENCE_PROVIDER",
+        )
+        if str(explicit_api_key or "").strip() or str(explicit_base_url or "").strip():
+            raise BetaProviderPolicyError(
+                "Realtor Beta runtime credentials must come from this profile's "
+                "OpenAI Codex auth store.",
+                code="beta_explicit_credentials_not_allowed",
+            )
+        codex_base_url_override = os.getenv("ELEVATE_CODEX_BASE_URL", "").strip()
+        if codex_base_url_override and (
+            codex_base_url_override.rstrip("/") != DEFAULT_CODEX_BASE_URL.rstrip("/")
+        ):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow a custom OpenAI Codex endpoint.",
+                code="beta_codex_endpoint_not_allowed",
+            )
+
+        configured_model = beta_model_cfg.get("default") or beta_model_cfg.get("model")
+        beta_model_cfg["default"] = beta_model_or_default(
+            configured_model, source="configured model"
+        )
+        if target_model is not None:
+            beta_model_or_default(target_model, source="target model")
+        if os.getenv("ELEVATE_MODEL") is not None:
+            beta_model_or_default(
+                os.getenv("ELEVATE_MODEL"), source="ELEVATE_MODEL"
+            )
+
+        # This check is a pure read of exactly <current home>/auth.json.  It
+        # happens before provider resolution, credential pools, refreshes, or
+        # alternate-provider clients can run.
+        require_beta_codex_auth(get_elevate_home())
+        requested_provider = BETA_ALLOWED_PROVIDER
+    else:
+        requested_provider = resolve_requested_provider(requested)
     if requested_provider == "claude-code-cli":
         return {
             "provider": "claude-code-cli",
@@ -1274,7 +1338,9 @@ def resolve_runtime_provider(
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
-    model_cfg = _get_model_config()
+    if beta_active:
+        canonical_beta_provider(provider, source="resolved provider")
+    model_cfg = beta_model_cfg if beta_model_cfg is not None else _get_model_config()
     explicit_runtime = _resolve_explicit_runtime(
         provider=provider,
         requested_provider=requested_provider,
@@ -1285,7 +1351,10 @@ def resolve_runtime_provider(
     if explicit_runtime:
         return explicit_runtime
 
-    should_use_pool = provider != "openrouter"
+    # Beta runtime auth comes only from this profile's provider state.  Skip
+    # the credential-pool path entirely because it can select imported,
+    # seeded, or otherwise indirect credentials before the local resolver.
+    should_use_pool = (not beta_active) and provider != "openrouter"
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
@@ -1370,6 +1439,25 @@ def resolve_runtime_provider(
     if provider == "openai-codex":
         try:
             creds = resolve_codex_runtime_credentials()
+            if beta_active:
+                canonical_beta_provider(
+                    creds.get("provider"), source="Codex credential provider"
+                )
+                if (
+                    creds.get("source") != "elevate-auth-store"
+                    or creds.get("auth_mode") != "chatgpt"
+                ):
+                    raise BetaProviderPolicyError(
+                        "Realtor Beta Codex credentials did not resolve from this "
+                        "profile's Elevate auth store.",
+                        code="beta_codex_runtime_not_local",
+                    )
+                resolved_base_url = str(creds.get("base_url") or "").rstrip("/")
+                if resolved_base_url != DEFAULT_CODEX_BASE_URL.rstrip("/"):
+                    raise BetaProviderPolicyError(
+                        "Realtor Beta Codex runtime resolved an unsupported endpoint.",
+                        code="beta_codex_endpoint_not_allowed",
+                    )
             return {
                 "provider": "openai-codex",
                 "api_mode": "codex_responses",
@@ -1377,6 +1465,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "elevate-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
+                "auth_store": str(get_elevate_home() / "auth.json"),
                 "requested_provider": requested_provider,
             }
         except AuthError:

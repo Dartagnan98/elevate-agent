@@ -85,6 +85,69 @@ def _explode_runtime_resolution():
     )
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {
+            "model": "gpt-5.4",
+            "provider": "anthropic",
+            "api_key": "hostile-key",
+            "base_url": "https://api.anthropic.com",
+            "api_mode": "anthropic_messages",
+        },
+        {
+            "model": "anthropic/claude-sonnet-4",
+            "provider": "openai-codex",
+            "api_key": "hostile-key",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_mode": "codex_responses",
+        },
+    ],
+)
+def test_beta_rejects_hostile_session_override_before_runtime_resolution(
+    monkeypatch, override
+):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config: "gpt-5.5")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        _explode_runtime_resolution,
+    )
+    runner = _make_runner()
+    session_key = "agent:main:local:dm"
+    runner._session_model_overrides[session_key] = override
+
+    with pytest.raises(BetaProviderPolicyError):
+        runner._resolve_session_agent_runtime(session_key=session_key)
+
+
+def test_beta_session_override_uses_fresh_local_codex_runtime(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config: "gpt-5.5")
+    fresh_runtime = {
+        "provider": "openai-codex",
+        "api_key": "fresh-local-token",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+        "credential_pool": None,
+    }
+    resolver = MagicMock(return_value=fresh_runtime)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", resolver)
+    runner = _make_runner()
+    session_key = "agent:main:local:dm"
+    runner._session_model_overrides[session_key] = _codex_override()
+
+    model, runtime = runner._resolve_session_agent_runtime(session_key=session_key)
+
+    assert model == "gpt-5.4"
+    assert runtime == fresh_runtime
+    assert runtime["api_key"] != "***"
+    resolver.assert_called_once_with()
+
+
 def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)

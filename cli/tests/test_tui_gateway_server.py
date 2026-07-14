@@ -967,6 +967,188 @@ def test_config_set_model_syncs_inference_provider_env(monkeypatch):
     assert os.environ["ELEVATE_INFERENCE_PROVIDER"] == "anthropic"
 
 
+def test_beta_tui_model_defaults_to_allowed_codex_model(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.delenv("ELEVATE_MODEL", raising=False)
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+
+    assert server._resolve_model() == "gpt-5.5"
+
+
+@pytest.mark.parametrize("source", ["environment", "config"])
+def test_beta_tui_rejects_anthropic_model_sources(monkeypatch, source):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.delenv("ELEVATE_MODEL", raising=False)
+    config = {"model": {"default": "anthropic/claude-sonnet-4"}}
+    if source == "environment":
+        monkeypatch.setenv("ELEVATE_MODEL", "anthropic/claude-sonnet-4")
+        config = {}
+    monkeypatch.setattr(server, "_load_cfg", lambda: config)
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        server._resolve_model()
+
+    assert exc.value.code == "beta_model_not_allowed"
+
+
+def test_beta_tui_model_switch_rejects_non_codex_before_switch(monkeypatch):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        "elevate_cli.model_switch.switch_model",
+        lambda **kwargs: pytest.fail("non-Codex switch reached model resolver"),
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        server._apply_model_switch(
+            "sid",
+            _session(
+                agent=types.SimpleNamespace(
+                    provider="openai-codex",
+                    model="gpt-5.5",
+                    base_url="https://chatgpt.com/backend-api/codex",
+                    api_key="local-token",
+                )
+            ),
+            "anthropic/claude-sonnet-4 --provider anthropic",
+        )
+
+    assert exc.value.code == "beta_provider_not_allowed"
+
+
+def test_beta_tui_runtime_rejects_non_codex_result_with_visible_code(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="beta_provider_not_allowed"):
+        server._resolve_tui_runtime()
+
+
+def test_beta_background_agent_removes_fallback_chain(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(
+        server,
+        "_resolve_tui_runtime",
+        lambda: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "fresh-local-token",
+            "api_mode": "codex_responses",
+            "credential_pool": None,
+        },
+    )
+    agent = types.SimpleNamespace(
+        provider="openai-codex",
+        model="gpt-5.4",
+        base_url="https://hostile.example.test/v1",
+        api_key="stale-host-key",
+        api_mode="chat_completions",
+        _fallback_model=[
+            {
+                "provider": "anthropic",
+                "model": "anthropic/claude-sonnet-4",
+            }
+        ],
+    )
+
+    kwargs = server._background_agent_kwargs(agent, "task-1")
+
+    assert kwargs["provider"] == "openai-codex"
+    assert kwargs["model"] == "gpt-5.4"
+    assert kwargs["base_url"] == "https://chatgpt.com/backend-api/codex"
+    assert kwargs["api_key"] == "fresh-local-token"
+    assert kwargs["api_mode"] == "codex_responses"
+    assert kwargs["credential_pool"] is None
+    assert kwargs["fallback_model"] is None
+
+
+def test_beta_background_agent_rejects_non_codex_parent(monkeypatch):
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(
+        server,
+        "_resolve_tui_runtime",
+        lambda: pytest.fail("runtime resolved for a non-Codex parent"),
+    )
+    agent = types.SimpleNamespace(
+        provider="anthropic",
+        model="gpt-5.4",
+    )
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        server._background_agent_kwargs(agent, "task-1")
+
+    assert exc.value.code == "beta_provider_not_allowed"
+
+
+def test_beta_tui_model_switch_replaces_stale_agent_credentials(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    # _apply_model_switch intentionally synchronizes these process-level
+    # values. Register their original absence so this test cannot leak them
+    # into later tests in the same worker.
+    monkeypatch.delenv("ELEVATE_MODEL", raising=False)
+    monkeypatch.delenv("ELEVATE_INFERENCE_PROVIDER", raising=False)
+    safe_runtime = {
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "fresh-local-token",
+        "api_mode": "codex_responses",
+    }
+    monkeypatch.setattr(server, "_resolve_tui_runtime", lambda: safe_runtime)
+    seen = {}
+
+    class _Agent:
+        provider = "openai-codex"
+        model = "gpt-5.5"
+        base_url = "https://hostile.example.test/v1"
+        api_key = "stale-host-key"
+
+        def switch_model(self, **kwargs):
+            seen["agent"] = kwargs
+
+    result = types.SimpleNamespace(
+        success=True,
+        new_model="gpt-5.4",
+        target_provider="openai-codex",
+        api_key="pipeline-hostile-key",
+        base_url="https://pipeline-hostile.example.test/v1",
+        api_mode="chat_completions",
+        warning_message="",
+    )
+
+    def _switch_model(**kwargs):
+        seen["pipeline"] = kwargs
+        return result
+
+    monkeypatch.setattr("elevate_cli.model_switch.switch_model", _switch_model)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda session: None)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+    response = server._apply_model_switch(
+        "sid", _session(agent=_Agent()), "gpt-5.4"
+    )
+
+    assert response["value"] == "gpt-5.4"
+    assert seen["pipeline"]["current_base_url"] == safe_runtime["base_url"]
+    assert seen["pipeline"]["current_api_key"] == safe_runtime["api_key"]
+    assert seen["agent"]["new_provider"] == "openai-codex"
+    assert seen["agent"]["base_url"] == safe_runtime["base_url"]
+    assert seen["agent"]["api_key"] == safe_runtime["api_key"]
+    assert seen["agent"]["api_mode"] == "codex_responses"
+
+
 def test_config_set_personality_rejects_unknown_name(monkeypatch):
     monkeypatch.setattr(
         server,

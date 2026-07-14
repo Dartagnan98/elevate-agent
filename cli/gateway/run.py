@@ -913,12 +913,21 @@ def _resolve_runtime_agent_kwargs() -> dict:
         format_runtime_provider_error,
     )
     from elevate_cli.auth import AuthError
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
 
     try:
         runtime = resolve_runtime_provider(
             requested=os.getenv("ELEVATE_INFERENCE_PROVIDER"),
         )
+    except BetaProviderPolicyError as policy_exc:
+        raise RuntimeError(f"{policy_exc.code}: {policy_exc}") from policy_exc
     except AuthError as auth_exc:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active():
+            # Beta must fail closed on its own Codex auth.  A configured
+            # fallback provider is never a valid substitute.
+            raise RuntimeError(format_runtime_provider_error(auth_exc)) from auth_exc
         # Primary provider auth failed (expired token, revoked key, etc.).
         # Try the fallback provider chain before raising.
         logger.warning("Primary provider auth failed: %s — trying fallback", auth_exc)
@@ -942,6 +951,11 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
 def _try_resolve_fallback_provider() -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        return None
+
     from elevate_cli.runtime_provider import resolve_runtime_provider
     try:
         import yaml as _y
@@ -2132,7 +2146,27 @@ class GatewayRunner:
 
         model = _resolve_gateway_model(user_config)
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
-        if override:
+        beta_override_model: Optional[str] = None
+        from elevate_cli.beta_provider_policy import (
+            beta_model_or_default,
+            beta_provider_policy_active,
+            canonical_beta_provider,
+        )
+
+        beta_active = beta_provider_policy_active()
+        if override and beta_active:
+            canonical_beta_provider(
+                override.get("provider"), source="session override provider"
+            )
+            beta_override_model = beta_model_or_default(
+                override.get("model") or model,
+                source="session override model",
+            )
+            # Never trust credentials cached in a session override during
+            # Beta.  Resolve current credentials from this profile's local
+            # Codex auth store on every agent construction.
+            override = None
+        elif override:
             override_model = override.get("model", model)
             override_runtime = {
                 "provider": override.get("provider"),
@@ -2161,7 +2195,15 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        if override and resolved_session_key:
+        if beta_active:
+            canonical_beta_provider(
+                runtime_kwargs.get("provider"), source="gateway runtime provider"
+            )
+            model = beta_model_or_default(
+                beta_override_model or model,
+                source="gateway session model",
+            )
+        elif override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
@@ -2726,6 +2768,11 @@ class GatewayRunner:
         dict (legacy ``fallback_model``), or None if not configured.
         AIAgent.__init__ normalizes both formats into a chain.
         """
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active():
+            return None
+
         try:
             import yaml as _y
             cfg_path = _elevate_home / "config.yaml"
