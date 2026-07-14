@@ -122,3 +122,80 @@ def test_show_status_hides_nous_subscription_section_when_feature_flag_is_off(mo
 
     out = capsys.readouterr().out
     assert "Nous Tool Gateway" not in out
+
+
+def test_exact_beta_status_is_codex_only_and_never_reads_alternate_inference_auth(
+    monkeypatch, capsys, tmp_path
+):
+    from elevate_cli import status as status_mod
+    import elevate_cli.auth as auth_mod
+    import httpx
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-be-probed")
+    _patch_common_status_deps(monkeypatch, status_mod, tmp_path)
+    monkeypatch.setattr(
+        status_mod,
+        "load_config",
+        lambda: {"model": {"provider": "anthropic", "default": "claude-hostile"}},
+    )
+    monkeypatch.setattr(
+        status_mod,
+        "provider_label",
+        lambda provider: "OpenAI Codex" if provider == "openai-codex" else provider,
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("alternate inference discovery is forbidden")
+
+    monkeypatch.setattr(status_mod, "resolve_requested_provider", forbidden)
+    monkeypatch.setattr(status_mod, "resolve_provider", forbidden)
+    for name in (
+        "get_nous_auth_status",
+        "get_codex_auth_status",
+        "get_anthropic_key",
+        "get_qwen_auth_status",
+        "get_minimax_oauth_auth_status",
+        "get_xai_oauth_auth_status",
+    ):
+        monkeypatch.setattr(auth_mod, name, forbidden)
+
+    allowed_tool_envs = {
+        "FIRECRAWL_API_KEY",
+        "TAVILY_API_KEY",
+        "FAL_KEY",
+        "ELEVENLABS_API_KEY",
+        "GITHUB_TOKEN",
+    }
+    env_reads = []
+
+    def read_tool_env(name):
+        assert name in allowed_tool_envs
+        env_reads.append(name)
+        return "tool-secret-value" if name == "TAVILY_API_KEY" else ""
+
+    monkeypatch.setattr(status_mod, "get_env_value", read_tool_env)
+    monkeypatch.setattr(status_mod, "managed_nous_tools_enabled", lambda: False)
+    monkeypatch.setattr(httpx, "get", forbidden)
+
+    status_mod.show_status(SimpleNamespace(all=True, deep=True))
+
+    out = capsys.readouterr().out
+    assert "Provider:     OpenAI Codex" in out
+    assert "claude-hostile (blocked by Realtor Beta policy)" in out
+    assert "OpenAI Codex only" in out
+    assert "Tavily" in out
+    assert "tool-secret-value" not in out
+    for hidden in (
+        "OpenRouter",
+        "Anthropic",
+        "Nous Portal",
+        "Google / Gemini",
+        "Qwen OAuth",
+        "MiniMax OAuth",
+        "xAI OAuth",
+        "Z.AI / GLM",
+        "Kimi / Moonshot",
+    ):
+        assert hidden not in out
+    assert set(env_reads) == allowed_tool_envs

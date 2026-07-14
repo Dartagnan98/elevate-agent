@@ -13,6 +13,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 from elevate_cli.auth import AuthError, resolve_provider
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_MODELS,
+    BETA_ALLOWED_PROVIDER,
+    beta_provider_policy_active,
+    read_beta_codex_auth_status,
+)
 from elevate_cli.colors import Colors, color
 from elevate_cli.config import get_env_path, get_env_value, get_elevate_home, load_config
 from elevate_cli.models import provider_label
@@ -67,11 +73,18 @@ def _configured_model_label(config: dict) -> str:
         model = model_cfg.strip()
     else:
         model = ""
+    if beta_provider_policy_active() and model and model not in BETA_ALLOWED_MODELS:
+        return f"{model} (blocked by Realtor Beta policy)"
     return model or "(not set)"
 
 
 def _effective_provider_label() -> str:
     """Return the provider label matching current CLI runtime resolution."""
+    if beta_provider_policy_active():
+        # A read-only Beta status command must not resolve stale or ambient
+        # alternate-provider credentials.
+        return provider_label(BETA_ALLOWED_PROVIDER)
+
     requested = resolve_requested_provider()
     try:
         effective = resolve_provider(requested)
@@ -89,7 +102,8 @@ from elevate_constants import is_termux as _is_termux
 
 def show_status(args):
     """Show status of all Elevate Agent components."""
-    show_all = getattr(args, 'all', False)
+    realtor_beta = beta_provider_policy_active()
+    show_all = bool(getattr(args, 'all', False)) and not realtor_beta
     deep = getattr(args, 'deep', False)
 
     print()
@@ -145,6 +159,11 @@ def show_status(args):
         "ElevenLabs": "ELEVENLABS_API_KEY",
         "GitHub": "GITHUB_TOKEN",
     }
+    if realtor_beta:
+        # These are separately labelled tool credentials. Alternate inference
+        # keys are neither read nor displayed in the Codex-only Beta.
+        tool_key_names = {"Firecrawl", "Tavily", "FAL", "ElevenLabs", "GitHub"}
+        keys = {name: ref for name, ref in keys.items() if name in tool_key_names}
 
     def _resolve_env(env_ref) -> str:
         """Return first non-empty env var value from a str or tuple of names."""
@@ -167,10 +186,11 @@ def show_status(args):
         display = redact_key(value) if not show_all else value
         print(f"  {name:<12}  {check_mark(has_key)} {display}")
 
-    from elevate_cli.auth import get_anthropic_key
-    anthropic_value = get_anthropic_key()
-    anthropic_display = redact_key(anthropic_value) if not show_all else anthropic_value
-    print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
+    if not realtor_beta:
+        from elevate_cli.auth import get_anthropic_key
+        anthropic_value = get_anthropic_key()
+        anthropic_display = redact_key(anthropic_value) if not show_all else anthropic_value
+        print(f"  {'Anthropic':<12}  {check_mark(bool(anthropic_value))} {anthropic_display}")
 
     # =========================================================================
     # Auth Providers (OAuth)
@@ -179,26 +199,35 @@ def show_status(args):
     print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
 
     try:
-        from elevate_cli.auth import (
-            get_nous_auth_status,
-            get_codex_auth_status,
-            get_qwen_auth_status,
-            get_minimax_oauth_auth_status,
-        )
-        nous_status = get_nous_auth_status()
-        codex_status = get_codex_auth_status()
-        qwen_status = get_qwen_auth_status()
-        minimax_status = get_minimax_oauth_auth_status()
+        if realtor_beta:
+            nous_status = {}
+            codex_status = read_beta_codex_auth_status(get_elevate_home())
+            qwen_status = {}
+            minimax_status = {}
+        else:
+            from elevate_cli.auth import get_codex_auth_status, get_nous_auth_status
+            from elevate_cli.auth import (
+                get_minimax_oauth_auth_status,
+                get_qwen_auth_status,
+            )
+            nous_status = get_nous_auth_status()
+            codex_status = get_codex_auth_status()
+            qwen_status = get_qwen_auth_status()
+            minimax_status = get_minimax_oauth_auth_status()
     except Exception:
         nous_status = {}
         codex_status = {}
         qwen_status = {}
         minimax_status = {}
 
+    def optional_nous_print(*values, **kwargs):
+        if not realtor_beta:
+            print(*values, **kwargs)
+
     nous_logged_in = bool(nous_status.get("logged_in"))
     nous_error = nous_status.get("error")
     nous_label = "logged in" if nous_logged_in else "not logged in (run: elevate auth add nous --type oauth)"
-    print(
+    optional_nous_print(
         f"  {'Nous Portal':<12}  {check_mark(nous_logged_in)} "
         f"{nous_label}"
     )
@@ -207,15 +236,15 @@ def show_status(args):
     key_exp = _format_iso_timestamp(nous_status.get("agent_key_expires_at"))
     refresh_label = "yes" if nous_status.get("has_refresh_token") else "no"
     if nous_logged_in or portal_url != "(unknown)" or nous_error:
-        print(f"    Portal URL: {portal_url}")
+        optional_nous_print(f"    Portal URL: {portal_url}")
     if nous_logged_in or nous_status.get("access_expires_at"):
-        print(f"    Access exp: {access_exp}")
+        optional_nous_print(f"    Access exp: {access_exp}")
     if nous_logged_in or nous_status.get("agent_key_expires_at"):
-        print(f"    Key exp:    {key_exp}")
+        optional_nous_print(f"    Key exp:    {key_exp}")
     if nous_logged_in or nous_status.get("has_refresh_token"):
-        print(f"    Refresh:    {refresh_label}")
+        optional_nous_print(f"    Refresh:    {refresh_label}")
     if nous_error and not nous_logged_in:
-        print(f"    Error:      {nous_error}")
+        optional_nous_print(f"    Error:      {nous_error}")
 
     codex_logged_in = bool(codex_status.get("logged_in"))
     print(
@@ -231,60 +260,67 @@ def show_status(args):
     if codex_status.get("error") and not codex_logged_in:
         print(f"    Error:      {codex_status.get('error')}")
 
+    def optional_inference_print(*values, **kwargs):
+        if not realtor_beta:
+            print(*values, **kwargs)
+
     qwen_logged_in = bool(qwen_status.get("logged_in"))
-    print(
+    optional_inference_print(
         f"  {'Qwen OAuth':<12}  {check_mark(qwen_logged_in)} "
         f"{'logged in' if qwen_logged_in else 'not logged in (run: qwen auth qwen-oauth)'}"
     )
     qwen_auth_file = qwen_status.get("auth_file")
     if qwen_auth_file:
-        print(f"    Auth file:  {qwen_auth_file}")
+        optional_inference_print(f"    Auth file:  {qwen_auth_file}")
     qwen_exp = qwen_status.get("expires_at_ms")
     if qwen_exp:
         from datetime import datetime, timezone
-        print(f"    Access exp: {datetime.fromtimestamp(int(qwen_exp) / 1000, tz=timezone.utc).isoformat()}")
+        optional_inference_print(f"    Access exp: {datetime.fromtimestamp(int(qwen_exp) / 1000, tz=timezone.utc).isoformat()}")
     if qwen_status.get("error") and not qwen_logged_in:
-        print(f"    Error:      {qwen_status.get('error')}")
+        optional_inference_print(f"    Error:      {qwen_status.get('error')}")
 
     minimax_logged_in = bool(minimax_status.get("logged_in"))
-    print(
+    optional_inference_print(
         f"  {'MiniMax OAuth':<12}  {check_mark(minimax_logged_in)} "
         f"{'logged in' if minimax_logged_in else 'not logged in (run: elevate auth add minimax-oauth)'}"
     )
     minimax_region = minimax_status.get("region")
     if minimax_logged_in and minimax_region:
-        print(f"    Region:     {minimax_region}")
+        optional_inference_print(f"    Region:     {minimax_region}")
     minimax_exp = minimax_status.get("expires_at")
     if minimax_exp:
-        print(f"    Access exp: {minimax_exp}")
+        optional_inference_print(f"    Access exp: {minimax_exp}")
     if minimax_status.get("error") and not minimax_logged_in:
-        print(f"    Error:      {minimax_status.get('error')}")
+        optional_inference_print(f"    Error:      {minimax_status.get('error')}")
 
     # xAI OAuth — separate try/except so an import failure here cannot
     # disrupt the already-printed Nous/Codex/Qwen/MiniMax rows above.
     try:
-        from elevate_cli.auth import get_xai_oauth_auth_status
-        xai_oauth_status = get_xai_oauth_auth_status() or {}
+        if realtor_beta:
+            xai_oauth_status = {}
+        else:
+            from elevate_cli.auth import get_xai_oauth_auth_status
+            xai_oauth_status = get_xai_oauth_auth_status() or {}
     except Exception:
         xai_oauth_status = {}
 
     xai_oauth_logged_in = bool(xai_oauth_status.get("logged_in"))
-    print(
+    optional_inference_print(
         f"  {'xAI OAuth':<12}  {check_mark(xai_oauth_logged_in)} "
         f"{'logged in' if xai_oauth_logged_in else 'not logged in (run: elevate auth add xai-oauth)'}"
     )
     xai_auth_file = xai_oauth_status.get("auth_store")
     if xai_auth_file:
-        print(f"    Auth file:  {xai_auth_file}")
+        optional_inference_print(f"    Auth file:  {xai_auth_file}")
     if xai_oauth_status.get("last_refresh"):
-        print(f"    Refreshed:  {_format_iso_timestamp(xai_oauth_status.get('last_refresh'))}")
+        optional_inference_print(f"    Refreshed:  {_format_iso_timestamp(xai_oauth_status.get('last_refresh'))}")
     if xai_oauth_status.get("error") and not xai_oauth_logged_in:
-        print(f"    Error:      {xai_oauth_status.get('error')}")
+        optional_inference_print(f"    Error:      {xai_oauth_status.get('error')}")
 
     # =========================================================================
     # Nous Subscription Features
     # =========================================================================
-    if managed_nous_tools_enabled():
+    if not realtor_beta and managed_nous_tools_enabled():
         features = get_nous_subscription_features(config)
         print()
         print(color("◆ Nous Tool Gateway", Colors.CYAN, Colors.BOLD))
@@ -305,7 +341,7 @@ def show_status(args):
             else:
                 state = "not configured"
             print(f"  {feature.label:<15} {check_mark(feature.available or feature.active or feature.managed_by_nous)} {state}")
-    elif nous_logged_in:
+    elif not realtor_beta and nous_logged_in:
         # Logged into Nous but on the free tier — show upgrade nudge
         print()
         print(color("◆ Nous Tool Gateway", Colors.CYAN, Colors.BOLD))
@@ -322,9 +358,13 @@ def show_status(args):
     # API-Key Providers
     # =========================================================================
     print()
-    print(color("◆ API-Key Providers", Colors.CYAN, Colors.BOLD))
+    if realtor_beta:
+        print(color("◆ Inference Provider", Colors.CYAN, Colors.BOLD))
+        print("  OpenAI Codex only — alternate inference providers are disabled")
+    else:
+        print(color("◆ API-Key Providers", Colors.CYAN, Colors.BOLD))
 
-    apikey_providers = {
+    apikey_providers = {} if realtor_beta else {
         "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
         "Kimi / Moonshot":  ("KIMI_API_KEY",),
         "StepFun Step Plan": ("STEPFUN_API_KEY",),
@@ -536,7 +576,7 @@ def show_status(args):
         print(color("◆ Deep Checks", Colors.CYAN, Colors.BOLD))
         
         # Check OpenRouter connectivity
-        openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
+        openrouter_key = "" if realtor_beta else os.getenv("OPENROUTER_API_KEY", "")
         if openrouter_key:
             try:
                 import httpx
