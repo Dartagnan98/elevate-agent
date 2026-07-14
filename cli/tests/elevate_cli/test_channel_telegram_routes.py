@@ -15,6 +15,7 @@ def make_client(
     validator=lambda _token: True,
     sync=lambda _key, _value: [],
     require_token=lambda _request: None,
+    raise_server_exceptions=True,
 ):
     app = FastAPI()
     router = APIRouter()
@@ -28,7 +29,7 @@ def make_client(
         token_preview=lambda token: f"preview:{token[-4:]}",
     )
     app.include_router(router)
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 def test_telegram_pair_start_saves_token_and_restarts_gateway(monkeypatch):
@@ -135,3 +136,108 @@ def test_telegram_approve_adds_allowed_user_and_home(monkeypatch):
     assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "ignore"
     assert env["TELEGRAM_HOME_CHANNEL"] == "222"
     assert syncs == [("TELEGRAM_HOME_CHANNEL", "222")]
+
+
+def test_exact_beta_telegram_configure_rejects_reused_agent_token(monkeypatch):
+    from elevate_cli.config import get_env_path, load_env, save_env_value
+
+    token = "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
+    save_env_value("ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN", token)
+    env_path = get_env_path()
+    before_bytes = env_path.read_bytes()
+    before = dict(load_env())
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    resp = make_client().post(
+        "/api/channels/telegram/configure",
+        json={
+            "bot_token": token,
+            "allowed_users": "123456",
+            "dm_behavior": "ignore",
+            "allow_all_users": False,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_telegram_token_reused"
+    assert load_env() == before
+    assert env_path.read_bytes() == before_bytes
+
+
+def test_exact_beta_telegram_configure_write_failure_is_atomic(monkeypatch):
+    from elevate_cli.config import get_env_path, load_env
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    env_path = get_env_path()
+    before_bytes = env_path.read_bytes() if env_path.exists() else None
+    before = dict(load_env())
+
+    def fail_write(_updates):
+        raise OSError("injected durable-write failure")
+
+    monkeypatch.setattr(channel_telegram, "save_env_values", fail_write)
+    resp = make_client(raise_server_exceptions=False).post(
+        "/api/channels/telegram/configure",
+        json={
+            "bot_token": "123456:ABCDEFGHIJKLMNOPQRSTUVWX",
+            "allowed_users": "123456",
+            "home_channel": "-1001234567890",
+            "dm_behavior": "ignore",
+            "allow_all_users": False,
+        },
+    )
+
+    assert resp.status_code == 500
+    assert load_env() == before
+    assert (env_path.read_bytes() if env_path.exists() else None) == before_bytes
+
+
+def test_exact_beta_pair_start_closes_stale_open_access_flags(monkeypatch):
+    from elevate_cli.config import load_env, save_env_values
+
+    save_env_values(
+        {
+            "GATEWAY_ALLOW_ALL_USERS": "true",
+            "GATEWAY_ALLOWED_USERS": "*",
+            "TELEGRAM_ALLOW_ALL_USERS": "true",
+            "TELEGRAM_ALLOWED_USERS": "*",
+            "TELEGRAM_GROUP_ALLOWED_USERS": "*",
+            "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR": "open",
+        }
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    resp = make_client().post(
+        "/api/telegram/pair/start",
+        json={"bot_token": "123456:ABCDEFGHIJKLMNOPQRSTUVWX"},
+    )
+
+    assert resp.status_code == 200
+    env = load_env()
+    assert env["GATEWAY_ALLOW_ALL_USERS"] == "false"
+    assert env["GATEWAY_ALLOWED_USERS"] == ""
+    assert env["TELEGRAM_ALLOW_ALL_USERS"] == "false"
+    assert env["TELEGRAM_ALLOWED_USERS"] == ""
+    assert env["TELEGRAM_GROUP_ALLOWED_USERS"] == ""
+    assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "pair"
+
+
+def test_exact_beta_status_reports_stale_open_access_sources(monkeypatch):
+    from elevate_cli.config import save_env_values
+
+    save_env_values(
+        {
+            "GATEWAY_ALLOW_ALL_USERS": "true",
+            "TELEGRAM_GROUP_ALLOWED_USERS": "*",
+        }
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    resp = make_client().get("/api/channels/telegram/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["allowAllUsers"] is True
+    assert resp.json()["unsafeAccessSources"] == [
+        "GATEWAY_ALLOW_ALL_USERS",
+        "TELEGRAM_GROUP_ALLOWED_USERS",
+    ]

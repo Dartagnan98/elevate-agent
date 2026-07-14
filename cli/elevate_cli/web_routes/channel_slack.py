@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
+from elevate_cli.beta_env_policy import reject_unsupported_beta_channel
 from elevate_cli.config import get_env_value, load_env, save_env_value
 
 RequireToken = Callable[[Request], None]
@@ -24,6 +25,7 @@ def register_slack_routes(
     @router.post("/api/channels/slack/configure")
     async def configure_slack(request: Request):
         require_token(request)
+        reject_unsupported_beta_channel("slack")
         try:
             body = await request.json()
         except Exception:
@@ -50,6 +52,7 @@ def register_slack_routes(
 
     @router.post("/api/channels/slack/test")
     def post_slack_test(payload: dict[str, Any] | None = Body(default=None)):
+        reject_unsupported_beta_channel("slack")
         import httpx
 
         body = payload or {}

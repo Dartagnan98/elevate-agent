@@ -8,11 +8,24 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from elevate_cli.beta_env_policy import (
+    beta_active_pack_env_metadata,
+    beta_env_alias_group,
+    beta_env_key_is_telegram,
+    beta_env_key_allowed,
+    beta_telegram_safety_updates,
+    canonicalize_beta_env_value,
+    enforce_beta_env_key,
+    enforce_beta_env_store_local,
+    enforce_beta_telegram_token_unique,
+)
 from elevate_cli.config import (
     OPTIONAL_ENV_VARS,
     load_env,
     remove_env_value,
+    remove_env_values,
     save_env_value,
+    save_env_values,
     redact_key,
 )
 
@@ -56,9 +69,28 @@ def create_env_router(
 
     @router.get("/api/env")
     async def get_env_vars():
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        realtor_beta = beta_provider_policy_active()
+        if realtor_beta:
+            enforce_beta_env_store_local()
+        pack_metadata = beta_active_pack_env_metadata() if realtor_beta else {}
+        if realtor_beta and not pack_metadata:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "beta_env_policy_unavailable",
+                    "message": "Realtor Beta could not verify its unlocked account packs. Reopen the app and try again.",
+                },
+            )
         env_on_disk = load_env()
         result = {}
         for var_name, info in OPTIONAL_ENV_VARS.items():
+            if realtor_beta and not beta_env_key_allowed(
+                var_name,
+                pack_metadata=pack_metadata,
+            ):
+                continue
             value = env_on_disk.get(var_name)
             result[var_name] = {
                 "is_set": bool(value),
@@ -70,8 +102,23 @@ def create_env_router(
                 "tools": info.get("tools", []),
                 "advanced": info.get("advanced", False),
             }
+        if realtor_beta:
+            for var_name, info in pack_metadata.items():
+                if var_name in result or not beta_env_key_allowed(
+                    var_name,
+                    pack_metadata=pack_metadata,
+                ):
+                    continue
+                value = env_on_disk.get(var_name)
+                result[var_name] = {
+                    "is_set": bool(value),
+                    "redacted_value": redact_key(value) if value else None,
+                    **info,
+                }
         for var_name, value in env_on_disk.items():
             if var_name in result:
+                continue
+            if realtor_beta:
                 continue
             if not re.match(r"^ELEVATE_AGENT_[A-Z0-9_]+_TELEGRAM_(BOT_TOKEN|CHANNEL)$", var_name):
                 continue
@@ -91,8 +138,19 @@ def create_env_router(
     @router.put("/api/env")
     async def set_env_var(body: EnvVarUpdate):
         try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
             key = str(body.key or "").strip()
             value = str(body.value or "").strip()
+            realtor_beta = beta_provider_policy_active()
+            if realtor_beta:
+                enforce_beta_env_store_local()
+                enforce_beta_env_key(key)
+                value = canonicalize_beta_env_value(
+                    key,
+                    value,
+                    looks_like_telegram_bot_token=looks_like_telegram_bot_token,
+                )
             if key == "TELEGRAM_HOME_CHANNEL" and looks_like_telegram_bot_token(value):
                 raise HTTPException(
                     status_code=400,
@@ -105,10 +163,23 @@ def create_env_router(
                     detail="That looks like a Telegram bot token. Paste it into the Bot token field, not the chat/topic field.",
                 )
             token_match = _AGENT_TELEGRAM_BOT_TOKEN_RE.fullmatch(key)
-            if token_match:
+            if token_match and not realtor_beta:
                 reject_shared_agent_token(token_match.group(1), value)
-            synced = sync_executive_telegram_aliases(key, value)
-            save_env_value(key, value)
+            if realtor_beta:
+                alias_group = beta_env_alias_group(key)
+                env_on_disk = load_env()
+                enforce_beta_telegram_token_unique(key, value, env_on_disk)
+                updates = (
+                    beta_telegram_safety_updates(env_on_disk)
+                    if beta_env_key_is_telegram(key)
+                    else {}
+                )
+                updates.update({alias_key: value for alias_key in alias_group})
+                save_env_values(updates)
+                synced = [alias_key for alias_key in alias_group if alias_key != key]
+            else:
+                synced = sync_executive_telegram_aliases(key, value)
+                save_env_value(key, value)
             return {"ok": True, "key": key, "synced": synced}
         except Exception as e:
             if isinstance(e, HTTPException):
@@ -119,10 +190,27 @@ def create_env_router(
     @router.delete("/api/env")
     async def remove_env_var(body: EnvVarDelete):
         try:
-            removed = remove_env_value(body.key)
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            realtor_beta = beta_provider_policy_active()
+            key = str(body.key or "").strip()
+            if realtor_beta:
+                enforce_beta_env_store_local()
+                enforce_beta_env_key(key, allow_inactive_cleanup=True)
+                alias_group = beta_env_alias_group(key)
+                removed_keys = remove_env_values(alias_group)
+                removed = bool(removed_keys)
+            else:
+                alias_group = (key,)
+                removed_keys = [key] if remove_env_value(key) else []
+                removed = bool(removed_keys)
             if not removed:
-                raise HTTPException(status_code=404, detail=f"{body.key} not found in .env")
-            return {"ok": True, "key": body.key}
+                raise HTTPException(status_code=404, detail=f"{key} not found in .env")
+            return {
+                "ok": True,
+                "key": key,
+                "synced": [removed_key for removed_key in removed_keys if removed_key != key],
+            }
         except HTTPException:
             raise
         except Exception:
@@ -133,6 +221,8 @@ def create_env_router(
     async def reveal_env_var(body: EnvVarReveal, request: Request):
         """Return the real value of a single env var after token and rate checks."""
         require_token(request)
+        enforce_beta_env_store_local()
+        enforce_beta_env_key(body.key)
 
         now = time.time()
         cutoff = now - _REVEAL_WINDOW_SECONDS

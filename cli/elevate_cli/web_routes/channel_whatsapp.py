@@ -14,6 +14,7 @@ from elevate_constants import get_elevate_home
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from elevate_cli.beta_env_policy import reject_unsupported_beta_channel
 from elevate_cli.config import get_env_value, load_config, save_env_value
 
 RequireToken = Callable[[Request], None]
@@ -50,6 +51,7 @@ def register_whatsapp_routes(
     async def configure_whatsapp(request: Request):
         """Save WhatsApp mode + allowlist. Pairing streams separately."""
         require_token(request)
+        reject_unsupported_beta_channel("WhatsApp")
         try:
             body = await request.json()
         except Exception:
@@ -84,6 +86,7 @@ def register_whatsapp_routes(
     async def install_whatsapp_bridge(request: Request):
         """Run ``npm install`` inside the WhatsApp bridge directory."""
         require_token(request)
+        reject_unsupported_beta_channel("WhatsApp")
         bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         if not (bridge_dir / "bridge.js").exists():
             raise HTTPException(status_code=404, detail=f"bridge.js not found at {bridge_dir}")
@@ -121,6 +124,7 @@ def register_whatsapp_routes(
     @router.get("/api/channels/whatsapp/status")
     async def whatsapp_status():
         """Lightweight status: is bridge installed, has session been paired."""
+        reject_unsupported_beta_channel("WhatsApp")
         bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         session_dir = get_elevate_home() / "whatsapp" / "session"
         return {
@@ -136,6 +140,7 @@ def register_whatsapp_routes(
     async def whatsapp_pair_stream(request: Request):
         """Server-Sent Events stream of WhatsApp pairing progress."""
         require_token(request)
+        reject_unsupported_beta_channel("WhatsApp")
         bridge_dir = elevate_repo_root_func() / "scripts" / "whatsapp-bridge"
         bridge_script = bridge_dir / "bridge.js"
         if not bridge_script.exists():

@@ -63,3 +63,29 @@ def test_slack_test_without_webhook_reports_configuration_gap(monkeypatch):
         "status": 0,
         "detail": "No webhook URL provided and SLACK_WEBHOOK_URL is not set.",
     }
+
+
+def test_exact_beta_slack_configure_and_test_are_not_available(monkeypatch):
+    env = {}
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        channel_slack,
+        "save_env_value",
+        lambda key, value: env.__setitem__(key, value),
+    )
+
+    configure = make_client().post(
+        "/api/channels/slack/configure",
+        json={"bot_token": "xoxb-secret", "allowed_users": "*"},
+    )
+    test = make_client().post(
+        "/api/channels/slack/test",
+        json={"webhook_url": "https://attacker.invalid/hook"},
+    )
+
+    assert [configure.status_code, test.status_code] == [409, 409]
+    assert {
+        configure.json()["detail"]["code"],
+        test.json()["detail"]["code"],
+    } == {"beta_channel_not_available"}
+    assert env == {}

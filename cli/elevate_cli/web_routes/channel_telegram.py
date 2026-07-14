@@ -1,11 +1,22 @@
 """Telegram channel setup and pairing routes."""
 
 import logging
+import os
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Request
 
-from elevate_cli.config import get_env_value, save_env_value
+from elevate_cli.beta_env_policy import (
+    beta_env_alias_group,
+    beta_telegram_safety_updates,
+    beta_telegram_unsafe_access_sources,
+    canonicalize_beta_env_value,
+    enforce_beta_env_key,
+    enforce_beta_env_store_local,
+    enforce_beta_telegram_token_unique,
+)
+from elevate_cli.beta_provider_policy import beta_provider_policy_active
+from elevate_cli.config import get_env_value, load_env, save_env_value, save_env_values
 
 RequireToken = Callable[[Request], None]
 SpawnElevateAction = Callable[[list[str], str], Any]
@@ -28,6 +39,54 @@ def register_telegram_routes(
     sync_executive_telegram_aliases: TelegramAliasSync,
     token_preview: TokenPreview,
 ) -> None:
+    def telegram_env_value(key: str) -> str:
+        if beta_provider_policy_active():
+            return str(load_env().get(key) or "")
+        return str(get_env_value(key) or "")
+
+    def save_telegram_values(
+        updates: dict[str, str],
+        *,
+        allow_empty_keys: set[str] | None = None,
+        stable_alias_keys: set[str] | None = None,
+    ) -> None:
+        """Persist one Telegram update, atomically in exact Realtor Beta."""
+        if not beta_provider_policy_active():
+            aliases = stable_alias_keys or set()
+            for key, value in updates.items():
+                if key in aliases:
+                    sync_executive_telegram_aliases(key, value)
+                save_env_value(key, value)
+            return
+
+        enforce_beta_env_store_local()
+        allow_empty = allow_empty_keys or set()
+        env_on_disk = load_env()
+        expanded = beta_telegram_safety_updates(env_on_disk)
+        for key, raw_value in updates.items():
+            if key == "GATEWAY_ALLOW_ALL_USERS":
+                if raw_value != "false":
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "beta_allow_all_not_allowed",
+                            "message": "Realtor Beta never allows every remote user.",
+                        },
+                    )
+                expanded[key] = "false"
+                continue
+            enforce_beta_env_key(key)
+            value = canonicalize_beta_env_value(
+                key,
+                raw_value,
+                looks_like_telegram_bot_token=looks_like_telegram_bot_token,
+                allow_empty=key in allow_empty,
+            )
+            enforce_beta_telegram_token_unique(key, value, env_on_disk)
+            for alias_key in beta_env_alias_group(key):
+                expanded[alias_key] = value
+        save_env_values(expanded)
+
     @router.post("/api/telegram/pair/start")
     async def start_telegram_pairing(request: Request):
         """Save bot token, switch unauthorized DMs to pairing, restart gateway."""
@@ -39,15 +98,22 @@ def register_telegram_routes(
         bot_token = str(body.get("bot_token") or "").strip()
         if not bot_token:
             raise HTTPException(status_code=400, detail="bot_token is required")
-        if not looks_like_telegram_bot_token(bot_token):
+        if (
+            not beta_provider_policy_active()
+            and not looks_like_telegram_bot_token(bot_token)
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="Token doesn't match Telegram's BotFather format (<id>:<secret>)",
             )
 
-        sync_executive_telegram_aliases("TELEGRAM_BOT_TOKEN", bot_token)
-        save_env_value("TELEGRAM_BOT_TOKEN", bot_token)
-        save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "pair")
+        save_telegram_values(
+            {
+                "TELEGRAM_BOT_TOKEN": bot_token,
+                "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR": "pair",
+            },
+            stable_alias_keys={"TELEGRAM_BOT_TOKEN"},
+        )
 
         try:
             proc = spawn_elevate_action(["gateway", "restart"], "gateway-restart")
@@ -64,6 +130,7 @@ def register_telegram_routes(
     @router.get("/api/telegram/pair/pending")
     async def list_telegram_pairings():
         """Return pending pairing codes plus already-approved users."""
+        enforce_beta_env_store_local()
         try:
             from gateway.pairing import PairingStore
             store = PairingStore()
@@ -86,6 +153,7 @@ def register_telegram_routes(
         set_home = bool(body.get("set_home"))
         if not code:
             raise HTTPException(status_code=400, detail="code is required")
+        enforce_beta_env_store_local()
 
         try:
             from gateway.pairing import PairingStore
@@ -101,15 +169,19 @@ def register_telegram_routes(
         user_name = str(result.get("user_name") or "").strip()
 
         if user_id:
-            existing = str(get_env_value("TELEGRAM_ALLOWED_USERS") or "").strip()
+            existing = telegram_env_value("TELEGRAM_ALLOWED_USERS").strip()
             existing_ids = [v.strip() for v in existing.split(",") if v.strip()]
+            updates: dict[str, str] = {}
             if user_id not in existing_ids:
                 existing_ids.append(user_id)
-                save_env_value("TELEGRAM_ALLOWED_USERS", ",".join(existing_ids))
-            save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", "ignore")
+                updates["TELEGRAM_ALLOWED_USERS"] = ",".join(existing_ids)
+            updates["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] = "ignore"
             if set_home:
-                sync_executive_telegram_aliases("TELEGRAM_HOME_CHANNEL", user_id)
-                save_env_value("TELEGRAM_HOME_CHANNEL", user_id)
+                updates["TELEGRAM_HOME_CHANNEL"] = user_id
+            save_telegram_values(
+                updates,
+                stable_alias_keys={"TELEGRAM_HOME_CHANNEL"},
+            )
 
         return {
             "ok": True,
@@ -120,16 +192,25 @@ def register_telegram_routes(
     @router.get("/api/channels/telegram/status")
     async def telegram_status():
         """Return the currently-wired Telegram bot's identity + env config."""
-        token = get_env_value("TELEGRAM_BOT_TOKEN") or ""
+        enforce_beta_env_store_local()
+        unsafe_access_sources = (
+            beta_telegram_unsafe_access_sources(load_env(), os.environ)
+            if beta_provider_policy_active()
+            else []
+        )
+        token = telegram_env_value("TELEGRAM_BOT_TOKEN")
         if not token:
-            return {
+            status = {
                 "configured": False,
                 "tokenPreview": "",
                 "allowedUsers": "",
                 "homeChannel": "",
                 "dmBehavior": "",
-                "allowAllUsers": False,
+                "allowAllUsers": bool(unsafe_access_sources),
             }
+            if beta_provider_policy_active():
+                status["unsafeAccessSources"] = unsafe_access_sources
+            return status
 
         bot_info: dict[str, Any] = {}
         try:
@@ -154,15 +235,20 @@ def register_telegram_routes(
         except Exception as exc:
             bot_info = {"error": str(exc)[:200]}
 
-        return {
+        status = {
             "configured": True,
             "tokenPreview": token_preview(token),
-            "allowedUsers": get_env_value("TELEGRAM_ALLOWED_USERS") or "",
-            "homeChannel": get_env_value("TELEGRAM_HOME_CHANNEL") or "",
-            "dmBehavior": get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "",
-            "allowAllUsers": (get_env_value("GATEWAY_ALLOW_ALL_USERS") or "").lower() == "true",
+            "allowedUsers": telegram_env_value("TELEGRAM_ALLOWED_USERS"),
+            "homeChannel": telegram_env_value("TELEGRAM_HOME_CHANNEL"),
+            "dmBehavior": telegram_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"),
+            "allowAllUsers": bool(unsafe_access_sources)
+            if beta_provider_policy_active()
+            else telegram_env_value("GATEWAY_ALLOW_ALL_USERS").lower() == "true",
             **bot_info,
         }
+        if beta_provider_policy_active():
+            status["unsafeAccessSources"] = unsafe_access_sources
+        return status
 
     @router.post("/api/channels/telegram/configure")
     async def configure_telegram(request: Request):
@@ -178,24 +264,43 @@ def register_telegram_routes(
         dm_behavior = _strip(body.get("dm_behavior")).lower()
         allow_all = bool(body.get("allow_all_users"))
 
-        existing_token = get_env_value("TELEGRAM_BOT_TOKEN") or ""
+        enforce_beta_env_store_local()
+        if beta_provider_policy_active() and allow_all:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "beta_allow_all_not_allowed",
+                    "message": "Realtor Beta never allows every remote user.",
+                },
+            )
+
+        existing_token = telegram_env_value("TELEGRAM_BOT_TOKEN")
+        updates: dict[str, str] = {}
+        allow_empty_keys: set[str] = set()
         if bot_token:
-            if not looks_like_telegram_bot_token(bot_token):
+            if (
+                not beta_provider_policy_active()
+                and not looks_like_telegram_bot_token(bot_token)
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail="Token doesn't match Telegram's BotFather format (<id>:<secret>)",
                 )
-            sync_executive_telegram_aliases("TELEGRAM_BOT_TOKEN", bot_token)
-            save_env_value("TELEGRAM_BOT_TOKEN", bot_token)
+            updates["TELEGRAM_BOT_TOKEN"] = bot_token
         elif not existing_token:
             raise HTTPException(status_code=400, detail="bot_token is required")
 
         # "allowed_users":"" is an explicit clear, "allowed_users": None is leave-as-is.
         if allowed is not None and body.get("allowed_users") is not None:
-            save_env_value("TELEGRAM_ALLOWED_USERS", allowed.replace(" ", ""))
+            updates["TELEGRAM_ALLOWED_USERS"] = allowed.replace(" ", "")
+            allow_empty_keys.add("TELEGRAM_ALLOWED_USERS")
         if body.get("home_channel") is not None:
             _hc = (home or "").strip()
-            if _hc and not (_hc.lstrip("-").isdigit() or _hc.startswith("@")):
+            if (
+                not beta_provider_policy_active()
+                and _hc
+                and not (_hc.lstrip("-").isdigit() or _hc.startswith("@"))
+            ):
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -203,24 +308,36 @@ def register_telegram_routes(
                         f"got {home!r} (looks like a pairing code, not a chat id)."
                     ),
                 )
-            save_env_value("TELEGRAM_HOME_CHANNEL", home)
+            updates["TELEGRAM_HOME_CHANNEL"] = home
+            allow_empty_keys.add("TELEGRAM_HOME_CHANNEL")
         if dm_behavior:
-            if dm_behavior not in {"pair", "ignore", "open"}:
+            if (
+                not beta_provider_policy_active()
+                and dm_behavior not in {"pair", "ignore", "open"}
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail="dm_behavior must be one of: pair, ignore, open",
+                    detail="dm_behavior must be one of: ignore, open, pair",
                 )
-            save_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR", dm_behavior)
-        if allow_all:
-            save_env_value("GATEWAY_ALLOW_ALL_USERS", "true")
+            updates["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] = dm_behavior
+        if beta_provider_policy_active():
+            updates["GATEWAY_ALLOW_ALL_USERS"] = "false"
+        elif allow_all:
+            updates["GATEWAY_ALLOW_ALL_USERS"] = "true"
         elif body.get("allow_all_users") is False:
-            save_env_value("GATEWAY_ALLOW_ALL_USERS", "false")
+            updates["GATEWAY_ALLOW_ALL_USERS"] = "false"
+
+        save_telegram_values(
+            updates,
+            allow_empty_keys=allow_empty_keys,
+            stable_alias_keys={"TELEGRAM_BOT_TOKEN"},
+        )
 
         return {
             "ok": True,
             "tokenPreview": token_preview(bot_token or existing_token),
-            "allowedUsers": get_env_value("TELEGRAM_ALLOWED_USERS") or "",
-            "homeChannel": get_env_value("TELEGRAM_HOME_CHANNEL") or "",
-            "dmBehavior": get_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR") or "",
-            "allowAllUsers": (get_env_value("GATEWAY_ALLOW_ALL_USERS") or "").lower() == "true",
+            "allowedUsers": telegram_env_value("TELEGRAM_ALLOWED_USERS"),
+            "homeChannel": telegram_env_value("TELEGRAM_HOME_CHANNEL"),
+            "dmBehavior": telegram_env_value("TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"),
+            "allowAllUsers": telegram_env_value("GATEWAY_ALLOW_ALL_USERS").lower() == "true",
         }

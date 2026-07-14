@@ -50,3 +50,26 @@ def test_discord_configure_requires_bot_token(monkeypatch):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "bot_token is required"
+
+
+def test_exact_beta_discord_configure_is_not_available(monkeypatch):
+    env = {}
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        channel_discord,
+        "save_env_value",
+        lambda key, value: env.__setitem__(key, value),
+    )
+
+    resp = make_client().post(
+        "/api/channels/discord/configure",
+        json={
+            "bot_token": "discord-secret-bot",
+            "allowed_users": "*",
+            "home_channel": "C123",
+        },
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_channel_not_available"
+    assert env == {}

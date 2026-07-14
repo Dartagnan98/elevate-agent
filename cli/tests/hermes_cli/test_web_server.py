@@ -1,6 +1,7 @@
 """Tests for elevate_cli.web_server and related config utilities."""
 
 import base64
+import copy
 import json
 import logging
 import os
@@ -18,6 +19,21 @@ from elevate_cli.config import (
     _EXTRA_ENV_KEYS,
     OPTIONAL_ENV_VARS,
 )
+
+
+def _activate_beta_entitlements(monkeypatch, *entitlements: str) -> None:
+    """Expose a deterministic signed-pack access snapshot to Beta route tests."""
+    import elevate_cli.access as access_module
+
+    access = copy.deepcopy(access_module.BASE_ACCESS_CONFIG)
+    for entitlement in entitlements:
+        access["entitlements"][entitlement]["status"] = "active"
+        access["entitlements"][entitlement]["owned_snapshot"] = True
+    monkeypatch.setattr(
+        access_module,
+        "load_access_config",
+        lambda _config=None: copy.deepcopy(access),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +666,510 @@ class TestWebServerEndpoints:
         data = resp.json()
         # Should contain known env var names
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
+
+    def test_exact_beta_env_surface_hides_inference_and_runtime_controls(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.get("/api/env")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "OPENROUTER_API_KEY" not in data
+        assert "GOOGLE_API_KEY" not in data
+        assert "ELEVATE_MAX_ITERATIONS" not in data
+        assert "API_SERVER_ENABLED" not in data
+        assert "FIRECRAWL_API_KEY" not in data
+        assert "VOICE_TOOLS_OPENAI_KEY" not in data
+        assert "SLACK_BOT_TOKEN" not in data
+        assert "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN" not in data
+        assert "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN" not in data
+        assert "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN" not in data
+        assert "TELEGRAM_BOT_TOKEN" in data
+        assert "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN" in data
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "ANTHROPIC_API_KEY",
+            "ELEVATE_RELEASE_CHANNEL",
+            "OPENAI_BASE_URL",
+            "OPENROUTER_API_KEY",
+            "API_SERVER_ENABLED",
+            "FIRECRAWL_API_KEY",
+            "SLACK_BOT_TOKEN",
+            "VOICE_TOOLS_OPENAI_KEY",
+            "SUDO_PASSWORD",
+            "ELEVATE_AGENT_UNKNOWN_TELEGRAM_BOT_TOKEN",
+            "ELEVATE_AGENT_ADS_TELEGRAM_CHANNEL",
+        ],
+    )
+    def test_exact_beta_env_write_rejects_provider_policy_and_hidden_keys(
+        self,
+        monkeypatch,
+        key,
+    ):
+        from elevate_cli.access import ENTITLEMENT_REAL_ESTATE_SALES
+        from elevate_cli.config import load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        _activate_beta_entitlements(monkeypatch, ENTITLEMENT_REAL_ESTATE_SALES)
+        before = dict(load_env())
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": key, "value": "must-not-persist"},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "beta_env_key_not_allowed"
+        assert load_env() == before
+
+    def test_exact_beta_env_allows_declared_realtor_account_credentials(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.access import ENTITLEMENT_REAL_ESTATE_SALES
+        from elevate_cli.config import load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        _activate_beta_entitlements(monkeypatch, ENTITLEMENT_REAL_ESTATE_SALES)
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "CRM_API_KEY", "value": "local-crm-credential=="},
+        )
+
+        assert resp.status_code == 200
+        assert load_env()["CRM_API_KEY"] == "local-crm-credential=="
+
+        get_resp = self.client.get("/api/env")
+        assert get_resp.status_code == 200
+        info = get_resp.json()["CRM_API_KEY"]
+        assert info["is_set"] is True
+        assert info["category"] == "account"
+        assert info["redacted_value"] != "local-crm-credential=="
+
+        reveal_resp = self.client.post(
+            "/api/env/reveal",
+            json={"key": "CRM_API_KEY"},
+        )
+        assert reveal_resp.status_code == 200
+        assert reveal_resp.json()["value"] == "local-crm-credential=="
+
+        delete_resp = self.client.request(
+            "DELETE",
+            "/api/env",
+            json={"key": "CRM_API_KEY"},
+        )
+        assert delete_resp.status_code == 200
+        after = self.client.get("/api/env").json()["CRM_API_KEY"]
+        assert after["is_set"] is False
+        assert after["redacted_value"] is None
+
+    def test_exact_beta_env_rejects_locked_pack_credentials(self, monkeypatch):
+        from elevate_cli.config import get_env_path, load_env, save_env_value
+
+        save_env_value("META_ACCESS_TOKEN", "stale-marketing-secret")
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes()
+        before = dict(load_env())
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        get_resp = self.client.get("/api/env")
+        put_resp = self.client.put(
+            "/api/env",
+            json={"key": "META_ACCESS_TOKEN", "value": "replacement"},
+        )
+        reveal_resp = self.client.post(
+            "/api/env/reveal",
+            json={"key": "META_ACCESS_TOKEN"},
+        )
+
+        assert get_resp.status_code == 200
+        assert "META_ACCESS_TOKEN" not in get_resp.json()
+        assert put_resp.status_code == 409
+        assert reveal_resp.status_code == 409
+        assert load_env() == before
+        assert env_path.read_bytes() == before_bytes
+
+    def test_exact_beta_can_remove_revoked_pack_credential(self, monkeypatch):
+        from elevate_cli.config import load_env, save_env_value
+
+        key = "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN"
+        save_env_value(key, "123456:ABCDEFGHIJKLMNOPQRSTUVWX")
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.request("DELETE", "/api/env", json={"key": key})
+
+        assert resp.status_code == 200
+        assert key not in load_env()
+
+    @pytest.mark.parametrize(
+        ("key", "value", "code"),
+        [
+            ("TELEGRAM_ALLOWED_USERS", "*", "beta_telegram_allowlist_invalid"),
+            (
+                "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR",
+                "open",
+                "beta_telegram_dm_policy_invalid",
+            ),
+            ("TELEGRAM_BOT_TOKEN", "not-a-real-token", "beta_telegram_token_invalid"),
+            (
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+                "not-a-chat-id",
+                "beta_telegram_target_invalid",
+            ),
+        ],
+    )
+    def test_exact_beta_env_rejects_unsafe_telegram_values_atomically(
+        self,
+        monkeypatch,
+        key,
+        value,
+        code,
+    ):
+        from elevate_cli.config import get_env_path, load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes() if env_path.exists() else None
+        before = dict(load_env())
+
+        resp = self.client.put("/api/env", json={"key": key, "value": value})
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == code
+        assert load_env() == before
+        assert (env_path.read_bytes() if env_path.exists() else None) == before_bytes
+
+    @pytest.mark.parametrize(
+        ("key", "alias", "value"),
+        [
+            (
+                "TELEGRAM_BOT_TOKEN",
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+                "123456:ABCDEFGHIJKLMNOPQRSTUVWX",
+            ),
+            (
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+                "TELEGRAM_BOT_TOKEN",
+                "654321:ZYXWVUTSRQPONMLKJIHGFEDC",
+            ),
+            (
+                "TELEGRAM_HOME_CHANNEL",
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+                "-1001234567890:55",
+            ),
+            (
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+                "TELEGRAM_HOME_CHANNEL",
+                "telegram:123456789",
+            ),
+        ],
+    )
+    def test_exact_beta_executive_telegram_aliases_set_and_delete_together(
+        self,
+        monkeypatch,
+        key,
+        alias,
+        value,
+    ):
+        from elevate_cli.config import load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        put_resp = self.client.put("/api/env", json={"key": key, "value": value})
+
+        assert put_resp.status_code == 200
+        assert put_resp.json()["synced"] == [alias]
+        assert load_env()[key] == value
+        assert load_env()[alias] == value
+
+        delete_resp = self.client.request(
+            "DELETE",
+            "/api/env",
+            json={"key": key},
+        )
+
+        assert delete_resp.status_code == 200
+        assert alias in delete_resp.json()["synced"]
+        assert key not in load_env()
+        assert alias not in load_env()
+
+    def test_exact_beta_env_rejects_linked_store_for_every_operation(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from elevate_cli.config import get_env_path
+
+        env_path = get_env_path()
+        if env_path.exists() or env_path.is_symlink():
+            env_path.unlink()
+        external = tmp_path / "stable.env"
+        external.write_text(
+            "TELEGRAM_BOT_TOKEN=123456:ABCDEFGHIJKLMNOPQRSTUVWX\n"
+            "CRM_API_KEY=stable-secret\n",
+            encoding="utf-8",
+        )
+        env_path.symlink_to(external)
+        before = external.read_bytes()
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        responses = [
+            self.client.get("/api/env"),
+            self.client.put(
+                "/api/env",
+                json={"key": "TELEGRAM_ALLOWED_USERS", "value": "123456"},
+            ),
+            self.client.request(
+                "DELETE",
+                "/api/env",
+                json={"key": "TELEGRAM_BOT_TOKEN"},
+            ),
+            self.client.post(
+                "/api/env/reveal",
+                json={"key": "TELEGRAM_BOT_TOKEN"},
+            ),
+        ]
+
+        assert [response.status_code for response in responses] == [409, 409, 409, 409]
+        assert {
+            response.json()["detail"]["code"] for response in responses
+        } == {"beta_env_store_not_local"}
+        assert external.read_bytes() == before
+
+    def test_exact_beta_env_rejects_managed_store_without_false_success(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.config import get_elevate_home, get_env_path, load_env
+
+        marker = get_elevate_home() / ".managed"
+        marker.touch()
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes() if env_path.exists() else None
+        before = dict(load_env())
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.put(
+            "/api/env",
+            json={
+                "key": "TELEGRAM_BOT_TOKEN",
+                "value": "123456:ABCDEFGHIJKLMNOPQRSTUVWX",
+            },
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "beta_env_store_managed"
+        assert load_env() == before
+        assert (env_path.read_bytes() if env_path.exists() else None) == before_bytes
+
+    @pytest.mark.parametrize(
+        ("key", "value", "expected_code"),
+        [
+            (
+                "TELEGRAM_BOT_TOKEN",
+                "legitOPENAI_API_KEY=blocked-secret",
+                "beta_env_value_not_allowed",
+            ),
+            (
+                "CRM_API_KEY",
+                "prefixOPENAI_API_KEY=blocked-secret",
+                "beta_env_value_not_allowed",
+            ),
+            (
+                "CRM_API_KEY",
+                "legit\nOPENAI_API_KEY=blocked-secret",
+                "beta_env_value_not_allowed",
+            ),
+            ("CRM_API_KEY", "credential\x00tail", "beta_env_value_not_allowed"),
+            ("CRM_API_KEY", "credential\twith-tab", "beta_env_value_not_allowed"),
+            ("CRM_API_KEY", "", "beta_env_value_required"),
+            ("CRM_API_KEY", "'quoted-secret'", "beta_env_value_not_allowed"),
+            ("CRM_API_KEY", '"quoted-secret"', "beta_env_value_not_allowed"),
+        ],
+    )
+    def test_exact_beta_env_rejects_non_roundtripping_values(
+        self,
+        monkeypatch,
+        key,
+        value,
+        expected_code,
+    ):
+        from elevate_cli.access import ENTITLEMENT_REAL_ESTATE_SALES
+        from elevate_cli.config import get_env_path, load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        _activate_beta_entitlements(monkeypatch, ENTITLEMENT_REAL_ESTATE_SALES)
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes() if env_path.exists() else None
+        before = dict(load_env())
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": key, "value": value},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == expected_code
+        assert load_env() == before
+        assert (env_path.read_bytes() if env_path.exists() else None) == before_bytes
+
+    def test_exact_beta_env_rejects_hard_linked_store(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from elevate_cli.config import get_env_path
+
+        env_path = get_env_path()
+        if env_path.exists() or env_path.is_symlink():
+            env_path.unlink()
+        external = tmp_path / "shared.env"
+        external.write_text("CRM_API_KEY=stable-secret\n", encoding="utf-8")
+        os.link(external, env_path)
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.get("/api/env")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "beta_env_store_not_local"
+        assert external.read_text(encoding="utf-8") == "CRM_API_KEY=stable-secret\n"
+
+    def test_exact_beta_rejects_one_bot_token_across_agent_lanes(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.access import ENTITLEMENT_REAL_ESTATE_ADMIN
+        from elevate_cli.config import get_env_path, load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        _activate_beta_entitlements(monkeypatch, ENTITLEMENT_REAL_ESTATE_ADMIN)
+        token = "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
+        first = self.client.put(
+            "/api/env",
+            json={"key": "TELEGRAM_BOT_TOKEN", "value": token},
+        )
+        assert first.status_code == 200
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes()
+        before = dict(load_env())
+
+        duplicate = self.client.put(
+            "/api/env",
+            json={
+                "key": "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+                "value": token,
+            },
+        )
+
+        assert duplicate.status_code == 409
+        assert duplicate.json()["detail"]["code"] == "beta_telegram_token_reused"
+        assert load_env() == before
+        assert env_path.read_bytes() == before_bytes
+
+    def test_exact_beta_strips_telegram_transport_prefix_before_persistence(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.config import load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        token = "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "TELEGRAM_BOT_TOKEN", "value": f"telegram:{token}"},
+        )
+
+        assert resp.status_code == 200
+        env = load_env()
+        assert env["TELEGRAM_BOT_TOKEN"] == token
+        assert env["ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN"] == token
+        assert all(not value.startswith("telegram:") for value in env.values())
+
+    def test_exact_beta_pack_channel_keys_do_not_cross_locked_admin(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.access import (
+            ENTITLEMENT_REAL_ESTATE_CMA,
+            ENTITLEMENT_REAL_ESTATE_MARKETING,
+        )
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        _activate_beta_entitlements(
+            monkeypatch,
+            ENTITLEMENT_REAL_ESTATE_MARKETING,
+            ENTITLEMENT_REAL_ESTATE_CMA,
+        )
+
+        resp = self.client.get("/api/env")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL" in data
+        assert "TELEGRAM_HOME_CHANNEL" in data
+        assert "ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL" not in data
+
+    def test_exact_beta_env_reveal_rejects_hidden_provider_key(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.config import save_env_value
+        from elevate_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        save_env_value("ANTHROPIC_API_KEY", "stale-secret")
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.post(
+            "/api/env/reveal",
+            json={"key": "ANTHROPIC_API_KEY"},
+            headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "beta_env_key_not_allowed"
+
+    def test_exact_beta_env_delete_rejects_hidden_provider_key_atomically(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli.config import get_env_path, load_env, save_env_value
+
+        save_env_value("ANTHROPIC_API_KEY", "stale-secret")
+        env_path = get_env_path()
+        before_bytes = env_path.read_bytes()
+        before = dict(load_env())
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        resp = self.client.request(
+            "DELETE",
+            "/api/env",
+            json={"key": "ANTHROPIC_API_KEY"},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "beta_env_key_not_allowed"
+        assert load_env() == before
+        assert env_path.read_bytes() == before_bytes
+
+    def test_nonexact_env_route_keeps_arbitrary_key_compatibility(self, monkeypatch):
+        from elevate_cli.config import load_env
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+
+        resp = self.client.put(
+            "/api/env",
+            json={"key": "CUSTOM_COMPATIBILITY_KEY", "value": "still-supported"},
+        )
+
+        assert resp.status_code == 200
+        assert load_env()["CUSTOM_COMPATIBILITY_KEY"] == "still-supported"
 
     def test_agent_channel_rejects_pasted_bot_token(self):
         from elevate_cli.config import load_env

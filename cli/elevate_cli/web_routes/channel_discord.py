@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Request
 
+from elevate_cli.beta_env_policy import reject_unsupported_beta_channel
 from elevate_cli.config import get_env_value, save_env_value
 
 RequireToken = Callable[[Request], None]
@@ -24,6 +25,7 @@ def register_discord_routes(
     async def configure_discord(request: Request):
         """Mirror ``setup._setup_discord``."""
         require_token(request)
+        reject_unsupported_beta_channel("discord")
         try:
             body = await request.json()
         except Exception:

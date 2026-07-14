@@ -48,3 +48,26 @@ def test_bluebubbles_configure_requires_server_url_and_password(monkeypatch):
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "BlueBubbles server URL + password are required"
+
+
+def test_exact_beta_bluebubbles_configure_is_not_available(monkeypatch):
+    env = {}
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        channel_bluebubbles,
+        "save_env_value",
+        lambda key, value: env.__setitem__(key, value),
+    )
+
+    resp = make_client().post(
+        "/api/channels/imessage/bluebubbles/configure",
+        json={
+            "server_url": "https://bluebubbles.example.com",
+            "password": "secret",
+            "allowed_users": "*",
+        },
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "beta_channel_not_available"
+    assert env == {}

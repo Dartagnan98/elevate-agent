@@ -96,3 +96,30 @@ def test_whatsapp_pair_stream_requires_installed_dependencies(tmp_path):
     assert resp.json()["detail"] == (
         "WhatsApp bridge dependencies not installed — call /api/channels/whatsapp/install first"
     )
+
+
+def test_exact_beta_whatsapp_routes_are_not_available(tmp_path, monkeypatch):
+    env = {}
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        channel_whatsapp,
+        "save_env_value",
+        lambda key, value: env.__setitem__(key, value),
+    )
+    client = make_client(tmp_path)
+
+    responses = [
+        client.post(
+            "/api/channels/whatsapp/configure",
+            json={"mode": "self-chat", "allowed_users": "*"},
+        ),
+        client.post("/api/channels/whatsapp/install"),
+        client.get("/api/channels/whatsapp/status"),
+        client.get("/api/channels/whatsapp/pair/stream"),
+    ]
+
+    assert [response.status_code for response in responses] == [409, 409, 409, 409]
+    assert {
+        response.json()["detail"]["code"] for response in responses
+    } == {"beta_channel_not_available"}
+    assert env == {}

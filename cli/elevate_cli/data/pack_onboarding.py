@@ -66,7 +66,22 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("user_profile", "profile", "User profile", "Your name, default assistant name, company, and timezone.", sort_order=10),
             PackItemSpec("model_provider", "model", "Model provider", "Default model/provider for chat, skills, and local agent runs.", ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"), sort_order=20),
             PackItemSpec("memory_embeddings", "memory", "Memory and embeddings", "Local memory store plus embedding provider/model for semantic recall.", ("OPENAI_API_KEY", "OPENAI_EMBEDDING_MODEL", "EMBEDDINGS_API_KEY"), sort_order=30),
-            PackItemSpec("messaging_gateway", "communication", "Messaging gateway", "Main Telegram or messaging lane for the Executive Assistant.", ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"), required=False, sort_order=40),
+            PackItemSpec(
+                "messaging_gateway",
+                "communication",
+                "Messaging gateway",
+                "Main Telegram or messaging lane for the Executive Assistant.",
+                (
+                    "TELEGRAM_BOT_TOKEN",
+                    "TELEGRAM_ALLOWED_USERS",
+                    "TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR",
+                    "TELEGRAM_HOME_CHANNEL",
+                    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN",
+                    "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_CHANNEL",
+                ),
+                required=False,
+                sort_order=40,
+            ),
             PackItemSpec("browser_use_tools", "tools", "Browser-use tools", "Browser-use provider and notes for controlled web automation.", ("BROWSER_USE_PROVIDER", "BROWSER_USE_API_KEY"), required=False, sort_order=50),
             PackItemSpec("account_connectors", "accounts", "Account connectors", "Composio and local connectors for Gmail, Calendar, Drive, Docs, and browser workflows.", ("COMPOSIO_API_KEY", "GMAIL_CLIENT_ID", "GOOGLE_DRIVE_ACCOUNT"), required=False, sort_order=60),
             PackItemSpec("local_databases", "storage", "Local databases", "State DB plus embedded Postgres operational storage created by the installer.", sort_order=70),
@@ -104,6 +119,18 @@ PACK_SPECS: tuple[PackSpec, ...] = (
         items=(
             PackItemSpec("crm_source", "accounts", "CRM / lead database", "Where leads, profiles, conversations, and pipeline status come from.", ("CRM_API_KEY", "LOFTY_API_KEY", "FOLLOWUPBOSS_API_KEY", "SIERRA_API_KEY"), sort_order=10),
             PackItemSpec("message_sources", "accounts", "Message sources", "Email, SMS, Instagram, WhatsApp, or CRM messages that populate conversations.", ("GMAIL_CLIENT_ID", "TWILIO_ACCOUNT_SID", "META_ACCESS_TOKEN", "WHATSAPP_TOKEN"), sort_order=20),
+            PackItemSpec(
+                "outreach_channel",
+                "communication",
+                "Inside Sales approval lane",
+                "Dedicated Telegram lane for the Inside Sales agent.",
+                (
+                    "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
+                    "ELEVATE_AGENT_OUTREACH_TELEGRAM_CHANNEL",
+                ),
+                required=False,
+                sort_order=25,
+            ),
             PackItemSpec("identity_verifiers", "matching", "Identity verifiers", "Phone and email rules used to match conversations to profiles safely.", sort_order=30),
             PackItemSpec("buyer_search_sources", "buyer-search", "Buyer search sources", "Saved searches, MLS criteria, and local search providers.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD"), sort_order=40),
             PackItemSpec("followup_rules", "automation", "Follow-up rules", "When to draft, skip, revive, or ask for human approval.", sort_order=50),
@@ -121,7 +148,21 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("social_scheduler", "accounts", "Social scheduler", "Ayrshare, Buffer, Meta, or manual queue used for social drafts.", ("AYRSHARE_API_KEY", "BUFFER_ACCESS_TOKEN", "META_ACCESS_TOKEN"), sort_order=30),
             PackItemSpec("asset_storage", "assets", "Marketing asset storage", "Drive/Dropbox folder for photos, captions, graphics, and seller-update PDFs.", ("GOOGLE_DRIVE_ACCOUNT", "DROPBOX_ACCESS_TOKEN", "MARKETING_ASSET_ROOT"), sort_order=40),
             PackItemSpec("listing_media_source", "assets", "Listing media source", "Where approved photos, video, floorplans, and feature sheets are pulled from.", ("PHOTO_SOURCE_ROOT", "LISTING_MEDIA_ROOT"), sort_order=50),
-            PackItemSpec("approval_lane", "communication", "Marketing approval lane", "Where drafts are sent before anything client-visible is sent.", ("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",), sort_order=60),
+            PackItemSpec("approval_lane", "communication", "Marketing approval lane", "Where drafts are sent before anything client-visible is sent.", ("ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",), sort_order=60),
+            PackItemSpec(
+                "draft_channels",
+                "communication",
+                "Marketing draft lanes",
+                "Optional dedicated Telegram lanes for Marketing and Social Media drafts.",
+                (
+                    "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
+                    "ELEVATE_AGENT_MARKETING_TELEGRAM_CHANNEL",
+                    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
+                    "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_CHANNEL",
+                ),
+                required=False,
+                sort_order=65,
+            ),
         ),
     ),
     PackSpec(
@@ -133,7 +174,7 @@ PACK_SPECS: tuple[PackSpec, ...] = (
             PackItemSpec("mls_cma_source", "accounts", "MLS/CMA source", "MLS portal, Cloud CMA, or local comp source used for valuation.", ("MLS_LOGIN_URL", "MLS_USERNAME", "MLS_PASSWORD", "CLOUD_CMA_API_KEY"), sort_order=10),
             PackItemSpec("pricing_rules", "analysis", "Pricing rules", "Agent pricing preferences, adjustment notes, and local comp assumptions.", sort_order=20),
             PackItemSpec("report_template", "documents", "Report template", "CMA report style, disclaimers, agent branding, and export destination.", ("CMA_TEMPLATE_PATH", "CMA_OUTPUT_ROOT"), sort_order=30),
-            PackItemSpec("approval_lane", "communication", "CMA approval lane", "Where the draft CMA goes before client delivery.", ("ELEVATE_AGENT_ADMIN_TELEGRAM_CHANNEL",), sort_order=40),
+            PackItemSpec("approval_lane", "communication", "CMA approval lane", "Where the draft CMA goes before client delivery.", ("TELEGRAM_HOME_CHANNEL",), sort_order=40),
         ),
     ),
 )
@@ -183,19 +224,30 @@ def _ensure_seeded(conn: sqlite3.Connection) -> None:
     for pack in PACK_SPECS:
         conn.execute(
             """
-            INSERT OR IGNORE INTO pack_onboarding_profiles(
+            INSERT INTO pack_onboarding_profiles(
                 pack_id, label, entitlement, description, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pack_id) DO UPDATE SET
+                label=excluded.label,
+                entitlement=excluded.entitlement,
+                description=excluded.description
             """,
             (pack.pack_id, pack.label, pack.entitlement, pack.description, now, now),
         )
         for item in pack.items:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO pack_onboarding_items(
+                INSERT INTO pack_onboarding_items(
                     pack_id, key, category, label, description, required,
                     env_keys_json, sort_order, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pack_id, key) DO UPDATE SET
+                    category=excluded.category,
+                    label=excluded.label,
+                    description=excluded.description,
+                    required=excluded.required,
+                    env_keys_json=excluded.env_keys_json,
+                    sort_order=excluded.sort_order
                 """,
                 (
                     pack.pack_id,
@@ -209,6 +261,12 @@ def _ensure_seeded(conn: sqlite3.Connection) -> None:
                     now,
                 ),
             )
+        current_keys = [item.key for item in pack.items]
+        placeholders = ",".join("?" for _ in current_keys)
+        conn.execute(
+            f"DELETE FROM pack_onboarding_items WHERE pack_id=? AND key NOT IN ({placeholders})",
+            (pack.pack_id, *current_keys),
+        )
 
 
 def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
