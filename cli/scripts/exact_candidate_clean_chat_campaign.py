@@ -685,6 +685,18 @@ async def run_turn(
         record.timings_ms["terminal_wait"] = int((time.monotonic() - phase) * 1000)
         turn_events = rpc.events_since(event_cursor, live_session_id)
         summarize_events(record, turn_events)
+        terminal = event_payload(terminal_event)
+        terminal_status = terminal.get("status")
+        record.terminal_status = safe_status(terminal_status)
+        if (
+            terminal_status != "complete"
+            or terminal.get("completed") is False
+            or terminal.get("failed") is True
+            or terminal.get("interrupted") is True
+            or bool(terminal.get("error"))
+        ):
+            raise CampaignFailure("terminal_not_complete")
+
         required_events = {"message.start", "message.delta", "message.complete"}
         if not required_events.issubset(record.event_counts):
             raise CampaignFailure("streaming_missing")
@@ -699,17 +711,6 @@ async def run_turn(
             ):
                 raise CampaignFailure("stream_identity_mismatch")
 
-        terminal = event_payload(terminal_event)
-        terminal_status = terminal.get("status")
-        record.terminal_status = safe_status(terminal_status)
-        if (
-            terminal_status != "complete"
-            or terminal.get("completed") is False
-            or terminal.get("failed") is True
-            or terminal.get("interrupted") is True
-            or bool(terminal.get("error"))
-        ):
-            raise CampaignFailure("terminal_not_complete")
         if not isinstance(terminal.get("usage"), dict):
             raise CampaignFailure("terminal_usage_missing")
         record.usage_present = True

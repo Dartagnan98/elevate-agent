@@ -475,6 +475,10 @@ def test_two_turn_campaign_is_fresh_read_only_and_content_free() -> None:
     [
         (FakeRpc(final_override="(empty)"), "empty_output"),
         (FakeRpc(completed=False), "terminal_not_complete"),
+        (
+            FakeRpc(terminal_status="error", include_delta=False),
+            "terminal_not_complete",
+        ),
         (FakeRpc(include_usage=False), "terminal_usage_missing"),
         (FakeRpc(include_delta=False), "streaming_missing"),
         (
