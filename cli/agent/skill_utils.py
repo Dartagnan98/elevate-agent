@@ -12,7 +12,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from elevate_constants import get_config_path, get_elevate_home, get_skills_dir, is_termux
+from elevate_constants import (
+    exact_realtor_beta_active,
+    get_config_path,
+    get_elevate_home,
+    get_runtime_skills_dir,
+    get_skills_dir,
+    is_termux,
+    is_trusted_beta_bundled_skill_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -313,6 +321,9 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.elevate/skills/`` are silently skipped.
     """
+    if exact_realtor_beta_active():
+        return []
+
     raw_dirs: list[str] = []
     config_path = get_config_path()
     if config_path.exists():
@@ -369,7 +380,7 @@ def get_all_skills_dirs() -> List[Path]:
     The local dir is always first (and always included even if it doesn't exist
     yet — callers handle that).  External dirs follow in config order.
     """
-    dirs = [get_skills_dir()]
+    dirs = [get_runtime_skills_dir()]
     dirs.extend(get_external_skills_dirs())
     return dirs
 
@@ -587,15 +598,30 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
 
     Excludes ``.git``, ``.github``, ``.hub`` directories.
     """
+    beta_only = exact_realtor_beta_active()
+    if beta_only and not is_trusted_beta_bundled_skill_path(skills_dir):
+        return
+
     matches = []
     for root, dirs, files in os.walk(skills_dir, followlinks=True):
         dirs[:] = [
             d for d in dirs
             if d not in EXCLUDED_SKILL_DIRS
             and not d.endswith(_EXCLUDED_DIR_SUFFIXES)
+            and (
+                not beta_only
+                or is_trusted_beta_bundled_skill_path(Path(root) / d)
+            )
         ]
-        if filename in files:
-            matches.append(Path(root) / filename)
+        candidate = Path(root) / filename
+        if (
+            filename in files
+            and (
+                not beta_only
+                or is_trusted_beta_bundled_skill_path(candidate)
+            )
+        ):
+            matches.append(candidate)
     for path in sorted(matches, key=lambda p: str(p.relative_to(skills_dir))):
         yield path
 

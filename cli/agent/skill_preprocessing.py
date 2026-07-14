@@ -5,6 +5,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from elevate_constants import exact_realtor_beta_active
+
 logger = logging.getLogger(__name__)
 
 # Matches ${ELEVATE_SKILL_DIR} / ${ELEVATE_SESSION_ID} tokens in SKILL.md.
@@ -66,6 +68,9 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     Failures return a short ``[inline-shell error: ...]`` marker instead of
     raising, so one bad snippet can't wreck the whole skill message.
     """
+    if exact_realtor_beta_active():
+        return "[inline-shell disabled in Realtor Beta]"
+
     try:
         completed = subprocess.run(
             ["bash", "-c", command],
@@ -108,7 +113,7 @@ def expand_inline_shell(
     Runs each snippet with the skill directory as CWD so relative paths in
     the snippet work the way the author expects.
     """
-    if "!`" not in content:
+    if exact_realtor_beta_active() or "!`" not in content:
         return content
 
     def _replace(match: re.Match) -> str:
@@ -133,7 +138,7 @@ def preprocess_skill_content(
     cfg = skills_cfg if isinstance(skills_cfg, dict) else load_skills_config()
     if cfg.get("template_vars", True):
         content = substitute_template_vars(content, skill_dir, session_id)
-    if cfg.get("inline_shell", False):
+    if cfg.get("inline_shell", False) and not exact_realtor_beta_active():
         timeout = int(cfg.get("inline_shell_timeout", 10) or 10)
         content = expand_inline_shell(content, skill_dir, timeout)
     return content

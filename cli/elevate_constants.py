@@ -133,6 +133,42 @@ def get_optional_skills_dir(default: Path | None = None) -> Path:
     return get_elevate_home() / "optional-skills"
 
 
+def exact_realtor_beta_active(environ: dict[str, str] | None = None) -> bool:
+    """Return true only for the exact lowercase Realtor Beta channel."""
+    env = os.environ if environ is None else environ
+    return env.get("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+def get_code_bundled_skills_dir() -> Path:
+    """Return the skills tree shipped beside this module."""
+    return Path(__file__).resolve().parent / "skills"
+
+
+def get_runtime_skills_dir() -> Path:
+    """Return the skill root whose instructions may enter the runtime.
+
+    Exact Realtor Beta reads only the code-shipped tree covered by the app
+    signature. Other channels retain the mutable profile skills directory.
+    """
+    if exact_realtor_beta_active():
+        return get_code_bundled_skills_dir()
+    return get_skills_dir()
+
+
+def is_trusted_beta_bundled_skill_path(path: Path | str | None) -> bool:
+    """Whether *path* resolves within the signed Beta skills tree."""
+    if not exact_realtor_beta_active() or path is None:
+        return False
+    root = get_code_bundled_skills_dir()
+    if root.is_symlink():
+        return False
+    try:
+        Path(path).resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def get_bundled_skills_dir(default: Path | None = None) -> Path:
     """Return the bundled skills directory for source and packaged installs.
 
@@ -141,6 +177,9 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
         2. Caller-supplied ``default`` (typically the source-checkout path)
         3. ``<ELEVATE_HOME>/skills`` last-resort
     """
+    if exact_realtor_beta_active():
+        return get_code_bundled_skills_dir()
+
     override = os.getenv("ELEVATE_BUNDLED_SKILLS", "").strip()
     if override:
         return Path(override)

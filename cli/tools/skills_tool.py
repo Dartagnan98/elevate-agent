@@ -69,7 +69,13 @@ Usage:
 import json
 import logging
 
-from elevate_constants import get_elevate_home, display_elevate_home
+from elevate_constants import (
+    display_elevate_home,
+    exact_realtor_beta_active,
+    get_elevate_home,
+    get_runtime_skills_dir,
+    is_trusted_beta_bundled_skill_path,
+)
 import os
 import re
 from enum import Enum
@@ -132,7 +138,7 @@ logger = logging.getLogger(__name__)
 # This is the single source of truth -- agent edits, hub installs, and bundled
 # skills all coexist here without polluting the git repo.
 ELEVATE_HOME = get_elevate_home()
-SKILLS_DIR = ELEVATE_HOME / "skills"
+SKILLS_DIR = get_runtime_skills_dir()
 
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
@@ -1297,6 +1303,21 @@ def skill_view(
                     "error": f"Skill '{name}' not found.",
                     "available_skills": available,
                     "hint": "Use skills_list to see all available skills",
+                },
+                ensure_ascii=False,
+            )
+
+        if (
+            exact_realtor_beta_active()
+            and not is_trusted_beta_bundled_skill_path(skill_md)
+        ):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{name}' is outside the signed Realtor Beta "
+                        "skill bundle and was not loaded."
+                    ),
                 },
                 ensure_ascii=False,
             )

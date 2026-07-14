@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from elevate_constants import display_elevate_home
+from elevate_constants import display_elevate_home, exact_realtor_beta_active
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,9 @@ def _run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     Failures return a short ``[inline-shell error: ...]`` marker instead of
     raising, so one bad snippet can't wreck the whole skill message.
     """
+    if exact_realtor_beta_active():
+        return "[inline-shell disabled in Realtor Beta]"
+
     try:
         completed = subprocess.run(
             ["bash", "-c", command],
@@ -93,7 +96,7 @@ def _run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     except subprocess.TimeoutExpired:
         return f"[inline-shell timeout after {timeout}s: {command}]"
     except FileNotFoundError:
-        return f"[inline-shell error: bash not found]"
+        return "[inline-shell error: bash not found]"
     except Exception as exc:
         return f"[inline-shell error: {exc}]"
 
@@ -115,7 +118,7 @@ def _expand_inline_shell(
     Runs each snippet with the skill directory as CWD so relative paths in
     the snippet work the way the author expects.
     """
-    if "!`" not in content:
+    if exact_realtor_beta_active() or "!`" not in content:
         return content
 
     def _replace(match: re.Match) -> str:
@@ -235,7 +238,10 @@ def _build_skill_message(
     skills_cfg = _load_skills_config()
     if skills_cfg.get("template_vars", True):
         content = _substitute_template_vars(content, skill_dir, session_id)
-    if skills_cfg.get("inline_shell", False):
+    if (
+        skills_cfg.get("inline_shell", False)
+        and not exact_realtor_beta_active()
+    ):
         timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
         content = _expand_inline_shell(content, skill_dir, timeout)
 

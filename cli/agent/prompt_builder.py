@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from elevate_constants import get_elevate_home, get_skills_dir, is_wsl
+from elevate_constants import get_elevate_home, get_runtime_skills_dir, is_wsl
 from typing import Optional
 
 from agent.skill_utils import (
@@ -1028,7 +1028,7 @@ def build_skills_system_prompt(
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
     """
-    skills_dir = get_skills_dir()
+    skills_dir = get_runtime_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
     if not skills_dir.exists() and not external_dirs:

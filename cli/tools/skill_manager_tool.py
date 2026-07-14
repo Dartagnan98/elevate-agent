@@ -39,7 +39,15 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from elevate_constants import get_elevate_home, display_elevate_home
+
+import yaml
+
+from elevate_constants import (
+    display_elevate_home,
+    exact_realtor_beta_active,
+    get_elevate_home,
+    is_trusted_beta_bundled_skill_path,
+)
 from typing import Dict, Any, Optional, Tuple
 
 from utils import atomic_replace, is_truthy_value
@@ -100,9 +108,6 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
     except Exception as e:
         logger.warning("Security scan failed for %s: %s", skill_dir, e, exc_info=True)
     return None
-
-import yaml
-
 
 # All skills live in ~/.elevate/skills/ (single source of truth)
 ELEVATE_HOME = get_elevate_home()
@@ -295,6 +300,19 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _signed_beta_mutation_error(skill_dir: Path) -> Optional[str]:
+    """Refuse writes that would invalidate the signed Realtor Beta bundle."""
+    if (
+        exact_realtor_beta_active()
+        and is_trusted_beta_bundled_skill_path(skill_dir)
+    ):
+        return (
+            "Bundled Realtor Beta skills are read-only. Switch to Stable to "
+            "manage mutable profile skills."
+        )
+    return None
+
+
 def _validate_file_path(file_path: str) -> Optional[str]:
     """
     Validate a file path for write_file/remove_file.
@@ -440,6 +458,9 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Use skills_list() to see available skills."}
+    mutation_error = _signed_beta_mutation_error(existing["path"])
+    if mutation_error:
+        return {"success": False, "error": mutation_error}
 
     skill_md = existing["path"] / "SKILL.md"
     # Back up original content for rollback
@@ -480,6 +501,9 @@ def _patch_skill(
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
+    mutation_error = _signed_beta_mutation_error(existing["path"])
+    if mutation_error:
+        return {"success": False, "error": mutation_error}
 
     skill_dir = existing["path"]
 
@@ -569,6 +593,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
+    mutation_error = _signed_beta_mutation_error(existing["path"])
+    if mutation_error:
+        return {"success": False, "error": mutation_error}
 
     pinned_err = _pinned_guard(name)
     if pinned_err:
@@ -638,6 +665,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found. Create it first with action='create'."}
+    mutation_error = _signed_beta_mutation_error(existing["path"])
+    if mutation_error:
+        return {"success": False, "error": mutation_error}
 
     target, err = _resolve_skill_target(existing["path"], file_path)
     if err:
@@ -672,6 +702,9 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     existing = _find_skill(name)
     if not existing:
         return {"success": False, "error": f"Skill '{name}' not found."}
+    mutation_error = _signed_beta_mutation_error(existing["path"])
+    if mutation_error:
+        return {"success": False, "error": mutation_error}
 
     skill_dir = existing["path"]
 
@@ -910,7 +943,7 @@ SKILL_MANAGE_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error  # noqa: E402
 
 registry.register(
     name="skill_manage",

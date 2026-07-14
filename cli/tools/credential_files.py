@@ -53,6 +53,11 @@ def _resolve_elevate_home() -> Path:
     return get_elevate_home()
 
 
+def _resolve_runtime_skills_dir() -> Path:
+    from elevate_constants import get_runtime_skills_dir
+    return get_runtime_skills_dir()
+
+
 def register_credential_file(
     relative_path: str,
     container_base: str = "/root/.elevate",
@@ -219,8 +224,7 @@ def get_skills_directory_mount(
     at ``<container_base>/external_skills/<index>``.
     """
     mounts = []
-    elevate_home = _resolve_elevate_home()
-    skills_dir = elevate_home / "skills"
+    skills_dir = _resolve_runtime_skills_dir()
     if skills_dir.is_dir():
         host_path = _safe_skills_path(skills_dir)
         mounts.append({
@@ -302,8 +306,7 @@ def iter_skills_files(
     """
     result: List[Dict[str, str]] = []
 
-    elevate_home = _resolve_elevate_home()
-    skills_dir = elevate_home / "skills"
+    skills_dir = _resolve_runtime_skills_dir()
     if skills_dir.is_dir():
         container_root = f"{container_base.rstrip('/')}/skills"
         for item in skills_dir.rglob("*"):
@@ -432,5 +435,4 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-
 

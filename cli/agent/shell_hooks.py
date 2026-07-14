@@ -75,7 +75,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
-from elevate_constants import get_elevate_home
+from elevate_constants import exact_realtor_beta_active, get_elevate_home
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,10 @@ def register_from_config(
     up on the plugin manager.  Skipped entries (unknown events, malformed,
     not allowlisted, already registered) are logged but not returned.
     """
+    if exact_realtor_beta_active():
+        logger.info("Exact Realtor Beta: config-defined shell hooks disabled")
+        return []
+
     if not isinstance(cfg, dict):
         return []
 
@@ -379,6 +383,9 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         "elapsed_seconds": 0.0,
         "error": None,
     }
+    if exact_realtor_beta_active():
+        result["error"] = "config-defined shell hooks are disabled in Realtor Beta"
+        return result
     try:
         argv = shlex.split(os.path.expanduser(spec.command))
     except ValueError as exc:
