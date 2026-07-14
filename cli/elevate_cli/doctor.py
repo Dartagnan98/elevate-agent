@@ -1470,11 +1470,26 @@ def run_doctor(args):
         if _mem_cfg_path.exists():
             with open(_mem_cfg_path) as _f:
                 _raw_cfg = _yaml.safe_load(_f) or {}
-            _active_memory_provider = (_raw_cfg.get("memory") or {}).get("provider", "")
+            _active_memory_provider = str(
+                (_raw_cfg.get("memory") or {}).get("provider", "") or ""
+            ).strip().lower()
     except Exception:
         pass
 
-    if not _active_memory_provider:
+    if realtor_beta:
+        if _active_memory_provider in {"", "holographic"}:
+            label = "Holographic local memory" if _active_memory_provider else "Built-in local memory"
+            check_ok(label, "(Realtor Beta local-only; no provider connection probe)")
+        else:
+            check_warn(
+                f"Blocked stale memory provider '{_active_memory_provider}'",
+                "(Realtor Beta supports built-in or Holographic local memory only)",
+            )
+            issues.append(
+                f"Remove blocked external memory provider "
+                f"'{_active_memory_provider}' through Realtor Beta onboarding"
+            )
+    elif not _active_memory_provider:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
     elif _active_memory_provider == "honcho":
         try:

@@ -625,6 +625,56 @@ def test_realtor_beta_doctor_never_reaches_alternate_provider_paths(
     assert "base_url: https://api.anthropic.com" in config_after
 
 
+def test_realtor_beta_doctor_blocks_external_memory_without_loading_plugin(
+    monkeypatch,
+    tmp_path,
+):
+    home = _prepare_beta_doctor(monkeypatch, tmp_path)
+    config_path = home / "config.yaml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "memory: {}",
+            "memory:\n  provider: honcho",
+        ),
+        encoding="utf-8",
+    )
+
+    def forbidden(name):
+        def _forbidden(*_args, **_kwargs):
+            raise AssertionError(f"external memory path reached: {name}")
+
+        return _forbidden
+
+    from plugins import memory as memory_plugins
+    from plugins.memory.honcho import client as honcho_client
+
+    monkeypatch.setattr(
+        honcho_client.HonchoClientConfig,
+        "from_global_config",
+        forbidden("HonchoClientConfig.from_global_config"),
+    )
+    monkeypatch.setattr(
+        honcho_client,
+        "get_honcho_client",
+        forbidden("get_honcho_client"),
+    )
+    monkeypatch.setattr(
+        memory_plugins,
+        "load_memory_provider",
+        forbidden("load_memory_provider"),
+    )
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+    out = buf.getvalue()
+
+    assert "Blocked stale memory provider 'honcho'" in out
+    assert "Realtor Beta supports built-in or Holographic local memory only" in out
+    assert "Honcho connected" not in out
+    assert "Honcho API key" not in out
+
+
 def test_nonexact_beta_doctor_preserves_generic_provider_diagnostics(
     monkeypatch,
     tmp_path,
