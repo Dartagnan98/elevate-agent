@@ -135,6 +135,50 @@ def test_fresh_gemini_key_seeds_a_primary_model_without_existing_config(monkeypa
     assert item["value"]["secretPresent"] is True
 
 
+def test_beta_fresh_setup_ignores_ambient_keys_for_primary(monkeypatch):
+    from elevate_cli import config
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai-key")
+    monkeypatch.setattr(config, "load_config", lambda: {"model": {}})
+    monkeypatch.setattr(
+        config,
+        "load_env",
+        lambda: {"ANTHROPIC_API_KEY": "profile-anthropic-key"},
+    )
+
+    item = agent_setup._detect_runtime_credentials()["model_primary"]
+
+    assert item["status"] == "missing"
+    assert item["provider"] == "openai-codex"
+    assert item["value"]["model"] == "gpt-5.5"
+    assert item["value"]["secretPresent"] is False
+    assert item["value"]["policyBlocked"] is False
+
+
+def test_beta_existing_non_codex_config_is_visibly_blocked(monkeypatch):
+    from elevate_cli import config
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-gemini-key")
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: {"model": {"provider": "gemini", "default": "gemini-2.5-flash"}},
+    )
+
+    item = agent_setup._detect_runtime_credentials()["model_primary"]
+
+    assert item["status"] == "missing"
+    assert item["provider"] == "openai-codex"
+    assert item["value"]["model"] == "gpt-5.5"
+    assert item["value"]["policyBlocked"] is True
+    assert item["value"]["blockedReason"] == "unsupported_beta_provider"
+    assert item["value"]["configuredProvider"] == "gemini"
+    assert item["value"]["configuredModel"] == "gemini-2.5-flash"
+
+
 def test_unrelated_openai_and_anthropic_keys_do_not_override_gemini(monkeypatch):
     item = _detect(
         monkeypatch,

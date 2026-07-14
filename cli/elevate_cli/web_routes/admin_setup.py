@@ -8,6 +8,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_constants import get_elevate_home
+from elevate_cli.beta_provider_policy import (
+    BetaProviderPolicyError,
+    beta_provider_policy_active,
+    read_beta_codex_auth_status,
+    validate_beta_primary_item,
+)
 from elevate_cli.config import load_config, load_env, save_config, save_env_value
 
 
@@ -308,6 +315,97 @@ def _materialize_agent_setup_secrets(items: List[Dict[str, Any]]) -> List[Dict[s
         item["value"] = value
         safe_items.append(item)
     return safe_items
+
+
+def _preflight_beta_agent_setup_update(
+    conn,
+    items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Validate the complete Beta update before any external mutation.
+
+    When the request omits ``model_primary``, both persisted setup state and
+    runtime config are checked.  This prevents an unrelated setup save from
+    materializing a stale Gemini (or other unsupported) primary selection.
+    """
+    if not beta_provider_policy_active():
+        return items
+
+    from elevate_cli.data.agent_setup import VALID_STATUSES, _DEFAULT_ITEMS
+
+    valid_keys = {str(item["key"]) for item in _DEFAULT_ITEMS}
+    seen: set[str] = set()
+    submitted_primary: Dict[str, Any] | None = None
+    for item in items:
+        key = str(item.get("key") or "").strip()
+        if not key:
+            raise ValueError("agent setup item key is required")
+        if key in seen:
+            raise ValueError(f"duplicate agent setup item {key!r}")
+        seen.add(key)
+        if key not in valid_keys:
+            raise LookupError(f"agent setup item {key!r} not found")
+        status = str(item.get("status") or "missing").strip()
+        if status not in VALID_STATUSES:
+            raise ValueError(f"invalid agent setup status {status!r}")
+        if key == "model_primary":
+            submitted_primary = item
+
+    auth_status = read_beta_codex_auth_status(get_elevate_home())
+    canonical_items = list(items)
+    if submitted_primary is not None:
+        canonical_primary = validate_beta_primary_item(
+            submitted_primary,
+            auth_status,
+        )
+        canonical_items = [
+            canonical_primary if item is submitted_primary else item
+            for item in items
+        ]
+        return canonical_items
+
+    current_primary_items: List[Dict[str, Any]] = []
+    row = conn.execute(
+        "SELECT status, provider, value_json FROM agent_setup_items WHERE key=?",
+        ("model_primary",),
+    ).fetchone()
+    if row is not None:
+        stored = dict(row)
+        try:
+            value = json.loads(stored.get("value_json") or "{}") or {}
+        except (TypeError, json.JSONDecodeError):
+            value = {}
+        if stored.get("provider") or (isinstance(value, dict) and value.get("model")):
+            current_primary_items.append(
+                {
+                    "key": "model_primary",
+                    "status": stored.get("status") or "missing",
+                    "provider": stored.get("provider"),
+                    "value": value,
+                }
+            )
+
+    cfg = load_config()
+    model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
+    model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+    cfg_provider = str(model_cfg.get("provider") or "").strip()
+    cfg_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+    if cfg_provider or cfg_model:
+        current_primary_items.append(
+            {
+                "key": "model_primary",
+                "status": "configured",
+                "provider": cfg_provider,
+                "value": {
+                    "model": cfg_model,
+                    "runtimeProvider": cfg_provider,
+                    "apiKey": "",
+                },
+            }
+        )
+
+    for current_primary in current_primary_items:
+        validate_beta_primary_item(current_primary, auth_status)
+    return canonical_items
 
 
 def _materialize_agent_setup_to_config(conn) -> Dict[str, Any]:
@@ -671,10 +769,21 @@ def create_admin_setup_router(
         try:
             from elevate_cli.data import connect, get_agent_setup, update_agent_setup
 
-            items = _materialize_agent_setup_secrets(
-                [item.dict() for item in body.items]
-            )
+            raw_items = [item.dict() for item in body.items]
 
+            if beta_provider_policy_active():
+                with connect() as conn:
+                    validated = _preflight_beta_agent_setup_update(conn, raw_items)
+                    items = _materialize_agent_setup_secrets(validated)
+                    update_agent_setup(conn, items=items)
+                    materialized = _materialize_agent_setup_to_config(conn)
+                    if materialized.get("error"):
+                        raise RuntimeError(materialized["error"])
+                    snapshot = get_agent_setup(conn)
+                    snapshot["materialized"] = materialized
+                    return snapshot
+
+            items = _materialize_agent_setup_secrets(raw_items)
             with connect() as conn:
                 update_agent_setup(conn, items=items)
                 materialized = _materialize_agent_setup_to_config(conn)
@@ -683,6 +792,8 @@ def create_admin_setup_router(
                 snapshot = get_agent_setup(conn)
                 snapshot["materialized"] = materialized
                 return snapshot
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail())
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except ValueError as exc:
@@ -703,12 +814,15 @@ def create_admin_setup_router(
             from elevate_cli.data import complete_agent_setup, connect
 
             with connect() as conn:
+                _preflight_beta_agent_setup_update(conn, [])
                 materialized = _materialize_agent_setup_to_config(conn)
                 if materialized.get("error"):
                     raise RuntimeError(materialized["error"])
                 snapshot = complete_agent_setup(conn)
                 snapshot["materialized"] = materialized
                 return snapshot
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail())
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc))
         except Exception as exc:

@@ -1,9 +1,11 @@
 """Tests for elevate_cli.web_server and related config utilities."""
 
-import os
+import base64
 import json
 import logging
+import os
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1570,6 +1572,232 @@ class TestNewEndpoints:
         reset_body = reset.json()
         assert reset_body["complete"] is True
         assert reset_body["completedAt"] is None
+
+    def test_beta_agent_setup_rejection_is_byte_atomic_when_primary_is_omitted(
+        self,
+        monkeypatch,
+    ):
+        from elevate_constants import get_elevate_home
+        from elevate_cli.config import get_config_path, get_env_path, save_config
+        from elevate_cli.data import connect
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        home = get_elevate_home()
+        save_config(
+            {"model": {"provider": "gemini", "default": "gemini-2.5-flash"}}
+        )
+        env_path = get_env_path()
+        env_path.write_text("EXISTING_MARKER=unchanged\n", encoding="utf-8")
+        expiry = base64.urlsafe_b64encode(
+            json.dumps({"exp": time.time() - 60}).encode("utf-8")
+        ).rstrip(b"=").decode("ascii")
+        auth_path = home / "auth.json"
+        auth_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {
+                        "openai-codex": {
+                            "tokens": {
+                                "access_token": f"header.{expiry}.signature",
+                                "refresh_token": "must-not-refresh",
+                            }
+                        }
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        seeded = self.client.get("/api/agent/setup")
+        assert seeded.status_code == 200
+
+        def db_rows():
+            with connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT key, status, provider, value_json, notes, updated_at
+                    FROM agent_setup_items ORDER BY key
+                    """
+                ).fetchall()
+            return json.dumps(
+                [dict(row) for row in rows],
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+        config_path = get_config_path()
+        before = {
+            "env": env_path.read_bytes(),
+            "config": config_path.read_bytes(),
+            "auth": auth_path.read_bytes(),
+            "db": db_rows(),
+        }
+
+        response = self.client.put(
+            "/api/agent/setup",
+            json={
+                "items": [
+                    {
+                        "key": "operator_channel_telegram",
+                        "status": "configured",
+                        "provider": "telegram",
+                        "value": {"botToken": "must-not-write", "chatId": "123"},
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "beta_provider_not_allowed"
+        assert env_path.read_bytes() == before["env"]
+        assert config_path.read_bytes() == before["config"]
+        assert auth_path.read_bytes() == before["auth"]
+        assert db_rows() == before["db"]
+
+    @pytest.mark.parametrize(
+        ("provider", "runtime_provider", "model", "with_auth", "error_code"),
+        [
+            ("gemini", "gemini", "gpt-5.5", True, "beta_provider_not_allowed"),
+            (
+                "openai-codex",
+                "openai-codex",
+                "gpt-4o",
+                True,
+                "beta_model_not_allowed",
+            ),
+            (
+                "openai-codex",
+                "openai-codex",
+                "gpt-5.5",
+                False,
+                "beta_codex_auth_required",
+            ),
+        ],
+    )
+    def test_beta_agent_setup_policy_rejections_are_409(
+        self,
+        monkeypatch,
+        provider,
+        runtime_provider,
+        model,
+        with_auth,
+        error_code,
+    ):
+        from elevate_constants import get_elevate_home
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        if with_auth:
+            (get_elevate_home() / "auth.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "providers": {
+                            "openai-codex": {
+                                "tokens": {
+                                    "access_token": "current-access",
+                                    "refresh_token": "current-refresh",
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        response = self.client.put(
+            "/api/agent/setup",
+            json={
+                "items": [
+                    {
+                        "key": "model_primary",
+                        "status": "configured",
+                        "provider": provider,
+                        "value": {
+                            "model": model,
+                            "runtimeProvider": runtime_provider,
+                            "apiKey": "",
+                        },
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == error_code
+
+    def test_beta_agent_setup_valid_local_codex_auth_succeeds(self, monkeypatch):
+        from elevate_constants import get_elevate_home
+        from elevate_cli.config import load_config
+        from elevate_cli.data import connect
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        home = get_elevate_home()
+        auth_path = home / "auth.json"
+        auth_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {
+                        "openai-codex": {
+                            "tokens": {
+                                "access_token": "current-beta-codex-access",
+                                "refresh_token": "current-beta-codex-refresh",
+                            }
+                        }
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        auth_before = auth_path.read_bytes()
+
+        response = self.client.put(
+            "/api/agent/setup",
+            json={
+                "items": [
+                    {
+                        "key": "model_primary",
+                        "status": "configured",
+                        # Current web transport alias; server persists canonical Codex.
+                        "provider": "openai",
+                        "value": {
+                            "model": "gpt-5.5",
+                            "runtimeProvider": "openai-codex",
+                            "apiKey": "",
+                        },
+                    },
+                    {
+                        "key": "memory_store",
+                        "status": "configured",
+                        "provider": "sqlite_local",
+                        "value": {"mode": "local"},
+                    },
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        primary = next(
+            item for item in response.json()["items"] if item["key"] == "model_primary"
+        )
+        assert primary["status"] == "configured"
+        assert primary["provider"] == "openai-codex"
+        assert primary["value"]["model"] == "gpt-5.5"
+        config = load_config()
+        assert config["model"]["provider"] == "openai-codex"
+        assert config["model"]["default"] == "gpt-5.5"
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT provider, value_json FROM agent_setup_items WHERE key=?",
+                ("model_primary",),
+            ).fetchone()
+        assert row["provider"] == "openai-codex"
+        assert json.loads(row["value_json"])["model"] == "gpt-5.5"
+        assert auth_path.read_bytes() == auth_before
 
     def test_leads_setup_lifecycle_contract(self):
         from elevate_constants import get_elevate_home

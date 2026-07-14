@@ -31,6 +31,12 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Iterable, Mapping
 
+from elevate_constants import get_elevate_home
+from elevate_cli.beta_provider_policy import (
+    beta_provider_policy_active,
+    build_beta_primary_overlay,
+    read_beta_codex_auth_status,
+)
 from elevate_cli.data._util import now_iso
 
 
@@ -504,6 +510,14 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
 
     _cfg_provider = str(_cfg_model.get("provider") or "").strip()
     _cfg_default = str(_cfg_model.get("default") or _cfg_model.get("model") or "").strip()
+    beta_policy_enabled = beta_provider_policy_active()
+
+    if beta_policy_enabled:
+        beta_auth_status = read_beta_codex_auth_status(get_elevate_home())
+        overlays["model_primary"] = build_beta_primary_overlay(
+            _cfg,
+            beta_auth_status,
+        )
 
     def _matching_primary_credential(provider: str) -> tuple[str, str | None] | None:
         """Return (source, secret) only for the configured provider."""
@@ -613,7 +627,11 @@ def _detect_runtime_credentials() -> dict[str, dict[str, Any]]:
                 pass
         return None
 
-    if _cfg_provider and _cfg_default:
+    if beta_policy_enabled:
+        # Primary inference is owned by the Beta policy above.  Do not inspect
+        # ambient/profile API keys or invoke the mutable OAuth status path.
+        pass
+    elif _cfg_provider and _cfg_default:
         matched = _matching_primary_credential(_cfg_provider)
         secret_source, matched_secret = matched or ("config", None)
         overlays["model_primary"] = {
@@ -878,6 +896,38 @@ def _apply_runtime_overlay(
             merged["status"] = "missing"
             return merged
         return item
+
+    if item_key == "model_primary" and beta_provider_policy_active():
+        # Beta primary state is server-authoritative.  A stale persisted
+        # provider/model must never override the policy overlay.  When config
+        # is fresh but the setup DB contains an older selection, surface that
+        # selection as explicitly blocked rather than silently hiding it.
+        overlay_value = overlay.get("value") or {}
+        persisted_value = item.get("value")
+        persisted_value = persisted_value if isinstance(persisted_value, dict) else {}
+        if (
+            not overlay_value.get("configuredProvider")
+            and not overlay_value.get("configuredModel")
+            and (item.get("provider") or persisted_value.get("model"))
+        ):
+            overlay = build_beta_primary_overlay(
+                {
+                    "model": {
+                        "provider": item.get("provider"),
+                        "default": persisted_value.get("model"),
+                    }
+                },
+                {
+                    "logged_in": bool(overlay_value.get("authReady")),
+                    "reason": overlay_value.get("authReason"),
+                },
+            )
+        merged = dict(item)
+        merged["status"] = overlay["status"]
+        merged["provider"] = overlay["provider"]
+        merged["value"] = overlay["value"]
+        merged["detected"] = overlay["status"] in READY_STATUSES
+        return merged
 
     status = item.get("status") or ""
     value = item.get("value")
