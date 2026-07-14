@@ -3,9 +3,19 @@ import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 import bcrypt from "bcryptjs";
 
+const testEntitlementKeyPair = crypto.generateKeyPairSync("ed25519");
+const TEST_ENTITLEMENT_PRIVATE_KEY_PKCS8_DER_B64 = testEntitlementKeyPair.privateKey
+  .export({ format: "der", type: "pkcs8" })
+  .toString("base64");
+const TEST_ENTITLEMENT_PUBLIC_KEY_SPKI_DER_B64 = testEntitlementKeyPair.publicKey
+  .export({ format: "der", type: "spki" })
+  .toString("base64");
+
 process.env.JWT_SECRET ||= "test-secret-for-hosted-route-handler-harness";
 process.env.SUPABASE_URL ||= "https://example.supabase.test";
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= "test-service-role-key";
+process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64 ||=
+  TEST_ENTITLEMENT_PRIVATE_KEY_PKCS8_DER_B64;
 
 type UserStatus = "active" | "trialing" | "inactive" | "canceled" | "past_due";
 type Tier = "pro" | "builder";
@@ -280,6 +290,81 @@ export function jsonRequest(
 
 export async function responseJson(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
+}
+
+export function assertEntitlementEnvelope(
+  body: Record<string, unknown>,
+  expected: {
+    sub: string;
+    license_id: string;
+    email: string;
+    tier: Tier;
+    entitlements: string[];
+  },
+): void {
+  assert.equal(typeof body.access_token, "string");
+  assert.equal(typeof body.refresh_token, "string");
+  assert.equal(typeof body.entitlement_assertion, "string");
+  assert.equal(body.expires_in, 3600);
+
+  const segments = String(body.entitlement_assertion).split(".");
+  assert.equal(segments.length, 3);
+  const header = JSON.parse(Buffer.from(segments[0], "base64url").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+  const payload = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+  assert.deepEqual(header, {
+    alg: "EdDSA",
+    typ: "elevate-entitlement+jwt",
+    kid: "ent-2026-07-a",
+  });
+
+  const publicKey = crypto.createPublicKey({
+    key: Buffer.from(TEST_ENTITLEMENT_PUBLIC_KEY_SPKI_DER_B64, "base64"),
+    format: "der",
+    type: "spki",
+  });
+  assert.equal(
+    crypto.verify(
+      null,
+      Buffer.from(`${segments[0]}.${segments[1]}`, "ascii"),
+      publicKey,
+      Buffer.from(segments[2], "base64url"),
+    ),
+    true,
+  );
+
+  const normalizedEmail = expected.email.trim().toLowerCase();
+  const normalizedEntitlements = [...new Set(expected.entitlements.map((value) => value.trim()))].sort();
+  assert.equal(payload.iss, "https://api.elevationrealestatehq.com");
+  assert.equal(payload.aud, "elevate-realtor-beta");
+  assert.equal(payload.schema, 1);
+  assert.equal(payload.sub, expected.sub);
+  assert.equal(payload.license_id, expected.license_id);
+  assert.equal(payload.email, normalizedEmail);
+  assert.equal(payload.tier, expected.tier);
+  assert.deepEqual(payload.entitlements, normalizedEntitlements);
+  assert.equal(payload.nbf, payload.iat);
+  assert.equal(Number(payload.exp) - Number(payload.iat), 3600);
+  assert.equal(typeof payload.jti, "string");
+  assert.notEqual(payload.jti, "");
+  assert.equal(
+    payload.ath,
+    crypto.createHash("sha256").update(String(body.access_token), "utf8").digest("base64url"),
+  );
+  assert.equal(
+    payload.rth,
+    crypto.createHash("sha256").update(String(body.refresh_token), "utf8").digest("base64url"),
+  );
+
+  assert.equal(body.license_id, payload.license_id);
+  assert.equal(body.email, payload.email);
+  assert.equal(body.tier, payload.tier);
+  assert.deepEqual(body.entitlements, payload.entitlements);
 }
 
 function okJson(data: unknown, status = 200): Response {

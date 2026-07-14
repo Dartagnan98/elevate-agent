@@ -7,8 +7,12 @@ import {
   findActiveUser,
   findUserByEmail,
 } from "@/lib/store";
-import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { signAccessToken, generateRefreshToken } from "@/lib/jwt";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
+import {
+  createEntitlementEnvelope,
+  tryLoadEntitlementSigner,
+} from "@/lib/entitlement-assertion";
 
 export const runtime = "nodejs";
 
@@ -43,6 +47,10 @@ export async function POST(req: NextRequest) {
   }
 
   const access_info = await effectiveAccess(user.id);
+  const entitlementSigner = tryLoadEntitlementSigner();
+  if (!entitlementSigner) {
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+  }
 
   const refresh = generateRefreshToken();
   const license = await createLicense(user.id, refresh.hash, device_label || null);
@@ -54,13 +62,18 @@ export async function POST(req: NextRequest) {
     license_id: license.id,
   });
 
-  return NextResponse.json({
+  const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: refresh.token,
+    sub: user.id,
     license_id: license.id,
+    email: user.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
+  }, entitlementSigner);
+
+  return NextResponse.json({
+    ...envelope,
     orgs: access_info.orgs,
-    expires_in: TTL.ACCESS_SECONDS,
   });
 }

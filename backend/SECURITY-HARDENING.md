@@ -14,6 +14,20 @@ Legend: ✅ done · 🟡 partial · ⬜ todo · ➖ n/a
 - ✅ **#12 Security headers** — HSTS, X-Frame-Options DENY, nosniff, Referrer-Policy, Permissions-Policy, X-XSS-Protection 0; `poweredByHeader: false` (next.config.ts).
 - ✅ **#23 Dependency audit** — `npm audit fix` applied; **high** Next.js advisory cleared (15.0.3 → 15.5.15). 2 moderate remain (breaking major bumps — see below).
 - ✅ Passwords: bcrypt cost 12. Reset tokens / login codes: sha256 at rest. Refresh tokens: sha256 at rest + rotation. JWT: fails hard in prod if secret unset/weak.
+- ✅ Realtor Beta entitlement assertions: every issued access/refresh pair is bound to a one-hour Ed25519 compact JWS. The signer fails closed and production verifies the private key against the pinned public key for `kid=ent-2026-07-a`.
+
+### Entitlement signing secret format
+
+`ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64` is the only private-key source. It
+must be canonical padded RFC 4648 base64 (one line, no whitespace) containing an
+**unencrypted Ed25519 PKCS#8 DER** private key. There is no development fallback.
+The production secret must be the private half of the centrally provisioned
+`ent-2026-07-a` key; the backend derives its public key and refuses to issue if
+it does not exactly match the pinned production SPKI key. Keep the private value
+in the deployment secret manager—never in source, a `.env` file, logs, or a
+client bundle. The non-production interoperability vector lives at
+`test/fixtures/entitlement-assertion-v1.json` and contains only its test public
+key and a pre-signed assertion, never the production private key.
 
 ## Partial
 - 🟡 **#10 CORS** — no wildcard ACAO exists (Next adds none by default, so cross-origin is already blocked). Add an explicit origin allowlist only if/when browser clients on other origins need it — don't add blind (would break the desktop/CLI clients).

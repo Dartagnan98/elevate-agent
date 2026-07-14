@@ -1,0 +1,33 @@
+{
+  "fixture": "elevate-entitlement-assertion-v1",
+  "environment": "non-production-test-only",
+  "header": {
+    "alg": "EdDSA",
+    "typ": "elevate-entitlement+jwt",
+    "kid": "ent-2026-07-a"
+  },
+  "test_public_key_spki_der_b64": "MCowBQYDK2VwAyEAz8qn+0phYwSZuZ2NiGJkEsFHOnSO1f2W8VI+ONmeGt4=",
+  "production_public_key_spki_der_b64": "MCowBQYDK2VwAyEAexzoft6MmOXSkKHVJH4hBLgss5LN51wWaQ7bfUom1CQ=",
+  "access_token": "golden-access-token.v1",
+  "refresh_token": "golden-refresh-token.v1",
+  "payload": {
+    "iss": "https://api.elevationrealestatehq.com",
+    "aud": "elevate-realtor-beta",
+    "schema": 1,
+    "sub": "user-golden-001",
+    "license_id": "license-golden-001",
+    "email": "golden.agent@example.com",
+    "tier": "pro",
+    "entitlements": [
+      "real_estate_admin",
+      "real_estate_sales"
+    ],
+    "iat": 1780000000,
+    "nbf": 1780000000,
+    "exp": 1780003600,
+    "jti": "11111111-2222-4333-8444-555555555555",
+    "ath": "BfXuEy8dGLr-O6OWbfMXqwfxSctiCDD5TVt5qCqcrrQ",
+    "rth": "CVxPYcrQy--av9SpcP8rv4-FOyngTAmLwIZvkpJcHU8"
+  },
+  "compact_jws": "eyJhbGciOiJFZERTQSIsInR5cCI6ImVsZXZhdGUtZW50aXRsZW1lbnQrand0Iiwia2lkIjoiZW50LTIwMjYtMDctYSJ9.eyJpc3MiOiJodHRwczovL2FwaS5lbGV2YXRpb25yZWFsZXN0YXRlaHEuY29tIiwiYXVkIjoiZWxldmF0ZS1yZWFsdG9yLWJldGEiLCJzY2hlbWEiOjEsInN1YiI6InVzZXItZ29sZGVuLTAwMSIsImxpY2Vuc2VfaWQiOiJsaWNlbnNlLWdvbGRlbi0wMDEiLCJlbWFpbCI6ImdvbGRlbi5hZ2VudEBleGFtcGxlLmNvbSIsInRpZXIiOiJwcm8iLCJlbnRpdGxlbWVudHMiOlsicmVhbF9lc3RhdGVfYWRtaW4iLCJyZWFsX2VzdGF0ZV9zYWxlcyJdLCJpYXQiOjE3ODAwMDAwMDAsIm5iZiI6MTc4MDAwMDAwMCwiZXhwIjoxNzgwMDAzNjAwLCJqdGkiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJhdGgiOiJCZlh1RXk4ZEdMci1PNk9XYmZNWHF3ZnhTY3RpQ0RENVRWdDVxQ3FjcnJRIiwicnRoIjoiQ1Z4UFljclF5LS1hdjlTcGNQOHJ2NC1GT3luZ1RBbUx3SVp2a3BKY0hVOCJ9.CqAvqT2SOHG4PSYtUfUnoOInlUagl0oRP7o1pvw1pWC2TAjsS1LZOUku9egWLVZ8yvA7T9TD7kYf3h9TbZt_BA"
+}

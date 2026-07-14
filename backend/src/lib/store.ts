@@ -906,7 +906,11 @@ export async function denyDeviceGrant(id: string, userId: string): Promise<void>
 export async function markDeviceGrantClaimed(id: string): Promise<void> {
   const { error } = await supabase()
     .from("device_grants")
-    .update({ status: "claimed", claimed_at: new Date().toISOString() })
+    .update({
+      status: "claimed",
+      claimed_at: new Date().toISOString(),
+      refresh_token_plain: null,
+    })
     .eq("id", id);
   if (error) throw error;
 }

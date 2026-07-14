@@ -7,8 +7,12 @@ import {
   effectiveAccess,
   findUserByEmail,
 } from "@/lib/store";
-import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { signAccessToken, generateRefreshToken } from "@/lib/jwt";
 import { clientIp, enforceLimits, tooManyRequests } from "@/lib/rate-limit";
+import {
+  createEntitlementEnvelope,
+  tryLoadEntitlementSigner,
+} from "@/lib/entitlement-assertion";
 
 export const runtime = "nodejs";
 
@@ -57,6 +61,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Validate the signing boundary before creating the account or license. A
+  // misconfigured issuer must not leave a half-created successful signup.
+  const entitlementSigner = tryLoadEntitlementSigner();
+  if (!entitlementSigner) {
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+  }
+
   const password_hash = await bcrypt.hash(password, 12);
   // Defaults: status "active", entitlements []. Active so login passes; empty
   // so the admin controls which packs each realtor gets.
@@ -78,14 +89,19 @@ export async function POST(req: NextRequest) {
     license_id: license.id,
   });
 
-  return NextResponse.json({
-    created: true,
+  const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: refresh.token,
+    sub: user.id,
     license_id: license.id,
+    email: user.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
+  }, entitlementSigner);
+
+  return NextResponse.json({
+    created: true,
+    ...envelope,
     orgs: access_info.orgs,
-    expires_in: TTL.ACCESS_SECONDS,
   });
 }

@@ -11,8 +11,11 @@ import {
   signAccessToken,
   generateRefreshToken,
   hashRefreshToken,
-  TTL,
 } from "@/lib/jwt";
+import {
+  createEntitlementEnvelope,
+  tryLoadEntitlementSigner,
+} from "@/lib/entitlement-assertion";
 
 export const runtime = "nodejs";
 
@@ -37,23 +40,34 @@ export async function POST(req: NextRequest) {
   }
 
   const access_info = await effectiveAccess(license.user_id);
+  const entitlementSigner = tryLoadEntitlementSigner();
+  if (!entitlementSigner) {
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+  }
 
   const next = generateRefreshToken();
-  await rotateLicenseRefreshToken(license.id, next.hash);
-
   const access = await signAccessToken({
     sub: license.user_id,
     email: active.email,
     tier: access_info.tier,
     license_id: license.id,
   });
-
-  return NextResponse.json({
+  const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: next.token,
+    sub: license.user_id,
+    license_id: license.id,
+    email: active.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
+  }, entitlementSigner);
+
+  // Rotate only after both tokens and their binding assertion exist. If signer
+  // configuration is broken, the caller's current refresh remains usable.
+  await rotateLicenseRefreshToken(license.id, next.hash);
+
+  return NextResponse.json({
+    ...envelope,
     orgs: access_info.orgs,
-    expires_in: TTL.ACCESS_SECONDS,
   });
 }

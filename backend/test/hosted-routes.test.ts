@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import bcrypt from "bcryptjs";
 import Stripe from "stripe";
 import {
+  assertEntitlementEnvelope,
   assertNoRawDiagnosticsText,
   createFakeDb,
   failNextSupabaseInsert,
@@ -69,6 +70,13 @@ describe("hosted route handlers", () => {
     assert.deepEqual(body.orgs, []);
     assert.equal(body.expires_in, 3600);
     assert.equal(db.licenses[0].device_label, "MacBook");
+    assertEntitlementEnvelope(body, {
+      sub: "user-1",
+      license_id: "license-1",
+      email: "agent@example.com",
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
   });
 
   it("login maps an inactive subscription to 402", async () => {
@@ -124,6 +132,13 @@ describe("hosted route handlers", () => {
       assert.deepEqual(db.users[0].entitlements, []);
       assert.equal(db.licenses.length, 1);
       assert.equal(db.licenses[0].revoked, false);
+      assertEntitlementEnvelope(signupBody, {
+        sub: "user-1",
+        license_id: "license-1",
+        email: "new.agent@example.com",
+        tier: "pro",
+        entitlements: [],
+      });
 
       const originalHash = db.users[0].password_hash;
       const forgotResponse = await forgot.POST(
@@ -286,6 +301,13 @@ describe("hosted route handlers", () => {
     assert.deepEqual(okBody.entitlements, ["real_estate_sales"]);
     assert.notEqual(activeLicense.refresh_token_hash, refreshHash("old-refresh"));
     assert.equal(activeLicense.revoked, false);
+    assertEntitlementEnvelope(okBody, {
+      sub: active.id,
+      license_id: activeLicense.id,
+      email: active.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
 
     const inactiveResponse = await route.POST(
       jsonRequest("/api/license/refresh", { refresh_token: "inactive-refresh" }),
@@ -295,6 +317,71 @@ describe("hosted route handlers", () => {
     assert.equal(inactiveResponse.status, 402);
     assert.deepEqual(inactiveBody, { error: "subscription inactive" });
     assert.equal(inactiveLicense.revoked, true);
+  });
+
+  it("license issuance fails closed before creating or rotating credentials", async () => {
+    const previousKey = process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64;
+    const previousConsoleError = console.error;
+    console.error = () => {};
+    try {
+      Reflect.deleteProperty(process.env, "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64");
+      const loginDb = useFakeDb();
+      loginDb.users.push(await makeUser());
+      const login = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/login");
+
+      const loginResponse = await login.POST(
+        jsonRequest("/api/auth/login", {
+          email: "agent@example.com",
+          password: "secret",
+        }),
+      );
+      assert.equal(loginResponse.status, 503);
+      assert.deepEqual(await responseJson(loginResponse), {
+        error: "license issuance unavailable",
+      });
+      assert.equal(loginDb.licenses.length, 0);
+
+      Reflect.set(
+        process.env,
+        "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64",
+        "malformed signing key",
+      );
+      const refreshDb = useFakeDb();
+      const active = await makeUser({ id: "refresh-order-user" });
+      refreshDb.users.push(active);
+      const originalHash = refreshHash("refresh-before-signing-error");
+      const license = seedLicense({
+        id: "refresh-order-license",
+        user_id: active.id,
+        refresh_token_hash: originalHash,
+      });
+      const refresh = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+        "license/refresh",
+      );
+
+      const refreshResponse = await refresh.POST(
+        jsonRequest("/api/license/refresh", {
+          refresh_token: "refresh-before-signing-error",
+        }),
+      );
+      assert.equal(refreshResponse.status, 503);
+      assert.deepEqual(await responseJson(refreshResponse), {
+        error: "license issuance unavailable",
+      });
+      assert.equal(license.refresh_token_hash, originalHash);
+      assert.equal(license.last_used_at, null);
+    } finally {
+      console.error = previousConsoleError;
+      if (previousKey === undefined) {
+        Reflect.deleteProperty(process.env, "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64");
+      } else {
+        Reflect.set(
+          process.env,
+          "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64",
+          previousKey,
+        );
+      }
+    }
   });
 
   it("self-service license routes read and revoke only the caller's sessions", async () => {
@@ -1040,6 +1127,64 @@ describe("hosted route handlers", () => {
     assert.equal(db.memberships.some((membership) => membership.user_id === invitee.id), false);
   });
 
+  it("invitation accept returns a signed entitlement envelope", async () => {
+    const db = useFakeDb();
+    const invitee = await makeUser({
+      id: "signed-invitee",
+      email: "Signed.Invitee@Example.com",
+      entitlements: ["real_estate_sales", "real_estate_admin", "real_estate_sales"],
+    });
+    db.users.push(invitee);
+    const now = new Date().toISOString();
+    db.organizations.push({
+      id: "signed-invite-org",
+      slug: "signed-invite-org",
+      name: "Signed Invite Org",
+      stripe_customer: null,
+      tier: "pro",
+      status: "active",
+      current_period_end: null,
+      entitlements: ["real_estate_cma"],
+      seat_limit: 2,
+      created_at: now,
+      updated_at: now,
+    });
+    const token = "signed-invitation-token";
+    db.invitations.push({
+      id: "signed-invitation",
+      org_id: "signed-invite-org",
+      email: invitee.email,
+      role: "member",
+      token_hash: crypto.createHash("sha256").update(token).digest("hex"),
+      invited_by: null,
+      status: "pending",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      accepted_at: null,
+      accepted_user_id: null,
+      created_at: now,
+    });
+    const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "invitations/accept",
+    );
+
+    const response = await route.POST(
+      jsonRequest("/api/invitations/accept", { token }),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 200);
+    assert.equal(body.accepted, true);
+    assert.equal(db.invitations[0].status, "accepted");
+    assert.equal(db.memberships[0].user_id, invitee.id);
+    assertEntitlementEnvelope(body, {
+      sub: invitee.id,
+      license_id: "license-1",
+      email: invitee.email,
+      tier: "pro",
+      entitlements: ["real_estate_admin", "real_estate_cma", "real_estate_sales"],
+    });
+  });
+
   it("inactive invite accepts do not consume the invite or add membership", async () => {
     const db = useFakeDb();
     const admin = await makeUser({ id: "inactive-invite-admin", email: "inactive-invite-admin@example.com", role: "admin" });
@@ -1555,6 +1700,13 @@ describe("hosted route handlers", () => {
     assert.equal(pollBody.license_id, "license-1");
     assert.equal(db.device_grants[0].status, "claimed");
     assert.equal(db.device_grants[0].refresh_token_plain, null);
+    assertEntitlementEnvelope(pollBody, {
+      sub: user.id,
+      license_id: "license-1",
+      email: user.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
 
     const secondPoll = await poll.POST(
       jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
@@ -1720,6 +1872,13 @@ describe("hosted route handlers", () => {
       assert.deepEqual(acceptedBody.entitlements, ["real_estate_sales"]);
       assert.equal(db.licenses[0].device_label, "Admin Web");
       assert.equal(typeof db.login_codes[0].consumed_at, "string");
+      assertEntitlementEnvelope(acceptedBody, {
+        sub: user.id,
+        license_id: "license-1",
+        email: user.email,
+        tier: "pro",
+        entitlements: ["real_estate_sales"],
+      });
     } finally {
       if (previousNodeEnv === undefined) {
         Reflect.deleteProperty(process.env, "NODE_ENV");

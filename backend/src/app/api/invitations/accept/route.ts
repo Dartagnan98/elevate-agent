@@ -15,7 +15,11 @@ import {
   getMembership,
   listMembershipsForOrg,
 } from "@/lib/store";
-import { signAccessToken, generateRefreshToken, TTL } from "@/lib/jwt";
+import { signAccessToken, generateRefreshToken } from "@/lib/jwt";
+import {
+  createEntitlementEnvelope,
+  tryLoadEntitlementSigner,
+} from "@/lib/entitlement-assertion";
 
 export const runtime = "nodejs";
 
@@ -28,6 +32,7 @@ const Body = z.object({
 export async function POST(req: NextRequest) {
   const parsed = Body.safeParse(await req.json().catch(() => ({})));
   if (!parsed.success) return NextResponse.json({ error: "bad request" }, { status: 400 });
+  const password = parsed.data.password;
 
   const tokenHash = crypto.createHash("sha256").update(parsed.data.token).digest("hex");
   const inv = await findInvitationByTokenHash(tokenHash);
@@ -50,14 +55,23 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  if (!user && !password) {
+    return NextResponse.json(
+      { error: "password required to create account", needs_password: true, email: inv.email },
+      { status: 400 },
+    );
+  }
+
+  // Resolve the signer before creating a user, joining an org, or consuming
+  // the invitation so deployment mistakes cannot leave a partial acceptance.
+  const entitlementSigner = tryLoadEntitlementSigner();
+  if (!entitlementSigner) {
+    return NextResponse.json({ error: "license issuance unavailable" }, { status: 503 });
+  }
+
   if (!user) {
-    if (!parsed.data.password) {
-      return NextResponse.json(
-        { error: "password required to create account", needs_password: true, email: inv.email },
-        { status: 400 },
-      );
-    }
-    const password_hash = await bcrypt.hash(parsed.data.password, 12);
+    if (!password) throw new Error("validated invitation password is missing");
+    const password_hash = await bcrypt.hash(password, 12);
     user = await createUser({
       email: inv.email,
       password_hash,
@@ -90,14 +104,19 @@ export async function POST(req: NextRequest) {
     license_id: license.id,
   });
 
-  return NextResponse.json({
-    accepted: true,
+  const envelope = createEntitlementEnvelope({
     access_token: access,
     refresh_token: refresh.token,
+    sub: user.id,
     license_id: license.id,
+    email: user.email,
     tier: access_info.tier,
     entitlements: access_info.entitlements,
+  }, entitlementSigner);
+
+  return NextResponse.json({
+    accepted: true,
+    ...envelope,
     orgs: access_info.orgs,
-    expires_in: TTL.ACCESS_SECONDS,
   });
 }
