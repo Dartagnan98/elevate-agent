@@ -540,7 +540,7 @@ def _build_setup_note(
 
 
 def check_skills_requirements() -> bool:
-    """Skills are always available -- the directory is created on first use if needed."""
+    """Skills are always available; listing an absent directory returns empty."""
     return True
 
 
@@ -866,13 +866,12 @@ def skills_list(category: str = None, task_id: str = None) -> str:
     """
     try:
         if not SKILLS_DIR.exists():
-            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
             return json.dumps(
                 {
                     "success": True,
                     "skills": [],
                     "categories": [],
-                    "message": f"No skills found. Skills directory created at {display_elevate_home()}/skills/",
+                    "message": f"No skills found. Skills directory does not exist at {display_elevate_home()}/skills/",
                 },
                 ensure_ascii=False,
             )
@@ -1829,6 +1828,7 @@ registry.register(
     ),
     check_fn=check_skills_requirements,
     emoji="📚",
+    effects={"read:skills"},
 )
 def _skill_view_with_bump(args, **kw):
     """Invoke skill_view, then bump view_count on success. Best-effort: a

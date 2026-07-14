@@ -19,6 +19,14 @@ from tools.skills_tool import (
     skill_view,
     MAX_DESCRIPTION_LENGTH,
 )
+from tools.approval import (
+    Effect,
+    EffectKind,
+    ExecutionPolicy,
+    ExecutionPolicyMode,
+    authorize_effects,
+)
+from tools.registry import registry
 
 
 def _make_skill(
@@ -314,14 +322,72 @@ class TestFindAllSkills:
 
 
 class TestSkillsList:
-    def test_empty_creates_directory(self, tmp_path):
-        skills_dir = tmp_path / "skills"
+    def test_absent_root_returns_empty_without_filesystem_mutation(self, tmp_path):
+        skills_dir = tmp_path / "missing" / "skills"
+        before = set(tmp_path.rglob("*"))
+
         with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
             raw = skills_list()
+
         result = json.loads(raw)
         assert result["success"] is True
         assert result["skills"] == []
-        assert skills_dir.exists()
+        assert result["categories"] == []
+        assert not skills_dir.exists()
+        assert not (skills_dir / ".usage.json").exists()
+        assert set(tmp_path.rglob("*")) == before
+
+    def test_registry_declares_exact_read_skills_effect(self):
+        expected = frozenset({Effect.parse("read:skills")})
+
+        entry = registry.get_entry("skills_list")
+        assert entry is not None
+        assert entry.effects == expected
+        assert entry.effect_resolver is None
+        assert registry.get_effect_metadata("skills_list") == {
+            "declared": True,
+            "effects": expected,
+            "has_resolver": False,
+        }
+        resolved = registry.resolve_effects("skills_list", {})
+        assert resolved == expected
+
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode(
+                "turn-skills-list",
+                ExecutionPolicyMode.READ_ONLY,
+            ),
+            resolved,
+        )
+        assert decision.allowed is True
+        assert decision.requested_effects == expected
+        assert decision.denied_effects == frozenset()
+        assert decision.reason == "allowed"
+
+    def test_skill_view_remains_unknown_due_to_usage_writes(self):
+        unknown = frozenset({Effect(EffectKind.UNKNOWN)})
+
+        entry = registry.get_entry("skill_view")
+        assert entry is not None
+        assert entry.effects is None
+        assert entry.effect_resolver is None
+        assert registry.get_effect_metadata("skill_view") == {
+            "declared": False,
+            "effects": unknown,
+            "has_resolver": False,
+        }
+        resolved = registry.resolve_effects("skill_view", {"name": "example"})
+        assert resolved == unknown
+
+        decision = authorize_effects(
+            ExecutionPolicy.for_mode(
+                "turn-skill-view",
+                ExecutionPolicyMode.READ_ONLY,
+            ),
+            resolved,
+        )
+        assert decision.allowed is False
+        assert decision.reason == "unknown_effect"
 
     def test_lists_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
