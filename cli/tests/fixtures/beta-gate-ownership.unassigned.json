@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "gates": [
+    {
+      "gate_id": "ERB-107",
+      "gate_class": "P0",
+      "status": "UNASSIGNED",
+      "accountable_person": "UNASSIGNED",
+      "accountable_role": null,
+      "due_date": null,
+      "evidence_plan": null,
+      "evidence_artifact": null
+    }
+  ]
+}
