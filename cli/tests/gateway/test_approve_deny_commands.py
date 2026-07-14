@@ -471,6 +471,57 @@ class TestApproveCommand:
         assert "expired" in result.lower() or "no longer waiting" in result.lower()
         assert session_key not in runner._pending_approvals
 
+    @pytest.mark.asyncio
+    async def test_exact_beta_requires_and_resolves_the_displayed_request_id(
+        self,
+        monkeypatch,
+    ):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        first = _ApprovalEntry({"command": "first"})
+        second = _ApprovalEntry({"command": "second"})
+        _gateway_queues[session_key] = [first, second]
+
+        missing = await runner._handle_approve_command(_make_event("/approve"))
+        assert "request-id" in missing
+        assert not first.event.is_set()
+        assert not second.event.is_set()
+
+        result = await runner._handle_approve_command(
+            _make_event(f"/approve {second.request_id}")
+        )
+
+        assert "approved" in result.lower()
+        assert not first.event.is_set()
+        assert second.event.is_set()
+        assert second.result == "once"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scope", ["all", "session", "always"])
+    async def test_exact_beta_rejects_ambiguous_or_persistent_text_scope(
+        self,
+        monkeypatch,
+        scope,
+    ):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        runner = _make_runner()
+        session_key = runner._session_key_for_source(_make_source())
+        entry = _ApprovalEntry({"command": "danger"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(
+            _make_event(f"/approve {scope}")
+        )
+
+        assert "one identified command" in result
+        assert not entry.event.is_set()
+
 
 # ------------------------------------------------------------------
 # /deny command
@@ -522,6 +573,67 @@ class TestDenyCommand:
         runner = _make_runner()
         result = await runner._handle_deny_command(_make_event("/deny"))
         assert "No pending command" in result
+
+    @pytest.mark.asyncio
+    async def test_exact_beta_denies_only_the_displayed_request_id(self, monkeypatch):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        first = _ApprovalEntry({"command": "first"})
+        second = _ApprovalEntry({"command": "second"})
+        _gateway_queues[session_key] = [first, second]
+
+        result = await runner._handle_deny_command(
+            _make_event(f"/deny {second.request_id}")
+        )
+
+        assert "denied" in result.lower()
+        assert not first.event.is_set()
+        assert second.event.is_set()
+        assert second.result == "deny"
+
+
+class TestApprovalTextFallback:
+    def test_exact_beta_prints_request_specific_one_time_commands(self, monkeypatch):
+        from gateway.run import _gateway_approval_text_prompt
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        request_id = "0123456789abcdef0123456789abcdef"
+
+        message = _gateway_approval_text_prompt(
+            "rm -rf /important",
+            "destructive command",
+            request_id,
+        )
+
+        assert f"/approve {request_id}" in message
+        assert f"/deny {request_id}" in message
+        assert "/approve session" not in message
+        assert "/approve always" not in message
+
+    def test_exact_beta_missing_request_id_fails_closed(self, monkeypatch):
+        from gateway.run import _gateway_approval_text_prompt
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+        message = _gateway_approval_text_prompt("danger", "reason", "")
+
+        assert "secure request ID is missing" in message
+        assert "no command was approved" in message
+        assert "/approve" not in message
+
+    def test_non_exact_channel_keeps_stable_text_commands(self, monkeypatch):
+        from gateway.run import _gateway_approval_text_prompt
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+
+        message = _gateway_approval_text_prompt("danger", "reason", "")
+
+        assert "/approve session" in message
+        assert "/approve always" in message
 
 
 # ------------------------------------------------------------------

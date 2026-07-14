@@ -56,6 +56,7 @@ _UPDATE_AVAILABLE_DEFAULT_INTERVAL = 6 * 60 * 60
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 # Per-platform connect timeout used during startup/retry (overridable via env var).
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
+_APPROVAL_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
@@ -71,6 +72,43 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
         return f"/{sanitized}" if sanitized else match.group(0)
 
     return _TELEGRAM_COMMAND_MENTION_RE.sub(_replace, text)
+
+
+def _gateway_approval_text_prompt(
+    command: str,
+    description: str,
+    request_id: str,
+) -> str:
+    """Build a truthful text fallback for one dangerous-command request."""
+    cmd_preview = command[:200] + "..." if len(command) > 200 else command
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+    except Exception:
+        beta_active = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+    if beta_active:
+        if not _APPROVAL_REQUEST_ID_RE.fullmatch(request_id):
+            return (
+                "⚠️ This action needs approval, but its secure request ID is missing. "
+                "Ask the agent to retry the action; no command was approved."
+            )
+        return (
+            f"⚠️ **Dangerous command requires approval:**\n"
+            f"```\n{cmd_preview}\n```\n"
+            f"Reason: {description}\n\n"
+            f"Approve only this request with `/approve {request_id}` or deny it with "
+            f"`/deny {request_id}`."
+        )
+
+    return (
+        f"⚠️ **Dangerous command requires approval:**\n"
+        f"```\n{cmd_preview}\n```\n"
+        f"Reason: {description}\n\n"
+        f"Reply `/approve` to execute, `/approve session` to approve this pattern "
+        f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -11080,8 +11118,9 @@ class GatewayRunner:
         flow as the CLI's synchronous input() approval.
 
         Supports multiple concurrent approvals (parallel subagents,
-        execute_code).  ``/approve`` resolves the oldest pending command;
-        ``/approve all`` resolves every pending command at once.
+        execute_code). Realtor Beta requires the opaque request ID shown in
+        the prompt and only grants a one-time approval. Other release channels
+        retain the legacy FIFO/all/session/always syntax.
 
         Usage:
             /approve              — approve oldest pending command once
@@ -11104,24 +11143,43 @@ class GatewayRunner:
                 return "⚠️ Approval expired (agent is no longer waiting). Ask the agent to try again."
             return "No pending command to approve."
 
-        # Parse args: support "all", "all session", "all always", "session", "always"
-        args = event.get_command_args().strip().lower().split()
-        resolve_all = "all" in args
-        remaining = [a for a in args if a != "all"]
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
-        if any(a in ("always", "permanent", "permanently") for a in remaining):
-            choice = "always"
-            scope_msg = " (pattern approved permanently)"
-        elif any(a in ("session", "ses") for a in remaining):
-            choice = "session"
-            scope_msg = " (pattern approved for this session)"
-        else:
+        # Exact Beta resolves the opaque ID printed with one specific prompt.
+        # Stable retains its long-standing FIFO/all/session/always text syntax.
+        args = event.get_command_args().strip().lower().split()
+        request_id: str | None = None
+        if beta_provider_policy_active():
+            if len(args) != 1 or not _APPROVAL_REQUEST_ID_RE.fullmatch(args[0]):
+                return (
+                    "Realtor Beta approves one identified command at a time. "
+                    "Use the exact `/approve <request-id>` shown with that command."
+                )
+            request_id = args[0]
+            resolve_all = False
             choice = "once"
             scope_msg = ""
+        else:
+            resolve_all = "all" in args
+            remaining = [a for a in args if a != "all"]
+            if any(a in ("always", "permanent", "permanently") for a in remaining):
+                choice = "always"
+                scope_msg = " (pattern approved permanently)"
+            elif any(a in ("session", "ses") for a in remaining):
+                choice = "session"
+                scope_msg = " (pattern approved for this session)"
+            else:
+                choice = "once"
+                scope_msg = ""
 
-        count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        count = resolve_gateway_approval(
+            session_key,
+            choice,
+            resolve_all=resolve_all,
+            request_id=request_id,
+        )
         if not count:
-            return "No pending command to approve."
+            return "No matching pending command to approve."
 
         # Resume typing indicator — agent is about to continue processing.
         _adapter = self.adapters.get(source.platform)
@@ -11138,7 +11196,9 @@ class GatewayRunner:
         Signals blocked agent thread(s) with a 'deny' result so they receive
         a definitive BLOCKED message, same as the CLI deny flow.
 
-        ``/deny`` denies the oldest; ``/deny all`` denies everything.
+        Realtor Beta requires the opaque request ID shown in the prompt and
+        denies only that request. Other release channels retain the legacy
+        FIFO/all syntax.
         """
         source = event.source
         session_key = self._session_key_for_source(source)
@@ -11153,12 +11213,29 @@ class GatewayRunner:
                 return "❌ Command denied (approval was stale)."
             return "No pending command to deny."
 
-        args = event.get_command_args().strip().lower()
-        resolve_all = "all" in args
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
 
-        count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all)
+        args = event.get_command_args().strip().lower().split()
+        request_id: str | None = None
+        if beta_provider_policy_active():
+            if len(args) != 1 or not _APPROVAL_REQUEST_ID_RE.fullmatch(args[0]):
+                return (
+                    "Realtor Beta denies one identified command at a time. "
+                    "Use the exact `/deny <request-id>` shown with that command."
+                )
+            request_id = args[0]
+            resolve_all = False
+        else:
+            resolve_all = "all" in args
+
+        count = resolve_gateway_approval(
+            session_key,
+            "deny",
+            resolve_all=resolve_all,
+            request_id=request_id,
+        )
         if not count:
-            return "No pending command to deny."
+            return "No matching pending command to deny."
 
         # Resume typing indicator — agent continues (with BLOCKED result).
         _adapter = self.adapters.get(source.platform)
@@ -14009,14 +14086,7 @@ class GatewayRunner:
                         )
 
                 # Fallback: plain text approval prompt
-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
-                )
+                msg = _gateway_approval_text_prompt(cmd, desc, request_id)
                 try:
                     asyncio.run_coroutine_threadsafe(
                         _status_adapter.send(
