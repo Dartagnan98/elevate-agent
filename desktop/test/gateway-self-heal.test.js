@@ -55,12 +55,12 @@ test("desktop schedules gateway self-heal for adopted and spawned dashboards", (
 
   assert.equal(calls.length, 2);
   assert.ok(
-    block.indexOf("backend:already-ready") <
+    block.indexOf("backend:already-compatible") <
       block.indexOf("scheduleGatewaySelfHeal(launcher, baseEnv)"),
   );
   assert.ok(
     block.lastIndexOf("scheduleGatewaySelfHeal(launcher, baseEnv)") >
-      block.indexOf("backend:ready"),
+      block.indexOf("backend:compatible"),
   );
 });
 

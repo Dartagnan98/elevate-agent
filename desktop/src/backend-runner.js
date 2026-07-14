@@ -56,7 +56,7 @@ function createBackendRunner({
     };
 
     if (await backendMatchesDesktopMode()) {
-      markStartup("backend:already-ready");
+      markStartup("backend:already-compatible");
       scheduleGatewaySelfHeal(launcher, baseEnv);
       return true;
     }
@@ -83,15 +83,15 @@ function createBackendRunner({
       setOwnsBackend(false);
     });
 
-    const ready = await waitForBackend();
-    if (!ready) {
+    const compatible = await waitForBackend();
+    if (!compatible) {
       markStartup("backend:timeout-detail", await backendProbeSummary());
     }
-    markStartup(ready ? "backend:ready" : "backend:timeout");
+    markStartup(compatible ? "backend:compatible" : "backend:timeout");
 
     scheduleGatewaySelfHeal(launcher, baseEnv);
 
-    return ready;
+    return compatible;
   }
 
   return {

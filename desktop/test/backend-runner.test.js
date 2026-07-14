@@ -59,7 +59,7 @@ function makeRunner(overrides = {}) {
   return { launcher, marks, runner, state, timers };
 }
 
-test("backend runner schedules gateway self-heal for already-ready backend", async () => {
+test("backend runner schedules gateway self-heal for already-compatible backend", async () => {
   let healed = false;
   const { runner, timers } = makeRunner({
     alreadyReady: true,
