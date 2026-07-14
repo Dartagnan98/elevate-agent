@@ -317,6 +317,36 @@ def _materialize_agent_setup_secrets(items: List[Dict[str, Any]]) -> List[Dict[s
     return safe_items
 
 
+def _has_meaningful_setup_value(value: Any) -> bool:
+    """Return whether a submitted setup value carries an active selection.
+
+    Agent onboarding sends empty placeholders such as ``{"apiKey": "",
+    "usesEnvSecret": false}`` for optional cards.  Those placeholders are safe
+    to retain.  Provider names, ready statuses, secrets, existing-secret flags,
+    endpoints, and other non-empty nested values all describe an active setup
+    request and must be evaluated by the Beta policy before any writer runs.
+    """
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_has_meaningful_setup_value(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_meaningful_setup_value(item) for item in value)
+    return bool(value)
+
+
+def _beta_image_setup_requested(item: Dict[str, Any]) -> bool:
+    """Return whether ``model_image`` attempts generic provider setup."""
+    return (
+        bool(str(item.get("provider") or "").strip())
+        or str(item.get("status") or "missing").strip()
+        in {"configured", "connected", "manual"}
+        or _has_meaningful_setup_value(item.get("value"))
+    )
+
+
 def _preflight_beta_agent_setup_update(
     conn,
     items: List[Dict[str, Any]],
@@ -373,6 +403,17 @@ def _preflight_beta_agent_setup_update(
                         "Realtor Beta uses local memory without embedding-based recall."
                     ),
                 }
+            )
+        elif key == "model_image" and _beta_image_setup_requested(item):
+            # Image generation in Realtor Beta is a signed-pack capability,
+            # not a second inference-provider picker.  Reject the complete
+            # request before the generic secret materializer can translate a
+            # Gemini/OpenAI/Replicate selection into an inference credential.
+            raise BetaProviderPolicyError(
+                "Realtor Beta configures photo services through the active signed "
+                "realtor pack, not generic image-model providers or API keys in "
+                "Agent setup.",
+                code="beta_image_provider_not_allowed",
             )
         canonical_items.append(item)
 
