@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 const yaml = require("js-yaml");
 const { sanitizeFileName } = require("builder-util/out/filename");
 const asar = require("@electron/asar");
@@ -937,20 +938,81 @@ function assertBundleManifest(actual, expected, label) {
 function validateZipEntries(entries, appBundleName) {
   if (!Array.isArray(entries) || entries.length === 0) throw new Error("[candidate] ZIP has no entries");
   const seen = new Set();
-  for (const raw of entries) {
-    const entry = String(raw || "");
-    if (!entry || entry.includes("\\") || entry.startsWith("/") || entry.includes("\0")) {
-      throw new Error(`[candidate] unsafe ZIP entry: ${entry}`);
-    }
-    const parts = entry.split("/").filter(Boolean);
-    if (parts.some((part) => part === "..") || parts[0] !== appBundleName) {
-      throw new Error(`[candidate] ZIP entry escapes the expected app bundle: ${entry}`);
-    }
-    const normalized = parts.join("/");
-    if (seen.has(normalized)) throw new Error(`[candidate] duplicate ZIP entry: ${entry}`);
-    seen.add(normalized);
-  }
+  for (const raw of entries) validateZipEntry(raw, appBundleName, seen);
   return true;
+}
+
+function validateZipEntry(raw, appBundleName, seen) {
+  const entry = String(raw || "");
+  if (!entry || entry.includes("\\") || entry.startsWith("/") || entry.includes("\0")) {
+    throw new Error(`[candidate] unsafe ZIP entry: ${entry}`);
+  }
+  const parts = entry.split("/").filter(Boolean);
+  if (parts.some((part) => part === "..") || parts[0] !== appBundleName) {
+    throw new Error(`[candidate] ZIP entry escapes the expected app bundle: ${entry}`);
+  }
+  const normalized = parts.join("/");
+  if (seen.has(normalized)) throw new Error(`[candidate] duplicate ZIP entry: ${entry}`);
+  seen.add(normalized);
+}
+
+function validateZipEntryListing(listingPath, appBundleName) {
+  const fd = fs.openSync(listingPath, "r");
+  const decoder = new StringDecoder("utf8");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  const seen = new Set();
+  let pending = "";
+  let entryCount = 0;
+  const consume = (text, final = false) => {
+    pending += text;
+    const lines = pending.split("\n");
+    const tail = lines.pop();
+    pending = final ? "" : tail;
+    for (const line of lines) {
+      validateZipEntry(line.endsWith("\r") ? line.slice(0, -1) : line, appBundleName, seen);
+      entryCount += 1;
+    }
+    if (final && tail) {
+      validateZipEntry(tail.endsWith("\r") ? tail.slice(0, -1) : tail, appBundleName, seen);
+      entryCount += 1;
+    }
+  };
+  try {
+    let bytes = 0;
+    while ((bytes = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      consume(decoder.write(buffer.subarray(0, bytes)));
+    }
+    consume(decoder.end(), true);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (entryCount === 0) throw new Error("[candidate] ZIP has no entries");
+  return true;
+}
+
+function validateZipArchiveEntries(zipPath, appBundleName) {
+  const listingPath = path.join(os.tmpdir(), `elevate-zip-entries-${process.pid}-${crypto.randomUUID()}.txt`);
+  let outputFd = null;
+  try {
+    outputFd = fs.openSync(listingPath, "wx", 0o600);
+    const result = spawnSync("unzip", ["-Z1", zipPath], {
+      cwd: DESKTOP,
+      encoding: "utf8",
+      timeout: 120_000,
+      stdio: ["ignore", outputFd, "pipe"],
+    });
+    const completedOutputFd = outputFd;
+    outputFd = null;
+    fs.closeSync(completedOutputFd);
+    if (result?.status !== 0 || result?.error) {
+      const detail = `${result?.stderr || ""}\n${result?.error?.message || ""}`.trim();
+      throw new Error(`[candidate] unzip -Z1 ${zipPath} failed${detail ? `: ${detail}` : ""}`);
+    }
+    return validateZipEntryListing(listingPath, appBundleName);
+  } finally {
+    if (outputFd !== null) fs.closeSync(outputFd);
+    fs.rmSync(listingPath, { force: true });
+  }
 }
 
 function assertContainedSymlinks(root) {
@@ -973,8 +1035,7 @@ function assertContainedSymlinks(root) {
 }
 
 function verifyZipAppPayload(zipPath, appBundleName, expectedManifest) {
-  const list = requireRun("unzip", ["-Z1", zipPath], { timeout: 120_000 }).split("\n").filter(Boolean);
-  validateZipEntries(list, appBundleName);
+  validateZipArchiveEntries(zipPath, appBundleName);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-candidate-zip-"));
   try {
     requireRun("ditto", ["-x", "-k", zipPath, temp], { timeout: 600_000 });
@@ -1673,7 +1734,9 @@ module.exports = {
   sha256File,
   verifyAppAgainstReceipt,
   validateSmokeEvidence,
+  validateZipArchiveEntries,
   validateZipEntries,
+  validateZipEntryListing,
   verifyCandidateReceipt,
   verifyPreSignEvidence,
   verifySourceReceipt,

@@ -38,6 +38,7 @@ const {
   verifyReleaseArchive,
   verifySourceReceipt,
   validateFeed,
+  validateZipEntryListing,
   validateZipEntries,
   writeImmutableReceipt,
 } = require("../scripts/candidate-receipt");
@@ -504,6 +505,18 @@ test("ZIP extraction rejects traversal, absolute, foreign-root, and duplicate en
   ]) {
     assert.throws(() => validateZipEntries(entries, "Elevate Beta.app"), /(unsafe|escapes|duplicate)/);
   }
+});
+
+test("ZIP entry validation streams listings larger than spawnSync's default buffer", (t) => {
+  const root = temporaryDirectory(t);
+  const listing = path.join(root, "large-zip-listing.txt");
+  const entries = Array.from(
+    { length: 40_000 },
+    (_, index) => `Elevate Beta.app/Contents/Resources/runtime/file-${index.toString().padStart(5, "0")}.txt`,
+  );
+  fs.writeFileSync(listing, `${entries.join("\n")}\n`);
+  assert.ok(fs.statSync(listing).size > 1024 * 1024);
+  assert.equal(validateZipEntryListing(listing, "Elevate Beta.app"), true);
 });
 
 test("tampering with an immutable candidate receipt invalidates its ID", (t) => {
