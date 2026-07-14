@@ -2769,6 +2769,175 @@ def _load_leads_onboarding_memory_block() -> str:
         return ""
 
 
+def _resolve_beta_agent_construction(values: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return a fresh, closed Codex construction receipt for exact Beta."""
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+        validate_beta_config_for_persistence,
+    )
+
+    if not beta_provider_policy_active():
+        return None
+
+    def reject(message: str, code: str) -> None:
+        raise BetaProviderPolicyError(message, code=code)
+
+    # Pure preflight first: stale config, env, and direct-constructor inputs
+    # must fail before stdio/logging/tool/client/process initialization.
+    from elevate_cli.config import read_raw_config
+
+    raw_config = read_raw_config()
+    validate_beta_config_for_persistence(raw_config, {"logged_in": True})
+    canonical_beta_provider(values.get("provider"), source="AIAgent provider")
+    direct_model = str(values.get("model") or "").strip()
+    if direct_model:
+        beta_model_or_default(direct_model, source="AIAgent model")
+    env_provider = os.getenv("ELEVATE_INFERENCE_PROVIDER")
+    canonical_beta_provider(env_provider, source="ELEVATE_INFERENCE_PROVIDER")
+    env_model = os.getenv("ELEVATE_MODEL")
+    if env_model is not None:
+        beta_model_or_default(env_model, source="ELEVATE_MODEL")
+
+    canonical_url = BETA_CODEX_BASE_URL.rstrip("/")
+    for source, candidate in (
+        ("AIAgent base URL", values.get("base_url")),
+        ("ELEVATE_CODEX_BASE_URL", os.getenv("ELEVATE_CODEX_BASE_URL")),
+        ("OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL")),
+        ("OPENROUTER_BASE_URL", os.getenv("OPENROUTER_BASE_URL")),
+        ("CUSTOM_BASE_URL", os.getenv("CUSTOM_BASE_URL")),
+    ):
+        endpoint = str(candidate or "").strip().rstrip("/")
+        if endpoint and endpoint != canonical_url:
+            reject(
+                f"Realtor Beta does not allow {source} to replace the Codex endpoint.",
+                "beta_custom_endpoint_not_allowed",
+            )
+    if values.get("api_mode") not in (None, "", "codex_responses"):
+        reject(
+            "Realtor Beta requires the Codex Responses transport.",
+            "beta_api_mode_not_allowed",
+        )
+    if any(values.get(key) for key in ("acp_command", "command", "acp_args", "args")):
+        reject(
+            "Realtor Beta does not allow an external model process.",
+            "beta_external_process_not_allowed",
+        )
+    if values.get("credential_pool") is not None:
+        reject(
+            "Realtor Beta does not allow credential-pool routing.",
+            "beta_credential_pool_not_allowed",
+        )
+    if values.get("fallback_model") not in (None, "", [], {}):
+        reject(
+            "Realtor Beta does not allow model fallback.",
+            "beta_fallback_not_allowed",
+        )
+    routing_keys = (
+        "providers_allowed",
+        "providers_ignored",
+        "providers_order",
+        "provider_sort",
+        "provider_require_parameters",
+        "provider_data_collection",
+        "openrouter_min_coding_score",
+    )
+    if any(values.get(key) not in (None, False, "", [], ()) for key in routing_keys):
+        reject(
+            "Realtor Beta does not allow OpenRouter provider-routing controls.",
+            "beta_provider_routing_not_allowed",
+        )
+
+    model_config = raw_config.get("model") if isinstance(raw_config, dict) else None
+    configured_model = ""
+    if isinstance(model_config, dict):
+        configured_model = str(
+            model_config.get("default") or model_config.get("model") or ""
+        ).strip()
+    canonical_model = beta_model_or_default(
+        direct_model or str(env_model or "").strip() or configured_model,
+        source="AIAgent effective model",
+    )
+    request_overrides = values.get("request_overrides")
+    if request_overrides is None:
+        safe_overrides: Dict[str, Any] = {}
+    elif type(request_overrides) is dict:  # exact dict: no executable mapping proxy
+        safe_overrides = dict(request_overrides)
+    else:
+        reject(
+            "Realtor Beta request overrides must be a plain mapping.",
+            "beta_request_overrides_not_allowed",
+        )
+    if safe_overrides:
+        from elevate_cli.models import resolve_fast_mode_overrides
+
+        if safe_overrides != resolve_fast_mode_overrides(canonical_model):
+            reject(
+                "Realtor Beta request overrides cannot replace model/provider payload.",
+                "beta_request_overrides_not_allowed",
+            )
+
+    # Final, fresh current-profile resolution. Nothing below this call may
+    # reuse caller credentials or transport data.
+    from elevate_cli.runtime_provider import resolve_runtime_provider
+
+    resolved_runtime = resolve_runtime_provider(
+        requested=BETA_ALLOWED_PROVIDER,
+        target_model=canonical_model,
+    )
+    if not isinstance(resolved_runtime, dict):
+        reject(
+            "Realtor Beta could not verify a current-profile Codex runtime.",
+            "beta_codex_runtime_not_local",
+        )
+    runtime = dict(resolved_runtime)
+    expected_auth_store = (get_elevate_home() / "auth.json").expanduser().resolve()
+    try:
+        runtime_auth_store = Path(str(runtime.get("auth_store") or "")).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        runtime_auth_store = Path()
+    if (
+        runtime.get("provider") != BETA_ALLOWED_PROVIDER
+        or runtime.get("requested_provider") != BETA_ALLOWED_PROVIDER
+        or runtime.get("api_mode") != "codex_responses"
+        or str(runtime.get("base_url") or "").rstrip("/") != canonical_url
+        or runtime.get("source") != "elevate-auth-store"
+        or runtime_auth_store != expected_auth_store
+        or not str(runtime.get("api_key") or "").strip()
+    ):
+        reject(
+            "Realtor Beta could not verify a current-profile Codex runtime.",
+            "beta_codex_runtime_not_local",
+        )
+    forbidden_receipt_keys = {
+        "credential_pool",
+        "fallback_model",
+        "fallback_providers",
+        "command",
+        "args",
+        "request_overrides",
+    }
+    if forbidden_receipt_keys.intersection(runtime):
+        reject(
+            "Realtor Beta Codex runtime included a forbidden routing escape hatch.",
+            "beta_codex_runtime_not_local",
+        )
+    caller_key = str(values.get("api_key") or "").strip()
+    if caller_key and caller_key != str(runtime["api_key"]).strip():
+        reject(
+            "Realtor Beta rejected stale or non-profile model credentials.",
+            "beta_explicit_credentials_not_allowed",
+        )
+
+    runtime["model"] = canonical_model
+    runtime["request_overrides"] = safe_overrides
+    return runtime
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -2900,6 +3069,44 @@ class AIAgent:
                 into the system prompt. Use this for batch processing and data generation to avoid
                 polluting trajectories with user-specific persona or project instructions.
         """
+        _beta_runtime = _resolve_beta_agent_construction(
+            {
+                "provider": provider,
+                "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
+                "api_mode": api_mode,
+                "acp_command": acp_command,
+                "acp_args": acp_args,
+                "command": command,
+                "args": args,
+                "fallback_model": fallback_model,
+                "credential_pool": credential_pool,
+                "providers_allowed": providers_allowed,
+                "providers_ignored": providers_ignored,
+                "providers_order": providers_order,
+                "provider_sort": provider_sort,
+                "provider_require_parameters": provider_require_parameters,
+                "provider_data_collection": provider_data_collection,
+                "openrouter_min_coding_score": openrouter_min_coding_score,
+                "request_overrides": request_overrides,
+            }
+        )
+        if _beta_runtime is not None:
+            provider = _beta_runtime["provider"]
+            model = _beta_runtime["model"]
+            base_url = _beta_runtime["base_url"]
+            api_key = _beta_runtime["api_key"]
+            api_mode = _beta_runtime["api_mode"]
+            request_overrides = _beta_runtime["request_overrides"]
+            acp_command = command = None
+            acp_args = args = []
+            fallback_model = credential_pool = None
+            providers_allowed = providers_ignored = providers_order = None
+            provider_sort = provider_data_collection = None
+            provider_require_parameters = False
+            openrouter_min_coding_score = None
+
         _install_safe_stdio()
 
         self.model = model
