@@ -14,6 +14,15 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_PROVIDER,
+    BETA_CODEX_BASE_URL,
+    BetaProviderPolicyError,
+    beta_provider_policy_active,
+    read_beta_codex_auth_status,
+)
+from elevate_constants import get_elevate_home
+
 
 RequireToken = Callable[[Request], None]
 _log = logging.getLogger(__name__)
@@ -235,6 +244,44 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
 )
 
 
+def _oauth_provider_catalog_for_request() -> tuple[Dict[str, Any], ...]:
+    """Return the exact OAuth catalog allowed by the active release lane."""
+    if not beta_provider_policy_active():
+        return _OAUTH_PROVIDER_CATALOG
+    return tuple(
+        provider
+        for provider in _OAUTH_PROVIDER_CATALOG
+        if provider["id"] == BETA_ALLOWED_PROVIDER
+    )
+
+
+def _require_beta_oauth_provider(provider_id: str) -> None:
+    """Reject non-Codex Beta OAuth paths before they can inspect or mutate state."""
+    if not beta_provider_policy_active() or provider_id == BETA_ALLOWED_PROVIDER:
+        return
+    error = BetaProviderPolicyError(
+        "Realtor Beta OAuth supports only OpenAI Codex.",
+        code="beta_provider_not_allowed",
+    )
+    raise HTTPException(status_code=409, detail=error.as_detail())
+
+
+def _beta_codex_oauth_status() -> Dict[str, Any]:
+    """Read only the nonsymlinked current-home Codex provider state."""
+    raw = read_beta_codex_auth_status(get_elevate_home())
+    logged_in = bool(raw.get("logged_in"))
+    return {
+        "logged_in": logged_in,
+        "source": raw.get("source"),
+        "source_label": "Current Realtor Beta profile",
+        "token_preview": "",
+        "expires_at": None,
+        "has_refresh_token": logged_in,
+        "auth_store": raw.get("auth_store"),
+        "reason": raw.get("reason"),
+    }
+
+
 def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
     """Dispatch to the right status helper for an OAuth provider entry."""
     if status_fn is not None:
@@ -340,6 +387,7 @@ def _gc_oauth_sessions() -> None:
 
 def _new_oauth_session(provider_id: str, flow: str) -> tuple[str, Dict[str, Any]]:
     """Create and register a new OAuth session."""
+    _require_beta_oauth_provider(provider_id)
     sid = secrets.token_urlsafe(16)
     sess = {
         "session_id": sid,
@@ -484,6 +532,7 @@ def _submit_anthropic_pkce(session_id: str, code_input: str) -> Dict[str, Any]:
 
 async def _start_device_code_flow(provider_id: str) -> Dict[str, Any]:
     """Initiate a device-code flow."""
+    _require_beta_oauth_provider(provider_id)
     if provider_id == "nous":
         from elevate_cli.auth import _request_device_code, PROVIDER_REGISTRY
         import httpx
@@ -613,6 +662,84 @@ def _nous_poller(session_id: str) -> None:
             sess["error_message"] = str(e)
 
 
+def _add_codex_pool_credential(
+    access_token: str,
+    refresh_token: str,
+    *,
+    base_url: str,
+) -> None:
+    """Preserve the existing dashboard credential-pool compatibility entry."""
+    from agent.credential_pool import (
+        AUTH_TYPE_OAUTH,
+        SOURCE_MANUAL,
+        PooledCredential,
+        load_pool,
+    )
+    import uuid as _uuid
+
+    entry = PooledCredential(
+        provider="openai-codex",
+        id=_uuid.uuid4().hex[:6],
+        label="dashboard device_code",
+        auth_type=AUTH_TYPE_OAUTH,
+        priority=0,
+        source=f"{SOURCE_MANUAL}:dashboard_device_code",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        base_url=base_url,
+    )
+    load_pool("openai-codex").add_entry(entry)
+
+
+def _persist_codex_device_credentials(
+    access_token: str,
+    refresh_token: str,
+) -> str:
+    """Persist device credentials to the authority used by the active lane."""
+    from elevate_cli.auth import DEFAULT_CODEX_BASE_URL
+
+    beta_active = beta_provider_policy_active()
+    if beta_active:
+        if not refresh_token:
+            raise RuntimeError("token exchange did not return refresh_token")
+        from elevate_cli.auth import _save_codex_tokens
+
+        # Beta runtime deliberately ignores pool-only credentials. Persist the
+        # current-home provider state first so readiness and runtime resolution
+        # consume the same authority.
+        _save_codex_tokens(
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            },
+            clear_device_code_suppression=True,
+        )
+        base_url = BETA_CODEX_BASE_URL
+        # Retain a pool entry for compatibility, but it is supplemental in
+        # Beta and must never make an otherwise successful provider-state save
+        # appear to have failed.
+        try:
+            _add_codex_pool_credential(
+                access_token,
+                refresh_token,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            _log.warning("beta codex pool compatibility add failed: %s", exc)
+        return base_url
+
+    base_url = (
+        os.getenv("ELEVATE_CODEX_BASE_URL", "").strip().rstrip("/")
+        or DEFAULT_CODEX_BASE_URL
+    )
+    _add_codex_pool_credential(
+        access_token,
+        refresh_token,
+        base_url=base_url,
+    )
+    return base_url
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow."""
     try:
@@ -620,7 +747,6 @@ def _codex_full_login_worker(session_id: str) -> None:
         from elevate_cli.auth import (
             CODEX_OAUTH_CLIENT_ID,
             CODEX_OAUTH_TOKEN_URL,
-            DEFAULT_CODEX_BASE_URL,
         )
         issuer = "https://auth.openai.com"
 
@@ -697,30 +823,7 @@ def _codex_full_login_worker(session_id: str) -> None:
         if not access_token:
             raise RuntimeError("token exchange did not return access_token")
 
-        from agent.credential_pool import (
-            PooledCredential,
-            load_pool,
-            AUTH_TYPE_OAUTH,
-            SOURCE_MANUAL,
-        )
-        import uuid as _uuid
-        pool = load_pool("openai-codex")
-        base_url = (
-            os.getenv("ELEVATE_CODEX_BASE_URL", "").strip().rstrip("/")
-            or DEFAULT_CODEX_BASE_URL
-        )
-        entry = PooledCredential(
-            provider="openai-codex",
-            id=_uuid.uuid4().hex[:6],
-            label="dashboard device_code",
-            auth_type=AUTH_TYPE_OAUTH,
-            priority=0,
-            source=f"{SOURCE_MANUAL}:dashboard_device_code",
-            access_token=access_token,
-            refresh_token=refresh_token,
-            base_url=base_url,
-        )
-        pool.add_entry(entry)
+        _persist_codex_device_credentials(access_token, refresh_token)
         with _oauth_sessions_lock:
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
@@ -745,8 +848,13 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
     @router.get("/api/providers/oauth")
     async def list_oauth_providers():
         providers = []
-        for p in _OAUTH_PROVIDER_CATALOG:
-            status = _resolve_provider_status(p["id"], p.get("status_fn"))
+        beta_active = beta_provider_policy_active()
+        for p in _oauth_provider_catalog_for_request():
+            status = (
+                _beta_codex_oauth_status()
+                if beta_active
+                else _resolve_provider_status(p["id"], p.get("status_fn"))
+            )
             providers.append({
                 "id": p["id"],
                 "name": p["name"],
@@ -760,8 +868,9 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
     @router.delete("/api/providers/oauth/{provider_id}")
     async def disconnect_oauth_provider(provider_id: str, request: Request):
         require_token(request)
+        _require_beta_oauth_provider(provider_id)
 
-        valid_ids = {p["id"] for p in _OAUTH_PROVIDER_CATALOG}
+        valid_ids = {p["id"] for p in _oauth_provider_catalog_for_request()}
         if provider_id not in valid_ids:
             raise HTTPException(
                 status_code=400,
@@ -796,8 +905,9 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
     @router.post("/api/providers/oauth/{provider_id}/start")
     async def start_oauth_login(provider_id: str, request: Request):
         require_token(request)
+        _require_beta_oauth_provider(provider_id)
         _gc_oauth_sessions()
-        valid = {p["id"] for p in _OAUTH_PROVIDER_CATALOG}
+        valid = {p["id"] for p in _oauth_provider_catalog_for_request()}
         if provider_id not in valid:
             raise HTTPException(status_code=400, detail=f"Unknown provider {provider_id}")
         catalog_entry = next(p for p in _OAUTH_PROVIDER_CATALOG if p["id"] == provider_id)
@@ -821,6 +931,7 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
     @router.post("/api/providers/oauth/{provider_id}/submit")
     async def submit_oauth_code(provider_id: str, body: OAuthSubmitBody, request: Request):
         require_token(request)
+        _require_beta_oauth_provider(provider_id)
         if provider_id in {"anthropic", "claude-code"}:
             return await asyncio.get_event_loop().run_in_executor(
                 None, _submit_anthropic_pkce, body.session_id, body.code,
@@ -829,6 +940,7 @@ def create_oauth_router(*, require_token: RequireToken) -> APIRouter:
 
     @router.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
     async def poll_oauth_session(provider_id: str, session_id: str):
+        _require_beta_oauth_provider(provider_id)
         with _oauth_sessions_lock:
             sess = _oauth_sessions.get(session_id)
         if not sess:
