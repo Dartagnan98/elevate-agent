@@ -4,8 +4,10 @@ Anchors on (a) the lane's best-performing existing template and (b) the
 agent's voice from ~/.elevate/SOUL.md or the configured brand profile, so
 the candidate sounds like the user — not generic LLM output.
 
-Falls back to a minimal heuristic variant if no Anthropic key is configured,
-so the approval queue is still populated for manual editing.
+Outside the exact Realtor Beta channel, a missing Anthropic key falls back to
+a minimal heuristic variant for manual editing. Exact Beta instead uses the
+current profile's canonical Codex auxiliary boundary and fails visibly without
+persisting when that boundary cannot return a terminal, parseable completion.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ def _anthropic_key() -> str | None:
 
 
 def _heuristic_variant(lane: str, anchor: dict[str, Any] | None) -> dict[str, Any]:
-    """Fallback when no LLM key — light shuffle of the anchor template."""
+    """Non-Beta fallback when no LLM key — light shuffle of the anchor."""
     base = anchor["body"] if anchor else "Hey {first_name}, quick one — what's the next thing you're trying to figure out?"
     name = f"Variant {random.randint(100, 999)}"
     return {
@@ -92,6 +94,46 @@ def _call_anthropic(*, system: str, user: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return None
+
+
+def _call_beta_codex(*, system: str, user: str) -> dict[str, Any]:
+    """Use the exact-Beta auxiliary boundary and require a terminal receipt."""
+    from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BetaProviderPolicyError,
+    )
+
+    try:
+        response = call_llm(
+            task="outreach_template",
+            provider=BETA_ALLOWED_PROVIDER,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=MAX_TOKENS,
+            timeout=TIMEOUT,
+        )
+        choice = response.choices[0]
+        finish_reason = str(getattr(choice, "finish_reason", "") or "").strip().lower()
+        tool_calls = getattr(choice.message, "tool_calls", None)
+        if finish_reason != "stop" or tool_calls:
+            raise ValueError(
+                f"non-terminal outreach completion ({finish_reason or 'missing'})"
+            )
+        text = extract_content_or_reasoning(response).strip()
+        if not text:
+            raise ValueError("empty outreach completion")
+    except BetaProviderPolicyError:
+        raise
+    except Exception as exc:
+        raise BetaProviderPolicyError(
+            "Realtor Beta could not complete a current-profile Codex outreach "
+            "suggestion. No template was saved.",
+            code="beta_outreach_generation_failed",
+        ) from exc
+    return {"text": text}
 
 
 def _parse_llm_output(text: str) -> dict[str, str] | None:
@@ -176,12 +218,28 @@ def suggest_variant(
     )
     user = "\n\n".join(user_parts)
 
-    llm = _call_anthropic(system=system, user=user)
+    from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
+        beta_provider_policy_active,
+    )
+
+    beta_active = beta_provider_policy_active()
+    llm = (
+        _call_beta_codex(system=system, user=user)
+        if beta_active
+        else _call_anthropic(system=system, user=user)
+    )
     parsed: dict[str, str] | None = None
     if llm and llm.get("text"):
         parsed = _parse_llm_output(llm["text"])
 
     if not parsed:
+        if beta_active:
+            raise BetaProviderPolicyError(
+                "Realtor Beta received an invalid Codex outreach suggestion. "
+                "No template was saved.",
+                code="beta_outreach_completion_invalid",
+            )
         return _heuristic_variant(lane, anchor)
 
     return {

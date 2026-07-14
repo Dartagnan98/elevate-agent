@@ -6,6 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
 
 class OutreachTemplateCreate(BaseModel):
     lane: str
@@ -108,6 +110,8 @@ def create_outreach_templates_router(*, log: logging.Logger | None = None) -> AP
                 extra_brief=body.extraBrief,
             )
             return {"template": saved}
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=503, detail=exc.as_detail())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:

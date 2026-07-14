@@ -368,3 +368,374 @@ def test_non_exact_beta_channels_preserve_legacy_constructor(
     assert agent._fallback_model == fallback
     assert agent.providers_allowed == ["provider-a"]
     assert agent.request_overrides == {"model": "legacy-override"}
+
+
+def _switch_state(agent) -> tuple:
+    compressor = getattr(agent, "context_compressor", None)
+    return (
+        agent.model,
+        agent.provider,
+        agent.base_url,
+        agent.api_mode,
+        agent.api_key,
+        agent.client,
+        dict(agent._client_kwargs),
+        dict(agent._primary_runtime),
+        list(agent._fallback_chain),
+        agent._fallback_model,
+        agent._credential_pool,
+        dict(getattr(agent, "_transport_cache", {})),
+        getattr(compressor, "model", None),
+        getattr(compressor, "base_url", None),
+        getattr(compressor, "api_key", None),
+        getattr(compressor, "provider", None),
+        getattr(compressor, "api_mode", None),
+        getattr(compressor, "context_length", None),
+        getattr(compressor, "threshold_tokens", None),
+        getattr(agent, "_anthropic_client", None),
+        getattr(agent, "_anthropic_api_key", None),
+        getattr(agent, "_anthropic_base_url", None),
+        getattr(agent, "_is_anthropic_oauth", None),
+        getattr(agent, "_bedrock_region", None),
+        getattr(agent, "acp_command", None),
+        list(getattr(agent, "acp_args", []) or []),
+    )
+
+
+def test_beta_switch_freshly_resolves_current_profile_before_client(
+    beta_agent, monkeypatch
+):
+    agent = beta_agent.build()
+    old_client = agent.client
+    beta_agent.created.clear()
+    events: list[str] = []
+
+    def resolve(**kwargs):
+        events.append("resolve")
+        assert kwargs == {
+            "requested": "openai-codex",
+            "target_model": "gpt-5.4",
+        }
+        return _runtime(beta_agent.home, token="rotated-profile-token")
+
+    new_client = MagicMock()
+
+    def openai(**kwargs):
+        events.append("client")
+        beta_agent.created.append(dict(kwargs))
+        return new_client
+
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider", resolve
+    )
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length", lambda *_args, **_kwargs: 200_000
+    )
+
+    agent.switch_model(
+        "gpt-5.4",
+        "openai-codex",
+        base_url=BETA_CODEX_BASE_URL,
+        api_mode="codex_responses",
+    )
+
+    assert events == ["resolve", "client"]
+    assert agent.model == "gpt-5.4"
+    assert agent.provider == "openai-codex"
+    assert agent.base_url == BETA_CODEX_BASE_URL
+    assert agent.api_mode == "codex_responses"
+    assert agent.api_key == "rotated-profile-token"
+    assert agent.client is new_client
+    assert agent._client_kwargs["api_key"] == "rotated-profile-token"
+    assert agent._client_kwargs["base_url"] == BETA_CODEX_BASE_URL
+    assert agent._fallback_chain == []
+    assert agent._fallback_model is None
+    assert agent._anthropic_client is None
+    assert agent._anthropic_api_key == ""
+    assert agent._anthropic_base_url == ""
+    assert agent._is_anthropic_oauth is False
+    assert agent.acp_command is None
+    assert agent.acp_args == []
+    old_client.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "kwargs,code",
+    [
+        ({"new_provider": "copilot-acp"}, "beta_provider_not_allowed"),
+        ({"new_model": "evil/model"}, "beta_model_not_allowed"),
+        (
+            {"base_url": "https://openrouter.ai/api/v1"},
+            "beta_custom_endpoint_not_allowed",
+        ),
+        ({"api_mode": "anthropic_messages"}, "beta_api_mode_not_allowed"),
+        ({"api_key": "foreign-token"}, "beta_explicit_credentials_not_allowed"),
+    ],
+)
+def test_beta_switch_rejects_hostile_arguments_without_mutation_or_client(
+    beta_agent, monkeypatch, kwargs, code
+):
+    agent = beta_agent.build()
+    old_client = agent.client
+    before = _switch_state(agent)
+    openai = MagicMock()
+    anthropic = MagicMock()
+    copilot = MagicMock()
+    popen = MagicMock()
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+    monkeypatch.setattr("agent.anthropic_adapter.build_anthropic_client", anthropic)
+    monkeypatch.setattr("agent.copilot_acp_client.CopilotACPClient", copilot)
+    monkeypatch.setattr("agent.copilot_acp_client.subprocess.Popen", popen)
+
+    switch_kwargs = {
+        "new_model": "gpt-5.5",
+        "new_provider": "openai-codex",
+        "base_url": BETA_CODEX_BASE_URL,
+        "api_mode": "codex_responses",
+    }
+    switch_kwargs.update(kwargs)
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        agent.switch_model(**switch_kwargs)
+
+    assert exc.value.code == code
+    assert _switch_state(agent) == before
+    openai.assert_not_called()
+    anthropic.assert_not_called()
+    copilot.assert_not_called()
+    popen.assert_not_called()
+    old_client.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "attribute,value,code",
+    [
+        ("acp_command", "copilot", "beta_external_process_not_allowed"),
+        ("_credential_pool", object(), "beta_credential_pool_not_allowed"),
+        (
+            "_fallback_chain",
+            [{"provider": "anthropic", "model": "claude"}],
+            "beta_fallback_not_allowed",
+        ),
+        ("providers_order", ["openrouter"], "beta_provider_routing_not_allowed"),
+        (
+            "request_overrides",
+            {"provider": {"order": ["openrouter"]}},
+            "beta_request_overrides_not_allowed",
+        ),
+        ("provider", "copilot-acp", "beta_provider_not_allowed"),
+        ("base_url", "acp://copilot", "beta_custom_endpoint_not_allowed"),
+        ("api_mode", "anthropic_messages", "beta_api_mode_not_allowed"),
+    ],
+)
+def test_beta_switch_rejects_hostile_live_routing_state_before_client(
+    beta_agent, monkeypatch, attribute, value, code
+):
+    agent = beta_agent.build()
+    setattr(agent, attribute, value)
+    old_client = agent.client
+    before = _switch_state(agent)
+    openai = MagicMock()
+    copilot = MagicMock()
+    popen = MagicMock()
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+    monkeypatch.setattr("agent.copilot_acp_client.CopilotACPClient", copilot)
+    monkeypatch.setattr("agent.copilot_acp_client.subprocess.Popen", popen)
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        agent.switch_model(
+            "gpt-5.5",
+            "openai-codex",
+            base_url=BETA_CODEX_BASE_URL,
+            api_mode="codex_responses",
+        )
+
+    assert exc.value.code == code
+    assert _switch_state(agent) == before
+    openai.assert_not_called()
+    copilot.assert_not_called()
+    popen.assert_not_called()
+    old_client.close.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "attribute,value,code",
+    [
+        ("_anthropic_client", object(), "beta_alternate_client_not_allowed"),
+        ("_anthropic_api_key", "sk-ant-planted", "beta_alternate_client_not_allowed"),
+        (
+            "_anthropic_base_url",
+            "https://api.anthropic.com",
+            "beta_alternate_client_not_allowed",
+        ),
+        ("_is_anthropic_oauth", True, "beta_alternate_client_not_allowed"),
+        ("_bedrock_region", "us-east-1", "beta_alternate_client_not_allowed"),
+        (
+            "_client_kwargs",
+            {"command": "copilot", "args": ["--acp"]},
+            "beta_external_process_not_allowed",
+        ),
+        (
+            "_primary_runtime",
+            {
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "base_url": BETA_CODEX_BASE_URL,
+                "api_mode": "codex_responses",
+                "anthropic_api_key": "planted",
+            },
+            "beta_alternate_client_not_allowed",
+        ),
+    ],
+)
+def test_beta_switch_rejects_planted_alternate_client_state(
+    beta_agent, monkeypatch, attribute, value, code
+):
+    agent = beta_agent.build()
+    setattr(agent, attribute, value)
+    before = _switch_state(agent)
+    old_client = agent.client
+    openai = MagicMock()
+    anthropic = MagicMock()
+    copilot = MagicMock()
+    popen = MagicMock()
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+    monkeypatch.setattr("agent.anthropic_adapter.build_anthropic_client", anthropic)
+    monkeypatch.setattr("agent.copilot_acp_client.CopilotACPClient", copilot)
+    monkeypatch.setattr("agent.copilot_acp_client.subprocess.Popen", popen)
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        agent.switch_model("gpt-5.5", "openai-codex")
+
+    assert exc.value.code == code
+    assert _switch_state(agent) == before
+    openai.assert_not_called()
+    anthropic.assert_not_called()
+    copilot.assert_not_called()
+    popen.assert_not_called()
+    old_client.close.assert_not_called()
+
+
+def test_beta_switch_revalidates_raw_config_before_runtime_resolution(
+    beta_agent, monkeypatch
+):
+    agent = beta_agent.build()
+    old_client = agent.client
+    before = _switch_state(agent)
+    beta_agent.home.joinpath("config.yaml").write_text(
+        "model:\n  provider: anthropic\n  default: gpt-5.5\n",
+        encoding="utf-8",
+    )
+    resolver = MagicMock(return_value=_runtime(beta_agent.home))
+    openai = MagicMock()
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider", resolver
+    )
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        agent.switch_model("gpt-5.5", "openai-codex")
+
+    assert exc.value.code == "beta_provider_not_allowed"
+    assert _switch_state(agent) == before
+    resolver.assert_not_called()
+    openai.assert_not_called()
+    old_client.close.assert_not_called()
+
+
+def test_beta_switch_client_failure_preserves_prior_runtime(beta_agent, monkeypatch):
+    agent = beta_agent.build()
+    old_client = agent.client
+    before = _switch_state(agent)
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kwargs: _runtime(beta_agent.home, token="rotated-profile-token"),
+    )
+    monkeypatch.setattr(
+        run_agent,
+        "OpenAI",
+        MagicMock(side_effect=RuntimeError("client construction failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        agent.switch_model("gpt-5.4", "openai-codex")
+
+    assert _switch_state(agent) == before
+    old_client.close.assert_not_called()
+
+
+def test_beta_switch_rolls_back_and_closes_new_client_on_refresh_failure(
+    beta_agent, monkeypatch
+):
+    agent = beta_agent.build()
+    old_client = agent.client
+    new_client = MagicMock()
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider",
+        lambda **_kwargs: _runtime(beta_agent.home, token="rotated-profile-token"),
+    )
+    monkeypatch.setattr(run_agent, "OpenAI", MagicMock(return_value=new_client))
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length", lambda *_args, **_kwargs: 200_000
+    )
+    monkeypatch.setattr(
+        agent.context_compressor,
+        "update_model",
+        MagicMock(side_effect=RuntimeError("compressor refresh failed")),
+    )
+    before = _switch_state(agent)
+
+    with pytest.raises(RuntimeError, match="compressor refresh failed"):
+        agent.switch_model("gpt-5.4", "openai-codex")
+
+    assert _switch_state(agent) == before
+    new_client.close.assert_called_once_with()
+    old_client.close.assert_not_called()
+
+
+def test_exported_switch_helper_uses_same_beta_sink_guard(beta_agent, monkeypatch):
+    from agent import agent_runtime_helpers
+
+    agent = beta_agent.build()
+    before = _switch_state(agent)
+    openai = MagicMock()
+    monkeypatch.setattr(run_agent, "OpenAI", openai)
+
+    with pytest.raises(BetaProviderPolicyError) as exc:
+        agent_runtime_helpers.switch_model(
+            agent,
+            "gpt-5.5",
+            "copilot-acp",
+            base_url="acp://copilot",
+        )
+
+    assert exc.value.code == "beta_provider_not_allowed"
+    assert _switch_state(agent) == before
+    openai.assert_not_called()
+
+
+def test_non_exact_beta_switch_preserves_legacy_path(beta_agent, monkeypatch):
+    agent = beta_agent.build()
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+    resolver = MagicMock(side_effect=AssertionError("non-exact channel resolved Beta"))
+    monkeypatch.setattr(
+        "elevate_cli.runtime_provider.resolve_runtime_provider", resolver
+    )
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length", lambda *_args, **_kwargs: 100_000
+    )
+
+    agent.switch_model(
+        "legacy/model",
+        "openrouter",
+        api_key="legacy-key",
+        base_url="https://openrouter.ai/api/v1",
+        api_mode="chat_completions",
+    )
+
+    resolver.assert_not_called()
+    assert agent.model == "legacy/model"
+    assert agent.provider == "openrouter"
+    assert agent.api_key == "legacy-key"
+    assert agent.base_url == "https://openrouter.ai/api/v1"
+    assert agent.api_mode == "chat_completions"

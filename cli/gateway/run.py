@@ -624,7 +624,7 @@ _elevate_home = get_elevate_home()
 
 # Load environment variables from ~/.elevate/.env first.
 # User-managed env files should override stale shell exports on restart.
-from dotenv import load_dotenv  # backward-compat for tests that monkeypatch this symbol
+from dotenv import load_dotenv  # noqa: E402,F401 - test monkeypatch compatibility
 from elevate_cli.env_loader import load_elevate_dotenv
 _env_path = _elevate_home / '.env'
 load_elevate_dotenv(elevate_home=_elevate_home, project_env=Path(__file__).resolve().parents[1] / '.env')
@@ -12540,6 +12540,7 @@ class GatewayRunner:
             *,
             partial_text: str = "",
             api_calls: int = 0,
+            error_code: str | None = None,
         ) -> Dict[str, Any]:
             partial_text = partial_text.strip()
             return {
@@ -12554,7 +12555,21 @@ class GatewayRunner:
                 "failed": True,
                 "partial": bool(partial_text),
                 "error": error,
+                "error_code": error_code,
             }
+
+        proxy_url = self._get_proxy_url()
+        if proxy_url:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                return _proxy_failure(
+                    "Realtor Beta blocked remote gateway proxy inference because "
+                    "the remote service cannot prove that it used this profile's "
+                    "canonical OpenAI Codex runtime. Remove GATEWAY_PROXY_URL or "
+                    "gateway.proxy_url and retry locally.",
+                    error_code="beta_gateway_proxy_not_allowed",
+                )
 
         try:
             from aiohttp import ClientSession as _AioClientSession, ClientTimeout
@@ -12563,7 +12578,6 @@ class GatewayRunner:
                 "Proxy mode requires aiohttp. Install with: pip install aiohttp"
             )
 
-        proxy_url = self._get_proxy_url()
         if not proxy_url:
             return _proxy_failure(
                 "Proxy URL not configured (GATEWAY_PROXY_URL or gateway.proxy_url)"
@@ -13304,9 +13318,7 @@ class GatewayRunner:
             # Re-read .env and config for fresh credentials (gateway is long-lived,
             # keys may change without restart).
             try:
-                load_dotenv(_env_path, override=True, encoding="utf-8")
-            except UnicodeDecodeError:
-                load_dotenv(_env_path, override=True, encoding="latin-1")
+                _reload_runtime_env_preserving_config_authority()
             except Exception:
                 pass
 

@@ -1320,6 +1320,18 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     change persists across turns (unlike fallback which is
     turn-scoped).
     """
+    beta_runtime = _ra()._resolve_beta_agent_switch(
+        agent,
+        new_model,
+        new_provider,
+        api_key=api_key,
+        base_url=base_url,
+        api_mode=api_mode,
+    )
+    if beta_runtime is not None:
+        _ra()._apply_beta_agent_switch(agent, beta_runtime)
+        return
+
     from elevate_cli.providers import determine_api_mode
 
     # ── Determine api_mode if not provided ──

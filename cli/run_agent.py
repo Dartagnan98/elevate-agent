@@ -2938,6 +2938,325 @@ def _resolve_beta_agent_construction(values: Dict[str, Any]) -> Optional[Dict[st
     return runtime
 
 
+def _resolve_beta_agent_switch(
+    agent: Any,
+    new_model: Any,
+    new_provider: Any,
+    *,
+    api_key: Any = "",
+    base_url: Any = "",
+    api_mode: Any = "",
+) -> Optional[Dict[str, Any]]:
+    """Return a fresh Codex receipt for an exact-Beta in-place switch.
+
+    The live agent's routing state is part of the preflight.  This prevents a
+    plugin or future direct caller from planting an ACP process, credential
+    pool, fallback, or provider-routing override and then using an otherwise
+    canonical switch request to carry that state forward.
+    """
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    if not beta_provider_policy_active():
+        return None
+
+    current_provider = getattr(agent, "provider", "")
+    current_model = getattr(agent, "model", "")
+    current_base_url = str(getattr(agent, "base_url", "") or "").strip().rstrip("/")
+    current_api_mode = str(getattr(agent, "api_mode", "") or "").strip()
+    canonical_beta_provider(current_provider, source="current AIAgent provider")
+    beta_model_or_default(current_model, source="current AIAgent model")
+    if current_base_url and current_base_url != BETA_CODEX_BASE_URL.rstrip("/"):
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected a non-Codex live-agent endpoint.",
+            code="beta_custom_endpoint_not_allowed",
+        )
+    if current_api_mode and current_api_mode != "codex_responses":
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected a non-Codex live-agent transport.",
+            code="beta_api_mode_not_allowed",
+        )
+
+    alternate_client_state = (
+        getattr(agent, "_anthropic_client", None) is not None
+        or bool(getattr(agent, "_anthropic_api_key", ""))
+        or bool(getattr(agent, "_anthropic_base_url", ""))
+        or bool(getattr(agent, "_is_anthropic_oauth", False))
+        or bool(getattr(agent, "_bedrock_region", ""))
+    )
+    live_client = getattr(agent, "client", None)
+    live_client_type = (
+        f"{type(live_client).__module__}.{type(live_client).__name__}".lower()
+        if live_client is not None
+        else ""
+    )
+    if alternate_client_state or any(
+        marker in live_client_type
+        for marker in (
+            "copilot_acp_client",
+            "claude_code_cli_client",
+            "gemini_cloudcode_adapter",
+            "gemini_native_adapter",
+        )
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected planted alternate-client state.",
+            code="beta_alternate_client_not_allowed",
+        )
+
+    live_client_kwargs = getattr(agent, "_client_kwargs", {})
+    if type(live_client_kwargs) is not dict:
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected non-canonical live client state.",
+            code="beta_alternate_client_not_allowed",
+        )
+    if any(live_client_kwargs.get(key) for key in ("command", "args")) or str(
+        live_client_kwargs.get("base_url") or ""
+    ).startswith(("acp://", "acp+tcp://", "claude-code-cli://", "cloudcode-pa://")):
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected live external-process client state.",
+            code="beta_external_process_not_allowed",
+        )
+    live_client_url = str(live_client_kwargs.get("base_url") or "").rstrip("/")
+    if live_client_url and live_client_url != BETA_CODEX_BASE_URL.rstrip("/"):
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected a non-Codex live client endpoint.",
+            code="beta_custom_endpoint_not_allowed",
+        )
+
+    primary_runtime = getattr(agent, "_primary_runtime", {})
+    if type(primary_runtime) is not dict:
+        raise BetaProviderPolicyError(
+            "Realtor Beta rejected non-canonical primary runtime state.",
+            code="beta_alternate_client_not_allowed",
+        )
+    if primary_runtime:
+        if primary_runtime.get("provider") != BETA_ALLOWED_PROVIDER:
+            raise BetaProviderPolicyError(
+                "Realtor Beta rejected an alternate primary runtime provider.",
+                code="beta_provider_not_allowed",
+            )
+        beta_model_or_default(
+            primary_runtime.get("model"), source="current primary runtime model"
+        )
+        primary_url = str(primary_runtime.get("base_url") or "").rstrip("/")
+        if primary_url != BETA_CODEX_BASE_URL.rstrip("/"):
+            raise BetaProviderPolicyError(
+                "Realtor Beta rejected an alternate primary runtime endpoint.",
+                code="beta_custom_endpoint_not_allowed",
+            )
+        if primary_runtime.get("api_mode") != "codex_responses":
+            raise BetaProviderPolicyError(
+                "Realtor Beta rejected an alternate primary runtime transport.",
+                code="beta_api_mode_not_allowed",
+            )
+        forbidden_primary_keys = {
+            "anthropic_api_key",
+            "anthropic_base_url",
+            "is_anthropic_oauth",
+            "command",
+            "args",
+            "credential_pool",
+            "fallback_model",
+            "fallback_providers",
+        }
+        if forbidden_primary_keys.intersection(primary_runtime):
+            raise BetaProviderPolicyError(
+                "Realtor Beta rejected alternate-client primary runtime state.",
+                code="beta_alternate_client_not_allowed",
+            )
+
+    fallback_state = (
+        getattr(agent, "_fallback_chain", None)
+        or getattr(agent, "_fallback_model", None)
+    )
+    return _resolve_beta_agent_construction(
+        {
+            "provider": new_provider or current_provider,
+            "model": new_model or current_model,
+            "base_url": base_url or current_base_url,
+            "api_key": api_key,
+            "api_mode": api_mode or current_api_mode,
+            "acp_command": getattr(agent, "acp_command", None),
+            "acp_args": getattr(agent, "acp_args", None),
+            "fallback_model": fallback_state,
+            "credential_pool": getattr(agent, "_credential_pool", None),
+            "providers_allowed": getattr(agent, "providers_allowed", None),
+            "providers_ignored": getattr(agent, "providers_ignored", None),
+            "providers_order": getattr(agent, "providers_order", None),
+            "provider_sort": getattr(agent, "provider_sort", None),
+            "provider_require_parameters": getattr(
+                agent, "provider_require_parameters", False
+            ),
+            "provider_data_collection": getattr(
+                agent, "provider_data_collection", None
+            ),
+            "openrouter_min_coding_score": getattr(
+                agent, "openrouter_min_coding_score", None
+            ),
+            "request_overrides": getattr(agent, "request_overrides", None),
+        }
+    )
+
+
+def _apply_beta_agent_switch(agent: Any, runtime: Dict[str, Any]) -> None:
+    """Transactionally install a validated exact-Beta Codex runtime."""
+    new_model = runtime["model"]
+    new_provider = runtime["provider"]
+    new_base_url = runtime["base_url"]
+    new_api_key = runtime["api_key"]
+    new_api_mode = runtime["api_mode"]
+
+    client_kwargs: Dict[str, Any] = {
+        "api_key": new_api_key,
+        "base_url": new_base_url,
+    }
+    request_timeout = get_provider_request_timeout(new_provider, new_model)
+    if request_timeout is not None:
+        client_kwargs["timeout"] = request_timeout
+
+    # Keep a shallow snapshot of the agent plus the compressor's scalar state.
+    # Exact Beta replaces, rather than mutates, routing dictionaries below, so
+    # restoring these snapshots leaves the pre-switch runtime byte-for-byte
+    # reachable if client construction or compressor refresh fails.
+    agent_snapshot = dict(agent.__dict__)
+    compressor = getattr(agent, "context_compressor", None)
+    compressor_snapshot = (
+        dict(compressor.__dict__)
+        if compressor is not None and hasattr(compressor, "__dict__")
+        else None
+    )
+    new_client = None
+
+    try:
+        # The fresh current-profile receipt is resolved immediately before this
+        # first client side effect.  No caller key, endpoint, or process data is
+        # reused.
+        new_client = agent._create_openai_client(
+            dict(client_kwargs),
+            reason="switch_model_beta",
+            shared=True,
+        )
+        use_prompt_caching, use_native_cache_layout = (
+            agent._anthropic_prompt_cache_policy(
+                provider=new_provider,
+                base_url=new_base_url,
+                api_mode=new_api_mode,
+                model=new_model,
+            )
+        )
+
+        new_context_length = None
+        if compressor is not None:
+            from agent.model_metadata import get_model_context_length
+
+            new_context_length = get_model_context_length(
+                new_model,
+                base_url=new_base_url,
+                api_key=new_api_key,
+                provider=new_provider,
+                config_context_length=None,
+            )
+
+        old_model = getattr(agent, "model", "")
+        old_provider = getattr(agent, "provider", "")
+        agent.model = new_model
+        agent.provider = new_provider
+        agent.base_url = new_base_url
+        agent.api_mode = new_api_mode
+        agent.api_key = new_api_key
+        agent._client_kwargs = dict(client_kwargs)
+        agent.client = new_client
+        agent._anthropic_client = None
+        agent._anthropic_api_key = ""
+        agent._anthropic_base_url = ""
+        agent._is_anthropic_oauth = False
+        agent._bedrock_region = None
+        agent.acp_command = None
+        agent.acp_args = []
+        if hasattr(agent, "_transport_cache"):
+            agent._transport_cache = {}
+        agent._use_prompt_caching = use_prompt_caching
+        agent._use_native_cache_layout = use_native_cache_layout
+        agent._config_context_length = None
+
+        if compressor is not None:
+            compressor.update_model(
+                model=new_model,
+                context_length=new_context_length,
+                base_url=new_base_url,
+                api_key=new_api_key,
+                provider=new_provider,
+                api_mode=new_api_mode,
+            )
+
+        agent._cached_system_prompt = None
+        agent._primary_runtime = {
+            "model": new_model,
+            "provider": new_provider,
+            "base_url": new_base_url,
+            "api_mode": new_api_mode,
+            "api_key": new_api_key,
+            "client_kwargs": dict(client_kwargs),
+            "use_prompt_caching": use_prompt_caching,
+            "use_native_cache_layout": use_native_cache_layout,
+            "compressor_model": getattr(compressor, "model", new_model),
+            "compressor_base_url": getattr(compressor, "base_url", new_base_url),
+            "compressor_api_key": getattr(compressor, "api_key", ""),
+            "compressor_provider": getattr(compressor, "provider", new_provider),
+            "compressor_context_length": getattr(compressor, "context_length", 0),
+            "compressor_threshold_tokens": getattr(
+                compressor, "threshold_tokens", 0
+            ),
+        }
+        agent._fallback_activated = False
+        agent._fallback_index = 0
+        agent._fallback_chain = []
+        agent._fallback_model = None
+    except Exception:
+        agent.__dict__.clear()
+        agent.__dict__.update(agent_snapshot)
+        if compressor_snapshot is not None:
+            compressor.__dict__.clear()
+            compressor.__dict__.update(compressor_snapshot)
+        if new_client is not None and new_client is not agent_snapshot.get("client"):
+            try:
+                close = getattr(new_client, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+        raise
+
+    old_client = agent_snapshot.get("client")
+    if old_client is not None and old_client is not new_client:
+        try:
+            agent._close_openai_client(
+                old_client,
+                reason="replace:switch_model_beta",
+                shared=True,
+            )
+        except Exception as exc:
+            # Closing a replaced transport is best-effort and happens only
+            # after the canonical runtime commit.  A close failure must never
+            # roll the live agent back onto the stale client.
+            logging.debug("Replaced Beta client close failed: %s", exc)
+
+    logging.info(
+        "Model switched in-place under Realtor Beta policy: %s (%s) -> %s (%s)",
+        old_model,
+        old_provider,
+        new_model,
+        new_provider,
+    )
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -4512,6 +4831,18 @@ class AIAgent:
         change persists across turns (unlike fallback which is
         turn-scoped).
         """
+        beta_runtime = _resolve_beta_agent_switch(
+            self,
+            new_model,
+            new_provider,
+            api_key=api_key,
+            base_url=base_url,
+            api_mode=api_mode,
+        )
+        if beta_runtime is not None:
+            _apply_beta_agent_switch(self, beta_runtime)
+            return
+
         from elevate_cli.providers import determine_api_mode
 
         # ── Determine api_mode if not provided ──

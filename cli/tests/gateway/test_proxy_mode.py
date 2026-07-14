@@ -1,8 +1,10 @@
 """Tests for gateway proxy mode — forwarding messages to a remote API server."""
 
-import asyncio
+import inspect
 import json
 import os
+import sys
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +13,7 @@ from gateway.config import Platform, StreamingConfig
 from gateway.platforms.base import resolve_proxy_url
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
+import gateway.run as gateway_run
 
 
 def _make_runner(proxy_url=None):
@@ -570,6 +573,135 @@ class TestRunAgentViaProxy:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "hello"
+
+
+class TestBetaProxyContainment:
+    @pytest.mark.parametrize("source_kind", ["environment", "profile-config"])
+    @pytest.mark.asyncio
+    async def test_exact_beta_blocks_proxy_before_prompt_network_or_client(
+        self, monkeypatch, source_kind
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("GATEWAY_PROXY_KEY", "hostile-remote-key")
+        if source_kind == "environment":
+            monkeypatch.setenv("GATEWAY_PROXY_URL", "https://attacker.invalid")
+            config = {"gateway": {"proxy_url": "https://ignored.invalid"}}
+        else:
+            monkeypatch.delenv("GATEWAY_PROXY_URL", raising=False)
+            config = {"gateway": {"proxy_url": "https://attacker.invalid"}}
+
+        session_constructor = MagicMock(
+            side_effect=AssertionError("Beta must fail before an HTTP client exists")
+        )
+        runner = _make_runner()
+        secret_prompt = "private client history must stay local"
+        with patch("gateway.run._load_gateway_config", return_value=config):
+            with patch("aiohttp.ClientSession", session_constructor):
+                result = await runner._run_agent_via_proxy(
+                    message="new private request",
+                    context_prompt="private system prompt",
+                    history=[{"role": "user", "content": secret_prompt}],
+                    source=_make_source(),
+                    session_id="beta-session",
+                )
+
+        session_constructor.assert_not_called()
+        assert result["error_code"] == "beta_gateway_proxy_not_allowed"
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["api_calls"] == 0
+        assert result["messages"] == []
+        assert secret_prompt not in json.dumps(result)
+        assert "this profile's canonical OpenAI Codex" in result["final_response"]
+
+    @pytest.mark.asyncio
+    async def test_non_exact_beta_proxy_behavior_is_unchanged(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        response = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                b'data: {"choices":[{"delta":{"content":"remote ok"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            ],
+        )
+        session = _FakeSession(response)
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(session):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await _make_runner()._run_agent_via_proxy(
+                        message="hello",
+                        context_prompt="",
+                        history=[],
+                        source=_make_source(),
+                        session_id="non-exact-beta",
+                    )
+
+        assert session.captured_url == "http://host:8642/v1/chat/completions"
+        assert result["completed"] is True
+        assert result["final_response"] == "remote ok"
+
+    @pytest.mark.asyncio
+    async def test_normal_gateway_entrypoint_fails_before_aiagent_or_http(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "https://attacker.invalid")
+        http_constructor = MagicMock(
+            side_effect=AssertionError("Beta must not create an HTTP client")
+        )
+        agent_constructor = MagicMock(
+            side_effect=AssertionError("proxy policy failure must precede AIAgent")
+        )
+        fake_run_agent = ModuleType("run_agent")
+        fake_run_agent.AIAgent = agent_constructor
+        monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with patch("aiohttp.ClientSession", http_constructor):
+                result = await _make_runner()._run_agent(
+                    message="private request",
+                    context_prompt="private system prompt",
+                    history=[{"role": "user", "content": "private history"}],
+                    source=_make_source(),
+                    session_id="beta-session",
+                    session_key="beta-key",
+                )
+
+        http_constructor.assert_not_called()
+        agent_constructor.assert_not_called()
+        assert result["error_code"] == "beta_gateway_proxy_not_allowed"
+        assert result["failed"] is True
+        assert result["completed"] is False
+        assert result["api_calls"] == 0
+        assert result["messages"] == []
+
+
+def test_gateway_per_turn_env_reload_preserves_exact_beta_launch_identity(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "beta-home"
+    home.mkdir()
+    (home / ".env").write_text(
+        "ELEVATE_HOME=/tmp/hostile-stable-home\n"
+        "ELEVATE_RELEASE_CHANNEL=latest\n"
+        "ANTHROPIC_API_KEY=rotated-tool-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gateway_run, "_elevate_home", home)
+    monkeypatch.setenv("ELEVATE_HOME", str(home))
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    gateway_run._reload_runtime_env_preserving_config_authority()
+
+    assert os.environ["ELEVATE_HOME"] == str(home)
+    assert os.environ["ELEVATE_RELEASE_CHANNEL"] == "beta"
+    assert os.environ["ANTHROPIC_API_KEY"] == "rotated-tool-key"
+    run_agent_source = inspect.getsource(GatewayRunner._run_agent)
+    assert "_reload_runtime_env_preserving_config_authority()" in run_agent_source
+    assert "load_dotenv(" not in run_agent_source
 
 
 class TestEnvVarRegistration:
