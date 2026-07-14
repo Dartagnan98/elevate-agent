@@ -259,6 +259,9 @@ CREATE TABLE IF NOT EXISTS prompt_receipts (
     client_message_id TEXT NOT NULL,
     assistant_message_id TEXT NOT NULL,
     payload_json TEXT NOT NULL,
+    accepted_policy_json TEXT,
+    effective_policy_json TEXT,
+    policy_revision INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     owner_id TEXT,
     created_at REAL NOT NULL,
@@ -2274,7 +2277,49 @@ class SessionDB:
         except (json.JSONDecodeError, TypeError):
             receipt["payload"] = {}
             receipt.pop("payload_json", None)
+        for json_key, decoded_key in (
+            ("accepted_policy_json", "accepted_policy"),
+            ("effective_policy_json", "effective_policy"),
+        ):
+            raw_policy = receipt.pop(json_key, None)
+            if raw_policy is None:
+                receipt[decoded_key] = None
+                continue
+            try:
+                decoded_policy = json.loads(raw_policy)
+            except (json.JSONDecodeError, TypeError):
+                decoded_policy = None
+            receipt[decoded_key] = (
+                decoded_policy if isinstance(decoded_policy, dict) else None
+            )
         return receipt
+
+    @staticmethod
+    def _canonical_prompt_policy(
+        policy: Any,
+        *,
+        client_message_id: str,
+    ) -> Tuple[Any, str]:
+        """Validate a policy snapshot and return its object and stable JSON."""
+        from tools.approval import ExecutionPolicy
+
+        if isinstance(policy, ExecutionPolicy):
+            restored = policy
+        elif isinstance(policy, dict):
+            restored = ExecutionPolicy.from_dict(policy)
+        else:
+            raise TypeError("accepted-turn policy must be ExecutionPolicy or dict")
+        if restored.accepted_turn_id != client_message_id:
+            raise ValueError(
+                "execution policy accepted_turn_id must match client_message_id"
+            )
+        policy_dict = restored.to_dict()
+        return restored, json.dumps(
+            policy_dict,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
     def prepare_prompt_receipt(
         self,
@@ -2284,6 +2329,7 @@ class SessionDB:
         assistant_message_id: str,
         client_message_id: str,
         payload: Dict[str, Any],
+        accepted_policy: Any = None,
     ) -> Dict[str, Any]:
         """Atomically persist a user row and a pending execution receipt.
 
@@ -2294,6 +2340,13 @@ class SessionDB:
         """
         if not client_message_id or not assistant_message_id:
             raise ValueError("client and assistant message ids are required")
+
+        accepted_policy_json = None
+        if accepted_policy is not None:
+            _, accepted_policy_json = self._canonical_prompt_policy(
+                accepted_policy,
+                client_message_id=client_message_id,
+            )
 
         stored_content = self._encode_content(transcript_content)
         # Keep the exact visible prompt alongside the canonical execution
@@ -2376,13 +2429,16 @@ class SessionDB:
             conn.execute(
                 "INSERT INTO prompt_receipts "
                 "(session_id, client_message_id, assistant_message_id, payload_json, "
+                "accepted_policy_json, effective_policy_json, policy_revision, "
                 "status, owner_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', NULL, ?, ?)",
                 (
                     session_id,
                     client_message_id,
                     assistant_message_id,
                     payload_json,
+                    accepted_policy_json,
+                    accepted_policy_json,
                     now,
                     now,
                 ),
@@ -2415,6 +2471,119 @@ class SessionDB:
         receipt = self._decode_prompt_receipt(row)
         receipt["inserted"] = receipt_inserted
         return receipt
+
+    def get_prompt_receipt(
+        self,
+        session_id: str,
+        client_message_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return one receipt by its stable accepted-turn identity."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+        return self._decode_prompt_receipt(row) if row is not None else None
+
+    def narrow_prompt_receipt_policy(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        expected_revision: int,
+        narrowed_policy: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """CAS-narrow the effective policy of a pending or running receipt.
+
+        The accepted policy is immutable. A stale revision, missing receipt,
+        terminal receipt, or legacy receipt without a policy returns ``None``.
+        Invalid policies and widening attempts raise rather than mutating the
+        durable row.
+        """
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise TypeError("expected_revision must be an integer")
+        if expected_revision < 0:
+            raise ValueError("expected_revision cannot be negative")
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT * FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if (
+                row["status"] not in {"pending", "running"}
+                or row["policy_revision"] != expected_revision
+                or row["accepted_policy_json"] is None
+                or row["effective_policy_json"] is None
+            ):
+                return None
+
+            try:
+                accepted_policy_data = json.loads(row["accepted_policy_json"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("stored accepted execution policy is invalid") from exc
+            try:
+                current_policy_data = json.loads(row["effective_policy_json"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ValueError("stored effective execution policy is invalid") from exc
+            accepted_policy, _ = self._canonical_prompt_policy(
+                accepted_policy_data,
+                client_message_id=client_message_id,
+            )
+            current_policy, _ = self._canonical_prompt_policy(
+                current_policy_data,
+                client_message_id=client_message_id,
+            )
+            validated_current = accepted_policy.narrow(
+                current_policy.allowed_effects,
+                mode=current_policy.mode,
+            )
+            if validated_current != current_policy:
+                raise ValueError(
+                    "stored effective execution policy exceeds accepted policy"
+                )
+            candidate_policy, candidate_json = self._canonical_prompt_policy(
+                narrowed_policy,
+                client_message_id=client_message_id,
+            )
+            for ceiling in (accepted_policy, current_policy):
+                validated_policy = ceiling.narrow(
+                    candidate_policy.allowed_effects,
+                    mode=candidate_policy.mode,
+                )
+                if validated_policy != candidate_policy:
+                    raise ValueError(
+                        "candidate execution policy is not a valid narrowing"
+                    )
+
+            now = time.time()
+            cursor = conn.execute(
+                "UPDATE prompt_receipts SET effective_policy_json = ?, "
+                "policy_revision = policy_revision + 1, updated_at = ? "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "AND policy_revision = ? AND status IN ('pending', 'running')",
+                (
+                    candidate_json,
+                    now,
+                    session_id,
+                    client_message_id,
+                    expected_revision,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return conn.execute(
+                "SELECT * FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+
+        row = self._execute_write(_do)
+        return self._decode_prompt_receipt(row) if row is not None else None
 
     def claim_prompt_receipt(
         self,

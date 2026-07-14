@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -842,6 +842,35 @@ class ExecutionPolicy:
             accepted_turn_id=accepted_turn_id,
             mode=normalized_mode,
             allowed_effects=_POLICY_MODE_CEILINGS[normalized_mode],
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the canonical, versioned persistence representation."""
+        return {
+            "schema_version": 1,
+            "accepted_turn_id": self.accepted_turn_id,
+            "mode": self.mode.value,
+            "allowed_effects": sorted(str(effect) for effect in self.allowed_effects),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ExecutionPolicy":
+        """Restore and validate a persisted accepted-turn policy."""
+        if not isinstance(data, Mapping):
+            raise TypeError("execution policy must be a mapping")
+        if data.get("schema_version") != 1:
+            raise ValueError(
+                f"Unsupported execution policy schema: {data.get('schema_version')!r}"
+            )
+        allowed_effects = data.get("allowed_effects")
+        if not isinstance(allowed_effects, list) or not all(
+            isinstance(effect, str) for effect in allowed_effects
+        ):
+            raise ValueError("execution policy allowed_effects must be a list of strings")
+        return cls(
+            accepted_turn_id=data.get("accepted_turn_id"),
+            mode=data.get("mode"),
+            allowed_effects=normalize_effects(allowed_effects),
         )
 
     def narrow(

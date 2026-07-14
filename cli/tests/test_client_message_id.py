@@ -6,12 +6,18 @@ stable id minted at append time; legacy rows hydrate with a deterministic
 (telegram/yuanbao) is never confused with ours.
 """
 
+import json
 import sqlite3
 import time
 
 import pytest
 
 from elevate_state import SessionDB
+from tools.approval import (
+    ExecutionPolicy,
+    ExecutionPolicyMode,
+    PolicyWideningError,
+)
 
 
 @pytest.fixture()
@@ -86,6 +92,246 @@ class TestAppendMessageMint:
 
 
 class TestPromptReceipt:
+    def test_policy_round_trips_with_atomic_receipt_prepare(self, db):
+        db.create_session(session_id="s1", source="tui")
+        policy = ExecutionPolicy.for_mode("user-policy", ExecutionPolicyMode.PLAN)
+
+        receipt = db.prepare_prompt_receipt(
+            "s1",
+            "inspect the deal",
+            assistant_message_id="assistant-policy",
+            client_message_id="user-policy",
+            payload={"text": "inspect the deal"},
+            accepted_policy=policy,
+        )
+
+        expected = policy.to_dict()
+        assert receipt["accepted_policy"] == expected
+        assert receipt["effective_policy"] == expected
+        assert receipt["policy_revision"] == 0
+        assert db.get_prompt_receipt("s1", "user-policy") == {
+            key: value for key, value in receipt.items() if key != "inserted"
+        }
+        recovered = db.get_recoverable_prompt_receipt("s1")
+        assert recovered["accepted_policy"] == expected
+        assert recovered["effective_policy"] == expected
+
+        raw = db._conn.execute(
+            "SELECT accepted_policy_json, effective_policy_json "
+            "FROM prompt_receipts WHERE session_id = ? AND client_message_id = ?",
+            ("s1", "user-policy"),
+        ).fetchone()
+        assert raw["accepted_policy_json"] == raw["effective_policy_json"]
+
+    def test_policy_identity_mismatch_rolls_back_entire_prepare(self, db):
+        db.create_session(session_id="s1", source="tui")
+        policy = ExecutionPolicy.for_mode("another-turn", ExecutionPolicyMode.PLAN)
+
+        with pytest.raises(ValueError, match="must match client_message_id"):
+            db.prepare_prompt_receipt(
+                "s1",
+                "inspect the deal",
+                assistant_message_id="assistant-policy",
+                client_message_id="user-policy",
+                payload={"text": "inspect the deal"},
+                accepted_policy=policy,
+            )
+
+        assert db.get_messages("s1") == []
+        assert _receipt_count(db, "s1") == 0
+
+    def test_retry_cannot_replace_original_policy(self, db):
+        db.create_session(session_id="s1", source="tui")
+        original = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.READ_ONLY)
+        replacement = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+
+        first = db.prepare_prompt_receipt(
+            "s1",
+            "inspect",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "inspect"},
+            accepted_policy=original,
+        )
+        duplicate = db.prepare_prompt_receipt(
+            "s1",
+            "inspect",
+            assistant_message_id="assistant-ignored",
+            client_message_id="user-1",
+            payload={"text": "inspect"},
+            accepted_policy=replacement,
+        )
+
+        assert first["accepted_policy"] == original.to_dict()
+        assert duplicate["inserted"] is False
+        assert duplicate["accepted_policy"] == original.to_dict()
+        assert duplicate["effective_policy"] == original.to_dict()
+        assert duplicate["policy_revision"] == 0
+
+    def test_policy_cas_narrows_effective_policy_only(self, db):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+        db.prepare_prompt_receipt(
+            "s1",
+            "prepare a plan",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "prepare a plan"},
+            accepted_policy=accepted,
+        )
+        narrowed = accepted.narrow({"read"}, mode=ExecutionPolicyMode.PLAN)
+
+        updated = db.narrow_prompt_receipt_policy(
+            "s1",
+            "user-1",
+            expected_revision=0,
+            narrowed_policy=narrowed,
+        )
+
+        assert updated["accepted_policy"] == accepted.to_dict()
+        assert updated["effective_policy"] == narrowed.to_dict()
+        assert updated["policy_revision"] == 1
+        assert db.narrow_prompt_receipt_policy(
+            "s1",
+            "user-1",
+            expected_revision=0,
+            narrowed_policy=narrowed,
+        ) is None
+
+    def test_policy_cas_rejects_widening_without_mutation(self, db):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.PLAN)
+        db.prepare_prompt_receipt(
+            "s1",
+            "prepare a plan",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "prepare a plan"},
+            accepted_policy=accepted,
+        )
+        widened = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+
+        with pytest.raises(PolicyWideningError):
+            db.narrow_prompt_receipt_policy(
+                "s1",
+                "user-1",
+                expected_revision=0,
+                narrowed_policy=widened,
+            )
+
+        stored = db.get_prompt_receipt("s1", "user-1")
+        assert stored["accepted_policy"] == accepted.to_dict()
+        assert stored["effective_policy"] == accepted.to_dict()
+        assert stored["policy_revision"] == 0
+
+    def test_policy_cas_fails_closed_on_malformed_stored_accepted_policy(self, db):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+        db.prepare_prompt_receipt(
+            "s1",
+            "prepare a plan",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "prepare a plan"},
+            accepted_policy=accepted,
+        )
+        db._conn.execute(
+            "UPDATE prompt_receipts SET accepted_policy_json = ? "
+            "WHERE session_id = ? AND client_message_id = ?",
+            ("{malformed", "s1", "user-1"),
+        )
+
+        with pytest.raises(ValueError, match="stored accepted execution policy"):
+            db.narrow_prompt_receipt_policy(
+                "s1",
+                "user-1",
+                expected_revision=0,
+                narrowed_policy=accepted.narrow({"read"}),
+            )
+
+        raw = db._conn.execute(
+            "SELECT policy_revision, effective_policy_json "
+            "FROM prompt_receipts WHERE session_id = ? AND client_message_id = ?",
+            ("s1", "user-1"),
+        ).fetchone()
+        assert raw["policy_revision"] == 0
+        assert raw["effective_policy_json"] is not None
+
+    def test_policy_cas_rejects_inconsistent_stored_effective_ceiling(self, db):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.READ_ONLY)
+        db.prepare_prompt_receipt(
+            "s1",
+            "inspect",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "inspect"},
+            accepted_policy=accepted,
+        )
+        broader = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+        db._conn.execute(
+            "UPDATE prompt_receipts SET effective_policy_json = ? "
+            "WHERE session_id = ? AND client_message_id = ?",
+            (
+                json.dumps(
+                    broader.to_dict(), sort_keys=True, separators=(",", ":")
+                ),
+                "s1",
+                "user-1",
+            ),
+        )
+
+        with pytest.raises((PolicyWideningError, ValueError)):
+            db.narrow_prompt_receipt_policy(
+                "s1",
+                "user-1",
+                expected_revision=0,
+                narrowed_policy=accepted,
+            )
+
+        stored = db.get_prompt_receipt("s1", "user-1")
+        assert stored["accepted_policy"] == accepted.to_dict()
+        assert stored["effective_policy"] == broader.to_dict()
+        assert stored["policy_revision"] == 0
+
+    def test_legacy_policyless_receipt_cannot_be_narrowed(self, db):
+        db.create_session(session_id="s1", source="tui")
+        receipt = _prepare_receipt(db, "s1")
+        candidate = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.READ_ONLY)
+
+        assert receipt["accepted_policy"] is None
+        assert receipt["effective_policy"] is None
+        assert receipt["policy_revision"] == 0
+        assert db.narrow_prompt_receipt_policy(
+            "s1",
+            "user-1",
+            expected_revision=0,
+            narrowed_policy=candidate,
+        ) is None
+
+    def test_terminal_receipt_policy_cannot_be_narrowed(self, db):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+            accepted_policy=accepted,
+        )
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="complete"
+        ) is True
+
+        assert db.narrow_prompt_receipt_policy(
+            "s1",
+            "user-1",
+            expected_revision=0,
+            narrowed_policy=accepted.narrow({"read"}),
+        ) is None
+
     def test_retry_returns_original_row_without_duplicate(self, db):
         db.create_session(session_id="s1", source="tui")
         payload = {"text": "send the offer", "persist_user_message": None}
@@ -368,6 +614,45 @@ class TestSchemaReconcile:
                 "SELECT client_message_id FROM messages WHERE session_id='legacy-s'"
             ).fetchone()
             assert row[0] is None  # legacy rows stay NULL; readers mint fallback
+        finally:
+            db.close()
+
+    def test_old_prompt_receipts_gain_nullable_policy_columns(self, tmp_path):
+        db_path = tmp_path / "old_policy_state.db"
+        seed = SessionDB(db_path=db_path)
+        seed.create_session(session_id="legacy-s", source="tui")
+        _prepare_receipt(seed, "legacy-s")
+        seed.close()
+
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("ALTER TABLE prompt_receipts DROP COLUMN accepted_policy_json")
+        conn.execute("ALTER TABLE prompt_receipts DROP COLUMN effective_policy_json")
+        conn.execute("ALTER TABLE prompt_receipts DROP COLUMN policy_revision")
+        conn.commit()
+        conn.close()
+
+        db = SessionDB(db_path=db_path)
+        try:
+            columns = {
+                row[1]: row
+                for row in db._conn.execute(
+                    "PRAGMA table_info(prompt_receipts)"
+                ).fetchall()
+            }
+            assert {
+                "accepted_policy_json",
+                "effective_policy_json",
+                "policy_revision",
+            }.issubset(columns)
+            assert columns["accepted_policy_json"][3] == 0
+            assert columns["effective_policy_json"][3] == 0
+            assert columns["policy_revision"][3] == 1
+            assert columns["policy_revision"][4] == "0"
+
+            receipt = db.get_prompt_receipt("legacy-s", "user-1")
+            assert receipt["accepted_policy"] is None
+            assert receipt["effective_policy"] is None
+            assert receipt["policy_revision"] == 0
         finally:
             db.close()
 

@@ -63,6 +63,40 @@ def test_execution_policy_is_frozen_and_narrowing_keeps_original() -> None:
         policy.allowed_effects.add(Effect.parse("unknown"))  # type: ignore[attr-defined]
 
 
+def test_execution_policy_persistence_round_trip_is_canonical() -> None:
+    policy = ExecutionPolicy.for_mode("turn-persisted", ExecutionPolicyMode.PLAN)
+
+    encoded = policy.to_dict()
+
+    assert encoded == {
+        "schema_version": 1,
+        "accepted_turn_id": "turn-persisted",
+        "mode": "plan",
+        "allowed_effects": ["read", "write_local:session_plan"],
+    }
+    assert ExecutionPolicy.from_dict(encoded) == policy
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"schema_version": 2},
+        {
+            "schema_version": 1,
+            "accepted_turn_id": "turn-invalid",
+            "mode": "read_only",
+            "allowed_effects": "read",
+        },
+    ],
+)
+def test_execution_policy_persistence_rejects_unknown_or_malformed_data(
+    data: dict,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        ExecutionPolicy.from_dict(data)
+
+
 def test_narrow_rejects_effect_scope_and_mode_widening() -> None:
     scoped = ExecutionPolicy(
         accepted_turn_id="turn-scoped",
