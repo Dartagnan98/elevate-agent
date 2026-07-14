@@ -725,6 +725,18 @@ class ToolRegistry:
                 stale_reason = "deregistered"
             elif current.entry_id != prepared.entry_id:
                 stale_reason = "entry_replaced"
+            elif (
+                current.handler is not prepared.captured_handler
+                or bool(current.is_async) != prepared.captured_is_async
+                or frozenset(current.effects or ()) != prepared.captured_effects
+                or current.effect_resolver is not prepared.captured_effect_resolver
+            ):
+                # ``get_entry`` is a long-standing public API and returns the
+                # live ToolEntry object. Until that compatibility surface can
+                # return an immutable view, direct field mutation must be
+                # treated exactly like replacement so it cannot change what
+                # was authorized without rotating the registration identity.
+                stale_reason = "entry_mutated"
             else:
                 stale_reason = None
 

@@ -383,6 +383,55 @@ def test_deregister_before_start_denies_prepared_call() -> None:
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ["handler", "is_async", "effects", "effect_resolver"],
+)
+def test_direct_entry_mutation_before_start_denies_prepared_call(mutation) -> None:
+    registry = ToolRegistry()
+    calls = []
+
+    def original_handler(args: dict) -> str:
+        calls.append(("original", args))
+        return "original"
+
+    def original_resolver(_args: dict):
+        return {"read"}
+
+    registry.register(
+        "mutable",
+        "core",
+        _schema("mutable"),
+        original_handler,
+        effects={"read"},
+        effect_resolver=original_resolver,
+    )
+    prepared = registry._prepare_shadow_call(
+        "mutable",
+        {},
+        _context(f"call-mutate-{mutation}"),
+        _policy(),
+    )
+    entry = registry.get_entry("mutable")
+    assert entry is not None
+
+    if mutation == "handler":
+        entry.handler = lambda args: calls.append(("replacement", args)) or "bad"
+    elif mutation == "is_async":
+        entry.is_async = True
+    elif mutation == "effects":
+        entry.effects = frozenset({Effect(EffectKind.WRITE_EXTERNAL, "crm")})
+    else:
+        entry.effect_resolver = lambda _args: {"write_external:crm"}
+
+    outcome = registry._start_prepared_shadow(prepared)
+
+    assert outcome.started is False
+    assert outcome.stale_reason == "entry_mutated"
+    assert calls == []
+    assert json.loads(outcome.result)["shadow_status"] == "stale_registration"
+
+
 def test_unrelated_generation_mutation_does_not_invalidate_entry() -> None:
     registry = ToolRegistry()
     calls = []
