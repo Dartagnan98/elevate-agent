@@ -320,6 +320,130 @@ def test_emit_preserves_tool_identity_under_root_correlation(monkeypatch):
     ]
 
 
+def test_delayed_tool_completion_keeps_start_turn_root_after_rebind(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+
+    recorder_calls = []
+    wire_frames = []
+    monkeypatch.setattr(
+        server,
+        "write_json",
+        lambda obj: wire_frames.append(obj) or True,
+    )
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: recorder_calls.append((event_type, kwargs))
+        or True,
+    )
+    server._sessions["sid"] = _session(
+        correlation_id="turn-A",
+        edit_snapshots={},
+        events_seq=1,
+        running_tools={},
+        tool_started_at={},
+    )
+    try:
+        turn_a = server._agent_cbs("sid", correlation_id="turn-A")
+        turn_a["tool_start_callback"]("tool-1", "document_search", {})
+        assert server._sessions["sid"]["running_tools"]["tool-1"][
+            "correlation_id"
+        ] == "turn-A"
+
+        # Turn B is now current and the reusable agent has its callbacks. The
+        # late completion still resolves through tool-1's start-time snapshot.
+        server._sessions["sid"]["correlation_id"] = "turn-B"
+        turn_b = server._agent_cbs("sid", correlation_id="turn-B")
+        turn_b["tool_complete_callback"](
+            "tool-1",
+            "document_search",
+            {},
+            json.dumps({"success": True}),
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    completed_wire = next(
+        frame["params"]["payload"]
+        for frame in wire_frames
+        if frame["params"]["type"] == "tool.complete"
+    )
+    assert completed_wire["correlation_id"] == "turn-A"
+    completed_record = next(
+        kwargs
+        for event_type, kwargs in recorder_calls
+        if event_type == "tool.complete"
+    )
+    assert completed_record["correlation_id"] == "turn-A"
+    assert completed_record["payload"]["tool_id"] == "tool-1"
+
+
+def test_delayed_child_progress_keeps_spawn_turn_root_after_rebind(monkeypatch):
+    from elevate_cli.diagnostics import session_recorder
+    from tools.delegate_tool import _build_child_progress_callback
+
+    recorder_calls = []
+    wire_frames = []
+    monkeypatch.setattr(
+        server,
+        "write_json",
+        lambda obj: wire_frames.append(obj) or True,
+    )
+    monkeypatch.setattr(
+        session_recorder,
+        "record_session_event",
+        lambda event_type, **kwargs: recorder_calls.append((event_type, kwargs))
+        or True,
+    )
+    agent = types.SimpleNamespace(_delegate_spinner=None)
+    server._sessions["sid"] = _session(
+        agent=agent,
+        correlation_id="turn-A",
+        events_seq=1,
+    )
+    try:
+        server._bind_agent_turn_callbacks(
+            agent,
+            "sid",
+            correlation_id="turn-A",
+        )
+        child_cb = _build_child_progress_callback(
+            0,
+            "prepare the CMA",
+            agent,
+            subagent_id="child-agent-1",
+        )
+        assert child_cb is not None
+
+        server._sessions["sid"]["correlation_id"] = "turn-B"
+        server._bind_agent_turn_callbacks(
+            agent,
+            "sid",
+            correlation_id="turn-B",
+        )
+        child_cb(
+            "subagent.complete",
+            preview="done",
+            status="completed",
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    child_wire = next(
+        frame["params"]["payload"]
+        for frame in wire_frames
+        if frame["params"]["type"] == "subagent.complete"
+    )
+    assert child_wire["correlation_id"] == "turn-A"
+    child_record = next(
+        kwargs
+        for event_type, kwargs in recorder_calls
+        if event_type == "subagent.complete"
+    )
+    assert child_record["correlation_id"] == "turn-A"
+    assert child_record["payload"]["status"] == "completed"
+
+
 def test_emit_throttles_delta_recorder(monkeypatch):
     from elevate_cli.diagnostics import session_recorder
 
@@ -2227,6 +2351,85 @@ def test_prompt_submit_forwards_persist_user_message(monkeypatch):
     assert captured["persist_user_message"] == "open it"
 
 
+def test_user_turn_consuming_parked_result_records_origin_link(monkeypatch):
+    _install_prompt_receipt_db(monkeypatch)
+    recorder_calls = _capture_session_recorder(monkeypatch)
+    captured = {}
+
+    class _Agent:
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            **kwargs,
+        ):
+            captured["prompt"] = prompt
+            return {
+                "final_response": "The CMA is ready.",
+                "messages": [{"role": "assistant", "content": "The CMA is ready."}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    session = _session(
+        agent=_Agent(),
+        pending_delegate_results=[
+            {
+                "status": "completed",
+                "goal": "prepare the CMA",
+                "summary": "Six comparable sales were verified.",
+                "correlation_id": "turn-A",
+                "relation": "delegate_result",
+                "task_id": "dt-cma",
+            }
+        ],
+    )
+    server._sessions["sid"] = session
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *args: None)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+
+        resp = server.handle_request(
+            {
+                "id": "consume-rpc",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "What came back?",
+                    "user_message_id": "turn-B",
+                },
+            }
+        )
+    finally:
+        server._sessions.pop("sid", None)
+
+    assert resp["result"]["correlation_id"] == "turn-B"
+    assert "Six comparable sales were verified" in captured["prompt"]
+    consumed = [
+        kwargs
+        for event_type, kwargs in recorder_calls
+        if event_type == "delegate.result_consumed"
+    ]
+    assert len(consumed) == 1
+    assert consumed[0]["correlation_id"] == "turn-B"
+    assert consumed[0]["payload"] == {
+        "parent_correlation_id": "turn-A",
+        "relation": "delegate_result",
+        "task_id": "dt-cma",
+    }
+    assert session.get("pending_delegate_results") == []
+
+
 def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
     _install_prompt_receipt_db(monkeypatch)
     captured = {}
@@ -2408,6 +2611,54 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
         approval.clear_session("session-key")
         server._sessions.pop("sid", None)
         db.close()
+
+
+def test_delegate_wake_prompt_persists_fresh_attempt_parent_lineage(monkeypatch):
+    db = _install_prompt_receipt_db(monkeypatch)
+    recorder_calls = _capture_session_recorder(monkeypatch)
+
+    class _DeferredThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            return None
+
+    server._sessions["sid"] = _session(agent=types.SimpleNamespace())
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _DeferredThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+
+        resp = server.handle_request(
+            {
+                "id": "wake-rpc",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "evaluate the completed delegate",
+                    "persist_user_message": "⟦subagent-result:completed⟧ CMA",
+                    "user_message_id": "wake.attempt-1",
+                    "parent_correlation_id": "turn-A",
+                    "relation": "delegate_result",
+                },
+            }
+        )
+
+        assert resp["result"]["correlation_id"] == "wake.attempt-1"
+        row = db.rows[("session-key", "wake.attempt-1")]
+        assert row["payload"]["parent_correlation_id"] == "turn-A"
+        assert row["payload"]["relation"] == "delegate_result"
+        accepted = [
+            kwargs
+            for event_type, kwargs in recorder_calls
+            if event_type == "prompt.accepted"
+        ]
+        assert len(accepted) == 1
+        assert accepted[0]["correlation_id"] == "wake.attempt-1"
+        assert accepted[0]["payload"]["parent_correlation_id"] == "turn-A"
+        assert accepted[0]["payload"]["relation"] == "delegate_result"
+    finally:
+        server._sessions.pop("sid", None)
 
 
 @pytest.mark.parametrize(
@@ -4139,8 +4390,13 @@ def test_async_delegate_sink_rewakes_main_agent():
         return {"jsonrpc": "2.0", "id": rid, "result": {"status": "streaming"}}
 
     with patch("tui_gateway.server._emit", side_effect=lambda ev, s, p=None: emitted.append((ev, s, p))), \
+         patch("tui_gateway.server._record_backend_event") as record_backend, \
          patch.dict("tui_gateway.server._methods", {"prompt.submit": fake_submit}):
-        sink = server._make_async_delegate_sink(sid, session)
+        sink = server._make_async_delegate_sink(
+            sid,
+            session,
+            correlation_id="turn-A",
+        )
         sink({
             "task_id": "dt_abc123",
             "results": [
@@ -4176,6 +4432,20 @@ def test_async_delegate_sink_rewakes_main_agent():
     assert len(submitted) == 1
     _rid, params = submitted[0]
     assert params["session_id"] == sid
+    assert params["user_message_id"].startswith("wake.")
+    assert params["user_message_id"] != "turn-A"
+    assert params["parent_correlation_id"] == "turn-A"
+    assert params["relation"] == "delegate_result"
+    record_backend.assert_called_once_with(
+        "delegate.result_consumed",
+        sid,
+        {
+            "correlation_id": params["user_message_id"],
+            "parent_correlation_id": "turn-A",
+            "relation": "delegate_result",
+            "task_id": "dt_abc123",
+        },
+    )
     assert "CMA drafted" in params["text"]  # API sees the full result + eval ask
     # Stored as a status-marked card, never a plain user bubble.
     assert params["persist_user_message"].startswith("⟦subagent-result:completed⟧")
@@ -4239,7 +4509,11 @@ def test_parked_result_yields_to_busy_session():
          patch.dict("tui_gateway.server._methods", {"prompt.submit": fake_submit}), \
          patch("tui_gateway.server.time.sleep"), \
          patch("tui_gateway.server.time.monotonic", side_effect=[0, 0, 100]):
-        sink = server._make_async_delegate_sink("busy-sid", session)
+        sink = server._make_async_delegate_sink(
+            "busy-sid",
+            session,
+            correlation_id="turn-A",
+        )
         sink({
             "task_id": "dt_busy1",
             "results": [{
@@ -4254,6 +4528,9 @@ def test_parked_result_yields_to_busy_session():
     assert submitted == []
     parked = session.get("pending_delegate_results")
     assert parked and "Found 7 leads" in parked[0]["summary"]
+    assert parked[0]["correlation_id"] == "turn-A"
+    assert parked[0]["relation"] == "delegate_result"
+    assert parked[0]["task_id"] == "dt_busy1"
 
 
 def test_wake_defers_until_sustained_quiet_window():
@@ -4291,8 +4568,16 @@ def test_wake_reparks_when_submit_loses_latch_race():
     session = _session(
         running=False,
         idle_since=0.0,  # quiet window long satisfied
+        correlation_id="turn-B",
         pending_delegate_results=[
-            {"status": "completed", "goal": "Find leads", "summary": "Found 7 leads."}
+            {
+                "status": "completed",
+                "goal": "Find leads",
+                "summary": "Found 7 leads.",
+                "correlation_id": "turn-A",
+                "relation": "delegate_result",
+                "task_id": "dt-leads",
+            }
         ],
     )
     submitted = []
@@ -4312,8 +4597,15 @@ def test_wake_reparks_when_submit_loses_latch_race():
 
     # Submit was attempted and lost; the result is back in the parked queue.
     assert len(submitted) == 1
+    _rid, params = submitted[0]
+    assert params["user_message_id"].startswith("wake.")
+    assert params["user_message_id"] not in {"turn-A", "turn-B"}
+    assert params["parent_correlation_id"] == "turn-A"
+    assert params["relation"] == "delegate_result"
     parked = session.get("pending_delegate_results")
     assert parked and "Found 7 leads" in parked[0]["summary"]
+    assert parked[0]["correlation_id"] == "turn-A"
+    assert parked[0]["task_id"] == "dt-leads"
 
 
 def test_async_delegate_sink_rejects_malformed_payload_without_signaling():

@@ -607,9 +607,11 @@ def _record_gateway_event(event: str, sid: str, payload: dict | None) -> None:
         "kind",
         "message_id",
         "model",
+        "parent_correlation_id",
         "parent_session_id",
         "provider",
         "reason",
+        "relation",
         "request_id",
         "source",
         "status",
@@ -710,6 +712,27 @@ def _tool_duration_ms(duration_s: float | None) -> int | None:
         return None
 
 
+def _correlation_lineage_payload(
+    correlation_id: object = "",
+    parent_correlation_id: object = "",
+    relation: object = "",
+) -> dict[str, str]:
+    """Return explicit, content-free correlation fields for one event.
+
+    Gateway sessions retain the latest accepted root for compatibility, but
+    delayed callbacks must never consult that mutable value.  Callers capture
+    these fields at turn/tool/delegate dispatch time and carry them forward.
+    """
+    payload: dict[str, str] = {}
+    if isinstance(correlation_id, str) and correlation_id:
+        payload["correlation_id"] = correlation_id
+    if isinstance(parent_correlation_id, str) and parent_correlation_id:
+        payload["parent_correlation_id"] = parent_correlation_id
+    if isinstance(relation, str) and relation:
+        payload["relation"] = relation
+    return payload
+
+
 def _parse_tool_result(result: str) -> dict | None:
     try:
         data = json.loads(result)
@@ -782,6 +805,10 @@ def _record_tool_completion_friction(
     name: str,
     result: str,
     duration_s: float | None,
+    *,
+    correlation_id: str = "",
+    parent_correlation_id: str = "",
+    relation: str = "",
 ) -> None:
     data = _parse_tool_result(result)
     duration_ms = _tool_duration_ms(duration_s)
@@ -797,6 +824,11 @@ def _record_tool_completion_friction(
                 "friction_kind": kind,
                 "attempt_count": 1,
                 "outcome": outcome,
+                **_correlation_lineage_payload(
+                    correlation_id,
+                    parent_correlation_id,
+                    relation,
+                ),
             }
             provider = _tool_provider(data)
             if provider:
@@ -819,6 +851,11 @@ def _record_tool_completion_friction(
             "friction_kind": error_kind,
             "attempt_count": 1,
             "outcome": "failed",
+            **_correlation_lineage_payload(
+                correlation_id,
+                parent_correlation_id,
+                relation,
+            ),
         }
         provider = _tool_provider(data)
         if provider:
@@ -2018,9 +2055,23 @@ def _tool_summary(name: str, result: str, duration_s: float | None) -> str | Non
     return f"{text or 'Completed'}{suffix}" if (text or dur) else None
 
 
-def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
+def _on_tool_start(
+    sid: str,
+    tool_call_id: str,
+    name: str,
+    args: dict,
+    *,
+    correlation_id: str = "",
+    parent_correlation_id: str = "",
+    relation: str = "",
+):
     session = _sessions.get(sid)
     started_at = time.time()
+    lineage = _correlation_lineage_payload(
+        correlation_id,
+        parent_correlation_id,
+        relation,
+    )
     if session is not None:
         try:
             from agent.display import capture_local_edit_snapshot
@@ -2040,6 +2091,7 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
             "name": name,
             "context": ctx,
             "started_at": started_at,
+            **lineage,
         }
     if _tool_progress_enabled(sid):
         _emit(
@@ -2050,25 +2102,63 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
                 "name": name,
                 "context": _tool_ctx(name, args),
                 "started_at": started_at,
+                **lineage,
             },
         )
 
 
-def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
+def _on_tool_complete(
+    sid: str,
+    tool_call_id: str,
+    name: str,
+    args: dict,
+    result: str,
+    *,
+    correlation_id: str = "",
+    parent_correlation_id: str = "",
+    relation: str = "",
+):
     payload = {"tool_id": tool_call_id, "name": name}
     session = _sessions.get(sid)
     snapshot = None
     started_at = None
+    running_tool: dict = {}
     if session is not None:
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
-        session.setdefault("running_tools", {}).pop(tool_call_id, None)
+        stored = session.setdefault("running_tools", {}).pop(tool_call_id, None)
+        if isinstance(stored, dict):
+            running_tool = stored
+    # A completion can arrive after the next turn has rebound the agent's
+    # callbacks. The start-time snapshot is authoritative over the callback's
+    # current turn root, so turn A cannot be silently relabelled as turn B.
+    correlation_id = str(running_tool.get("correlation_id") or correlation_id or "")
+    parent_correlation_id = str(
+        running_tool.get("parent_correlation_id") or parent_correlation_id or ""
+    )
+    relation = str(running_tool.get("relation") or relation or "")
+    payload.update(
+        _correlation_lineage_payload(
+            correlation_id,
+            parent_correlation_id,
+            relation,
+        )
+    )
     completed_at = time.time()
     payload["completed_at"] = completed_at
     duration_s = completed_at - started_at if started_at else None
     if duration_s is not None:
         payload["duration_s"] = duration_s
-    _record_tool_completion_friction(sid, tool_call_id, name, result, duration_s)
+    _record_tool_completion_friction(
+        sid,
+        tool_call_id,
+        name,
+        result,
+        duration_s,
+        correlation_id=correlation_id,
+        parent_correlation_id=parent_correlation_id,
+        relation=relation,
+    )
     try:
         from agent.display import _detect_tool_failure
 
@@ -2116,8 +2206,17 @@ def _on_tool_progress(
     name: str | None = None,
     preview: str | None = None,
     _args: dict | None = None,
+    *,
+    correlation_id: str = "",
+    parent_correlation_id: str = "",
+    relation: str = "",
     **_kwargs,
 ):
+    lineage = _correlation_lineage_payload(
+        correlation_id,
+        parent_correlation_id,
+        relation,
+    )
     if event_type == "steer.applied":
         try:
             correction_count = max(1, int(_kwargs.get("count") or 1))
@@ -2129,6 +2228,7 @@ def _on_tool_progress(
             "correction_count": correction_count,
             "attempt_count": 1,
             "outcome": "applied",
+            **lineage,
         }
         if _kwargs.get("child_session_id"):
             payload["child_session_id"] = str(_kwargs["child_session_id"])
@@ -2136,10 +2236,14 @@ def _on_tool_progress(
     if not _tool_progress_enabled(sid):
         return
     if event_type == "tool.started" and name:
-        _emit("tool.progress", sid, {"name": name, "preview": preview or ""})
+        _emit(
+            "tool.progress",
+            sid,
+            {"name": name, "preview": preview or "", **lineage},
+        )
         return
     if event_type == "reasoning.available" and preview and _show_reasoning_enabled(sid):
-        _emit("reasoning.available", sid, {"text": str(preview)})
+        _emit("reasoning.available", sid, {"text": str(preview), **lineage})
         return
     if event_type == "steer.applied":
         # A queued mid-run follow-up was actually injected (folded into a
@@ -2149,6 +2253,7 @@ def _on_tool_progress(
         payload = {
             "count": int(_kwargs.get("count") or 1),
             "via": str(_kwargs.get("via") or ""),
+            **lineage,
         }
         if _kwargs.get("sources"):
             payload["sources"] = [str(s) for s in _kwargs["sources"]]
@@ -2165,6 +2270,7 @@ def _on_tool_progress(
             "goal": str(_kwargs.get("goal") or ""),
             "task_count": int(_kwargs.get("task_count") or 1),
             "task_index": int(_kwargs.get("task_index") or 0),
+            **lineage,
         }
         # Identity fields for the TUI spawn tree.  All optional — older
         # emitters that omit them fall back to flat rendering client-side.
@@ -2236,17 +2342,59 @@ def _on_tool_progress(
         _emit(event_type, sid, payload)
 
 
-def _agent_cbs(sid: str) -> dict:
+def _agent_cbs(
+    sid: str,
+    *,
+    correlation_id: str = "",
+    parent_correlation_id: str = "",
+    relation: str = "",
+) -> dict:
+    def _progress(event_type, name=None, preview=None, args=None, **kwargs):
+        # A delegated child carries the origin it captured when it was spawned.
+        # Prefer that explicit identity over whichever turn currently owns the
+        # reusable parent agent callbacks.
+        event_correlation_id = str(
+            kwargs.pop("correlation_id", "") or correlation_id or ""
+        )
+        event_parent_correlation_id = str(
+            kwargs.pop("parent_correlation_id", "")
+            or parent_correlation_id
+            or ""
+        )
+        event_relation = str(kwargs.pop("relation", "") or relation or "")
+        return _on_tool_progress(
+            sid,
+            event_type,
+            name,
+            preview,
+            args,
+            correlation_id=event_correlation_id,
+            parent_correlation_id=event_parent_correlation_id,
+            relation=event_relation,
+            **kwargs,
+        )
+
     return dict(
         tool_start_callback=lambda tc_id, name, args: _on_tool_start(
-            sid, tc_id, name, args
+            sid,
+            tc_id,
+            name,
+            args,
+            correlation_id=correlation_id,
+            parent_correlation_id=parent_correlation_id,
+            relation=relation,
         ),
         tool_complete_callback=lambda tc_id, name, args, result: _on_tool_complete(
-            sid, tc_id, name, args, result
+            sid,
+            tc_id,
+            name,
+            args,
+            result,
+            correlation_id=correlation_id,
+            parent_correlation_id=parent_correlation_id,
+            relation=relation,
         ),
-        tool_progress_callback=lambda event_type, name=None, preview=None, args=None, **kwargs: _on_tool_progress(
-            sid, event_type, name, preview, args, **kwargs
-        ),
+        tool_progress_callback=_progress,
         tool_gen_callback=lambda name: _tool_progress_enabled(sid)
         and _emit("tool.generating", sid, {"name": name}),
         thinking_callback=lambda text: _show_reasoning_enabled(sid)
@@ -2261,6 +2409,34 @@ def _agent_cbs(sid: str) -> dict:
             "clarify.request", sid, {"question": q, "choices": c}
         ),
     )
+
+
+def _bind_agent_turn_callbacks(
+    agent,
+    sid: str,
+    *,
+    correlation_id: str,
+    parent_correlation_id: str = "",
+    relation: str = "",
+) -> None:
+    """Bind reusable agent callbacks to one accepted turn's immutable root."""
+    callbacks = _agent_cbs(
+        sid,
+        correlation_id=correlation_id,
+        parent_correlation_id=parent_correlation_id,
+        relation=relation,
+    )
+    for attr in (
+        "tool_start_callback",
+        "tool_complete_callback",
+        "tool_progress_callback",
+    ):
+        setattr(agent, attr, callbacks[attr])
+    # delegate_tool captures these fields when it creates child callbacks, so
+    # a child finishing after another turn starts still reports its origin.
+    agent._elevate_turn_correlation_id = correlation_id
+    agent._elevate_parent_correlation_id = parent_correlation_id
+    agent._elevate_correlation_relation = relation
 
 
 def _wire_callbacks(sid: str):
@@ -4605,6 +4781,17 @@ def _prompt_user_message_id(params: dict) -> str:
     return _wire_message_id()
 
 
+def _prompt_parent_lineage(params: dict) -> tuple[str, str]:
+    """Validate optional internal lineage attached to a fresh prompt attempt."""
+    parent = params.get("parent_correlation_id")
+    relation = params.get("relation")
+    if not isinstance(parent, str) or not _WIRE_MESSAGE_ID_RE.match(parent):
+        return ("", "")
+    if relation != "delegate_result":
+        return ("", "")
+    return (parent, relation)
+
+
 _RECOVERED_EXECUTION_POLICY_KEY = object()
 _POLICY_RECEIPT_INTERRUPTED_MESSAGE = (
     "This saved request could not be resumed because it has no valid secure "
@@ -4882,6 +5069,10 @@ def _recover_pending_prompt(sid: str, session: dict) -> bool:
         params["persist_user_message"] = payload["persist_user_message"]
     if payload.get("agent_id"):
         params["agent_id"] = payload["agent_id"]
+    parent_correlation_id, relation = _prompt_parent_lineage(payload)
+    if parent_correlation_id:
+        params["parent_correlation_id"] = parent_correlation_id
+        params["relation"] = relation
     result = submit(f"recover_{uuid.uuid4().hex[:8]}", params)
     if isinstance(result, dict) and result.get("error"):
         logger.warning(
@@ -4956,7 +5147,14 @@ def _format_delegate_completion(results: list) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def _park_delegate_result(session: dict, results: list, summary_text: str) -> None:
+def _park_delegate_result(
+    session: dict,
+    results: list,
+    summary_text: str,
+    *,
+    correlation_id: str = "",
+    task_id: str = "",
+) -> None:
     """Park a finished async delegation's result on the session.
 
     The result is NOT pushed as its own competing turn — it waits in
@@ -4981,7 +5179,13 @@ def _park_delegate_result(session: dict, results: list, summary_text: str) -> No
         "status": overall_status,
         "goal": "; ".join(goals),
         "summary": summary_text,
+        **_correlation_lineage_payload(
+            correlation_id,
+            relation="delegate_result" if correlation_id else "",
+        ),
     }
+    if task_id:
+        entry["task_id"] = task_id
     lock = session.get("history_lock")
     if lock is not None:
         with lock:
@@ -5025,6 +5229,51 @@ def _repark_delegate_results(session: dict, entries: list) -> None:
             *entries,
             *(session.get("pending_delegate_results") or []),
         ]
+
+
+def _delegate_result_origins(entries: list) -> list[str]:
+    """Return distinct immutable roots carried by parked delegate results."""
+    roots: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        root = entry.get("correlation_id")
+        if (
+            isinstance(root, str)
+            and _WIRE_MESSAGE_ID_RE.match(root)
+            and root not in roots
+        ):
+            roots.append(root)
+    return roots
+
+
+def _record_delegate_result_consumption(
+    sid: str,
+    entries: list,
+    *,
+    consuming_correlation_id: str,
+) -> None:
+    """Record each origin -> consuming-turn edge without result content."""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        origin = str(entry.get("correlation_id") or "")
+        if (
+            not _WIRE_MESSAGE_ID_RE.match(origin)
+            or origin == consuming_correlation_id
+        ):
+            continue
+        payload = {
+            **_correlation_lineage_payload(
+                consuming_correlation_id,
+                origin,
+                "delegate_result",
+            )
+        }
+        task_id = entry.get("task_id")
+        if isinstance(task_id, str) and task_id:
+            payload["task_id"] = task_id
+        _record_backend_event("delegate.result_consumed", sid, payload)
 
 
 def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
@@ -5112,6 +5361,8 @@ def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
             + (f" {goal_label}\n\n" if goal_label else "\n\n")
             + summaries
         )
+        origin_roots = _delegate_result_origins(drained)
+        wake_user_message_id = f"wake.{_wire_message_id()}"
         result = None
         try:
             result = submit(
@@ -5120,6 +5371,15 @@ def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
                     "session_id": sid,
                     "text": wake_prompt,
                     "persist_user_message": stored_marker,
+                    "user_message_id": wake_user_message_id,
+                    **(
+                        {
+                            "parent_correlation_id": origin_roots[0],
+                            "relation": "delegate_result",
+                        }
+                        if origin_roots
+                        else {}
+                    ),
                 },
             )
         except Exception:
@@ -5132,6 +5392,17 @@ def _wake_main_agent_with_result(sid: str, session: dict) -> bool:
         if isinstance(result, dict) and result.get("error"):
             _repark_delegate_results(session, drained)
             continue
+        result_payload = result.get("result") if isinstance(result, dict) else None
+        consuming_correlation_id = (
+            str(result_payload.get("correlation_id") or "")
+            if isinstance(result_payload, dict)
+            else ""
+        ) or wake_user_message_id
+        _record_delegate_result_consumption(
+            sid,
+            drained,
+            consuming_correlation_id=consuming_correlation_id,
+        )
         return True
     logger.warning(
         "re-wake watcher timed out (sid=%s busy >90s) — parked result will ride "
@@ -5233,7 +5504,13 @@ def _make_async_delegate_sink(
             #    thread (per-child parallel deliveries must not queue behind a
             #    sibling's wake wait); concurrent watchers self-dedupe via the
             #    atomic drain.
-            _park_delegate_result(session, results, summary_text)
+            _park_delegate_result(
+                session,
+                results,
+                summary_text,
+                correlation_id=correlation_id,
+                task_id=task_id,
+            )
             threading.Thread(
                 target=_wake_main_agent_with_result,
                 args=(sid, session),
@@ -5345,6 +5622,9 @@ def _(rid, params: dict) -> dict:
         "user": _prompt_user_message_id(params),
         "assistant": _wire_message_id(),
     }
+    requested_parent_correlation_id, requested_relation = _prompt_parent_lineage(
+        params
+    )
     session, err = _sess(params, rid)
     if err:
         return err
@@ -5422,6 +5702,11 @@ def _(rid, params: dict) -> dict:
             "correlation_id": turn_ids["user"],
             "text": text,
         }
+        if requested_parent_correlation_id:
+            submitted_payload["parent_correlation_id"] = (
+                requested_parent_correlation_id
+            )
+            submitted_payload["relation"] = requested_relation
         with _prompt_claims_lock:
             active = _active_prompt_claims.get(claim_key)
             if isinstance(active, dict):
@@ -5593,6 +5878,9 @@ def _(rid, params: dict) -> dict:
 
     receipt_user_id = turn_ids["user"]
     receipt_assistant_id = turn_ids["assistant"]
+    receipt_parent_correlation_id, receipt_relation = _prompt_parent_lineage(
+        canonical_payload
+    )
     _record_backend_event(
         "prompt.accepted",
         sid,
@@ -5602,6 +5890,11 @@ def _(rid, params: dict) -> dict:
             "recovered": not receipt_inserted,
             "status": "accepted",
             "user_message_id": receipt_user_id,
+            **_correlation_lineage_payload(
+                receipt_user_id,
+                receipt_parent_correlation_id,
+                receipt_relation,
+            ),
         },
     )
 
@@ -5693,6 +5986,13 @@ def _(rid, params: dict) -> dict:
                 history = list(session["history"])
                 history_version = int(session.get("history_version", 0))
             agent = session["agent"]
+            _bind_agent_turn_callbacks(
+                agent,
+                sid,
+                correlation_id=receipt_user_id,
+                parent_correlation_id=receipt_parent_correlation_id,
+                relation=receipt_relation,
+            )
             turn_usage_before = _get_usage(agent)
             # Wire the async-delegation sink so top-level delegate_task calls
             # dispatch non-blocking: the child runs on its own thread and its
@@ -5748,12 +6048,18 @@ def _(rid, params: dict) -> dict:
             # stands down. Like the digest, this context is API-only — the
             # persist_override below keeps the stored user message clean.
             _pending_delegate_ctx = ""
+            _drained_pending: list[dict] = []
             try:
                 _drained_pending = _drain_pending_delegate_results(session)
                 if _drained_pending:
                     _pending_delegate_ctx = "\n\n---\n\n".join(
                         str(e.get("summary") or "") for e in _drained_pending
                     ).strip()
+                    _record_delegate_result_consumption(
+                        sid,
+                        _drained_pending,
+                        consuming_correlation_id=receipt_user_id,
+                    )
             except Exception:
                 logger.debug("pending delegate drain failed", exc_info=True)
             if _pending_delegate_ctx and isinstance(prompt, str):

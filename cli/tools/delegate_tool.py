@@ -1271,6 +1271,18 @@ def _build_child_progress_callback(
     """
     spinner = getattr(parent_agent, "_delegate_spinner", None)
     parent_cb = getattr(parent_agent, "tool_progress_callback", None)
+    # The gateway reuses one parent agent across turns. Capture the accepted
+    # turn lineage now, when this child is spawned, so a delayed child event
+    # cannot inherit a newer turn's mutable session root.
+    correlation_id = str(
+        getattr(parent_agent, "_elevate_turn_correlation_id", "") or ""
+    )
+    parent_correlation_id = str(
+        getattr(parent_agent, "_elevate_parent_correlation_id", "") or ""
+    )
+    correlation_relation = str(
+        getattr(parent_agent, "_elevate_correlation_relation", "") or ""
+    )
 
     if not spinner and not parent_cb:
         return None  # No display → no callback → zero behavior change
@@ -1300,6 +1312,12 @@ def _build_child_progress_callback(
             kw["model"] = model
         if toolsets is not None:
             kw["toolsets"] = list(toolsets)
+        if correlation_id:
+            kw["correlation_id"] = correlation_id
+        if parent_correlation_id:
+            kw["parent_correlation_id"] = parent_correlation_id
+        if correlation_relation:
+            kw["relation"] = correlation_relation
         # The child's own session id — populated once the child agent is built
         # (after this callback is created). Threading it onto EVERY event (not
         # just start/complete) keeps the live "running" card openable into the

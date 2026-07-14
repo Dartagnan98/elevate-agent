@@ -154,6 +154,25 @@ def test_friction_metric_allowlist_keeps_safe_types():
     assert report["unknown_keys_dropped"] == 0
 
 
+def test_lineage_allowlist_keeps_parent_and_relation_without_content():
+    payload, report = recorder.sanitize_payload(
+        "delegate.result_consumed",
+        {
+            "parent_correlation_id": "turn-A",
+            "relation": "delegate_result",
+            "task_id": "dt-cma",
+            "summary": "private child result",
+        },
+    )
+
+    assert payload == {
+        "parent_correlation_id": "turn-A",
+        "relation": "delegate_result",
+        "task_id": "dt-cma",
+    }
+    assert report["unknown_keys_dropped"] == 1
+
+
 def test_friction_metric_allowlist_drops_wrong_types_and_raw_browser_text():
     payload, report = recorder.sanitize_payload(
         "browser.friction_detected",

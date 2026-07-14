@@ -160,6 +160,26 @@ class TestBuildChildProgressCallback:
         assert parent_cb.call_args.args[0] == "subagent.thinking"
         assert parent_cb.call_args.args[2] == "some reasoning text"
 
+    def test_gateway_callback_captures_spawn_turn_lineage(self):
+        """A delayed child keeps turn A after the reusable parent moves to B."""
+        parent = MagicMock()
+        parent._delegate_spinner = None
+        parent_cb = MagicMock()
+        parent.tool_progress_callback = parent_cb
+        parent._elevate_turn_correlation_id = "turn-A"
+        parent._elevate_parent_correlation_id = "origin-1"
+        parent._elevate_correlation_relation = "delegate_result"
+
+        cb = _build_child_progress_callback(0, "test goal", parent)
+        parent._elevate_turn_correlation_id = "turn-B"
+        parent._elevate_parent_correlation_id = "origin-2"
+
+        cb("subagent.complete", preview="done", status="completed")
+
+        assert parent_cb.call_args.kwargs["correlation_id"] == "turn-A"
+        assert parent_cb.call_args.kwargs["parent_correlation_id"] == "origin-1"
+        assert parent_cb.call_args.kwargs["relation"] == "delegate_result"
+
     def test_parallel_callbacks_independent(self):
         """Each child's callback batches tool names independently."""
         parent = MagicMock()
@@ -386,4 +406,3 @@ class TestBatchFlush:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

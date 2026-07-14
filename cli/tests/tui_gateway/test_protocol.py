@@ -308,6 +308,7 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
                 "name": "browser_navigate",
                 "context": "https://example.test",
                 "started_at": 1710000001.0,
+                "correlation_id": "turn-A",
             }
         },
         "session_key": "20260409_010101_abc123",
@@ -336,6 +337,7 @@ def test_session_resume_reattaches_existing_live_session(server, monkeypatch):
             "name": "browser_navigate",
             "context": "https://example.test",
             "started_at": 1710000001.0,
+            "correlation_id": "turn-A",
         }
     ]
     assert resp["result"]["messages"] == [{"role": "user", "text": "keep going"}]
