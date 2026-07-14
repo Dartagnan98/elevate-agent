@@ -9,7 +9,12 @@ def test_vision_call_uses_resolved_provider_args():
 
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = MagicMock(
-        choices=[MagicMock(message=MagicMock(content="description"))],
+        choices=[
+            MagicMock(
+                message=MagicMock(content="description"),
+                finish_reason="stop",
+            )
+        ],
         usage=MagicMock(prompt_tokens=10, completion_tokens=5),
     )
 

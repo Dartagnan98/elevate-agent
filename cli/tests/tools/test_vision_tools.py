@@ -340,6 +340,7 @@ class TestErrorLoggingExcInfo:
             mock_response = MagicMock()
             mock_choice = MagicMock()
             mock_choice.message.content = "A test image description"
+            mock_choice.finish_reason = "stop"
             mock_response.choices = [mock_choice]
 
             with (
@@ -375,6 +376,7 @@ class TestVisionConfig:
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "Configured image analysis"
+        mock_choice.finish_reason = "stop"
         mock_response.choices = [mock_choice]
 
         with (
@@ -405,6 +407,7 @@ class TestVisionConfig:
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "Default image analysis"
+        mock_choice.finish_reason = "stop"
         mock_response.choices = [mock_choice]
 
         with (
@@ -553,6 +556,7 @@ class TestTildeExpansion:
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "A test image"
+        mock_choice.finish_reason = "stop"
         mock_response.choices = [mock_choice]
 
         with (
@@ -604,6 +608,7 @@ class TestFileUriSupport:
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "A test image"
+        mock_choice.finish_reason = "stop"
         mock_response.choices = [mock_choice]
 
         with (
@@ -665,6 +670,7 @@ class TestBase64SizeLimit:
         mock_response = MagicMock()
         mock_choice = MagicMock()
         mock_choice.message.content = "Small image"
+        mock_choice.finish_reason = "stop"
         mock_response.choices = [mock_choice]
 
         with (
