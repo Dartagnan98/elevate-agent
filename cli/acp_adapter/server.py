@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 from collections import defaultdict, deque
@@ -77,6 +78,50 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
 # does not expose a client-side limit, so this is a fixed cap that clients
 # paginate against using `cursor` / `next_cursor`.
 _LIST_SESSIONS_PAGE_SIZE = 50
+
+
+def _beta_failure_text(error: Any = None, *, empty: bool = False) -> str:
+    """Render a safe, typed ACP failure without suggesting false success."""
+    from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+    if isinstance(error, BetaProviderPolicyError):
+        return f"Error [{error.code}]: {error}"
+
+    rendered = str(error or "").strip()
+    if rendered.startswith("Error ["):
+        return rendered
+    lowered = rendered.lower()
+    if empty:
+        code = "beta_acp_empty_response"
+        message = (
+            "OpenAI Codex returned no final response. The ACP session was not "
+            "changed and no provider switch was attempted."
+        )
+    elif "429" in lowered or "rate limit" in lowered or "rate-limit" in lowered:
+        code = "beta_acp_codex_rate_limited"
+        message = (
+            "OpenAI Codex rate limited this request (429). The ACP session was "
+            "not changed and no provider switch was attempted."
+        )
+    elif "401" in lowered or "unauthor" in lowered or "auth" in lowered:
+        code = "beta_acp_codex_auth_failed"
+        message = (
+            "OpenAI Codex rejected the current Beta profile credentials. Sign "
+            "in again; no provider switch was attempted."
+        )
+    elif "timeout" in lowered or "timed out" in lowered:
+        code = "beta_acp_codex_timeout"
+        message = (
+            "The OpenAI Codex request timed out. The ACP session was not changed "
+            "and no provider switch was attempted."
+        )
+    else:
+        code = "beta_acp_codex_request_failed"
+        message = (
+            "The OpenAI Codex request failed. The ACP session was not changed "
+            "and no provider switch was attempted."
+        )
+    return f"Error [{code}]: {message}"
 
 
 def _extract_text(
@@ -172,6 +217,38 @@ class ElevateACPAgent(acp.Agent):
         model = str(state.model or getattr(state.agent, "model", "") or "").strip()
         provider = getattr(state.agent, "provider", None) or detect_provider() or "openrouter"
 
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_MODELS,
+            BETA_ALLOWED_PROVIDER,
+            beta_model_or_default,
+            beta_provider_policy_active,
+            canonical_beta_provider,
+        )
+
+        if beta_provider_policy_active():
+            canonical_beta_provider(provider, source="ACP session provider")
+            current_model = beta_model_or_default(model, source="ACP session model")
+            return SessionModelState(
+                available_models=[
+                    ModelInfo(
+                        model_id=self._encode_model_choice(
+                            BETA_ALLOWED_PROVIDER,
+                            model_id,
+                        ),
+                        name=model_id,
+                        description=(
+                            "OpenAI Codex • Realtor Beta"
+                            + (" • current" if model_id == current_model else "")
+                        ),
+                    )
+                    for model_id in BETA_ALLOWED_MODELS
+                ],
+                current_model_id=self._encode_model_choice(
+                    BETA_ALLOWED_PROVIDER,
+                    current_model,
+                ),
+            )
+
         try:
             from elevate_cli.models import curated_models_for_provider, normalize_provider, provider_label
 
@@ -232,6 +309,28 @@ class ElevateACPAgent(acp.Agent):
     @staticmethod
     def _resolve_model_selection(raw_model: str, current_provider: str) -> tuple[str, str]:
         """Resolve ``provider:model`` input into the provider and normalized model id."""
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_PROVIDER,
+            beta_model_or_default,
+            beta_provider_policy_active,
+            canonical_beta_provider,
+        )
+
+        if beta_provider_policy_active():
+            canonical_beta_provider(current_provider, source="current ACP provider")
+            requested_provider = BETA_ALLOWED_PROVIDER
+            requested_model = raw_model.strip()
+            if ":" in requested_model:
+                requested_provider, requested_model = requested_model.split(":", 1)
+            requested_provider = canonical_beta_provider(
+                requested_provider,
+                source="ACP model selection provider",
+            )
+            return requested_provider, beta_model_or_default(
+                requested_model,
+                source="ACP model selection",
+            )
+
         target_provider = current_provider
         new_model = raw_model.strip()
 
@@ -520,6 +619,10 @@ class ElevateACPAgent(acp.Agent):
         if not user_text:
             return PromptResponse(stop_reason="end_turn")
 
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+
         # Intercept slash commands — handle locally without calling the LLM
         if user_text.startswith("/"):
             response_text = self._handle_slash_command(user_text, state)
@@ -527,12 +630,44 @@ class ElevateACPAgent(acp.Agent):
                 if self._conn:
                     update = acp.update_agent_message_text(response_text)
                     await self._conn.session_update(session_id, update)
-                return PromptResponse(stop_reason="end_turn")
+                slash_failed = beta_active and response_text.startswith("Error [")
+                return PromptResponse(
+                    stop_reason="refusal" if slash_failed else "end_turn"
+                )
 
         logger.info("Prompt on session %s: %s", session_id, user_text[:100])
 
         conn = self._conn
         loop = asyncio.get_running_loop()
+
+        previous_agent = state.agent
+        previous_model = state.model
+        previous_history = copy.deepcopy(state.history) if beta_active else None
+
+        if beta_active:
+            # A session may remain open while config/auth changes underneath it.
+            # Construct a fresh current-profile Codex agent immediately before
+            # execution.  Do not replace the last known-good session object
+            # unless construction succeeds.
+            try:
+                fresh_agent = await asyncio.to_thread(
+                    self.session_manager.fresh_agent_for_execution,
+                    state,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session %s: Beta ACP runtime refresh failed",
+                    session_id,
+                    exc_info=True,
+                )
+                error_text = _beta_failure_text(exc)
+                if conn:
+                    await conn.session_update(
+                        session_id,
+                        acp.update_agent_message_text(error_text),
+                    )
+                return PromptResponse(stop_reason="refusal")
+            state.agent = fresh_agent
 
         if state.cancel_event:
             state.cancel_event.clear()
@@ -589,15 +724,25 @@ class ElevateACPAgent(acp.Agent):
             try:
                 result = agent.run_conversation(
                     user_message=user_text,
-                    conversation_history=state.history,
+                    conversation_history=(
+                        copy.deepcopy(previous_history)
+                        if beta_active
+                        else state.history
+                    ),
                     task_id=session_id,
                 )
                 return result
             except Exception as e:
                 logger.exception("Agent error in session %s", session_id)
                 return {
-                    "final_response": f"Error: {e}",
-                    "messages": state.history,
+                    "final_response": (
+                        _beta_failure_text(e) if beta_active else f"Error: {e}"
+                    ),
+                    "messages": (
+                        copy.deepcopy(previous_history)
+                        if beta_active
+                        else state.history
+                    ),
                     "failed": True,
                     "completed": False,
                     "error": str(e),
@@ -622,18 +767,28 @@ class ElevateACPAgent(acp.Agent):
                 agent.interrupt("ACP prompt cancelled")
             except Exception:
                 logger.debug("Could not interrupt cancelled ACP prompt", exc_info=True)
+            if beta_active:
+                state.agent = previous_agent
+                state.model = previous_model
+                state.history = previous_history or []
             return PromptResponse(stop_reason="cancelled")
         except Exception as exc:
             logger.exception("Executor error for session %s", session_id)
-            error_text = f"Agent execution failed before it could finish: {exc}"
-            state.history.extend([
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": error_text},
-            ])
-            try:
-                self.session_manager.save_session(session_id)
-            except Exception:
-                logger.debug("Could not persist ACP executor failure", exc_info=True)
+            if beta_active:
+                error_text = _beta_failure_text(exc)
+                state.agent = previous_agent
+                state.model = previous_model
+                state.history = previous_history or []
+            else:
+                error_text = f"Agent execution failed before it could finish: {exc}"
+                state.history.extend([
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": error_text},
+                ])
+                try:
+                    self.session_manager.save_session(session_id)
+                except Exception:
+                    logger.debug("Could not persist ACP executor failure", exc_info=True)
             if conn:
                 await conn.session_update(
                     session_id,
@@ -641,16 +796,36 @@ class ElevateACPAgent(acp.Agent):
                 )
             return PromptResponse(stop_reason="refusal")
 
-        if result.get("messages"):
-            state.history = result["messages"]
-            # Persist updated history so sessions survive process restarts.
-            self.session_manager.save_session(session_id)
-
         succeeded = agent_result_succeeded(result)
         final_response = str(result.get("final_response") or "")
-        if not succeeded and not final_response:
-            final_response = agent_result_error(result)
-        if final_response and succeeded:
+        if beta_active:
+            if (
+                not final_response.strip()
+                and not result.get("error")
+                and not result.get("interrupted")
+            ):
+                succeeded = False
+                final_response = _beta_failure_text(empty=True)
+            elif not succeeded:
+                final_response = _beta_failure_text(
+                    result.get("error") or final_response or agent_result_error(result)
+                )
+
+            if not succeeded:
+                state.agent = previous_agent
+                state.model = previous_model
+                state.history = previous_history or []
+            elif result.get("messages"):
+                state.history = result["messages"]
+                self.session_manager.save_session(session_id)
+        else:
+            if result.get("messages"):
+                state.history = result["messages"]
+                # Persist updated history so sessions survive process restarts.
+                self.session_manager.save_session(session_id)
+            if not succeeded and not final_response:
+                final_response = agent_result_error(result)
+        if final_response and succeeded and not beta_active:
             try:
                 from agent.title_generator import maybe_auto_title
 
@@ -761,6 +936,10 @@ class ElevateACPAgent(acp.Agent):
             return handler(args, state)
         except Exception as e:
             logger.error("Slash command /%s error: %s", cmd, e, exc_info=True)
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                return _beta_failure_text(e)
             return f"Error executing /{cmd}: {e}"
 
     def _cmd_help(self, args: str, state: SessionState) -> str:
@@ -777,16 +956,34 @@ class ElevateACPAgent(acp.Agent):
             provider = getattr(state.agent, "provider", None) or "auto"
             return f"Current model: {model}\nProvider: {provider}"
 
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
         current_provider = getattr(state.agent, "provider", None) or "openrouter"
         target_provider, new_model = self._resolve_model_selection(args, current_provider)
 
-        state.model = new_model
-        state.agent = self.session_manager._make_agent(
-            session_id=state.session_id,
-            cwd=state.cwd,
-            model=new_model,
-            requested_provider=target_provider,
-        )
+        if beta_active:
+            candidate = self.session_manager._make_agent(
+                session_id=state.session_id,
+                cwd=state.cwd,
+                model=new_model,
+                requested_provider=target_provider,
+                base_url=getattr(state.agent, "base_url", None),
+                api_mode=getattr(state.agent, "api_mode", None),
+            )
+            # Commit the in-memory and persisted selection only after the
+            # fresh Beta runtime and agent were constructed successfully.
+            state.model = new_model
+            state.agent = candidate
+        else:
+            # Preserve Stable's existing mutation order exactly.
+            state.model = new_model
+            state.agent = self.session_manager._make_agent(
+                session_id=state.session_id,
+                cwd=state.cwd,
+                model=new_model,
+                requested_provider=target_provider,
+            )
         self.session_manager.save_session(state.session_id)
         provider_label = getattr(state.agent, "provider", None) or target_provider or current_provider
         logger.info("Session %s: model switched to %s", state.session_id, new_model)
@@ -840,8 +1037,17 @@ class ElevateACPAgent(acp.Agent):
     def _cmd_compact(self, args: str, state: SessionState) -> str:
         if not state.history:
             return "Nothing to compress — conversation is empty."
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+        previous_agent = state.agent
+        previous_history = copy.deepcopy(state.history) if beta_active else None
         try:
-            agent = state.agent
+            agent = (
+                self.session_manager.fresh_agent_for_execution(state)
+                if beta_active
+                else state.agent
+            )
             if not getattr(agent, "compression_enabled", True):
                 return "Context compression is disabled for this agent."
             if not hasattr(agent, "_compress_context"):
@@ -867,6 +1073,8 @@ class ElevateACPAgent(acp.Agent):
                 agent._session_db = original_session_db
 
             state.history = compressed
+            if beta_active:
+                state.agent = agent
             self.session_manager.save_session(state.session_id)
 
             new_count = len(state.history)
@@ -876,6 +1084,10 @@ class ElevateACPAgent(acp.Agent):
                 f"~{approx_tokens:,} -> ~{new_tokens:,} tokens"
             )
         except Exception as e:
+            if beta_active:
+                state.agent = previous_agent
+                state.history = previous_history or []
+                return _beta_failure_text(e)
             return f"Compression failed: {e}"
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
@@ -887,33 +1099,64 @@ class ElevateACPAgent(acp.Agent):
         self, model_id: str, session_id: str, **kwargs: Any
     ) -> SetSessionModelResponse | None:
         """Switch the model for a session (called by ACP protocol)."""
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
         state = self.session_manager.get_session(session_id)
         if state:
-            current_provider = getattr(state.agent, "provider", None)
-            requested_provider, resolved_model = self._resolve_model_selection(
-                model_id,
-                current_provider or "openrouter",
-            )
-            state.model = resolved_model
-            provider_changed = bool(current_provider and requested_provider != current_provider)
-            current_base_url = None if provider_changed else getattr(state.agent, "base_url", None)
-            current_api_mode = None if provider_changed else getattr(state.agent, "api_mode", None)
-            state.agent = self.session_manager._make_agent(
-                session_id=session_id,
-                cwd=state.cwd,
-                model=resolved_model,
-                requested_provider=requested_provider,
-                base_url=current_base_url,
-                api_mode=current_api_mode,
-            )
-            self.session_manager.save_session(session_id)
-            logger.info(
-                "Session %s: model switched to %s via provider %s",
-                session_id,
-                resolved_model,
-                requested_provider,
-            )
-            return SetSessionModelResponse()
+            try:
+                current_provider = getattr(state.agent, "provider", None)
+                requested_provider, resolved_model = self._resolve_model_selection(
+                    model_id,
+                    current_provider or "openrouter",
+                )
+                provider_changed = bool(
+                    current_provider and requested_provider != current_provider
+                )
+                current_base_url = (
+                    None
+                    if provider_changed
+                    else getattr(state.agent, "base_url", None)
+                )
+                current_api_mode = (
+                    None
+                    if provider_changed
+                    else getattr(state.agent, "api_mode", None)
+                )
+                if beta_active:
+                    candidate = self.session_manager._make_agent(
+                        session_id=session_id,
+                        cwd=state.cwd,
+                        model=resolved_model,
+                        requested_provider=requested_provider,
+                        base_url=current_base_url,
+                        api_mode=current_api_mode,
+                    )
+                    state.model = resolved_model
+                    state.agent = candidate
+                else:
+                    # Preserve Stable's existing mutation order exactly.
+                    state.model = resolved_model
+                    state.agent = self.session_manager._make_agent(
+                        session_id=session_id,
+                        cwd=state.cwd,
+                        model=resolved_model,
+                        requested_provider=requested_provider,
+                        base_url=current_base_url,
+                        api_mode=current_api_mode,
+                    )
+                self.session_manager.save_session(session_id)
+                logger.info(
+                    "Session %s: model switched to %s via provider %s",
+                    session_id,
+                    resolved_model,
+                    requested_provider,
+                )
+                return SetSessionModelResponse()
+            except Exception as exc:
+                if beta_active:
+                    raise RuntimeError(_beta_failure_text(exc)) from None
+                raise
         logger.warning("Session %s: model switch requested for missing session", session_id)
         return None
 

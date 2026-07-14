@@ -537,14 +537,25 @@ class SessionManager:
         requested_provider: str | None = None,
         base_url: str | None = None,
         api_mode: str | None = None,
+        enabled_toolsets: List[str] | None = None,
     ):
         if self._agent_factory is not None:
             return self._agent_factory()
 
         from run_agent import AIAgent
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_PROVIDER,
+            BETA_CODEX_BASE_URL,
+            BetaProviderPolicyError,
+            beta_model_or_default,
+            beta_provider_policy_active,
+            read_beta_codex_auth_status,
+            validate_beta_config_for_persistence,
+        )
         from elevate_cli.config import load_config
         from elevate_cli.runtime_provider import resolve_runtime_provider
 
+        beta_active = beta_provider_policy_active()
         config = load_config()
         model_cfg = config.get("model")
         default_model = ""
@@ -561,35 +572,151 @@ class SessionManager:
             if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
         ]
 
-        kwargs = {
-            "platform": "acp",
-            "enabled_toolsets": _expand_acp_enabled_toolsets(
+        selected_toolsets = (
+            list(enabled_toolsets)
+            if enabled_toolsets is not None
+            else _expand_acp_enabled_toolsets(
                 ["elevate-acp"],
                 mcp_server_names=configured_mcp_servers,
-            ),
+            )
+        )
+        selected_model = model or default_model
+        if beta_active:
+            auth_status = read_beta_codex_auth_status(get_elevate_home())
+            validate_beta_config_for_persistence(config, auth_status)
+            # Cached ACP session metadata is not an authority boundary.  Reject
+            # hostile snapshots before resolving credentials or constructing a
+            # client, then let the shared resolver re-read the current Beta
+            # profile and its local Codex auth store.
+            if base_url and base_url.rstrip("/") != BETA_CODEX_BASE_URL.rstrip("/"):
+                raise BetaProviderPolicyError(
+                    "Realtor Beta rejected the ACP session's cached model endpoint.",
+                    code="beta_acp_cached_endpoint_not_allowed",
+                )
+            if api_mode and api_mode != "codex_responses":
+                raise BetaProviderPolicyError(
+                    "Realtor Beta rejected the ACP session's cached API mode.",
+                    code="beta_acp_cached_api_mode_not_allowed",
+                )
+            selected_model = beta_model_or_default(
+                selected_model,
+                source="ACP session model",
+            )
+
+        kwargs = {
+            "platform": "acp",
+            "enabled_toolsets": selected_toolsets,
             "quiet_mode": True,
             "session_id": session_id,
-            "model": model or default_model,
+            "model": selected_model,
         }
 
-        try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+        if beta_active:
+            runtime = resolve_runtime_provider(
+                requested=requested_provider or config_provider,
+                target_model=selected_model,
+            )
+            resolved_provider = str(runtime.get("provider") or "").strip().lower()
+            resolved_base_url = str(runtime.get("base_url") or "").strip().rstrip("/")
+            resolved_api_mode = str(runtime.get("api_mode") or "").strip()
+            resolved_source = str(runtime.get("source") or "").strip()
+            resolved_auth_store = str(runtime.get("auth_store") or "").strip()
+            expected_auth_store = str(get_elevate_home() / "auth.json")
+            if resolved_provider != BETA_ALLOWED_PROVIDER:
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime did not resolve OpenAI Codex.",
+                    code="beta_acp_runtime_provider_mismatch",
+                )
+            if resolved_base_url != BETA_CODEX_BASE_URL.rstrip("/"):
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime resolved an unsupported endpoint.",
+                    code="beta_acp_runtime_endpoint_mismatch",
+                )
+            if resolved_api_mode != "codex_responses":
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime resolved an unsupported API mode.",
+                    code="beta_acp_runtime_api_mode_mismatch",
+                )
+            if resolved_source != "elevate-auth-store" or resolved_auth_store != expected_auth_store:
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime credentials are not from the current profile.",
+                    code="beta_acp_runtime_not_current_profile",
+                )
+            if not str(runtime.get("api_key") or "").strip():
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime has no usable current-profile Codex token.",
+                    code="beta_acp_runtime_token_missing",
+                )
+            if runtime.get("command") or runtime.get("args"):
+                raise BetaProviderPolicyError(
+                    "Realtor Beta ACP runtime cannot use an external provider process.",
+                    code="beta_acp_external_runtime_not_allowed",
+                )
             kwargs.update(
                 {
-                    "provider": runtime.get("provider"),
-                    "api_mode": api_mode or runtime.get("api_mode"),
-                    "base_url": base_url or runtime.get("base_url"),
+                    "provider": BETA_ALLOWED_PROVIDER,
+                    "api_mode": "codex_responses",
+                    "base_url": BETA_CODEX_BASE_URL,
                     "api_key": runtime.get("api_key"),
-                    "command": runtime.get("command"),
-                    "args": list(runtime.get("args") or []),
+                    "command": None,
+                    "args": [],
                 }
             )
-        except Exception:
-            logger.debug("ACP session falling back to default provider resolution", exc_info=True)
+        else:
+            try:
+                runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+                kwargs.update(
+                    {
+                        "provider": runtime.get("provider"),
+                        "api_mode": api_mode or runtime.get("api_mode"),
+                        "base_url": base_url or runtime.get("base_url"),
+                        "api_key": runtime.get("api_key"),
+                        "command": runtime.get("command"),
+                        "args": list(runtime.get("args") or []),
+                    }
+                )
+            except Exception:
+                logger.debug("ACP session falling back to default provider resolution", exc_info=True)
 
-        _register_task_cwd(session_id, cwd)
+        if not beta_active:
+            _register_task_cwd(session_id, cwd)
         agent = AIAgent(**kwargs)
+        if beta_active:
+            # Defense in depth: the adapter never hands Beta an alternate
+            # fallback or credential pool, even if AIAgent grows new defaults.
+            agent._fallback_chain = []
+            agent._fallback_model = None
+            agent._credential_pool = None
+            # Each prompt already constructs from a freshly resolved current-
+            # profile runtime.  A 401 must surface truthfully instead of doing
+            # a second, state-mutating forced refresh inside AIAgent, and a 429
+            # must not sit in the generic multi-retry loop before ACP can report
+            # the failure to the editor.
+            agent._try_refresh_codex_client_credentials = (
+                lambda *, force=True: False
+            )
+            agent._api_max_retries = 1
+        if beta_active:
+            _register_task_cwd(session_id, cwd)
         # ACP stdio transport requires stdout to remain protocol-only JSON-RPC.
         # Route any incidental human-readable agent output to stderr instead.
         agent._print_fn = _acp_stderr_print
         return agent
+
+    def fresh_agent_for_execution(self, state: SessionState):
+        """Build a fresh agent from current authority without mutating *state*.
+
+        The caller decides when to swap the candidate into the session, which
+        lets Beta prompt failures preserve the last known-good session object.
+        """
+        current = state.agent
+        toolsets = getattr(current, "enabled_toolsets", None)
+        return self._make_agent(
+            session_id=state.session_id,
+            cwd=state.cwd,
+            model=state.model or getattr(current, "model", None),
+            requested_provider=getattr(current, "provider", None),
+            base_url=getattr(current, "base_url", None),
+            api_mode=getattr(current, "api_mode", None),
+            enabled_toolsets=list(toolsets) if isinstance(toolsets, (list, tuple)) else None,
+        )
