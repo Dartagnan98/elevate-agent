@@ -396,6 +396,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self._model_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, Dict[str, str]] = {}
+        # The primary application is separate from ``_agent_apps``.  Keep its
+        # signed agent identity explicit so a revoked specialist cannot hide
+        # outside the entitlement refresh loop.
+        self._primary_agent_id: Optional[str] = None
 
     def _agent_bot_configs(self) -> List[Dict[str, str]]:
         raw = self.config.extra.get("agent_bots", {}) if isinstance(self.config.extra, dict) else {}
@@ -412,6 +416,24 @@ class TelegramAdapter(BasePlatformAdapter):
             if agent_id_text and token:
                 configs.append({"agent_id": agent_id_text, "agent_name": agent_name, "token": token})
         return configs
+
+    @staticmethod
+    def _select_primary_agent_bot(
+        configs: List[Dict[str, str]], *, exact_beta: bool
+    ) -> Optional[Dict[str, str]]:
+        """Choose a primary fallback without promoting a Beta specialist."""
+        if not configs:
+            return None
+        if not exact_beta:
+            return configs[0]
+        return next(
+            (
+                item
+                for item in configs
+                if item.get("agent_id") == "executive-assistant"
+            ),
+            None,
+        )
 
     def _context_agent(self, context: Any) -> tuple[Optional[str], Optional[str]]:
         data = getattr(getattr(context, "application", None), "bot_data", {}) or {}
@@ -590,8 +612,8 @@ class TelegramAdapter(BasePlatformAdapter):
             _telegram_agent_token_env,
         )
 
-        primary_token = str(self.config.token or "").strip()
         allowed_beta_envs = _beta_active_telegram_agent_token_envs()
+        primary_token = str(self.config.token or "").strip()
         configs: Dict[str, Dict[str, str]] = {
             c["agent_id"]: c
             for c in self._agent_bot_configs()
@@ -605,6 +627,59 @@ class TelegramAdapter(BasePlatformAdapter):
         # paid-pack bot that is no longer in the active signed contract before
         # considering hot additions.
         if allowed_beta_envs is not None:
+            primary_agent_id = str(
+                self._primary_agent_id
+                or (
+                    getattr(getattr(self, "_app", None), "bot_data", {}) or {}
+                ).get("elevate_agent_id")
+                or ""
+            ).strip()
+            if (
+                primary_agent_id
+                and primary_agent_id != "executive-assistant"
+                and _telegram_agent_token_env(primary_agent_id) not in allowed_beta_envs
+            ):
+                # Older runtimes could promote the first paid agent bot to the
+                # primary app when no generic token existed.  That app is not
+                # present in ``_agent_apps``, so revoke it explicitly too.
+                primary_app = getattr(self, "_app", None)
+                self._agent_bots.pop(primary_agent_id, None)
+                shutdown_errors: List[str] = []
+                try:
+                    if primary_app and primary_app.updater and primary_app.updater.running:
+                        await primary_app.updater.stop()
+                except Exception as exc:
+                    shutdown_errors.append(f"updater stop: {exc}")
+                try:
+                    if primary_app and primary_app.running:
+                        await primary_app.stop()
+                except Exception as exc:
+                    shutdown_errors.append(f"app stop: {exc}")
+                try:
+                    if primary_app:
+                        await primary_app.shutdown()
+                except Exception as exc:
+                    shutdown_errors.append(f"shutdown: {exc}")
+                if shutdown_errors:
+                    logger.warning(
+                        "[%s] Primary Telegram bot for locked Beta pack %s "
+                        "reported shutdown errors: %s",
+                        self.name,
+                        primary_agent_id,
+                        "; ".join(shutdown_errors),
+                    )
+                else:
+                    logger.info(
+                        "[%s] Stopped primary Telegram bot for locked Beta pack: %s",
+                        self.name,
+                        primary_agent_id,
+                    )
+                self._app = None
+                self._bot = None
+                self._primary_agent_id = None
+                self.config.token = ""
+                primary_token = ""
+
             for agent_id, app in list(self._agent_apps.items()):
                 if _telegram_agent_token_env(agent_id) in allowed_beta_envs:
                     continue
@@ -1121,17 +1196,35 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         
         agent_bot_configs = self._agent_bot_configs()
+        try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            exact_beta = beta_provider_policy_active()
+        except Exception:
+            exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
         primary_agent_id = None
         primary_agent_name = None
         if not self.config.token and agent_bot_configs:
-            primary_agent = agent_bot_configs[0]
-            self.config.token = primary_agent["token"]
-            primary_agent_id = primary_agent["agent_id"]
-            primary_agent_name = primary_agent.get("agent_name") or primary_agent_id
+            # A paid/specialist bot must remain a separately tracked app so
+            # entitlement refresh can stop it.  Only the signed Executive
+            # lane may serve as the exact-Beta primary fallback.
+            primary_agent = self._select_primary_agent_bot(
+                agent_bot_configs,
+                exact_beta=exact_beta,
+            )
+            if primary_agent:
+                self.config.token = primary_agent["token"]
+                primary_agent_id = primary_agent["agent_id"]
+                primary_agent_name = primary_agent.get("agent_name") or primary_agent_id
         elif self.config.token:
             primary_token = str(self.config.token).strip()
             for agent_bot in agent_bot_configs:
                 if str(agent_bot.get("token") or "").strip() == primary_token:
+                    if exact_beta and agent_bot.get("agent_id") != "executive-assistant":
+                        # ``self.config.token`` is the generic primary lane in
+                        # exact Beta.  Never relabel it as a paid agent merely
+                        # because stale agent config reused the same token.
+                        continue
                     primary_agent_id = agent_bot.get("agent_id")
                     primary_agent_name = agent_bot.get("agent_name") or primary_agent_id
                     break
@@ -1219,6 +1312,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
             builder = builder.request(request).get_updates_request(get_updates_request)
             self._app = builder.build()
+            self._primary_agent_id = primary_agent_id
             if primary_agent_id:
                 self._app.bot_data["elevate_agent_id"] = primary_agent_id
                 self._app.bot_data["elevate_agent_name"] = primary_agent_name or primary_agent_id
@@ -1831,16 +1925,29 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._approval_counter = itertools.count(1)
             approval_id = next(self._approval_counter)
 
-            keyboard = InlineKeyboardMarkup([
-                [
+            try:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                exact_beta = beta_provider_policy_active()
+            except Exception:
+                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+            if exact_beta:
+                keyboard_rows = [[
                     InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
-                ],
-                [
-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
                     InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
-                ],
-            ])
+                ]]
+            else:
+                keyboard_rows = [
+                    [
+                        InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
+                        InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
+                    ],
+                    [
+                        InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
+                        InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
+                    ],
+                ]
+            keyboard = InlineKeyboardMarkup(keyboard_rows)
 
             kwargs: Dict[str, Any] = {
                 "chat_id": int(chat_id),
@@ -1859,6 +1966,7 @@ class TelegramAdapter(BasePlatformAdapter):
             self._approval_state[approval_id] = {
                 "request_id": request_id,
                 "session_key": session_key,
+                "agent_id": str((metadata or {}).get("agent_id") or "").strip(),
             }
 
             return SendResult(success=True, message_id=str(msg.message_id))
@@ -2223,12 +2331,72 @@ class TelegramAdapter(BasePlatformAdapter):
                     await query.answer(text="⛔ You are not authorized to approve commands.")
                     return
 
-                approval_state = self._approval_state.pop(approval_id, None)
+                approval_state = self._approval_state.get(approval_id)
                 if not approval_state:
-                    await query.answer(text="This approval has already been resolved.")
+                    await query.answer(
+                        text="This approval is no longer active; no decision was applied."
+                    )
                     return
 
-                # Map choice to human-readable label
+                try:
+                    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                    exact_beta = beta_provider_policy_active()
+                except Exception:
+                    exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+                expected_agent_id = str(approval_state.get("agent_id") or "").strip()
+                if exact_beta and expected_agent_id != str(callback_agent_id or "").strip():
+                    await query.answer(
+                        text="⛔ This approval belongs to a different signed agent."
+                    )
+                    return
+
+                # Exact Beta intentionally grants one command only even if an
+                # older client sends a broader button choice.
+                display_choice = (
+                    "once"
+                    if exact_beta and choice in {"once", "session", "always"}
+                    else choice
+                )
+
+                # Resolve the approval first.  Local state and visible status
+                # remain pending unless the authoritative queue confirms the
+                # exact request identity.
+                try:
+                    from tools.approval import resolve_gateway_approval
+                    session_key = approval_state["session_key"]
+                    request_id = approval_state.get("request_id", "")
+                    if not request_id:
+                        raise RuntimeError("approval request identity missing")
+                    count = resolve_gateway_approval(
+                        session_key,
+                        choice,
+                        request_id=request_id,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                    await query.answer(
+                        text="Decision check failed. No command was approved; try again."
+                    )
+                    return
+                if count <= 0:
+                    logger.warning(
+                        "Telegram approval request was stale or not confirmed "
+                        "(session=%s, request=%s)",
+                        session_key,
+                        request_id,
+                    )
+                    await query.answer(
+                        text=(
+                            "Decision not confirmed; no command was approved. "
+                            "This request may be stale."
+                        )
+                    )
+                    return
+
+                self._approval_state.pop(approval_id, None)
+
+                # Map the confirmed choice to a human-readable label.
                 label_map = {
                     "once": "✅ Approved once",
                     "session": "✅ Approved for session",
@@ -2236,7 +2404,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     "deny": "❌ Denied",
                 }
                 user_display = getattr(query.from_user, "first_name", "User")
-                label = label_map.get(choice, "Resolved")
+                label = label_map.get(display_choice, "Resolved")
 
                 await query.answer(text=label)
 
@@ -2250,25 +2418,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 except Exception:
                     pass  # non-fatal if edit fails
 
-                # Resolve the approval — unblocks the agent thread
-                try:
-                    from tools.approval import resolve_gateway_approval
-                    session_key = approval_state["session_key"]
-                    request_id = approval_state.get("request_id", "")
-                    if not request_id:
-                        logger.error("Telegram approval state missing request identity")
-                        return
-                    count = resolve_gateway_approval(
-                        session_key,
-                        choice,
-                        request_id=request_id,
-                    )
-                    logger.info(
-                        "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                        count, session_key, choice, user_display,
-                    )
-                except Exception as exc:
-                    logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                logger.info(
+                    "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)",
+                    count, session_key, display_choice, user_display,
+                )
             return
 
         # --- Update prompt callbacks ---

@@ -1,5 +1,6 @@
 """Identity binding for Discord dangerous-command approval buttons."""
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -32,6 +33,46 @@ async def test_send_exec_approval_binds_central_request_identity():
     view = channel.send.await_args.kwargs["view"]
     assert view.session_key == "discord-session"
     assert view.request_id == "request-discord"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("release_channel", "expected_labels"),
+    [
+        ("beta", ["Allow Once", "Deny"]),
+        ("Beta", ["Allow Once", "Allow Session", "Always Allow", "Deny"]),
+    ],
+)
+async def test_beta_prompt_only_advertises_supported_scope(
+    release_channel, expected_labels
+):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="token"))
+    message = SimpleNamespace(id=42)
+    channel = SimpleNamespace(send=AsyncMock(return_value=message))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _channel_id: channel,
+        fetch_channel=AsyncMock(return_value=channel),
+    )
+    embed = SimpleNamespace(add_field=lambda **_kwargs: None)
+
+    with (
+        patch.dict(
+            os.environ,
+            {"ELEVATE_RELEASE_CHANNEL": release_channel},
+            clear=False,
+        ),
+        patch.object(discord, "Embed", return_value=embed),
+    ):
+        await adapter.send_exec_approval(
+            chat_id="123",
+            command="rm -rf /tmp/example",
+            session_key="discord-session",
+            request_id="request-discord",
+        )
+
+    view = channel.send.await_args.kwargs["view"]
+    assert list(view.visible_approval_labels) == expected_labels
+    assert view.exact_beta is (release_channel == "beta")
 
 
 @pytest.mark.asyncio
@@ -80,3 +121,43 @@ async def test_button_targets_its_request_not_fifo_queue():
         "once",
         request_id="request-discord",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_result", [0, RuntimeError("resolver down")])
+async def test_unconfirmed_button_stays_retryable_and_never_displays_success(
+    resolver_result,
+):
+    view = ExecApprovalView(
+        session_key="discord-session",
+        request_id="request-discord",
+        allowed_user_ids=set(),
+    )
+    interaction = SimpleNamespace(
+        message=SimpleNamespace(embeds=[]),
+        response=SimpleNamespace(edit_message=AsyncMock(), send_message=AsyncMock()),
+        user=SimpleNamespace(display_name="Agent", id=123),
+    )
+    effect = (
+        {"side_effect": resolver_result}
+        if isinstance(resolver_result, Exception)
+        else {"return_value": resolver_result}
+    )
+
+    with patch("tools.approval.resolve_gateway_approval", **effect):
+        await view._resolve(
+            interaction,
+            "once",
+            discord.Color.green(),
+            "Approved once",
+        )
+
+    assert view.resolved is False
+    interaction.response.edit_message.assert_not_awaited()
+    status = interaction.response.send_message.await_args.args[0].lower()
+    if isinstance(resolver_result, Exception):
+        assert "check failed" in status
+        assert "try again" in status
+    else:
+        assert "may be stale" in status
+    assert "no command was approved" in status

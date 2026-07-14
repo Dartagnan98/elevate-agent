@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -92,6 +93,52 @@ class TestTelegramExecApproval:
         assert kwargs["reply_markup"] is not None  # InlineKeyboardMarkup
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("release_channel", "expected_labels"),
+        [
+            ("beta", ["✅ Allow Once", "❌ Deny"]),
+            (
+                "Beta",
+                ["✅ Allow Once", "✅ Session", "✅ Always", "❌ Deny"],
+            ),
+        ],
+    )
+    async def test_beta_prompt_only_advertises_supported_scope(
+        self, release_channel, expected_labels
+    ):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+
+        with (
+            patch.dict(
+                os.environ,
+                {"ELEVATE_RELEASE_CHANNEL": release_channel},
+                clear=False,
+            ),
+            patch(
+                "gateway.platforms.telegram.InlineKeyboardButton",
+                side_effect=lambda text, callback_data: SimpleNamespace(
+                    text=text,
+                    callback_data=callback_data,
+                ),
+            ),
+            patch(
+                "gateway.platforms.telegram.InlineKeyboardMarkup",
+                side_effect=lambda rows: SimpleNamespace(inline_keyboard=rows),
+            ),
+        ):
+            await adapter.send_exec_approval(
+                chat_id="12345",
+                command="echo test",
+                session_key="my-session-key",
+                request_id="request-telegram",
+            )
+
+        markup = adapter._bot.send_message.await_args.kwargs["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert labels == expected_labels
+
+    @pytest.mark.asyncio
     async def test_stores_approval_state(self):
         adapter = _make_adapter()
         mock_msg = MagicMock()
@@ -109,9 +156,28 @@ class TestTelegramExecApproval:
         assert len(adapter._approval_state) == 1
         approval_id = list(adapter._approval_state.keys())[0]
         assert adapter._approval_state[approval_id] == {
+            "agent_id": "",
             "request_id": "request-telegram",
             "session_key": "my-session-key",
         }
+
+    @pytest.mark.asyncio
+    async def test_stores_signed_agent_identity_from_delivery_metadata(self):
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(
+            return_value=MagicMock(message_id=42)
+        )
+
+        await adapter.send_exec_approval(
+            chat_id="12345",
+            command="echo test",
+            session_key="my-session-key",
+            metadata={"agent_id": "admin"},
+            request_id="request-telegram",
+        )
+
+        state = next(iter(adapter._approval_state.values()))
+        assert state["agent_id"] == "admin"
 
     @pytest.mark.asyncio
     async def test_sends_in_thread(self):
@@ -252,6 +318,104 @@ class TestBetaTelegramAgentBotRefresh:
         locked_app.stop.assert_awaited_once()
         locked_app.shutdown.assert_awaited_once()
 
+    def test_beta_primary_fallback_never_selects_paid_specialist(self):
+        configs = [
+            {"agent_id": "admin", "agent_name": "Admin", "token": "paid"},
+            {"agent_id": "marketing", "agent_name": "Marketing", "token": "paid-2"},
+        ]
+
+        assert (
+            TelegramAdapter._select_primary_agent_bot(configs, exact_beta=True)
+            is None
+        )
+        assert (
+            TelegramAdapter._select_primary_agent_bot(configs, exact_beta=False)
+            == configs[0]
+        )
+
+    def test_beta_primary_fallback_keeps_executive_lane(self):
+        executive = {
+            "agent_id": "executive-assistant",
+            "agent_name": "Executive",
+            "token": "core",
+        }
+        configs = [
+            {"agent_id": "admin", "agent_name": "Admin", "token": "paid"},
+            executive,
+        ]
+
+        assert (
+            TelegramAdapter._select_primary_agent_bot(configs, exact_beta=True)
+            == executive
+        )
+
+    @pytest.mark.asyncio
+    async def test_beta_connect_does_not_promote_specialist_only_config(
+        self, monkeypatch
+    ):
+        config = PlatformConfig(
+            enabled=True,
+            token="",
+            extra={
+                "agent_bots": {
+                    "admin": {"agent_name": "Admin", "token": "paid-token"},
+                }
+            },
+        )
+        adapter = TelegramAdapter(config)
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setattr("gateway.platforms.telegram.TELEGRAM_AVAILABLE", True)
+
+        connected = await adapter.connect()
+
+        assert connected is False
+        assert adapter.config.token == ""
+        assert adapter._primary_agent_id is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_revokes_legacy_specialist_primary(self, monkeypatch):
+        from elevate_cli import beta_env_policy
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setattr(
+            beta_env_policy,
+            "beta_active_pack_env_metadata",
+            lambda: {},
+        )
+        monkeypatch.setattr("gateway.config._gateway_env_values", lambda: {})
+
+        adapter = _make_adapter(
+            extra={
+                "agent_bots": {
+                    "admin": {"agent_name": "Admin", "token": "admin-token"},
+                }
+            }
+        )
+        adapter.config.token = "admin-token"
+        adapter._primary_agent_id = "admin"
+        primary_app = MagicMock()
+        primary_app.bot_data = {"elevate_agent_id": "admin"}
+        primary_app.updater.running = True
+        primary_app.updater.stop = AsyncMock()
+        primary_app.running = True
+        primary_app.stop = AsyncMock()
+        primary_app.shutdown = AsyncMock()
+        adapter._app = primary_app
+        adapter._bot = MagicMock()
+        adapter._agent_bots["admin"] = adapter._bot
+        adapter._agent_request_kwargs = {}
+
+        await adapter._refresh_agent_bots()
+
+        assert adapter._app is None
+        assert adapter._bot is None
+        assert adapter._primary_agent_id is None
+        assert adapter.config.token == ""
+        assert "admin" not in adapter._agent_bots
+        primary_app.updater.stop.assert_awaited_once()
+        primary_app.stop.assert_awaited_once()
+        primary_app.shutdown.assert_awaited_once()
+
 
 # ===========================================================================
 # _handle_callback_query — approval button clicks
@@ -330,6 +494,159 @@ class TestTelegramApprovalCallback:
         assert "Denied" in edit_kwargs["text"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("resolver_result", [0, RuntimeError("resolver down")])
+    async def test_unconfirmed_resolution_stays_pending_and_truthful(
+        self, resolver_result
+    ):
+        adapter = _make_adapter()
+        adapter._approval_state[3] = {
+            "agent_id": "",
+            "request_id": "request-retry",
+            "session_key": "retry-session",
+        }
+        query = AsyncMock()
+        query.data = "ea:once:3"
+        query.message = MagicMock(chat_id=12345)
+        query.from_user = MagicMock(id=222, first_name="Alice")
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update = MagicMock(callback_query=query)
+        effect = (
+            {"side_effect": resolver_result}
+            if isinstance(resolver_result, Exception)
+            else {"return_value": resolver_result}
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", **effect):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        assert 3 in adapter._approval_state
+        query.edit_message_text.assert_not_awaited()
+        status = query.answer.await_args.kwargs["text"].lower()
+        if isinstance(resolver_result, Exception):
+            assert "check failed" in status
+            assert "try again" in status
+        else:
+            assert "may be stale" in status
+        assert "no command was approved" in status
+
+    @pytest.mark.asyncio
+    async def test_beta_broader_choice_displays_actual_once_scope(self):
+        adapter = _make_adapter()
+        adapter._approval_state[4] = {
+            "agent_id": "",
+            "request_id": "request-scope",
+            "session_key": "scope-session",
+        }
+        query = AsyncMock()
+        query.data = "ea:session:4"
+        query.message = MagicMock(chat_id=12345)
+        query.from_user = MagicMock(id=222, first_name="Owner")
+        update = MagicMock(callback_query=query)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ELEVATE_RELEASE_CHANNEL": "beta",
+                    "TELEGRAM_ALLOWED_USERS": "222",
+                },
+                clear=False,
+            ),
+            patch("tools.approval.resolve_gateway_approval", return_value=1),
+        ):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        assert "approved once" in query.answer.await_args.kwargs["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_beta_callback_must_match_originating_signed_agent(self):
+        adapter = _make_adapter()
+        adapter._approval_state[5] = {
+            "agent_id": "admin",
+            "request_id": "request-agent",
+            "session_key": "agent-session",
+        }
+        query = AsyncMock()
+        query.data = "ea:once:5"
+        query.message = MagicMock(chat_id=12345)
+        query.from_user = MagicMock(id=222, first_name="Owner")
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "elevate_agent_id": "marketing",
+                    "elevate_agent_name": "Marketing",
+                }
+            ),
+            bot=MagicMock(),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ELEVATE_RELEASE_CHANNEL": "beta",
+                    "TELEGRAM_ALLOWED_USERS": "222",
+                },
+                clear=False,
+            ),
+            patch("tools.approval.resolve_gateway_approval") as resolve,
+        ):
+            await adapter._handle_callback_query(
+                MagicMock(callback_query=query),
+                context,
+            )
+
+        resolve.assert_not_called()
+        assert 5 in adapter._approval_state
+        assert "different signed agent" in query.answer.await_args.kwargs["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_beta_executive_callback_matches_executive_prompt(self):
+        adapter = _make_adapter()
+        adapter._approval_state[6] = {
+            "agent_id": "executive-assistant",
+            "request_id": "request-executive",
+            "session_key": "executive-session",
+        }
+        query = AsyncMock()
+        query.data = "ea:once:6"
+        query.message = MagicMock(chat_id=12345)
+        query.from_user = MagicMock(id=222, first_name="Owner")
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "elevate_agent_id": "executive-assistant",
+                    "elevate_agent_name": "Executive Assistant",
+                }
+            ),
+            bot=MagicMock(),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ELEVATE_RELEASE_CHANNEL": "beta",
+                    "TELEGRAM_ALLOWED_USERS": "222",
+                },
+                clear=False,
+            ),
+            patch("tools.approval.resolve_gateway_approval", return_value=1) as resolve,
+        ):
+            await adapter._handle_callback_query(
+                MagicMock(callback_query=query),
+                context,
+            )
+
+        resolve.assert_called_once_with(
+            "executive-session",
+            "once",
+            request_id="request-executive",
+        )
+        assert 6 not in adapter._approval_state
+
+    @pytest.mark.asyncio
     async def test_already_resolved(self):
         adapter = _make_adapter()
         # No state for approval_id 99 — already resolved
@@ -353,7 +670,7 @@ class TestTelegramApprovalCallback:
         mock_resolve.assert_not_called()
         # Should still ack with "already resolved" message
         query.answer.assert_called_once()
-        assert "already been resolved" in query.answer.call_args[1]["text"]
+        assert "no longer active" in query.answer.call_args[1]["text"]
 
     @pytest.mark.asyncio
     async def test_beta_wildcard_cannot_authorize_actual_button_caller(self):

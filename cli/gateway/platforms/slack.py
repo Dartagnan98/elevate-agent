@@ -1541,6 +1541,49 @@ class SlackAdapter(BasePlatformAdapter):
             cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
             thread_ts = self._resolve_thread_ts(None, metadata)
 
+            try:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                exact_beta = beta_provider_policy_active()
+            except Exception:
+                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+            action_elements = [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Allow Once"},
+                    "style": "primary",
+                    "action_id": "elevate_approve_once",
+                    "value": session_key,
+                },
+            ]
+            if not exact_beta:
+                action_elements.extend(
+                    [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Allow Session"},
+                            "action_id": "elevate_approve_session",
+                            "value": session_key,
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Always Allow"},
+                            "action_id": "elevate_approve_always",
+                            "value": session_key,
+                        },
+                    ]
+                )
+            action_elements.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Deny"},
+                    "style": "danger",
+                    "action_id": "elevate_deny",
+                    "value": session_key,
+                }
+            )
+
             blocks = [
                 {
                     "type": "section",
@@ -1555,34 +1598,7 @@ class SlackAdapter(BasePlatformAdapter):
                 },
                 {
                     "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Once"},
-                            "style": "primary",
-                            "action_id": "elevate_approve_once",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Session"},
-                            "action_id": "elevate_approve_session",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Always Allow"},
-                            "action_id": "elevate_approve_always",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Deny"},
-                            "style": "danger",
-                            "action_id": "elevate_deny",
-                            "value": session_key,
-                        },
-                    ],
+                    "elements": action_elements,
                 },
             ]
 
@@ -1640,11 +1656,77 @@ class SlackAdapter(BasePlatformAdapter):
         }
         choice = choice_map.get(action_id, "deny")
 
-        # Prevent double-clicks and ignore caller-supplied button values.  The
-        # server-side state is the authority for both identities.
-        approval_state = self._approval_state.pop(msg_ts, None)
+        # Ignore caller-supplied button values.  The server-side state is the
+        # authority for both identities, and remains retryable until the
+        # central queue confirms this exact request.
+        approval_state = self._approval_state.get(msg_ts)
         if not approval_state:
             return
+
+        try:
+            from tools.approval import resolve_gateway_approval
+            session_key = approval_state["session_key"]
+            request_id = approval_state.get("request_id", "")
+            if not request_id:
+                raise RuntimeError("approval request identity missing")
+            count = resolve_gateway_approval(
+                session_key,
+                choice,
+                request_id=request_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
+            count = 0
+            resolution_error = True
+        else:
+            resolution_error = False
+
+        if count <= 0:
+            # Keep the original action block so the user can retry.  Never
+            # replace a failed/stale central decision with Approved/Denied.
+            retry_text = (
+                "⚠️ Decision check failed. No command was approved; please try again."
+                if resolution_error
+                else (
+                    "⚠️ Decision not confirmed; no command was approved. "
+                    "This request may be stale."
+                )
+            )
+            retry_blocks = [
+                block
+                for block in message.get("blocks", [])
+                if block.get("type") != "context"
+            ]
+            retry_blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": retry_text}],
+                }
+            )
+            try:
+                await self._get_client(channel_id).chat_update(
+                    channel=channel_id,
+                    ts=msg_ts,
+                    text=retry_text,
+                    blocks=retry_blocks,
+                )
+            except Exception as exc:
+                logger.warning("[Slack] Failed to show pending approval status: %s", exc)
+            return
+
+        self._approval_state.pop(msg_ts, None)
+
+        try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            exact_beta = beta_provider_policy_active()
+        except Exception:
+            exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+        display_choice = (
+            "once"
+            if exact_beta and choice in {"once", "session", "always"}
+            else choice
+        )
 
         # Update the message to show the decision and remove buttons
         label_map = {
@@ -1653,7 +1735,7 @@ class SlackAdapter(BasePlatformAdapter):
             "always": f"✅ Approved permanently by {user_name}",
             "deny": f"❌ Denied by {user_name}",
         }
-        decision_text = label_map.get(choice, f"Resolved by {user_name}")
+        decision_text = label_map.get(display_choice, f"Resolved by {user_name}")
 
         # Get original text from the section block
         original_text = ""
@@ -1688,27 +1770,10 @@ class SlackAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[Slack] Failed to update approval message: %s", e)
 
-        # Resolve the approval — this unblocks the agent thread
-        try:
-            from tools.approval import resolve_gateway_approval
-            session_key = approval_state["session_key"]
-            request_id = approval_state.get("request_id", "")
-            if not request_id:
-                logger.error("Slack approval state missing request identity")
-                return
-            count = resolve_gateway_approval(
-                session_key,
-                choice,
-                request_id=request_id,
-            )
-            logger.info(
-                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                count, session_key, choice, user_name,
-            )
-        except Exception as exc:
-            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
-
-        # (approval state already consumed by atomic pop above)
+        logger.info(
+            "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
+            count, session_key, display_choice, user_name,
+        )
 
     # ----- Thread context fetching -----
 

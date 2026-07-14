@@ -109,6 +109,44 @@ class TestSlackExecApproval:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("release_channel", "expected_actions"),
+        [
+            ("beta", ["elevate_approve_once", "elevate_deny"]),
+            (
+                "Beta",
+                [
+                    "elevate_approve_once",
+                    "elevate_approve_session",
+                    "elevate_approve_always",
+                    "elevate_deny",
+                ],
+            ),
+        ],
+    )
+    async def test_beta_prompt_only_advertises_supported_scope(
+        self, release_channel, expected_actions
+    ):
+        adapter = _make_adapter()
+        client = adapter._team_clients["T1"]
+        client.chat_postMessage = AsyncMock(return_value={"ts": "1234.5678"})
+
+        with patch.dict(
+            os.environ,
+            {"ELEVATE_RELEASE_CHANNEL": release_channel},
+            clear=False,
+        ):
+            await adapter.send_exec_approval(
+                chat_id="C1",
+                command="rm -rf /important",
+                session_key="slack-session",
+                request_id="request-slack",
+            )
+
+        actions = client.chat_postMessage.await_args.kwargs["blocks"][1]["elements"]
+        assert [action["action_id"] for action in actions] == expected_actions
+
+    @pytest.mark.asyncio
     async def test_sends_in_thread(self):
         adapter = _make_adapter()
         mock_client = adapter._team_clients["T1"]
@@ -265,6 +303,58 @@ class TestSlackApprovalAction:
         )
         update_kwargs = mock_client.chat_update.call_args[1]
         assert "Denied by alice" in update_kwargs["text"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resolver_result", [0, RuntimeError("resolver down")])
+    async def test_unconfirmed_action_keeps_state_buttons_and_truthful_status(
+        self, resolver_result
+    ):
+        adapter = _make_adapter()
+        adapter._approval_state["1.3"] = {
+            "request_id": "request-retry",
+            "session_key": "retry-session",
+        }
+        ack = AsyncMock()
+        body = {
+            "message": {
+                "ts": "1.3",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "dangerous command"},
+                    },
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {"action_id": "elevate_approve_once", "value": "ignored"}
+                        ],
+                    },
+                ],
+            },
+            "channel": {"id": "C1"},
+            "user": {"name": "alice", "id": "U1"},
+        }
+        action = {"action_id": "elevate_approve_once", "value": "attacker"}
+        client = adapter._team_clients["T1"]
+        client.chat_update = AsyncMock()
+        effect = (
+            {"side_effect": resolver_result}
+            if isinstance(resolver_result, Exception)
+            else {"return_value": resolver_result}
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", **effect):
+            await adapter._handle_approval_action(ack, body, action)
+
+        assert "1.3" in adapter._approval_state
+        update = client.chat_update.await_args.kwargs
+        if isinstance(resolver_result, Exception):
+            assert "check failed" in update["text"].lower()
+            assert "try again" in update["text"].lower()
+        else:
+            assert "may be stale" in update["text"].lower()
+        assert "no command was approved" in update["text"].lower()
+        assert any(block.get("type") == "actions" for block in update["blocks"])
 
 
 # ===========================================================================

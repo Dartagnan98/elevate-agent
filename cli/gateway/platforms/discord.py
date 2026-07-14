@@ -4061,11 +4061,19 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             embed.add_field(name="Reason", value=description, inline=False)
 
+            try:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                exact_beta = beta_provider_policy_active()
+            except Exception:
+                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
             view = ExecApprovalView(
                 session_key=session_key,
                 request_id=request_id,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
+                exact_beta=exact_beta,
             )
 
             msg = await channel.send(embed=embed, view=view)
@@ -5009,10 +5017,12 @@ def _define_discord_view_classes() -> None:
         """
         Interactive button view for exec approval of dangerous commands.
 
-        Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
-        Clicking a button calls ``resolve_gateway_approval()`` to unblock the
-        waiting agent thread — the same mechanism as the text ``/approve`` flow.
-        Only users in the allowed list can click.  Times out after 5 minutes.
+        Stable shows Allow Once, Allow Session, Always Allow, and Deny. Exact
+        Beta removes the persistent choices and shows only Allow Once and
+        Deny, matching its one-command authorization policy. Clicking a button
+        calls ``resolve_gateway_approval()`` to unblock the waiting agent
+        thread. Only users in the allowed list can click. Times out after 5
+        minutes.
         """
 
         def __init__(
@@ -5021,6 +5031,7 @@ def _define_discord_view_classes() -> None:
             request_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            exact_beta: bool = False,
         ):
             super().__init__(timeout=300)  # 5-minute timeout
             self.session_key = session_key
@@ -5028,6 +5039,16 @@ def _define_discord_view_classes() -> None:
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            self.exact_beta = exact_beta
+            self.visible_approval_labels = (
+                ("Allow Once", "Deny")
+                if exact_beta
+                else ("Allow Once", "Allow Session", "Always Allow", "Deny")
+            )
+            if exact_beta:
+                for child in list(self.children):
+                    if str(getattr(child, "label", "")) not in self.visible_approval_labels:
+                        self.remove_item(child)
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             """Verify the user clicking is authorized."""
@@ -5039,7 +5060,7 @@ def _define_discord_view_classes() -> None:
             self, interaction: discord.Interaction, choice: str,
             color: discord.Color, label: str,
         ):
-            """Resolve the approval via the gateway approval queue and update the embed."""
+            """Resolve centrally before presenting a terminal decision."""
             if self.resolved:
                 await interaction.response.send_message(
                     "This approval has already been resolved~", ephemeral=True
@@ -5052,7 +5073,54 @@ def _define_discord_view_classes() -> None:
                 )
                 return
 
+            try:
+                from tools.approval import resolve_gateway_approval
+                if not self.request_id:
+                    raise RuntimeError("approval request identity missing")
+                count = resolve_gateway_approval(
+                    self.session_key,
+                    choice,
+                    request_id=self.request_id,
+                )
+            except Exception as exc:
+                logger.error("Failed to resolve gateway approval from Discord button: %s", exc)
+                await interaction.response.send_message(
+                    "Decision check failed. No command was approved; please try again.",
+                    ephemeral=True,
+                )
+                return
+            if count <= 0:
+                logger.warning(
+                    "Discord approval request was stale or not confirmed "
+                    "(session=%s, request=%s)",
+                    self.session_key,
+                    self.request_id,
+                )
+                await interaction.response.send_message(
+                    (
+                        "Decision not confirmed; no command was approved. "
+                        "This request may be stale."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
             self.resolved = True
+
+            try:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                exact_beta = beta_provider_policy_active()
+            except Exception:
+                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+            display_choice = (
+                "once"
+                if exact_beta and choice in {"once", "session", "always"}
+                else choice
+            )
+            if display_choice == "once" and choice != "once":
+                label = "Approved once"
+                color = discord.Color.green()
 
             # Update the embed with the decision
             embed = interaction.message.embeds[0] if interaction.message.embeds else None
@@ -5065,24 +5133,10 @@ def _define_discord_view_classes() -> None:
                 child.disabled = True
 
             await interaction.response.edit_message(embed=embed, view=self)
-
-            # Unblock the waiting agent thread via the gateway approval queue
-            try:
-                from tools.approval import resolve_gateway_approval
-                if not self.request_id:
-                    logger.error("Discord approval state missing request identity")
-                    return
-                count = resolve_gateway_approval(
-                    self.session_key,
-                    choice,
-                    request_id=self.request_id,
-                )
-                logger.info(
-                    "Discord button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                    count, self.session_key, choice, interaction.user.display_name,
-                )
-            except Exception as exc:
-                logger.error("Failed to resolve gateway approval from button: %s", exc)
+            logger.info(
+                "Discord button resolved %d approval(s) for session %s (choice=%s, user=%s)",
+                count, self.session_key, display_choice, interaction.user.display_name,
+            )
 
         @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
         async def allow_once(

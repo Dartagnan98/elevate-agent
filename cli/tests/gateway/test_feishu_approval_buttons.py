@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,6 +81,15 @@ def _close_submitted_coro(coro, _loop):
     return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
 
 
+def _seed_approval(adapter: FeishuAdapter, approval_id: int) -> None:
+    adapter._approval_state[approval_id] = {
+        "session_key": f"session-{approval_id}",
+        "request_id": f"request-{approval_id}",
+        "message_id": f"message-{approval_id}",
+        "chat_id": "oc_12345",
+    }
+
+
 # ===========================================================================
 # send_exec_approval — interactive card with buttons
 # ===========================================================================
@@ -128,6 +138,47 @@ class TestFeishuExecApproval:
         assert action_names == [
             "approve_once", "approve_session", "approve_always", "deny"
         ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("release_channel", "expected_actions"),
+        [
+            ("beta", ["approve_once", "deny"]),
+            ("Beta", ["approve_once", "approve_session", "approve_always", "deny"]),
+        ],
+    )
+    async def test_beta_prompt_only_advertises_supported_scope(
+        self, release_channel, expected_actions
+    ):
+        adapter = _make_adapter()
+        response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_scope"),
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {"ELEVATE_RELEASE_CHANNEL": release_channel},
+                clear=False,
+            ),
+            patch.object(
+                adapter,
+                "_feishu_send_with_retry",
+                new_callable=AsyncMock,
+                return_value=response,
+            ) as send,
+        ):
+            await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="rm -rf /important",
+                session_key="feishu-session",
+                request_id="request-feishu",
+            )
+
+        card = json.loads(send.await_args.kwargs["payload"])
+        actions = card["elements"][1]["actions"]
+        assert [action["value"]["elevate_action"] for action in actions] == expected_actions
 
     @pytest.mark.asyncio
     async def test_stores_approval_state(self):
@@ -385,6 +436,7 @@ class TestCardActionCallbackResponse:
 
     def test_returns_card_for_approve_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
+        _seed_approval(adapter, 1)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
@@ -393,7 +445,7 @@ class TestCardActionCallbackResponse:
         )
         adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+        with patch("tools.approval.resolve_gateway_approval", return_value=1):
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
@@ -403,16 +455,18 @@ class TestCardActionCallbackResponse:
         assert card["header"]["template"] == "green"
         assert "Approved once" in card["header"]["title"]["content"]
         assert "Bob" in card["elements"][0]["content"]
+        assert 1 not in adapter._approval_state
 
     def test_returns_card_for_deny_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
+        _seed_approval(adapter, 2)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
             {"elevate_action": "deny", "approval_id": 2},
         )
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+        with patch("tools.approval.resolve_gateway_approval", return_value=1):
             response = adapter._on_card_action_trigger(data)
 
         assert response.card is not None
@@ -447,6 +501,7 @@ class TestCardActionCallbackResponse:
 
     def test_falls_back_to_open_id_when_name_not_cached(self, _patch_callback_card_types):
         adapter = _make_adapter()
+        _seed_approval(adapter, 3)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
@@ -454,7 +509,7 @@ class TestCardActionCallbackResponse:
             open_id="ou_unknown",
         )
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+        with patch("tools.approval.resolve_gateway_approval", return_value=1):
             response = adapter._on_card_action_trigger(data)
 
         card = response.card.data
@@ -462,6 +517,7 @@ class TestCardActionCallbackResponse:
 
     def test_ignores_expired_cached_name(self, _patch_callback_card_types):
         adapter = _make_adapter()
+        _seed_approval(adapter, 4)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
@@ -470,9 +526,65 @@ class TestCardActionCallbackResponse:
         )
         adapter._sender_name_cache["ou_expired"] = ("Old Name", 1)
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
+        with patch("tools.approval.resolve_gateway_approval", return_value=1):
             response = adapter._on_card_action_trigger(data)
 
         card = response.card.data
         assert "Old Name" not in card["elements"][0]["content"]
         assert "ou_expired" in card["elements"][0]["content"]
+
+    @pytest.mark.parametrize(
+        ("release_channel", "expected_actions"),
+        [
+            ("beta", ["approve_once", "deny"]),
+            ("Beta", ["approve_once", "approve_session", "approve_always", "deny"]),
+        ],
+    )
+    def test_retry_card_preserves_channel_specific_scope(
+        self, release_channel, expected_actions
+    ):
+        with patch.dict(
+            os.environ,
+            {"ELEVATE_RELEASE_CHANNEL": release_channel},
+            clear=False,
+        ):
+            card = FeishuAdapter._build_pending_approval_card(
+                approval_id=7,
+                retryable=True,
+                resolution_error=True,
+            )
+
+        actions = card["elements"][1]["actions"]
+        assert [action["value"]["elevate_action"] for action in actions] == expected_actions
+
+    @pytest.mark.parametrize("resolver_result", [0, RuntimeError("resolver down")])
+    def test_unconfirmed_action_returns_retryable_pending_card(
+        self, _patch_callback_card_types, resolver_result
+    ):
+        adapter = _make_adapter()
+        _seed_approval(adapter, 5)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": 5},
+        )
+        effect = (
+            {"side_effect": resolver_result}
+            if isinstance(resolver_result, Exception)
+            else {"return_value": resolver_result}
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", **effect):
+            response = adapter._on_card_action_trigger(data)
+
+        assert 5 in adapter._approval_state
+        card = response.card.data
+        assert card["header"]["template"] == "orange"
+        status = card["elements"][0]["content"].lower()
+        if isinstance(resolver_result, Exception):
+            assert "check failed" in status
+            assert "try again" in status
+        else:
+            assert "may be stale" in status
+        assert "no command was approved" in status
+        assert card["elements"][1]["tag"] == "action"
