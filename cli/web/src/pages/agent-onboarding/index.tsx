@@ -19,6 +19,7 @@ import type {
   StatusResponse,
 } from "@/lib/api-types";
 import { Button } from "@/components/ui/button";
+import { OAuthProvidersCard } from "@/components/OAuthProvidersCard";
 import { RouteSkeleton } from "@/components/route-skeletons";
 import { cn } from "@/lib/utils";
 import {
@@ -32,6 +33,10 @@ import {
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
 import { exitAgentOnboardingToChat } from "./onboarding-exit";
+import {
+  canonicalizePrimaryDraftForOnboarding,
+  scopeOAuthProvidersForOnboarding,
+} from "./beta-provider-ui";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -643,7 +648,9 @@ export function AgentSetupLaunch({
   onForceOnboardingDone?: () => void;
   realtorBeta?: boolean;
 }) {
-  const [draft, setDraft] = useState<AgentSetupDraft>(() => draftFromSnapshot(setup));
+  const [draft, setDraft] = useState<AgentSetupDraft>(() =>
+    canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+  );
   const [saving, setSaving] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -651,14 +658,20 @@ export function AgentSetupLaunch({
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[] | null>(null);
 
   useEffect(() => {
-    setDraft(draftFromSnapshot(setup));
-  }, [setup]);
+    setDraft(
+      canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+    );
+  }, [setup, realtorBeta]);
 
   useEffect(() => {
     let cancelled = false;
     api.getOAuthProviders()
       .then((response) => {
-        if (!cancelled) setOauthProviders(response.providers);
+        if (!cancelled) {
+          setOauthProviders(
+            scopeOAuthProvidersForOnboarding(response.providers, realtorBeta),
+          );
+        }
       })
       .catch(() => {
         // Unknown is not disconnected. Keep null so an unchanged configured
@@ -667,7 +680,7 @@ export function AgentSetupLaunch({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [realtorBeta]);
 
   const byKey = useMemo(
     () => new Map(setup.items.map((item: AgentSetupItem) => [item.key, item])),
@@ -688,8 +701,9 @@ export function AgentSetupLaunch({
     setError(null);
     setSavedMessage(null);
     try {
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
       const updated = await api.updateAgentSetup(
-        buildItemUpdates(draft, oauthProviders, primaryItem),
+        buildItemUpdates(draftToSave, oauthProviders, primaryItem),
       );
       onSetupUpdated(updated);
       setSavedMessage(
@@ -702,14 +716,17 @@ export function AgentSetupLaunch({
     } finally {
       setSaving(false);
     }
-  }, [draft, oauthProviders, onSetupUpdated, primaryItem]);
+  }, [draft, oauthProviders, onSetupUpdated, primaryItem, realtorBeta]);
 
   const markComplete = useCallback(async () => {
     setCompleting(true);
     setError(null);
     setSavedMessage(null);
     try {
-      await api.updateAgentSetup(buildItemUpdates(draft, oauthProviders, primaryItem));
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
+      await api.updateAgentSetup(
+        buildItemUpdates(draftToSave, oauthProviders, primaryItem),
+      );
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
       onForceOnboardingDone?.();
@@ -718,7 +735,14 @@ export function AgentSetupLaunch({
     } finally {
       setCompleting(false);
     }
-  }, [draft, oauthProviders, onSetupUpdated, onForceOnboardingDone, primaryItem]);
+  }, [
+    draft,
+    oauthProviders,
+    onSetupUpdated,
+    onForceOnboardingDone,
+    primaryItem,
+    realtorBeta,
+  ]);
 
   const updateField = useCallback(
     <K extends keyof AgentSetupDraft>(key: K, value: AgentSetupDraft[K]) => {
@@ -783,46 +807,72 @@ export function AgentSetupLaunch({
         </div>
       )}
 
-      <ItemCard
-        title="Primary LLM"
-        description="The model the agent thinks with. Anthropic Claude or OpenAI GPT are the proven defaults."
-        status={primaryItem?.status ?? "missing"}
-        required
-      >
-        <SelectRow
-          label="Provider"
-          value={draft.primaryProvider}
-          onChange={(v) => updateField("primaryProvider", v)}
-          options={[
-            { value: "anthropic", label: "Anthropic (Claude)" },
-            { value: "openai", label: "OpenAI" },
-            { value: "openrouter", label: "OpenRouter" },
-            { value: "azure_openai", label: "Azure Foundry" },
-          ]}
-        />
-        <FieldRow
-          label="Model ID"
-          value={draft.primaryModel}
-          onChange={(v) => updateField("primaryModel", v)}
-          placeholder="claude-opus-4-7  or  gpt-4-turbo"
-        />
-        <FieldRow
-          label="API key"
-          value={draft.primaryApiKey}
-          onChange={(v) => updateField("primaryApiKey", v)}
-          placeholder={
-            draft.primarySecretPresent && !draft.primaryApiKey
-              ? `Already set — ${draft.primarySecretPreview} (paste to replace)`
-              : "sk-ant-…  or  sk-…"
-          }
-          type="password"
-          hint={
-            draft.primarySecretPresent && !draft.primaryApiKey
-              ? "Detected from environment. Leave blank to keep using it."
-              : undefined
-          }
-        />
-      </ItemCard>
+      {realtorBeta ? (
+        <ItemCard
+          title="OpenAI Codex"
+          description="The supported model connection for Realtor Beta. Elevation chooses the compatible model automatically."
+          status={primaryItem?.status ?? "missing"}
+          required
+        >
+          <OAuthProvidersCard
+            realtorBeta
+            onError={(message) => setError(message)}
+            onSuccess={() => {
+              api.getOAuthProviders()
+                .then((response) =>
+                  setOauthProviders(
+                    scopeOAuthProvidersForOnboarding(response.providers, true),
+                  ),
+                )
+                .catch(() => {});
+            }}
+          />
+          <p className="text-[11.5px] leading-5 text-muted-foreground">
+            No provider picker, model picker, or API key is needed in Realtor Beta.
+          </p>
+        </ItemCard>
+      ) : (
+        <ItemCard
+          title="Primary LLM"
+          description="The model the agent thinks with. Anthropic Claude or OpenAI GPT are the proven defaults."
+          status={primaryItem?.status ?? "missing"}
+          required
+        >
+          <SelectRow
+            label="Provider"
+            value={draft.primaryProvider}
+            onChange={(v) => updateField("primaryProvider", v)}
+            options={[
+              { value: "anthropic", label: "Anthropic (Claude)" },
+              { value: "openai", label: "OpenAI" },
+              { value: "openrouter", label: "OpenRouter" },
+              { value: "azure_openai", label: "Azure Foundry" },
+            ]}
+          />
+          <FieldRow
+            label="Model ID"
+            value={draft.primaryModel}
+            onChange={(v) => updateField("primaryModel", v)}
+            placeholder="claude-opus-4-7  or  gpt-4-turbo"
+          />
+          <FieldRow
+            label="API key"
+            value={draft.primaryApiKey}
+            onChange={(v) => updateField("primaryApiKey", v)}
+            placeholder={
+              draft.primarySecretPresent && !draft.primaryApiKey
+                ? `Already set — ${draft.primarySecretPreview} (paste to replace)`
+                : "sk-ant-…  or  sk-…"
+            }
+            type="password"
+            hint={
+              draft.primarySecretPresent && !draft.primaryApiKey
+                ? "Detected from environment. Leave blank to keep using it."
+                : undefined
+            }
+          />
+        </ItemCard>
+      )}
 
       {realtorBeta ? (
         <ItemCard
@@ -1354,6 +1404,7 @@ export function AgentOnboardingPage() {
   if (showOnboarding && wizardPhase === "welcome") {
     return (
       <AgentOnboardingWelcome
+        realtorBeta={realtorBeta}
         onContinue={() => setWizardPhase("wizard")}
         onFinishLater={finishOnboardingLater}
       />

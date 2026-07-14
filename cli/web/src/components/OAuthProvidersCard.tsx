@@ -8,10 +8,15 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { OAuthLoginModal } from "@/components/OAuthLoginModal";
 import { ListSkeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
+import {
+  isOAuthProviderAllowedInOnboarding,
+  scopeOAuthProvidersForOnboarding,
+} from "@/pages/agent-onboarding/beta-provider-ui";
 
 interface Props {
   onError?: (msg: string) => void;
   onSuccess?: (msg: string) => void;
+  realtorBeta?: boolean;
 }
 
 function formatExpiresAt(expiresAt: string | number | null | undefined, expiresInTemplate: string): string | null {
@@ -39,7 +44,7 @@ function formatExpiresAt(expiresAt: string | number | null | undefined, expiresI
   }
 }
 
-export function OAuthProvidersCard({ onError, onSuccess }: Props) {
+export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: Props) {
   const [providers, setProviders] = useState<OAuthProvider[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -55,16 +60,22 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
     setLoading(true);
     api
       .getOAuthProviders()
-      .then((resp) => setProviders(resp.providers))
+      .then((resp) =>
+        setProviders(scopeOAuthProvidersForOnboarding(resp.providers, realtorBeta)),
+      )
       .catch((e) => onErrorRef.current?.(`Failed to load providers: ${e}`))
       .finally(() => setLoading(false));
-  }, []);
+  }, [realtorBeta]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
   const handleCopy = async (provider: OAuthProvider) => {
+    if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
+      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      return;
+    }
     try {
       await navigator.clipboard.writeText(provider.cli_command);
       setCopiedId(provider.id);
@@ -76,6 +87,10 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   };
 
   const handleDisconnect = async (provider: OAuthProvider) => {
+    if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
+      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      return;
+    }
     setBusyId(provider.id);
     try {
       await api.disconnectOAuthProvider(provider.id);
@@ -92,13 +107,23 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   const connectedCount = providers?.filter((p) => p.status.logged_in).length ?? 0;
   const totalCount = providers?.length ?? 0;
 
+  const beginLogin = (provider: OAuthProvider) => {
+    if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
+      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      return;
+    }
+    setLoginFor(provider);
+  };
+
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5 text-muted-foreground" />
-            <CardTitle className="text-base">{t.oauth.providerLogins}</CardTitle>
+            <CardTitle className="text-base">
+              {realtorBeta ? "OpenAI Codex sign-in" : t.oauth.providerLogins}
+            </CardTitle>
           </div>
           <Button
             variant="ghost"
@@ -112,7 +137,11 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           </Button>
         </div>
         <CardDescription>
-          {t.oauth.description.replace("{connected}", String(connectedCount)).replace("{total}", String(totalCount))}
+          {realtorBeta
+            ? connectedCount > 0
+              ? "Connected to this Realtor Beta profile."
+              : "Sign in once so Elevation can work on your real estate tasks."
+            : t.oauth.description.replace("{connected}", String(connectedCount)).replace("{total}", String(totalCount))}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -184,7 +213,12 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                         )}
                       </code>
                     )}
-                    {!p.status.logged_in && (
+                    {!p.status.logged_in && realtorBeta && (
+                      <span className="text-xs text-muted-foreground/80">
+                        Not signed in on this Beta profile.
+                      </span>
+                    )}
+                    {!p.status.logged_in && !realtorBeta && (
                       <span className="text-xs text-muted-foreground/80">
                         {t.oauth.notConnected.split("{command}")[0]}
                         <code className="text-foreground bg-secondary/40 px-1">
@@ -202,7 +236,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                 </div>
                 {/* Right: action buttons */}
                 <div className="flex items-center gap-1.5 shrink-0">
-                  {p.docs_url && (
+                  {p.docs_url && !realtorBeta && (
                     <a
                       href={p.docs_url}
                       target="_blank"
@@ -218,14 +252,14 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
                     <Button
                       variant="default"
                       size="sm"
-                      onClick={() => setLoginFor(p)}
+                      onClick={() => beginLogin(p)}
                       className="text-xs h-7"
                     >
                       <LogIn className="h-3 w-3 mr-1" />
                       {loginLabel}
                     </Button>
                   )}
-                  {!p.status.logged_in && (
+                  {!p.status.logged_in && !realtorBeta && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -271,7 +305,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
           })}
         </div>
       </CardContent>
-      {loginFor && (
+      {loginFor && isOAuthProviderAllowedInOnboarding(loginFor.id, realtorBeta) && (
         <OAuthLoginModal
           provider={loginFor}
           onClose={() => {
@@ -283,7 +317,10 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
         />
       )}
       <ConfirmDialog
-        open={disconnectTarget !== null}
+        open={
+          disconnectTarget !== null &&
+          isOAuthProviderAllowedInOnboarding(disconnectTarget.id, realtorBeta)
+        }
         title={`${t.oauth.disconnect} ${disconnectTarget?.name ?? "provider"}?`}
         description="This removes the stored OAuth credentials for this provider. You can log in again later."
         confirmLabel={t.oauth.disconnect}

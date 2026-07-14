@@ -54,6 +54,10 @@ import {
   resolveConfiguredPrimaryRuntimeProvider,
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
+import {
+  canonicalizePrimaryDraftForOnboarding,
+  scopeOAuthProvidersForOnboarding,
+} from "./beta-provider-ui";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
@@ -200,9 +204,11 @@ const AGENT_WIZARD_STEPS: AgentWizardStep[] = [
 export function AgentOnboardingWelcome({
   onContinue,
   onFinishLater,
+  realtorBeta = false,
 }: {
   onContinue: () => void;
   onFinishLater: () => void;
+  realtorBeta?: boolean;
 }) {
   const [exiting, setExiting] = useState(false);
 
@@ -244,7 +250,9 @@ export function AgentOnboardingWelcome({
           Bring the agent online.
         </h1>
         <p className="onboarding-rise-delay-2 mt-4 max-w-lg text-[15px] leading-7 text-muted-foreground">
-          Pick a model, give it a memory store, and tell it which channels to listen on. Same form you'd find buried in Settings — guided.
+          {realtorBeta
+            ? "Connect OpenAI Codex, confirm your local memory, and choose how you want Elevation to reach you."
+            : "Pick a model, give it a memory store, and tell it which channels to listen on. Same form you'd find buried in Settings — guided."}
         </p>
         <Button
           size="lg"
@@ -284,7 +292,9 @@ export function AgentOnboardingWizard({
   onFinish: () => void;
   realtorBeta?: boolean;
 }) {
-  const [draft, setDraft] = useState<AgentSetupDraft>(() => draftFromSnapshot(setup));
+  const [draft, setDraft] = useState<AgentSetupDraft>(() =>
+    canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+  );
   const [saving, setSaving] = useState(false);
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -304,8 +314,10 @@ export function AgentOnboardingWizard({
   draftRef.current = draft;
 
   useEffect(() => {
-    setDraft(draftFromSnapshot(setup));
-  }, [setup]);
+    setDraft(
+      canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+    );
+  }, [setup, realtorBeta]);
 
   // Pull real CLI auth state so the Brain step reflects what's actually
   // signed in (anthropic via PKCE, claude-code subscription, etc) — NOT
@@ -318,16 +330,24 @@ export function AgentOnboardingWizard({
         .getOAuthProviders()
         .then((resp) => {
           if (cancelled) return;
-          setOauthProviders(resp.providers);
+          const scopedProviders = scopeOAuthProvidersForOnboarding(
+            resp.providers,
+            realtorBeta,
+          );
+          setOauthProviders(scopedProviders);
+          if (realtorBeta) {
+            setDraft((prev) => canonicalizePrimaryDraftForOnboarding(prev, true));
+            return;
+          }
           // Auto-default primaryProvider when nothing is picked yet but
           // a CLI provider is signed in. Saves the user a click when they
           // already authed via `elevate auth add anthropic`.
           const current = draftRef.current.primaryProvider;
           if (!current.trim()) {
-            const live = resp.providers.find(
+            const live = scopedProviders.find(
               (p) => isOAuthProviderUsable(p) && p.id !== "claude-code",
             );
-            const fallback = resp.providers.find(isOAuthProviderUsable);
+            const fallback = scopedProviders.find(isOAuthProviderUsable);
             const pick = live ?? fallback;
             if (pick) {
               setDraft((prev) =>
@@ -348,7 +368,7 @@ export function AgentOnboardingWizard({
     return () => {
       cancelled = true;
     };
-  }, [stepIdx]);
+  }, [stepIdx, realtorBeta]);
 
   const connectedProviderIds = useMemo(() => {
     if (!oauthProviders) return new Set<string>();
@@ -360,12 +380,14 @@ export function AgentOnboardingWizard({
     setConfiguredApiKeyEnvNames(new Set(envKeys));
   }, []);
   const handleApiKeyError = useCallback((message: string) => setError(message), []);
-  const primaryDirectSecretPresent = Boolean(draft.primaryApiKey.trim()) ||
+  const primaryDirectSecretPresent = !realtorBeta && (
+    Boolean(draft.primaryApiKey.trim()) ||
     primaryProviderUsesEnvKey(draft.primaryProvider, configuredApiKeyEnvNames) ||
     (
       draft.primarySecretPresent &&
       resolvePrimaryWizardProvider(primaryItem?.provider ?? "") === draft.primaryProvider
-    );
+    )
+  );
 
   const catalogProviderId = useMemo(
     () => resolveConfiguredPrimaryRuntimeProvider({
@@ -394,6 +416,11 @@ export function AgentOnboardingWizard({
   }, []);
 
   useEffect(() => {
+    if (realtorBeta) {
+      setPrimaryModelCatalog([]);
+      setPrimaryModelLoading(false);
+      return;
+    }
     if (!catalogProviderId) {
       setPrimaryModelCatalog([]);
       setPrimaryModelLoading(false);
@@ -424,12 +451,13 @@ export function AgentOnboardingWizard({
     return () => {
       cancelled = true;
     };
-  }, [catalogProviderId]);
+  }, [catalogProviderId, realtorBeta]);
 
   // Auto-clear primaryModel when the user switches providers and the carried
   // value isn't in the new catalog. Prevents stale Anthropic ids surfacing
   // when the resolved provider becomes openai-codex, etc.
   useEffect(() => {
+    if (realtorBeta) return;
     if (!catalogProviderId) return;
     if (primaryModelLoading) return;
     if (primaryModelCatalog.length === 0) return;
@@ -448,7 +476,7 @@ export function AgentOnboardingWizard({
     if (familyMismatch) {
       setDraft((prev) => ({ ...prev, primaryModel: primaryModelCatalog[0] ?? "" }));
     }
-  }, [catalogProviderId, primaryModelCatalog, primaryModelLoading]);
+  }, [catalogProviderId, primaryModelCatalog, primaryModelLoading, realtorBeta]);
 
   // Channels marked "configured" on the backend (env-detected or
   // wizard-confirmed). The toggle in the UI mirrors this so env-set creds
@@ -492,10 +520,14 @@ export function AgentOnboardingWizard({
         existingPrimary: primaryItem,
       });
       if (!anyProviderConnected && !primaryReady) {
-        return "Connect a model provider below before continuing.";
+        return realtorBeta
+          ? "Sign in to OpenAI Codex on this Beta profile before continuing."
+          : "Connect a model provider below before continuing.";
       }
       if (!primaryReady) {
-        return "Pick a provider and model the agent should think with.";
+        return realtorBeta
+          ? "OpenAI Codex sign-in is not ready yet. Refresh the status and try again."
+          : "Pick a provider and model the agent should think with.";
       }
       // Embedding is OPTIONAL — without it, memory recall falls back to the
       // Postgres full-text (tsvector) keyword search, so it degrades rather
@@ -550,8 +582,14 @@ export function AgentOnboardingWizard({
     setSaving(true);
     setError(null);
     try {
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
       const updated = await api.updateAgentSetup(
-        buildItemUpdates(draft, oauthProviders, primaryItem, primaryDirectSecretPresent),
+        buildItemUpdates(
+          draftToSave,
+          oauthProviders,
+          primaryItem,
+          primaryDirectSecretPresent,
+        ),
       );
       onSetupUpdated(updated);
     } catch (err) {
@@ -560,14 +598,27 @@ export function AgentOnboardingWizard({
     } finally {
       setSaving(false);
     }
-  }, [draft, oauthProviders, onSetupUpdated, primaryItem, primaryDirectSecretPresent]);
+  }, [
+    draft,
+    oauthProviders,
+    onSetupUpdated,
+    primaryItem,
+    primaryDirectSecretPresent,
+    realtorBeta,
+  ]);
 
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
     try {
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
       await api.updateAgentSetup(
-        buildItemUpdates(draft, oauthProviders, primaryItem, primaryDirectSecretPresent),
+        buildItemUpdates(
+          draftToSave,
+          oauthProviders,
+          primaryItem,
+          primaryDirectSecretPresent,
+        ),
       );
       const completed = await api.completeAgentSetup();
       onSetupUpdated(completed);
@@ -586,6 +637,7 @@ export function AgentOnboardingWizard({
     onFinish,
     primaryItem,
     primaryDirectSecretPresent,
+    realtorBeta,
   ]);
 
   const handleNext = useCallback(async () => {
@@ -658,107 +710,131 @@ export function AgentOnboardingWizard({
             {step.title}
           </h2>
           <p className="onboarding-rise-delay-2 mt-3 max-w-xl text-[14px] leading-7 text-muted-foreground">
-            {realtorBeta && step.id === "memory"
-              ? "Realtor Beta keeps long-term memory in this Elevation profile on your Mac. No external memory account is needed."
-              : step.subtitle}
+            {realtorBeta && step.id === "models"
+              ? "OpenAI Codex is the supported model for Realtor Beta. Sign in once and Elevation handles the model setup for you."
+              : realtorBeta && step.id === "memory"
+                ? "Realtor Beta keeps long-term memory in this Elevation profile on your Mac. No external memory account is needed."
+                : step.subtitle}
           </p>
 
           <div className="onboarding-rise-delay-3 mt-8 flex flex-col gap-5">
             {step.id === "models" && (
-              <>
+              realtorBeta ? (
                 <WizardSection
-                  title="Sign in to a model provider"
-                  hint="Real CLI auth state. Sign in here once and the agent, the CLI, and every cron all share the same credential."
+                  title="Connect OpenAI Codex"
+                  hint="This is the only model sign-in used by Realtor Beta. No API key or model choice is needed."
                 >
                   <div className="-mx-1">
                     <OAuthProvidersCard
+                      realtorBeta
                       onError={(msg) => setError(msg)}
                       onSuccess={() => {
-                        // Re-pull so the wizard picks up the new auth state.
-                        api.getOAuthProviders().then((resp) => setOauthProviders(resp.providers)).catch(() => {});
+                        api.getOAuthProviders()
+                          .then((resp) =>
+                            setOauthProviders(
+                              scopeOAuthProvidersForOnboarding(resp.providers, true),
+                            ),
+                          )
+                          .catch(() => {});
                       }}
                     />
                   </div>
-                </WizardSection>
-
-                <WizardSection
-                  title="Or paste API keys"
-                  hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Saves to your current Elevate profile."
-                >
-                  <ApiKeysPanel
-                    onError={handleApiKeyError}
-                    onSuccess={() => undefined}
-                    onEnvStateChange={handleApiKeyEnvStateChange}
-                  />
-                </WizardSection>
-
-                <WizardSection
-                  title="Pick the brain"
-                  hint="Which connected provider + which model id the agent should use as its primary."
-                >
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <WizardSelect
-                      label="Provider"
-                      value={draft.primaryProvider}
-                      onChange={(v) => updateField("primaryProvider", v)}
-                      options={[
-                        { value: "", label: anyProviderConnected ? "— pick one —" : "— connect a provider above first —" },
-                        {
-                          value: "anthropic",
-                          label: `Anthropic (Claude)${connectedProviderIds.has("anthropic") ? " · connected" : ""}`,
-                        },
-                        {
-                          value: "openai",
-                          label: `OpenAI${connectedProviderIds.has("openai-codex") ? " · connected via Codex" : ""}`,
-                        },
-                        { value: "nous", label: `Nous Portal${connectedProviderIds.has("nous") ? " · connected" : ""}` },
-                        { value: "qwen", label: `Qwen${connectedProviderIds.has("qwen-oauth") ? " · connected" : ""}` },
-                        {
-                          value: "xai",
-                          label: `xAI (Grok)${connectedProviderIds.has("xai-oauth") || connectedProviderIds.has("xai") ? " · connected" : ""}`,
-                        },
-                        {
-                          value: "gemini",
-                          label: `Google Gemini${connectedProviderIds.has("google-gemini-cli") || connectedProviderIds.has("gemini") ? " · connected" : ""}`,
-                        },
-                        {
-                          value: "minimax",
-                          label: `MiniMax${connectedProviderIds.has("minimax-oauth") || connectedProviderIds.has("minimax") ? " · connected" : ""}`,
-                        },
-                        { value: "deepseek", label: "DeepSeek (add key in Settings)" },
-                        { value: "zai", label: "Z.AI / GLM (add key in Settings)" },
-                        { value: "kimi-coding", label: "Kimi / Moonshot (add key in Settings)" },
-                        { value: "nvidia", label: "NVIDIA NIM (add key in Settings)" },
-                        { value: "huggingface", label: "Hugging Face (add key in Settings)" },
-                        { value: "ollama-cloud", label: "Ollama Cloud (add key in Settings)" },
-                        { value: "openrouter", label: "OpenRouter (add key in Settings)" },
-                        { value: "azure_openai", label: "Azure Foundry (add key below)" },
-                      ]}
-                    />
-                    <WizardModelPicker
-                      label="Model ID"
-                      value={draft.primaryModel}
-                      onChange={(v) => updateField("primaryModel", v)}
-                      models={primaryModelCatalog}
-                      loading={primaryModelLoading}
-                      disabled={!draft.primaryProvider}
-                    />
-                  </div>
-                  <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
-                    Don't see your provider connected? Hit "Sign in" on a card above, or add the key under Settings &gt; API keys and reload.
+                  <p
+                    className="mt-3 text-[12px] leading-5 text-muted-foreground"
+                    aria-live="polite"
+                  >
+                    {oauthProviders === null
+                      ? "Checking this Beta profile’s Codex sign-in…"
+                      : connectedProviderIds.has("openai-codex")
+                        ? "Codex is ready. Elevation will use the supported Realtor Beta model automatically."
+                        : "Sign in above to continue. Your other provider accounts are not used by Realtor Beta."}
                   </p>
                 </WizardSection>
-
-                {realtorBeta ? (
+              ) : (
+                <>
                   <WizardSection
-                    title="Local recall"
-                    hint="Included with Realtor Beta. No embedding account or API key is needed."
+                    title="Sign in to a model provider"
+                    hint="Real CLI auth state. Sign in here once and the agent, the CLI, and every cron all share the same credential."
                   >
-                    <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
-                      Elevation uses local keyword and graph recall. External embedding services stay off.
+                    <div className="-mx-1">
+                      <OAuthProvidersCard
+                        onError={(msg) => setError(msg)}
+                        onSuccess={() => {
+                          // Re-pull so the wizard picks up the new auth state.
+                          api.getOAuthProviders().then((resp) => setOauthProviders(resp.providers)).catch(() => {});
+                        }}
+                      />
                     </div>
                   </WizardSection>
-                ) : (
+
+                  <WizardSection
+                    title="Or paste API keys"
+                    hint="For providers that don't have OAuth, or to override an OAuth login with a raw key. Saves to your current Elevate profile."
+                  >
+                    <ApiKeysPanel
+                      onError={handleApiKeyError}
+                      onSuccess={() => undefined}
+                      onEnvStateChange={handleApiKeyEnvStateChange}
+                    />
+                  </WizardSection>
+
+                  <WizardSection
+                    title="Pick the brain"
+                    hint="Which connected provider + which model id the agent should use as its primary."
+                  >
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <WizardSelect
+                        label="Provider"
+                        value={draft.primaryProvider}
+                        onChange={(v) => updateField("primaryProvider", v)}
+                        options={[
+                          { value: "", label: anyProviderConnected ? "— pick one —" : "— connect a provider above first —" },
+                          {
+                            value: "anthropic",
+                            label: `Anthropic (Claude)${connectedProviderIds.has("anthropic") ? " · connected" : ""}`,
+                          },
+                          {
+                            value: "openai",
+                            label: `OpenAI${connectedProviderIds.has("openai-codex") ? " · connected via Codex" : ""}`,
+                          },
+                          { value: "nous", label: `Nous Portal${connectedProviderIds.has("nous") ? " · connected" : ""}` },
+                          { value: "qwen", label: `Qwen${connectedProviderIds.has("qwen-oauth") ? " · connected" : ""}` },
+                          {
+                            value: "xai",
+                            label: `xAI (Grok)${connectedProviderIds.has("xai-oauth") || connectedProviderIds.has("xai") ? " · connected" : ""}`,
+                          },
+                          {
+                            value: "gemini",
+                            label: `Google Gemini${connectedProviderIds.has("google-gemini-cli") || connectedProviderIds.has("gemini") ? " · connected" : ""}`,
+                          },
+                          {
+                            value: "minimax",
+                            label: `MiniMax${connectedProviderIds.has("minimax-oauth") || connectedProviderIds.has("minimax") ? " · connected" : ""}`,
+                          },
+                          { value: "deepseek", label: "DeepSeek (add key in Settings)" },
+                          { value: "zai", label: "Z.AI / GLM (add key in Settings)" },
+                          { value: "kimi-coding", label: "Kimi / Moonshot (add key in Settings)" },
+                          { value: "nvidia", label: "NVIDIA NIM (add key in Settings)" },
+                          { value: "huggingface", label: "Hugging Face (add key in Settings)" },
+                          { value: "ollama-cloud", label: "Ollama Cloud (add key in Settings)" },
+                          { value: "openrouter", label: "OpenRouter (add key in Settings)" },
+                          { value: "azure_openai", label: "Azure Foundry (add key below)" },
+                        ]}
+                      />
+                      <WizardModelPicker
+                        label="Model ID"
+                        value={draft.primaryModel}
+                        onChange={(v) => updateField("primaryModel", v)}
+                        models={primaryModelCatalog}
+                        loading={primaryModelLoading}
+                        disabled={!draft.primaryProvider}
+                      />
+                    </div>
+                    <p className="mt-3 text-[11.5px] leading-5 text-muted-foreground/80">
+                      Don't see your provider connected? Hit "Sign in" on a card above, or add the key under Settings &gt; API keys and reload.
+                    </p>
+                  </WizardSection>
+
                   <WizardSection title="Embedding model (optional)" hint="Sharpens semantic recall. Skip it and memory uses keyword search — fine for most realtors.">
                     <div className="grid gap-4 md:grid-cols-2">
                       <WizardSelect
@@ -812,8 +888,8 @@ export function AgentOnboardingWizard({
                       </div>
                     )}
                   </WizardSection>
-                )}
-              </>
+                </>
+              )
             )}
 
             {step.id === "tts" && (
@@ -854,7 +930,7 @@ export function AgentOnboardingWizard({
               >
                 {realtorBeta ? (
                   <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-[12px] leading-5 text-muted-foreground">
-                    Local memory is ready in this Elevation profile. External memory services stay off.
+                    Local memory is ready in this Elevation profile. External memory services stay off. External embedding services stay off.
                   </div>
                 ) : (
                   <>

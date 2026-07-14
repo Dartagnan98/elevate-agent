@@ -228,12 +228,26 @@ describe("agent onboarding OAuth readiness", () => {
     expect(wizard).toContain("oauthProviders.filter(isOAuthProviderUsable)");
     expect(wizard).toContain("const primaryReady = isPrimaryModelReady({");
     expect(wizard).toContain("resolveConfiguredPrimaryRuntimeProvider({");
-    expect(wizard.match(/buildItemUpdates\(draft, oauthProviders, primaryItem, primaryDirectSecretPresent\)/g)).toHaveLength(2);
+    expect(
+      wizard.match(
+        /buildItemUpdates\(\s*draftToSave,\s*oauthProviders,\s*primaryItem,\s*primaryDirectSecretPresent,\s*\)/g,
+      ),
+    ).toHaveLength(2);
+    expect(wizard).toContain(
+      "canonicalizePrimaryDraftForOnboarding(draft, realtorBeta)",
+    );
     expect(wizard).toContain('setup.items.find((item) => item.key === "model_primary")');
     expect(wizard).not.toContain("setOauthProviders([])");
     expect(wizard).toContain("onEnvStateChange={handleApiKeyEnvStateChange}");
     expect(wizard).toContain("primaryProviderUsesEnvKey(draft.primaryProvider");
-    expect(serializer.match(/buildItemUpdates\(draft, oauthProviders, primaryItem\)/g)).toHaveLength(2);
+    expect(
+      serializer.match(
+        /buildItemUpdates\(\s*draftToSave,\s*oauthProviders,\s*primaryItem,?\s*\)/g,
+      ),
+    ).toHaveLength(2);
+    expect(serializer).toContain(
+      "canonicalizePrimaryDraftForOnboarding(draft, realtorBeta)",
+    );
     expect(serializer).toContain("api.getOAuthProviders()");
   });
 });
