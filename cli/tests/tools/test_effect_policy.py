@@ -9,9 +9,17 @@ from tools.approval import (
     EffectKind,
     ExecutionPolicy,
     ExecutionPolicyMode,
+    PERMISSION_MODE_POLICY_MODES,
     PolicyWideningError,
     authorize_effects,
+    execution_policy_for_permission_mode,
+    get_current_execution_policy,
+    get_session_permission_mode_for_policy,
+    reset_current_execution_policy,
+    set_current_execution_policy,
+    set_session_permission_mode,
 )
+from tools import approval
 from tools.registry import ToolRegistry
 
 
@@ -95,6 +103,124 @@ def test_execution_policy_persistence_rejects_unknown_or_malformed_data(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         ExecutionPolicy.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "expected_mode"),
+    [
+        ("default", ExecutionPolicyMode.DEFAULT),
+        ("acceptEdits", ExecutionPolicyMode.DEFAULT),
+        ("plan", ExecutionPolicyMode.PLAN),
+        ("bypassPermissions", ExecutionPolicyMode.DEFAULT),
+        ("read_only", ExecutionPolicyMode.READ_ONLY),
+    ],
+)
+def test_permission_mode_mapping_is_total_outside_beta(
+    monkeypatch,
+    permission_mode: str,
+    expected_mode: ExecutionPolicyMode,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "latest")
+
+    policy = execution_policy_for_permission_mode("turn-mapped", permission_mode)
+
+    assert policy == ExecutionPolicy.for_mode("turn-mapped", expected_mode)
+
+
+@pytest.mark.parametrize("permission_mode", ["", "acceptedits", "unknown", None])
+def test_permission_mode_mapping_never_falls_back_for_unknown_values(
+    monkeypatch,
+    permission_mode,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "latest")
+
+    with pytest.raises((TypeError, ValueError)):
+        execution_policy_for_permission_mode("turn-unknown", permission_mode)
+
+
+def test_unknown_session_and_config_modes_reach_policy_mapper_unsanitized(
+    monkeypatch,
+) -> None:
+    with pytest.raises(ValueError, match="Unknown permission mode"):
+        set_session_permission_mode("strict-policy-session", "futureMode")
+
+    monkeypatch.setattr(
+        approval,
+        "_get_approval_config",
+        lambda: {"permission_mode": "futureMode"},
+    )
+    configured = get_session_permission_mode_for_policy("unconfigured-session")
+    assert configured == "futureMode"
+    with pytest.raises(ValueError, match="Unknown permission mode"):
+        execution_policy_for_permission_mode("turn-config", configured)
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "expected_mode", "expected_effects"),
+    [
+        (
+            "default",
+            ExecutionPolicyMode.READ_ONLY,
+            {"read"},
+        ),
+        (
+            "acceptEdits",
+            ExecutionPolicyMode.DRAFT_ONLY,
+            {"read", "write_local:draft", "write_local:session_plan"},
+        ),
+        (
+            "bypassPermissions",
+            ExecutionPolicyMode.DRAFT_ONLY,
+            {"read", "write_local:draft", "write_local:session_plan"},
+        ),
+        (
+            "plan",
+            ExecutionPolicyMode.PLAN,
+            {"read", "write_local:session_plan"},
+        ),
+        ("read_only", ExecutionPolicyMode.READ_ONLY, {"read"}),
+    ],
+)
+def test_realtor_beta_permission_modes_are_immutably_draft_clamped(
+    monkeypatch,
+    permission_mode: str,
+    expected_mode: ExecutionPolicyMode,
+    expected_effects: set[str],
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "BeTa")
+
+    policy = execution_policy_for_permission_mode("turn-beta", permission_mode)
+
+    assert policy.mode is expected_mode
+    assert {str(effect) for effect in policy.allowed_effects} == expected_effects
+
+
+def test_policy_ceiling_and_permission_mappings_are_immutable() -> None:
+    with pytest.raises(TypeError):
+        PERMISSION_MODE_POLICY_MODES["default"] = ExecutionPolicyMode.READ_ONLY
+    with pytest.raises(TypeError):
+        approval._BETA_PERMISSION_MODE_POLICY_MODES["default"] = (
+            ExecutionPolicyMode.DEFAULT
+        )
+    with pytest.raises(TypeError):
+        approval._POLICY_MODE_CEILINGS[ExecutionPolicyMode.DEFAULT] = frozenset()
+
+
+def test_execution_policy_context_binding_restores_prior_value() -> None:
+    outer = ExecutionPolicy.for_mode("turn-outer", ExecutionPolicyMode.READ_ONLY)
+    inner = ExecutionPolicy.for_mode("turn-inner", ExecutionPolicyMode.PLAN)
+    assert get_current_execution_policy() is None
+
+    outer_token = set_current_execution_policy(outer)
+    inner_token = set_current_execution_policy(inner)
+    try:
+        assert get_current_execution_policy() is inner
+        reset_current_execution_policy(inner_token)
+        assert get_current_execution_policy() is outer
+    finally:
+        reset_current_execution_policy(outer_token)
+
+    assert get_current_execution_policy() is None
 
 
 def test_narrow_rejects_effect_scope_and_mode_widening() -> None:

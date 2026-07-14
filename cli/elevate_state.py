@@ -2657,6 +2657,139 @@ class SessionDB:
 
         return bool(self._execute_write(_do))
 
+    def interrupt_prompt_receipt_with_assistant(
+        self,
+        session_id: str,
+        client_message_id: str,
+        *,
+        owner_id: str,
+        assistant_message_id: str,
+        assistant_content: str,
+        reclaim_owner_id: Optional[str] = None,
+    ) -> bool:
+        """Atomically interrupt a recoverable receipt and persist its outcome.
+
+        This is the fail-closed recovery boundary for legacy or corrupt policy
+        receipts. The terminal receipt and visible assistant explanation commit
+        together, or neither does. A repeated call by the same owner is
+        idempotent and never inserts a duplicate assistant row.
+        """
+        if not client_message_id or not owner_id or not assistant_message_id:
+            raise ValueError("prompt and assistant message ids plus owner are required")
+        stored_content = self._encode_content(assistant_content)
+        now = time.time()
+
+        def _do(conn):
+            receipt = conn.execute(
+                "SELECT status, owner_id, assistant_message_id "
+                "FROM prompt_receipts "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (session_id, client_message_id),
+            ).fetchone()
+            if receipt is None:
+                return False, False
+            if receipt["assistant_message_id"] != assistant_message_id:
+                raise ValueError(
+                    "assistant_message_id does not match the durable prompt receipt"
+                )
+
+            assistant_rows = conn.execute(
+                "SELECT id, role, content FROM messages "
+                "WHERE session_id = ? AND client_message_id = ? ORDER BY id",
+                (session_id, assistant_message_id),
+            ).fetchall()
+            if len(assistant_rows) > 1:
+                raise ValueError("assistant_message_id has duplicate durable rows")
+
+            if receipt["status"] == "interrupted":
+                if receipt["owner_id"] != owner_id or len(assistant_rows) != 1:
+                    return False, False
+                existing = assistant_rows[0]
+                if (
+                    existing["role"] != "assistant"
+                    or existing["content"] != stored_content
+                ):
+                    raise ValueError(
+                        "assistant_message_id belongs to a different outcome"
+                    )
+                return True, False
+
+            allowed = receipt["status"] == "pending" or (
+                receipt["status"] == "running"
+                and reclaim_owner_id is not None
+                and receipt["owner_id"] == reclaim_owner_id
+            )
+            if not allowed:
+                return False, False
+
+            cursor = conn.execute(
+                "UPDATE prompt_receipts "
+                "SET status = 'interrupted', owner_id = ?, updated_at = ? "
+                "WHERE session_id = ? AND client_message_id = ? "
+                "AND status = ? AND owner_id IS ?",
+                (
+                    owner_id,
+                    now,
+                    session_id,
+                    client_message_id,
+                    receipt["status"],
+                    receipt["owner_id"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                return False, False
+
+            message_inserted = not assistant_rows
+            if assistant_rows:
+                existing = assistant_rows[0]
+                if (
+                    existing["role"] != "assistant"
+                    or existing["content"] != stored_content
+                ):
+                    raise ValueError(
+                        "assistant_message_id belongs to a different outcome"
+                    )
+                conn.execute(
+                    "UPDATE messages SET finish_reason = 'interrupted' WHERE id = ?",
+                    (existing["id"],),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, role, content, timestamp, finish_reason, "
+                    "client_message_id) "
+                    "VALUES (?, 'assistant', ?, ?, 'interrupted', ?)",
+                    (session_id, stored_content, now, assistant_message_id),
+                )
+                conn.execute(
+                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
+                    (session_id,),
+                )
+            return True, message_inserted
+
+        interrupted, message_inserted = self._execute_write(_do)
+        if interrupted and message_inserted:
+            try:
+                from elevate_cli.data.sessiondb_shadow import shadow_append_message
+
+                shadow_append_message(
+                    session_id,
+                    "assistant",
+                    content=(
+                        stored_content if isinstance(stored_content, str) else None
+                    ),
+                    client_message_id=assistant_message_id,
+                    finish_reason="interrupted",
+                    timestamp=now,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "PG shadow interrupted prompt append failed for %s: %s",
+                    session_id,
+                    exc,
+                )
+        return bool(interrupted)
+
     def update_message_finish_reason(
         self,
         session_id: str,

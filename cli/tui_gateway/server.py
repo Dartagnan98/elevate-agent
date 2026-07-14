@@ -4489,6 +4489,13 @@ def _prompt_user_message_id(params: dict) -> str:
     return _wire_message_id()
 
 
+_RECOVERED_EXECUTION_POLICY_KEY = object()
+_POLICY_RECEIPT_INTERRUPTED_MESSAGE = (
+    "This saved request could not be resumed because it has no valid secure "
+    "execution policy. Nothing was run. Please resend the request."
+)
+
+
 def _prompt_owner_alive(
     owner_id: object, claim_key: Optional[tuple[str, str]] = None
 ) -> bool:
@@ -4516,6 +4523,173 @@ def _prompt_owner_alive(
         return True
     except OSError:
         return False
+    return True
+
+
+def _execution_policy_from_receipt(receipt: dict):
+    """Validate one receipt and return only its durable effective policy."""
+    from tools.approval import (
+        ExecutionPolicy,
+        ExecutionPolicyMode,
+    )
+
+    client_message_id = str(receipt.get("client_message_id") or "")
+    if not client_message_id:
+        raise ValueError("prompt receipt is missing client_message_id")
+    accepted_data = receipt.get("accepted_policy")
+    effective_data = receipt.get("effective_policy")
+    if not isinstance(accepted_data, dict) or not isinstance(effective_data, dict):
+        raise ValueError("prompt receipt is missing a valid execution policy")
+
+    accepted = ExecutionPolicy.from_dict(accepted_data)
+    effective = ExecutionPolicy.from_dict(effective_data)
+    if (
+        accepted.accepted_turn_id != client_message_id
+        or effective.accepted_turn_id != client_message_id
+    ):
+        raise ValueError("prompt receipt policy identity does not match its message")
+    if accepted.narrow(
+        effective.allowed_effects,
+        mode=effective.mode,
+    ) != effective:
+        raise ValueError("prompt receipt effective policy exceeds accepted policy")
+
+    # A receipt accepted on another release channel cannot widen the Realtor
+    # Beta process after an update/restart. This is a release ceiling check,
+    # not an ambient permission lookup.
+    if os.getenv("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+        beta_ceiling = ExecutionPolicy.for_mode(
+            client_message_id,
+            ExecutionPolicyMode.DRAFT_ONLY,
+        )
+        if beta_ceiling.narrow(
+            effective.allowed_effects,
+            mode=effective.mode,
+        ) != effective:
+            raise ValueError("prompt receipt effective policy exceeds Beta ceiling")
+    return effective
+
+
+def _interrupt_untrusted_prompt_receipt(
+    db,
+    sid: str,
+    session: dict,
+    session_key: str,
+    receipt: dict,
+    *,
+    claim_lock_held: bool = False,
+    history_lock_held: bool = False,
+) -> bool:
+    """Terminalize an unsafe recoverable receipt and show a resubmit path."""
+    client_message_id = str(receipt.get("client_message_id") or "")
+    assistant_message_id = str(
+        receipt.get("assistant_message_id") or _wire_message_id()
+    )
+    status = str(receipt.get("status") or "")
+    owner_id = receipt.get("owner_id")
+    reclaim_owner_id = (
+        (str(owner_id or "") or None) if status == "running" else None
+    )
+    interrupt_with_assistant = getattr(
+        db,
+        "interrupt_prompt_receipt_with_assistant",
+        None,
+    )
+    if not callable(interrupt_with_assistant):
+        logger.error(
+            "unsafe prompt receipt cannot be terminalized atomically "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
+        return False
+    try:
+        interrupted = bool(
+            interrupt_with_assistant(
+                session_key,
+                client_message_id,
+                owner_id=_PROMPT_EXECUTION_OWNER,
+                assistant_message_id=assistant_message_id,
+                assistant_content=_POLICY_RECEIPT_INTERRUPTED_MESSAGE,
+                reclaim_owner_id=reclaim_owner_id,
+            )
+        )
+        if not interrupted:
+            logger.info(
+                "unsafe prompt receipt atomic CAS lost race session=%s message=%s",
+                session_key,
+                client_message_id,
+            )
+            return False
+    except Exception:
+        logger.exception(
+            "unsafe prompt receipt atomic terminalization failed "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
+        return False
+
+    assistant_row = {
+        "role": "assistant",
+        "content": _POLICY_RECEIPT_INTERRUPTED_MESSAGE,
+        "finish_reason": "interrupted",
+        "client_message_id": assistant_message_id,
+    }
+
+    def _refresh_history() -> None:
+        try:
+            persisted_history = db.get_messages_as_conversation(session_key)
+        except Exception:
+            persisted_history = None
+        if isinstance(persisted_history, list):
+            session["history"] = persisted_history
+        else:
+            session.setdefault("history", []).append(assistant_row)
+        session["history_version"] = int(session.get("history_version", 0)) + 1
+
+    if history_lock_held:
+        _refresh_history()
+    else:
+        with session["history_lock"]:
+            _refresh_history()
+
+    if claim_lock_held:
+        _active_prompt_claims.pop((session_key, client_message_id), None)
+    else:
+        with _prompt_claims_lock:
+            _active_prompt_claims.pop((session_key, client_message_id), None)
+
+    payload = {
+        "text": _POLICY_RECEIPT_INTERRUPTED_MESSAGE,
+        "status": "interrupted",
+        "warning": "Resend this request to create a new secure turn.",
+        "message_id": assistant_message_id,
+        "correlation_id": client_message_id,
+        "user_message_id": client_message_id,
+        "completed": False,
+    }
+    try:
+        rendered = render_message(_POLICY_RECEIPT_INTERRUPTED_MESSAGE, 80)
+        if rendered:
+            payload["rendered"] = rendered
+        _emit(
+            "message.start",
+            sid,
+            {
+                "message_id": assistant_message_id,
+                "user_message_id": client_message_id,
+                "correlation_id": client_message_id,
+            },
+        )
+        _emit("message.complete", sid, payload)
+    except Exception:
+        logger.exception(
+            "unsafe prompt receipt interruption could not be emitted "
+            "session=%s message=%s",
+            session_key,
+            client_message_id,
+        )
     return True
 
 
@@ -4556,6 +4730,17 @@ def _recover_pending_prompt(sid: str, session: dict) -> bool:
         receipt.get("owner_id"), receipt_claim_key
     ):
         return False
+    try:
+        recovered_policy = _execution_policy_from_receipt(receipt)
+    except Exception as exc:
+        logger.warning(
+            "prompt receipt recovery refused unsafe policy session=%s message=%s: %s",
+            session_key,
+            receipt.get("client_message_id"),
+            exc,
+        )
+        _interrupt_untrusted_prompt_receipt(db, sid, session, session_key, receipt)
+        return False
     payload = receipt.get("payload")
     if not isinstance(payload, dict):
         return False
@@ -4564,6 +4749,7 @@ def _recover_pending_prompt(sid: str, session: dict) -> bool:
         "text": payload.get("text", ""),
         "user_message_id": receipt.get("client_message_id"),
         "correlation_id": receipt.get("client_message_id"),
+        _RECOVERED_EXECUTION_POLICY_KEY: recovered_policy,
     }
     if isinstance(payload.get("persist_user_message"), str):
         params["persist_user_message"] = payload["persist_user_message"]
@@ -5130,12 +5316,35 @@ def _(rid, params: dict) -> dict:
                     },
                 )
             try:
+                from tools.approval import (
+                    ExecutionPolicy,
+                    execution_policy_for_permission_mode,
+                    get_session_permission_mode_for_policy,
+                )
+
+                recovered_policy = params.get(_RECOVERED_EXECUTION_POLICY_KEY)
+                if recovered_policy is not None:
+                    if not isinstance(recovered_policy, ExecutionPolicy):
+                        raise TypeError("invalid internal recovery execution policy")
+                    accepted_policy = recovered_policy
+                else:
+                    accepted_policy = execution_policy_for_permission_mode(
+                        turn_ids["user"],
+                        get_session_permission_mode_for_policy(session_key),
+                    )
+            except (TypeError, ValueError) as exc:
+                return _err(rid, 4002, f"prompt policy rejected: {exc}")
+            except Exception as exc:
+                logger.warning("prompt.submit policy snapshot failed: %s", exc)
+                return _err(rid, 5009, f"prompt policy unavailable: {exc}")
+            try:
                 receipt = db.prepare_prompt_receipt(
                     session_key,
                     receipt_text,
                     assistant_message_id=turn_ids["assistant"],
                     client_message_id=turn_ids["user"],
                     payload=submitted_payload,
+                    accepted_policy=accepted_policy,
                 )
             except ValueError as exc:
                 return _err(rid, 4091, str(exc))
@@ -5193,6 +5402,34 @@ def _(rid, params: dict) -> dict:
             if receipt_status == "running":
                 reclaim_owner_id = str(receipt_owner or "") or None
 
+            try:
+                receipt_execution_policy = _execution_policy_from_receipt(receipt)
+            except Exception as exc:
+                logger.warning(
+                    "prompt.submit refused unsafe receipt policy "
+                    "session=%s message=%s: %s",
+                    session_key,
+                    turn_ids["user"],
+                    exc,
+                )
+                interrupted = _interrupt_untrusted_prompt_receipt(
+                    db,
+                    sid,
+                    session,
+                    session_key,
+                    receipt,
+                    claim_lock_held=True,
+                    history_lock_held=True,
+                )
+                if interrupted:
+                    return _err(rid, 4092, _POLICY_RECEIPT_INTERRUPTED_MESSAGE)
+                return _err(
+                    rid,
+                    4093,
+                    "prompt receipt changed while secure recovery was interrupted; "
+                    "reconnect before retrying",
+                )
+
             canonical_payload = receipt.get("payload")
             if not isinstance(canonical_payload, dict):
                 return _err(rid, 5009, "prompt persistence failed: invalid receipt payload")
@@ -5240,6 +5477,7 @@ def _(rid, params: dict) -> dict:
 
     def run():
         approval_token = None
+        policy_token = None
         claimed = False
         receipt_terminal_status = "error"
         session_tokens = []
@@ -5260,6 +5498,9 @@ def _(rid, params: dict) -> dict:
             )
             if not claimed:
                 return
+            from tools.approval import set_current_execution_policy
+
+            policy_token = set_current_execution_policy(receipt_execution_policy)
             turn_started_at = time.monotonic()
             # Server-initiated wake turns have no optimistic user bubble. Emit
             # their stored marker only after this worker owns the durable claim.
@@ -5804,6 +6045,13 @@ def _(rid, params: dict) -> dict:
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
+            except Exception:
+                pass
+            try:
+                if policy_token is not None:
+                    from tools.approval import reset_current_execution_policy
+
+                    reset_current_execution_policy(policy_token)
             except Exception:
                 pass
             _clear_session_context(session_tokens)

@@ -533,6 +533,7 @@ class _PromptReceiptDB:
         assistant_message_id,
         client_message_id,
         payload,
+        accepted_policy=None,
     ):
         key = (session_id, client_message_id)
         existing = self.rows.get(key)
@@ -541,11 +542,18 @@ class _PromptReceiptDB:
                 raise ValueError("client_message_id already belongs to a different prompt")
             return {**existing, "inserted": False}
         row = {
+            "accepted_policy": (
+                accepted_policy.to_dict() if accepted_policy is not None else None
+            ),
             "assistant_message_id": assistant_message_id,
             "client_message_id": client_message_id,
             "content": content,
+            "effective_policy": (
+                accepted_policy.to_dict() if accepted_policy is not None else None
+            ),
             "owner_id": None,
             "payload": payload,
+            "policy_revision": 0,
             "status": "pending",
         }
         self.rows[key] = row
@@ -1132,6 +1140,130 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
 
     assert resp["result"]["status"] == "streaming"
     assert captured["session_key"] == "session-key"
+
+
+def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
+    monkeypatch,
+):
+    from tools import approval
+    from tools.approval import (
+        ExecutionPolicy,
+        ExecutionPolicyMode,
+        execution_policy_for_permission_mode,
+        get_current_execution_policy,
+    )
+
+    class _NarrowingReceiptDB(_PromptReceiptDB):
+        def prepare_prompt_receipt(self, *args, **kwargs):
+            receipt = super().prepare_prompt_receipt(*args, **kwargs)
+            key = (args[0], kwargs["client_message_id"])
+            if receipt["inserted"]:
+                accepted = ExecutionPolicy.from_dict(receipt["accepted_policy"])
+                effective = accepted.narrow(
+                    {"read"},
+                    mode=ExecutionPolicyMode.READ_ONLY,
+                )
+                self.rows[key]["effective_policy"] = effective.to_dict()
+                receipt["effective_policy"] = effective.to_dict()
+            return receipt
+
+    db = _NarrowingReceiptDB()
+    captured = {}
+
+    class _Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            captured["policy"] = get_current_execution_policy()
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    approval.set_session_permission_mode("session-key", "bypassPermissions")
+    server._sessions["sid"] = _session(agent=_Agent())
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "policy-1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "draft the follow-up",
+                    "user_message_id": "user-policy-bind",
+                },
+            }
+        )
+
+        assert response["result"]["status"] == "streaming"
+        stored = db.rows[("session-key", "user-policy-bind")]
+        assert stored["accepted_policy"] == execution_policy_for_permission_mode(
+            "user-policy-bind",
+            "bypassPermissions",
+        ).to_dict()
+        expected_effective = ExecutionPolicy.for_mode(
+            "user-policy-bind",
+            ExecutionPolicyMode.READ_ONLY,
+        )
+        assert stored["effective_policy"] == expected_effective.to_dict()
+        assert captured["policy"] == expected_effective
+        assert get_current_execution_policy() is None
+    finally:
+        approval.clear_session("session-key")
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_rejects_unknown_permission_mode_before_persistence(
+    monkeypatch,
+):
+    from tools import approval
+
+    class _ForbiddenThread:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("unknown policy mode must not start a worker")
+
+    db = _PromptReceiptDB()
+    server._sessions["sid"] = _session()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server.threading, "Thread", _ForbiddenThread)
+    monkeypatch.setattr(
+        approval,
+        "_get_approval_config",
+        lambda: {"permission_mode": "futureMode"},
+    )
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "unknown-policy",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "do something",
+                    "user_message_id": "unknown-policy-user",
+                },
+            }
+        )
+
+        assert response["error"]["code"] == 4002
+        assert "Unknown permission mode" in response["error"]["message"]
+        assert db.rows == {}
+        assert server._sessions["sid"]["running"] is False
+    finally:
+        approval.clear_session("session-key")
+        server._sessions.pop("sid", None)
 
 
 def test_prompt_submit_records_one_delta_usage_row_at_completion(monkeypatch):
@@ -1865,10 +1997,12 @@ def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
 
 def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
     from elevate_state import SessionDB
+    from tools import approval
+    from tools.approval import get_current_execution_policy
 
     db = SessionDB(db_path=tmp_path / "state.db")
     db.create_session("session-key", source="tui")
-    calls = {"correlation_ids": [], "runs": 0}
+    calls = {"correlation_ids": [], "policies": [], "runs": 0}
     recorder_calls = _capture_session_recorder(monkeypatch)
 
     class _Agent:
@@ -1879,6 +2013,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
             calls["correlation_ids"].append(
                 get_session_env("ELEVATE_SESSION_MESSAGE_ID")
             )
+            calls["policies"].append(get_current_execution_policy())
             return {
                 "final_response": "",
                 "messages": [
@@ -1903,6 +2038,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
             receipt = db.get_recoverable_prompt_receipt("session-key")
             assert receipt["status"] == "pending"
             assert receipt["payload"]["correlation_id"] == "user-receipt-1"
+            assert receipt["effective_policy"]["mode"] == "plan"
 
     class _ImmediateThread:
         def __init__(self, target=None, daemon=None):
@@ -1918,6 +2054,8 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_emit", lambda *args: None)
     monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
     monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "latest")
+    approval.set_session_permission_mode("session-key", "plan")
     request = {
         "method": "prompt.submit",
         "params": {
@@ -1959,13 +2097,223 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
             agent=_Agent(),
             history=db.get_messages_as_conversation("session-key"),
         )
+        # Recovery must ignore this ambient widening and bind the receipt's
+        # original effective policy.
+        approval.set_session_permission_mode("session-key", "default")
 
         assert server._recover_pending_prompt("sid", server._sessions["sid"]) is True
         assert calls["runs"] == 1
         assert calls["correlation_ids"] == ["user-receipt-1"]
+        assert len(calls["policies"]) == 1
+        assert calls["policies"][0].mode.value == "plan"
+        assert calls["policies"][0].accepted_turn_id == "user-receipt-1"
         assert len(db.get_messages("session-key")) == 1
         assert db.get_recoverable_prompt_receipt("session-key") is None
     finally:
+        approval.clear_session("session-key")
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "policyless_pending",
+        "policyless_running",
+        "malformed_accepted",
+        "malformed_effective",
+    ],
+)
+def test_recovery_interrupts_and_persists_unsafe_policy_receipt(
+    monkeypatch,
+    tmp_path,
+    variant,
+):
+    from elevate_state import SessionDB
+    from tools.approval import ExecutionPolicy, ExecutionPolicyMode
+
+    db = SessionDB(db_path=tmp_path / f"{variant}.db")
+    db.create_session("session-key", source="tui")
+    policy = (
+        None
+        if variant.startswith("policyless")
+        else ExecutionPolicy.for_mode("unsafe-user", ExecutionPolicyMode.PLAN)
+    )
+    db.prepare_prompt_receipt(
+        "session-key",
+        "prepare the listing",
+        assistant_message_id="unsafe-assistant",
+        client_message_id="unsafe-user",
+        payload={"text": "prepare the listing"},
+        accepted_policy=policy,
+    )
+    if variant == "policyless_running":
+        assert db.claim_prompt_receipt(
+            "session-key",
+            "unsafe-user",
+            owner_id="old-owner",
+        )
+    elif variant == "malformed_accepted":
+        db._conn.execute(
+            "UPDATE prompt_receipts SET accepted_policy_json = ? "
+            "WHERE session_id = ? AND client_message_id = ?",
+            ("{malformed", "session-key", "unsafe-user"),
+        )
+    elif variant == "malformed_effective":
+        db._conn.execute(
+            "UPDATE prompt_receipts SET effective_policy_json = ? "
+            "WHERE session_id = ? AND client_message_id = ?",
+            ("{malformed", "session-key", "unsafe-user"),
+        )
+
+    emitted = []
+
+    class _ForbiddenAgent:
+        def run_conversation(self, *_args, **_kwargs):
+            raise AssertionError("unsafe recovery must not execute the agent")
+
+    session = _session(
+        agent=_ForbiddenAgent(),
+        history=db.get_messages_as_conversation("session-key"),
+    )
+    server._sessions["sid"] = session
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "latest")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(
+        server,
+        "_emit",
+        lambda event, sid, payload: emitted.append((event, sid, payload)),
+    )
+    monkeypatch.setattr(server, "render_message", lambda raw, _cols: raw)
+
+    try:
+        assert server._recover_pending_prompt("sid", session) is False
+
+        receipt = db.get_prompt_receipt("session-key", "unsafe-user")
+        assert receipt["status"] == "interrupted"
+        assert db.get_recoverable_prompt_receipt("session-key") is None
+        transcript = db.get_messages_as_conversation("session-key")
+        assert [(message["role"], message["client_message_id"]) for message in transcript] == [
+            ("user", "unsafe-user"),
+            ("assistant", "unsafe-assistant"),
+        ]
+        assert transcript[-1]["finish_reason"] == "interrupted"
+        assert "Please resend" in transcript[-1]["content"]
+        assert session["history"] == transcript
+
+        complete = [payload for event, _sid, payload in emitted if event == "message.complete"]
+        assert len(complete) == 1
+        assert complete[0]["status"] == "interrupted"
+        assert complete[0]["completed"] is False
+        assert complete[0]["correlation_id"] == "unsafe-user"
+        assert complete[0]["user_message_id"] == "unsafe-user"
+        assert "Please resend" in complete[0]["text"]
+    finally:
+        server._sessions.pop("sid", None)
+        db.close()
+
+
+def test_unsafe_policy_interrupt_does_not_emit_when_atomic_cas_loses(monkeypatch):
+    class _RaceLostDB:
+        def interrupt_prompt_receipt_with_assistant(self, *_args, **_kwargs):
+            return False
+
+    session = _session(history=[{"role": "user", "content": "keep"}])
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+    interrupted = server._interrupt_untrusted_prompt_receipt(
+        _RaceLostDB(),
+        "sid",
+        session,
+        "session-key",
+        {
+            "assistant_message_id": "assistant-race",
+            "client_message_id": "user-race",
+            "owner_id": None,
+            "status": "pending",
+        },
+    )
+
+    assert interrupted is False
+    assert emitted == []
+    assert session["history"] == [{"role": "user", "content": "keep"}]
+
+
+def test_duplicate_submit_cannot_replace_persisted_policy_with_ambient_mode(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_state import SessionDB
+    from tools import approval
+    from tools.approval import (
+        ExecutionPolicy,
+        ExecutionPolicyMode,
+        get_current_execution_policy,
+    )
+
+    db = SessionDB(db_path=tmp_path / "duplicate-policy.db")
+    db.create_session("session-key", source="tui")
+    original = ExecutionPolicy.for_mode("duplicate-user", ExecutionPolicyMode.PLAN)
+    db.prepare_prompt_receipt(
+        "session-key",
+        "prepare the listing",
+        assistant_message_id="duplicate-assistant",
+        client_message_id="duplicate-user",
+        payload={"text": "prepare the listing"},
+        accepted_policy=original,
+    )
+    captured = []
+
+    class _Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            captured.append(get_current_execution_policy())
+            return {
+                "final_response": "done",
+                "messages": [{"role": "assistant", "content": "done"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(
+        agent=_Agent(),
+        history=db.get_messages_as_conversation("session-key"),
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "latest")
+    approval.set_session_permission_mode("session-key", "default")
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_ensure_tui_tool_profile", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+    monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+
+    try:
+        response = server.handle_request(
+            {
+                "id": "duplicate-policy",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "prepare the listing",
+                    "user_message_id": "duplicate-user",
+                },
+            }
+        )
+
+        assert response["result"]["duplicate"] is True
+        assert captured == [original]
+        stored = db.get_prompt_receipt("session-key", "duplicate-user")
+        assert stored["accepted_policy"] == original.to_dict()
+        assert stored["effective_policy"] == original.to_dict()
+        assert stored["policy_revision"] == 0
+    finally:
+        approval.clear_session("session-key")
         server._sessions.pop("sid", None)
         db.close()
 

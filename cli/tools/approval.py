@@ -19,6 +19,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Optional
 from elevate_cli.config import cfg_get
 
@@ -770,7 +771,7 @@ class ExecutionPolicyMode(str, Enum):
 _ALL_DECLARED_EFFECTS = frozenset(
     Effect(kind) for kind in EffectKind if kind is not EffectKind.UNKNOWN
 )
-_POLICY_MODE_CEILINGS = {
+_POLICY_MODE_CEILINGS = MappingProxyType({
     ExecutionPolicyMode.DEFAULT: _ALL_DECLARED_EFFECTS,
     ExecutionPolicyMode.PLAN: frozenset({
         Effect(EffectKind.READ),
@@ -782,7 +783,25 @@ _POLICY_MODE_CEILINGS = {
         Effect(EffectKind.WRITE_LOCAL, "draft"),
         Effect(EffectKind.WRITE_LOCAL, "session_plan"),
     }),
-}
+})
+
+# Existing Claude-style permission modes are an input vocabulary, not an
+# execution policy. Keep the translation total and immutable so a typo or a
+# future mode cannot silently inherit the permissive default ceiling.
+PERMISSION_MODE_POLICY_MODES = MappingProxyType({
+    "default": ExecutionPolicyMode.DEFAULT,
+    "acceptEdits": ExecutionPolicyMode.DEFAULT,
+    "plan": ExecutionPolicyMode.PLAN,
+    "bypassPermissions": ExecutionPolicyMode.DEFAULT,
+    "read_only": ExecutionPolicyMode.READ_ONLY,
+})
+_BETA_PERMISSION_MODE_POLICY_MODES = MappingProxyType({
+    "default": ExecutionPolicyMode.READ_ONLY,
+    "acceptEdits": ExecutionPolicyMode.DRAFT_ONLY,
+    "plan": ExecutionPolicyMode.PLAN,
+    "bypassPermissions": ExecutionPolicyMode.DRAFT_ONLY,
+    "read_only": ExecutionPolicyMode.READ_ONLY,
+})
 
 
 class PolicyWideningError(ValueError):
@@ -915,6 +934,55 @@ class ExecutionPolicy:
             mode=target_mode,
             allowed_effects=frozenset(intersection),
         )
+
+
+def execution_policy_for_permission_mode(
+    accepted_turn_id: str,
+    permission_mode: str,
+) -> ExecutionPolicy:
+    """Freeze one accepted-turn policy from the legacy permission mode.
+
+    Realtor Beta has a draft-only cohort maximum. Its engineering ``default``
+    remains read-only; only explicit edit/bypass-style modes reach the
+    draft-only ceiling. Unknown modes always raise.
+    """
+    if not isinstance(permission_mode, str):
+        raise TypeError("permission_mode must be a string")
+    normalized = permission_mode.strip()
+    try:
+        policy_mode = PERMISSION_MODE_POLICY_MODES[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unknown permission mode: {permission_mode!r}") from exc
+
+    if os.getenv("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+        policy_mode = _BETA_PERMISSION_MODE_POLICY_MODES[normalized]
+    return ExecutionPolicy.for_mode(accepted_turn_id, policy_mode)
+
+
+_current_execution_policy: contextvars.ContextVar[Optional[ExecutionPolicy]] = (
+    contextvars.ContextVar("current_execution_policy", default=None)
+)
+
+
+def set_current_execution_policy(
+    policy: ExecutionPolicy,
+) -> contextvars.Token[Optional[ExecutionPolicy]]:
+    """Bind the validated durable policy for the current worker context."""
+    if not isinstance(policy, ExecutionPolicy):
+        raise TypeError("current execution policy must be an ExecutionPolicy")
+    return _current_execution_policy.set(policy)
+
+
+def reset_current_execution_policy(
+    token: contextvars.Token[Optional[ExecutionPolicy]],
+) -> None:
+    """Restore the worker's prior accepted-turn policy binding."""
+    _current_execution_policy.reset(token)
+
+
+def get_current_execution_policy() -> Optional[ExecutionPolicy]:
+    """Return the bound durable policy, or ``None`` outside an accepted turn."""
+    return _current_execution_policy.get()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1052,9 +1120,11 @@ _PLAN_WRITE_REDIRECT = re.compile(r">\s*(?!/dev/null\b|&)")
 
 def set_session_permission_mode(session_key: str, mode: str) -> str:
     """Set the permission mode for one session. Returns the normalized mode."""
-    mode = (mode or "default").strip()
+    if not isinstance(mode, str):
+        raise TypeError("permission mode must be a string")
+    mode = mode.strip()
     if mode not in _VALID_PERMISSION_MODES:
-        mode = "default"
+        raise ValueError(f"Unknown permission mode: {mode!r}")
     if session_key:
         with _lock:
             _session_permission_mode[session_key] = mode
@@ -1085,6 +1155,30 @@ def get_session_permission_mode(session_key: str) -> str:
         if mode:
             return mode
     return _config_permission_mode()
+
+
+def get_session_permission_mode_for_policy(session_key: str) -> str:
+    """Return the unsanitized accepted-turn input permission mode.
+
+    Unlike the legacy runtime getter, this does not turn an unknown configured
+    value into permissive ``default``. The strict policy mapper will reject it.
+    A missing value still means the documented default mode.
+    """
+    if session_key:
+        with _lock:
+            mode = _session_permission_mode.get(session_key)
+        if mode is not None:
+            return mode
+    try:
+        configured = _get_approval_config().get("permission_mode")
+    except Exception:
+        configured = None
+    if configured is None:
+        return "default"
+    if not isinstance(configured, str):
+        raise TypeError("configured permission mode must be a string")
+    configured = configured.strip()
+    return configured or "default"
 
 
 def get_permission_mode() -> str:

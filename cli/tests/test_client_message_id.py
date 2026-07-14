@@ -8,6 +8,7 @@ stable id minted at append time; legacy rows hydrate with a deterministic
 
 import json
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -224,6 +225,70 @@ class TestPromptReceipt:
         assert stored["effective_policy"] == accepted.to_dict()
         assert stored["policy_revision"] == 0
 
+    def test_policy_cas_has_one_winner_across_real_concurrent_connections(
+        self,
+        db,
+    ):
+        db.create_session(session_id="s1", source="tui")
+        accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
+        db.prepare_prompt_receipt(
+            "s1",
+            "prepare a plan",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "prepare a plan"},
+            accepted_policy=accepted,
+        )
+        candidates = [
+            accepted.narrow(
+                {"read", "write_local:session_plan"},
+                mode=ExecutionPolicyMode.PLAN,
+            ),
+            accepted.narrow({"read"}, mode=ExecutionPolicyMode.READ_ONLY),
+        ]
+        connections = [SessionDB(db_path=db.db_path), SessionDB(db_path=db.db_path)]
+        barrier = threading.Barrier(3)
+        results = []
+        errors = []
+
+        def _narrow(connection, candidate):
+            try:
+                barrier.wait(timeout=5)
+                results.append(
+                    connection.narrow_prompt_receipt_policy(
+                        "s1",
+                        "user-1",
+                        expected_revision=0,
+                        narrowed_policy=candidate,
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        workers = [
+            threading.Thread(target=_narrow, args=(connection, candidate))
+            for connection, candidate in zip(connections, candidates)
+        ]
+        try:
+            for worker in workers:
+                worker.start()
+            barrier.wait(timeout=5)
+            for worker in workers:
+                worker.join(timeout=10)
+
+            assert all(not worker.is_alive() for worker in workers)
+            assert errors == []
+            assert len(results) == 2
+            assert sum(result is not None for result in results) == 1
+            stored = db.get_prompt_receipt("s1", "user-1")
+            assert stored["policy_revision"] == 1
+            assert stored["effective_policy"] in [
+                candidate.to_dict() for candidate in candidates
+            ]
+        finally:
+            for connection in connections:
+                connection.close()
+
     def test_policy_cas_fails_closed_on_malformed_stored_accepted_policy(self, db):
         db.create_session(session_id="s1", source="tui")
         accepted = ExecutionPolicy.for_mode("user-1", ExecutionPolicyMode.DEFAULT)
@@ -331,6 +396,60 @@ class TestPromptReceipt:
             expected_revision=0,
             narrowed_policy=accepted.narrow({"read"}),
         ) is None
+
+    def test_atomic_policy_interrupt_persists_one_idempotent_assistant(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+
+        for _attempt in range(2):
+            assert db.interrupt_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="secure-recovery",
+                assistant_message_id="assistant-1",
+                assistant_content="Nothing was run. Please resend the request.",
+            ) is True
+
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["status"] == "interrupted"
+        assert receipt["owner_id"] == "secure-recovery"
+        assert db.get_recoverable_prompt_receipt("s1") is None
+        messages = db.get_messages_as_conversation("s1")
+        assert [(message["role"], message["client_message_id"]) for message in messages] == [
+            ("user", "user-1"),
+            ("assistant", "assistant-1"),
+        ]
+        assert messages[-1]["finish_reason"] == "interrupted"
+        assert db.get_session("s1")["message_count"] == 2
+
+    def test_atomic_policy_interrupt_rolls_back_on_assistant_insert_failure(self, db):
+        db.create_session(session_id="s1", source="tui")
+        _prepare_receipt(db, "s1")
+        db._conn.execute(
+            "CREATE TRIGGER fail_policy_interrupt_assistant "
+            "BEFORE INSERT ON messages "
+            "WHEN NEW.client_message_id = 'assistant-1' "
+            "BEGIN SELECT RAISE(ABORT, 'injected assistant write failure'); END"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="injected assistant"):
+            db.interrupt_prompt_receipt_with_assistant(
+                "s1",
+                "user-1",
+                owner_id="secure-recovery",
+                assistant_message_id="assistant-1",
+                assistant_content="Nothing was run. Please resend the request.",
+            )
+
+        receipt = db.get_prompt_receipt("s1", "user-1")
+        assert receipt["status"] == "pending"
+        assert receipt["owner_id"] is None
+        assert db.get_recoverable_prompt_receipt("s1")["status"] == "pending"
+        messages = db.get_messages_as_conversation("s1")
+        assert [(message["role"], message["client_message_id"]) for message in messages] == [
+            ("user", "user-1"),
+        ]
+        assert db.get_session("s1")["message_count"] == 1
 
     def test_retry_returns_original_row_without_duplicate(self, db):
         db.create_session(session_id="s1", source="tui")
