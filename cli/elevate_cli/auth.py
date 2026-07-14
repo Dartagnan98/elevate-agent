@@ -3172,7 +3172,12 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
     }
 
 
-def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None:
+def _save_codex_tokens(
+    tokens: Dict[str, str],
+    last_refresh: str = None,
+    *,
+    clear_device_code_suppression: bool = False,
+) -> None:
     """Save Codex OAuth tokens to Elevate auth store (~/.elevate/auth.json)."""
     if last_refresh is None:
         last_refresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -3183,6 +3188,20 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None) -> None
         state["last_refresh"] = last_refresh
         state["auth_mode"] = "chatgpt"
         _save_provider_state(auth_store, "openai-codex", state)
+        if clear_device_code_suppression:
+            suppressed = auth_store.get("suppressed_sources")
+            if isinstance(suppressed, dict):
+                provider_sources = suppressed.get("openai-codex")
+                if isinstance(provider_sources, list):
+                    provider_sources[:] = [
+                        source
+                        for source in provider_sources
+                        if source not in {"device_code", "manual:device_code"}
+                    ]
+                    if not provider_sources:
+                        suppressed.pop("openai-codex", None)
+                if not suppressed:
+                    auth_store.pop("suppressed_sources", None)
         _save_auth_store(auth_store)
 
 
@@ -5917,6 +5936,45 @@ def _update_config_for_provider(
     mismatched model/provider (e.g. ``anthropic/claude-opus-4.6`` sent to
     MiniMax's API).
     """
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BETA_DEFAULT_MODEL,
+        beta_model_or_default,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    if beta_provider_policy_active():
+        canonical_beta_provider(provider_id, source="configured provider")
+        requested_base_url = str(inference_base_url or "").strip().rstrip("/")
+        if requested_base_url and requested_base_url != BETA_CODEX_BASE_URL.rstrip("/"):
+            from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow a custom Codex endpoint.",
+                code="beta_custom_endpoint_not_allowed",
+            )
+
+        config = read_raw_config()
+        current_model = config.get("model")
+        model_cfg = dict(current_model) if isinstance(current_model, dict) else {}
+        model_cfg["provider"] = BETA_ALLOWED_PROVIDER
+        model_cfg["default"] = beta_model_or_default(
+            default_model or BETA_DEFAULT_MODEL,
+            source="configured model",
+        )
+        model_cfg["base_url"] = BETA_CODEX_BASE_URL
+        model_cfg["api_mode"] = "codex_responses"
+        model_cfg.pop("api_key", None)
+        model_cfg.pop("key_env", None)
+        config["model"] = model_cfg
+
+        from elevate_cli.config import save_config
+
+        save_config(config)
+        return get_config_path()
+
     # Set active_provider in auth.json so auto-resolution picks this provider
     with _auth_store_lock():
         auth_store = _load_auth_store()
@@ -6218,7 +6276,30 @@ def _save_model_choice(model_id: str) -> None:
     The model is stored in config.yaml only — NOT in .env.  This avoids
     conflicts in multi-agent setups where env vars would stomp each other.
     """
-    from elevate_cli.config import save_config, load_config
+    from elevate_cli.config import load_config, read_raw_config, save_config
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        beta_model_or_default,
+        beta_provider_policy_active,
+    )
+
+    if beta_provider_policy_active():
+        config = read_raw_config()
+        selected_model = beta_model_or_default(model_id, source="selected model")
+        current_model = config.get("model")
+        model_cfg = dict(current_model) if isinstance(current_model, dict) else {}
+        model_cfg.update(
+            provider=BETA_ALLOWED_PROVIDER,
+            default=selected_model,
+            base_url=BETA_CODEX_BASE_URL,
+            api_mode="codex_responses",
+        )
+        model_cfg.pop("api_key", None)
+        model_cfg.pop("key_env", None)
+        config["model"] = model_cfg
+        save_config(config)
+        return
 
     config = load_config()
     # Always use dict format so provider/base_url can be stored alongside

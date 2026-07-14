@@ -161,7 +161,59 @@ def _format_exhausted_status(entry) -> str:
 
 
 def auth_add_command(args) -> None:
-    provider = _normalize_provider(getattr(args, "provider", ""))
+    raw_provider = str(getattr(args, "provider", "") or "").strip()
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BetaProviderPolicyError,
+        beta_provider_policy_active,
+        canonical_beta_provider,
+    )
+
+    if beta_provider_policy_active():
+        try:
+            provider = canonical_beta_provider(
+                raw_provider,
+                source="auth provider",
+            )
+        except BetaProviderPolicyError as exc:
+            raise SystemExit(f"Error [{exc.code}]: {exc}") from exc
+
+        requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
+        if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
+            raise SystemExit(
+                "Error [beta_primary_api_key_not_allowed]: Realtor Beta "
+                "requires current-profile OpenAI Codex OAuth."
+            )
+        if requested_type not in {"", AUTH_TYPE_OAUTH}:
+            raise SystemExit(
+                "Error [beta_auth_type_not_allowed]: Realtor Beta requires "
+                "OpenAI Codex OAuth."
+            )
+
+        creds = auth_mod._codex_device_code_login()
+        tokens = creds.get("tokens") if isinstance(creds, dict) else None
+        access_token = str(
+            (tokens.get("access_token") or "") if isinstance(tokens, dict) else ""
+        ).strip()
+        refresh_token = str(
+            (tokens.get("refresh_token") or "") if isinstance(tokens, dict) else ""
+        ).strip()
+        if not access_token or not refresh_token:
+            raise SystemExit(
+                "Error [beta_codex_auth_invalid]: OpenAI Codex login did not "
+                "return a usable access and refresh token pair."
+            )
+        auth_mod._save_codex_tokens(
+            dict(tokens),
+            creds.get("last_refresh"),
+            clear_device_code_suppression=True,
+        )
+        print(
+            f"Connected {BETA_ALLOWED_PROVIDER} for this Realtor Beta profile."
+        )
+        return
+
+    provider = _normalize_provider(raw_provider)
     if provider not in PROVIDER_REGISTRY and provider != "openrouter" and not provider.startswith(CUSTOM_POOL_PREFIX):
         raise SystemExit(f"Unknown provider: {provider}")
 
@@ -430,6 +482,31 @@ def auth_add_command(args) -> None:
 
 
 def auth_list_command(args) -> None:
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        beta_provider_policy_active,
+        read_beta_codex_auth_status,
+    )
+    from elevate_constants import get_elevate_home
+
+    if beta_provider_policy_active():
+        requested = str(getattr(args, "provider", "") or "").strip().lower()
+        if requested in auth_mod.SERVICE_PROVIDER_NAMES:
+            provider_filter = requested
+        else:
+            provider_filter = ""
+        if requested and requested != BETA_ALLOWED_PROVIDER:
+            if not provider_filter:
+                raise SystemExit(
+                    "Error [beta_provider_not_allowed]: Realtor Beta exposes only "
+                    "OpenAI Codex inference auth."
+                )
+        else:
+            status = read_beta_codex_auth_status(get_elevate_home())
+            state = "connected" if status.get("logged_in") else "not connected"
+            print(f"{BETA_ALLOWED_PROVIDER}: {state} (current Beta profile)")
+            return
+
     provider_filter = _normalize_provider(getattr(args, "provider", "") or "")
     if provider_filter:
         providers = [provider_filter]
@@ -502,7 +579,30 @@ def auth_reset_command(args) -> None:
 
 
 def auth_status_command(args) -> None:
-    provider = _normalize_provider(getattr(args, "provider", "") or "")
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        beta_provider_policy_active,
+        read_beta_codex_auth_status,
+    )
+    from elevate_constants import get_elevate_home
+
+    if beta_provider_policy_active():
+        provider = str(getattr(args, "provider", "") or "").strip().lower()
+        if provider in auth_mod.SERVICE_PROVIDER_NAMES:
+            provider = _normalize_provider(provider)
+        else:
+            if provider != BETA_ALLOWED_PROVIDER:
+                raise SystemExit(
+                    "Error [beta_provider_not_allowed]: Realtor Beta exposes only "
+                    "OpenAI Codex inference auth."
+                )
+            status = read_beta_codex_auth_status(get_elevate_home())
+            state = "logged in" if status.get("logged_in") else "logged out"
+            print(f"{BETA_ALLOWED_PROVIDER}: {state} (current Beta profile)")
+            return
+
+    if not beta_provider_policy_active():
+        provider = _normalize_provider(getattr(args, "provider", "") or "")
     if not provider:
         raise SystemExit("Provider is required. Example: `elevate auth status spotify`.")
     status = auth_mod.get_auth_status(provider)
@@ -541,6 +641,26 @@ def auth_spotify_command(args) -> None:
 
 def _interactive_auth() -> None:
     """Interactive credential pool management when `elevate auth` is called bare."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    if beta_provider_policy_active():
+        auth_list_command(SimpleNamespace(provider="openai-codex"))
+        print()
+        try:
+            choice = input("Connect or refresh OpenAI Codex now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if choice in {"y", "yes"}:
+            auth_add_command(
+                SimpleNamespace(
+                    provider="openai-codex",
+                    auth_type="oauth",
+                    label=None,
+                    api_key=None,
+                )
+            )
+        return
+
     # Show current pool status first
     print("Credential Pool Status")
     print("=" * 50)
@@ -649,6 +769,15 @@ def _interactive_auth() -> None:
 
 def _pick_provider(prompt: str = "Provider") -> str:
     """Prompt for a provider name with auto-complete hints."""
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        beta_provider_policy_active,
+    )
+
+    if beta_provider_policy_active():
+        print(f"\nRealtor Beta inference provider: {BETA_ALLOWED_PROVIDER}")
+        return BETA_ALLOWED_PROVIDER
+
     known = sorted(set(list(PROVIDER_REGISTRY.keys()) + ["openrouter"]))
     custom_names = _get_custom_provider_names()
     if custom_names:
