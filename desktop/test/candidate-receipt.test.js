@@ -258,6 +258,15 @@ test("the real build runner exports one verified source ID into both builder con
   const scripts = require("../package.json").scripts;
   assert.match(scripts["build:mac"], /candidate-receipt\.js build-mac/);
   assert.doesNotMatch(scripts["release:mac"], /ship:mac/);
+  assert.match(scripts["smoke:mac"], /DESKTOP_ROOT=\$\(pwd -P\)/);
+  assert.match(
+    scripts["smoke:mac"],
+    /--installed-app "\$DESKTOP_ROOT\/dist\/mac\/\$APP_BUNDLE"/,
+  );
+  assert.match(
+    scripts["smoke:mac"],
+    /--installed-app "\$DESKTOP_ROOT\/dist\/mac-arm64\/\$APP_BUNDLE"/,
+  );
   assert.match(scripts["smoke:mac:live"], /--live-candidate/);
   assert.match(scripts["smoke:mac:live"], /live-ai\.json/);
   assert.doesNotMatch(scripts["smoke:mac:live"], /--skip-sidecar/);
