@@ -474,7 +474,7 @@ HA_CALL_SERVICE_SCHEMA = {
 # Registration
 # ---------------------------------------------------------------------------
 
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error  # noqa: E402 - deferred registration
 
 registry.register(
     name="ha_list_entities",
@@ -483,6 +483,7 @@ registry.register(
     handler=_handle_list_entities,
     check_fn=_check_ha_available,
     emoji="🏠",
+    effects={"read:homeassistant", "credential_access:homeassistant"},
 )
 
 registry.register(
@@ -492,6 +493,7 @@ registry.register(
     handler=_handle_get_state,
     check_fn=_check_ha_available,
     emoji="🏠",
+    effects={"read:homeassistant", "credential_access:homeassistant"},
 )
 
 registry.register(
@@ -501,6 +503,7 @@ registry.register(
     handler=_handle_list_services,
     check_fn=_check_ha_available,
     emoji="🏠",
+    effects={"read:homeassistant", "credential_access:homeassistant"},
 )
 
 registry.register(

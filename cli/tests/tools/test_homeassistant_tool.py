@@ -4,12 +4,26 @@ Tests real logic: entity filtering, payload building, response parsing,
 handler validation, and availability gating.
 """
 
+import asyncio
 import json
-from unittest.mock import patch
+import sys
+from types import ModuleType
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import tools.homeassistant_tool as ha_module
+from tools.approval import (
+    Effect,
+    EffectKind,
+    ExecutionPolicy,
+    ExecutionPolicyMode,
+    authorize_effects,
+)
 from tools.homeassistant_tool import (
+    _async_get_state,
+    _async_list_entities,
+    _async_list_services,
     _check_ha_available,
     _filter_and_summarize,
     _build_service_payload,
@@ -20,6 +34,14 @@ from tools.homeassistant_tool import (
     _BLOCKED_DOMAINS,
     _ENTITY_ID_RE,
     _SERVICE_NAME_RE,
+)
+from tools.registry import registry
+
+
+AUTHENTICATED_READ_TOOLS = (
+    "ha_list_entities",
+    "ha_get_state",
+    "ha_list_services",
 )
 
 
@@ -231,16 +253,23 @@ class TestDomainBlocklist:
         assert "error" in result
         assert "blocked" in result["error"].lower()
 
-    def test_safe_domain_not_blocked(self):
-        """Safe domains like 'light' should not be blocked (will fail on network, not blocklist)."""
-        # This will try to make a real HTTP call and fail, but the important thing
-        # is it does NOT return a "blocked" error
+    @patch(
+        "tools.homeassistant_tool._async_call_service",
+        new_callable=AsyncMock,
+        return_value={"success": True},
+    )
+    def test_safe_domain_not_blocked(self, mock_call_service):
+        """Safe domains pass validation using a fully fake service transport."""
         result = json.loads(_handle_call_service({
             "domain": "light", "service": "turn_on", "entity_id": "light.test"
         }))
-        # Should fail with a network/connection error, not a "blocked" error
-        if "error" in result:
-            assert "blocked" not in result["error"].lower()
+        assert result == {"result": {"success": True}}
+        mock_call_service.assert_awaited_once_with(
+            "light",
+            "turn_on",
+            "light.test",
+            None,
+        )
 
     def test_blocked_domains_include_shell_command(self):
         assert "shell_command" in _BLOCKED_DOMAINS
@@ -295,14 +324,23 @@ class TestEntityIdValidation:
         assert "error" in result
         assert "Invalid entity_id" in result["error"]
 
-    def test_call_service_allows_no_entity_id(self):
-        """Some services (like scene.turn_on) don't need entity_id."""
-        # Will fail on network, but should NOT fail on entity_id validation
+    @patch(
+        "tools.homeassistant_tool._async_call_service",
+        new_callable=AsyncMock,
+        return_value={"success": True},
+    )
+    def test_call_service_allows_no_entity_id(self, mock_call_service):
+        """Some services omit entity_id without reaching a live transport."""
         result = json.loads(_handle_call_service({
             "domain": "scene", "service": "turn_on"
         }))
-        if "error" in result:
-            assert "Invalid entity_id" not in result["error"]
+        assert result == {"result": {"success": True}}
+        mock_call_service.assert_awaited_once_with(
+            "scene",
+            "turn_on",
+            None,
+            None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +351,12 @@ class TestEntityIdValidation:
 class TestCallServiceStringData:
     """data param may arrive as a JSON string (XML tool calling mode)."""
 
-    @patch("tools.homeassistant_tool._run_async", return_value={"success": True})
-    def test_string_data_deserialized(self, mock_run):
+    @patch(
+        "tools.homeassistant_tool._async_call_service",
+        new_callable=AsyncMock,
+        return_value={"success": True},
+    )
+    def test_string_data_deserialized(self, mock_call_service):
         """JSON string data is parsed into a dict before dispatch."""
         _handle_call_service({
             "domain": "climate",
@@ -322,11 +364,19 @@ class TestCallServiceStringData:
             "entity_id": "climate.living_room",
             "data": '{"hvac_mode": "heat"}',
         })
-        call_args = mock_run.call_args[0][0]  # the coroutine arg
-        # _run_async was called, meaning we got past validation
+        mock_call_service.assert_awaited_once_with(
+            "climate",
+            "set_hvac_mode",
+            "climate.living_room",
+            {"hvac_mode": "heat"},
+        )
 
-    @patch("tools.homeassistant_tool._run_async", return_value={"success": True})
-    def test_dict_data_passthrough(self, mock_run):
+    @patch(
+        "tools.homeassistant_tool._async_call_service",
+        new_callable=AsyncMock,
+        return_value={"success": True},
+    )
+    def test_dict_data_passthrough(self, mock_call_service):
         """Dict data (JSON tool calling mode) still works unchanged."""
         _handle_call_service({
             "domain": "light",
@@ -334,7 +384,12 @@ class TestCallServiceStringData:
             "entity_id": "light.bedroom",
             "data": {"brightness": 255},
         })
-        mock_run.assert_called_once()
+        mock_call_service.assert_awaited_once_with(
+            "light",
+            "turn_on",
+            "light.bedroom",
+            {"brightness": 255},
+        )
 
     def test_invalid_json_string_returns_error(self):
         """Malformed JSON string in data returns a clear error."""
@@ -347,8 +402,12 @@ class TestCallServiceStringData:
         assert "error" in result
         assert "Invalid JSON" in result["error"]
 
-    @patch("tools.homeassistant_tool._run_async", return_value={"success": True})
-    def test_empty_string_data_becomes_none(self, mock_run):
+    @patch(
+        "tools.homeassistant_tool._async_call_service",
+        new_callable=AsyncMock,
+        return_value={"success": True},
+    )
+    def test_empty_string_data_becomes_none(self, mock_call_service):
         """Empty/whitespace string data is treated as None."""
         _handle_call_service({
             "domain": "light",
@@ -356,7 +415,12 @@ class TestCallServiceStringData:
             "entity_id": "light.bedroom",
             "data": "   ",
         })
-        mock_run.assert_called_once()
+        mock_call_service.assert_awaited_once_with(
+            "light",
+            "turn_on",
+            "light.bedroom",
+            None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -485,18 +549,13 @@ class TestGetHeaders:
 
 class TestRegistration:
     def test_tools_registered_in_registry(self):
-        from tools.registry import registry
-
         names = registry.get_all_tool_names()
-        assert "ha_list_entities" in names
-        assert "ha_get_state" in names
-        assert "ha_call_service" in names
+        for tool in (*AUTHENTICATED_READ_TOOLS, "ha_call_service"):
+            assert tool in names
 
     def test_tools_in_homeassistant_toolset(self):
-        from tools.registry import registry
-
         toolset_map = registry.get_tool_to_toolset_map()
-        for tool in ("ha_list_entities", "ha_get_state", "ha_call_service"):
+        for tool in (*AUTHENTICATED_READ_TOOLS, "ha_call_service"):
             assert toolset_map[tool] == "homeassistant"
 
     def test_check_fn_gates_availability(self, monkeypatch):
@@ -505,7 +564,7 @@ class TestRegistration:
 
         monkeypatch.delenv("HASS_TOKEN", raising=False)
         invalidate_check_fn_cache()
-        defs = registry.get_definitions({"ha_list_entities", "ha_get_state", "ha_call_service"})
+        defs = registry.get_definitions({*AUTHENTICATED_READ_TOOLS, "ha_call_service"})
         assert len(defs) == 0
 
     def test_check_fn_includes_when_token_set(self, monkeypatch):
@@ -514,5 +573,169 @@ class TestRegistration:
 
         monkeypatch.setenv("HASS_TOKEN", "test-token")
         invalidate_check_fn_cache()
-        defs = registry.get_definitions({"ha_list_entities", "ha_get_state", "ha_call_service"})
-        assert len(defs) == 3
+        defs = registry.get_definitions({*AUTHENTICATED_READ_TOOLS, "ha_call_service"})
+        assert len(defs) == 4
+
+    def test_authenticated_reads_declare_exact_effects_and_service_call_unknown(self):
+        expected = frozenset({
+            Effect.parse("read:homeassistant"),
+            Effect.parse("credential_access:homeassistant"),
+        })
+
+        for name in AUTHENTICATED_READ_TOOLS:
+            entry = registry.get_entry(name)
+            assert entry is not None
+            assert entry.effects == expected
+            assert entry.effect_resolver is None
+            assert registry.get_effect_metadata(name) == {
+                "declared": True,
+                "effects": expected,
+                "has_resolver": False,
+            }
+            assert registry.resolve_effects(name, {}) == expected
+
+        unknown = frozenset({Effect(EffectKind.UNKNOWN)})
+        service_call = registry.get_entry("ha_call_service")
+        assert service_call is not None
+        assert service_call.effects is None
+        assert service_call.effect_resolver is None
+        assert registry.get_effect_metadata("ha_call_service") == {
+            "declared": False,
+            "effects": unknown,
+            "has_resolver": False,
+        }
+        assert registry.resolve_effects("ha_call_service", {}) == unknown
+
+    def test_authenticated_reads_are_denied_by_read_only_and_allowed_by_default(self):
+        expected = frozenset({
+            Effect.parse("read:homeassistant"),
+            Effect.parse("credential_access:homeassistant"),
+        })
+        credential = frozenset({Effect.parse("credential_access:homeassistant")})
+        read_only = ExecutionPolicy.for_mode(
+            "turn-homeassistant-read-only",
+            ExecutionPolicyMode.READ_ONLY,
+        )
+        default = ExecutionPolicy.for_mode(
+            "turn-homeassistant-default",
+            ExecutionPolicyMode.DEFAULT,
+        )
+
+        for name in AUTHENTICATED_READ_TOOLS:
+            resolved = registry.resolve_effects(name, {})
+            read_only_decision = authorize_effects(read_only, resolved)
+            default_decision = authorize_effects(default, resolved)
+
+            assert resolved == expected
+            assert read_only_decision.allowed is False
+            assert read_only_decision.denied_effects == credential
+            assert read_only_decision.reason == "effect_not_allowed"
+            assert default_decision.allowed is True
+            assert default_decision.denied_effects == frozenset()
+            assert default_decision.reason == "allowed"
+
+        unknown_decision = authorize_effects(
+            default,
+            registry.resolve_effects("ha_call_service", {}),
+        )
+        assert unknown_decision.allowed is False
+        assert unknown_decision.reason == "unknown_effect"
+
+
+def test_authenticated_reads_use_get_only_fake_transport_without_filesystem_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+    state = {
+        "entity_id": "light.bedroom",
+        "state": "on",
+        "attributes": {"friendly_name": "Bedroom Light"},
+        "last_changed": "2026-07-14T12:00:00Z",
+        "last_updated": "2026-07-14T12:00:00Z",
+    }
+    services = [{
+        "domain": "light",
+        "services": {
+            "turn_on": {
+                "description": "Turn on a light",
+                "fields": {},
+            },
+        },
+    }]
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return self.payload
+
+    class FakeClientSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append({"method": "GET", "url": url, **kwargs})
+            if url.endswith("/api/states/light.bedroom"):
+                return FakeResponse(state)
+            if url.endswith("/api/states"):
+                return FakeResponse(SAMPLE_STATES)
+            if url.endswith("/api/services"):
+                return FakeResponse(services)
+            raise AssertionError(f"unexpected fake Home Assistant URL: {url}")
+
+        def post(self, url, **kwargs):
+            calls.append({"method": "POST", "url": url, **kwargs})
+            raise AssertionError("authenticated Home Assistant read attempted POST")
+
+    fake_aiohttp = ModuleType("aiohttp")
+    fake_aiohttp.ClientSession = FakeClientSession
+    fake_aiohttp.ClientTimeout = lambda **kwargs: kwargs
+    monkeypatch.setitem(sys.modules, "aiohttp", fake_aiohttp)
+    monkeypatch.setattr(
+        ha_module,
+        "_get_config",
+        lambda: ("https://homeassistant.invalid", "fake-test-token"),
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    before = set(tmp_path.rglob("*"))
+
+    async def exercise_reads():
+        return (
+            await _async_list_entities(domain="light"),
+            await _async_get_state("light.bedroom"),
+            await _async_list_services(domain="light"),
+        )
+
+    entities_result, state_result, services_result = asyncio.run(exercise_reads())
+
+    assert entities_result["count"] == 2
+    assert state_result["entity_id"] == "light.bedroom"
+    assert services_result["count"] == 1
+    assert len(calls) == 3
+    assert {call["method"] for call in calls} == {"GET"}
+    assert not any(call["method"] == "POST" for call in calls)
+    assert {call["url"] for call in calls} == {
+        "https://homeassistant.invalid/api/states",
+        "https://homeassistant.invalid/api/states/light.bedroom",
+        "https://homeassistant.invalid/api/services",
+    }
+    for call in calls:
+        assert call["headers"] == {
+            "Authorization": "Bearer fake-test-token",
+            "Content-Type": "application/json",
+        }
+    assert set(tmp_path.rglob("*")) == before
