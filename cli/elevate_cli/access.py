@@ -13,6 +13,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
 PROFILE_STANDALONE = "standalone"
 PROFILE_EXP = "exp"
 PROFILE_TEAM_PACK = "team_pack"
@@ -210,7 +212,57 @@ def load_access_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
         config = read_raw_config()
     raw = config.get("access") if isinstance(config, dict) else {}
-    return normalize_access_config(raw)
+    access = normalize_access_config(raw)
+
+    # Exact Realtor Beta treats the locally verified HQ license snapshot as
+    # authoritative. Config is still preserved for Stable, but stale manual or
+    # historical grants cannot outlive a missing, tampered, expired, revoked,
+    # or empty Beta snapshot. Any verification failure therefore yields Core
+    # only instead of failing open to config.yaml.
+    if not beta_provider_policy_active():
+        return access
+
+    granted: set[str] = set()
+    try:
+        from elevate_cli.license import read_verified_beta_license_snapshot
+
+        lic = read_verified_beta_license_snapshot(require_current=True)
+        granted = set(lic.entitlements or [])
+    except Exception:
+        granted = set()
+
+    entitlements = access.setdefault("entitlements", {})
+    # Every non-Core entitlement in the Beta profile is server-authoritative,
+    # including legacy, custom, and team-pack entries already present in a
+    # user's config. Otherwise an old local grant could bypass a missing or
+    # revoked HQ snapshot even though the four dashboard flags look locked.
+    authoritative = (
+        set(entitlements)
+        | set(granted)
+        | set(KNOWN_ENTITLEMENTS)
+    ) - {ENTITLEMENT_CORE}
+    affiliation_granted = False
+    for entitlement in authoritative:
+        allowed = entitlement in granted
+        entry = entitlements.setdefault(entitlement, {"description": ""})
+        if allowed and (
+            entitlement in REAL_ESTATE_ENTITLEMENTS
+            or bool(entry.get("requires_active_affiliation"))
+        ):
+            affiliation_granted = True
+        entry["status"] = "active" if allowed else "locked"
+        entry["owned_snapshot"] = allowed
+        entry.pop("manual_lock", None)
+    core_entry = entitlements.setdefault(
+        ENTITLEMENT_CORE,
+        copy.deepcopy(BASE_ACCESS_CONFIG["entitlements"][ENTITLEMENT_CORE]),
+    )
+    core_entry["status"] = "active"
+    core_entry["owned_snapshot"] = True
+    core_entry.pop("manual_lock", None)
+    affiliation = access.setdefault("affiliation", {})
+    affiliation["status"] = "active" if affiliation_granted else "inactive"
+    return access
 
 
 def save_access_config(access_config: dict[str, Any]) -> None:
@@ -420,7 +472,12 @@ def dashboard_access_status(access_config: dict[str, Any] | None = None) -> dict
             "manualLock": bool(entry.get("manual_lock")),
         }
 
-    dev_override = _truthy_env(DEV_DASHBOARD_UNLOCK_ENV)
+    # The developer escape hatch remains available to Stable, but a signed
+    # Beta build must never let mutable environment state override HQ.
+    dev_override = (
+        not beta_provider_policy_active()
+        and _truthy_env(DEV_DASHBOARD_UNLOCK_ENV)
+    )
     sales = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_SALES, access_config)
     marketing = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_MARKETING, access_config)
     admin = dev_override or is_entitlement_active(ENTITLEMENT_REAL_ESTATE_ADMIN, access_config)

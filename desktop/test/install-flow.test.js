@@ -105,8 +105,7 @@ test("installer exit success reloads setup page when backend is still unavailabl
 test("desktop license writer stores token file at 0600", () => {
   const auth = fs.readFileSync(path.resolve(__dirname, "../src/desktop-auth.js"), "utf8");
 
-  assert.match(
-    auth,
-    /fs\.writeFileSync\(licensePath, JSON\.stringify\(license, null, 2\), \{ mode: 0o600 \}\);/,
-  );
+  assert.match(auth, /fsImpl\.fchmodSync\(fd, 0o600\)/);
+  assert.match(auth, /fsImpl\.renameSync\(tempPath, resolvedLicensePath\)/);
+  assert.match(auth, /persistedStat\.nlink !== 1/);
 });

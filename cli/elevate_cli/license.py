@@ -29,8 +29,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import stat
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -137,6 +139,164 @@ def _signed_beta_backend_url() -> str:
     return backend
 
 
+def _beta_profile_root() -> Path:
+    """Return the profile root fixed by the signed Beta product identity."""
+    return Path.home() / ".elevate-beta"
+
+
+def _beta_store_error(code: str, message: str) -> LicenseError:
+    return LicenseError(message, code=code)
+
+
+def _auth_flow_error(message: str, *, beta_code: str) -> LicenseError:
+    """Keep Stable errors compatible while making every Beta path typed."""
+    return LicenseError(
+        message,
+        code=beta_code if _exact_realtor_beta_active() else "license_error",
+    )
+
+
+def _post_hq(base_url: str, path: str, payload: dict[str, Any]):
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            return client.post(f"{base_url}{path}", json=payload)
+    except httpx.HTTPError as exc:
+        if _exact_realtor_beta_active():
+            raise LicenseError(
+                "Elevation HQ could not be reached. Check your connection and try again.",
+                code="beta_auth_upstream_unavailable",
+            ) from exc
+        raise
+
+
+def _response_json(response: Any) -> Any:
+    try:
+        return response.json()
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if _exact_realtor_beta_active():
+            raise LicenseError(
+                "Elevation HQ returned an invalid account response.",
+                code="beta_license_response_invalid",
+            ) from exc
+        raise
+
+
+def preflight_beta_license_store(*, require_writable: bool = True) -> None:
+    """Validate the exact-Beta license store before auth I/O.
+
+    The path is bound to the product's dedicated local profile. Symlinked,
+    hardlinked, cross-profile, managed, foreign-owned, and unwritable stores
+    fail closed. A short exclusive-create probe proves write access instead of
+    trusting ``os.access`` (which can lie under elevated test/runtime users).
+    """
+    if not _exact_realtor_beta_active():
+        return
+
+    root = _beta_profile_root().expanduser().absolute()
+    license_path = LICENSE_PATH.expanduser().absolute()
+    if license_path.name != "license.json" or license_path.parent != root:
+        raise _beta_store_error(
+            "beta_license_store_not_local",
+            "Realtor Beta will only use its dedicated local Beta profile.",
+        )
+
+    try:
+        from elevate_cli.config import is_managed
+
+        if is_managed() or (root / ".managed").exists():
+            raise _beta_store_error(
+                "beta_license_store_managed",
+                "This managed Realtor Beta profile cannot persist an account session.",
+            )
+
+        parent = root.parent
+        if parent.is_symlink() or not parent.is_dir():
+            raise _beta_store_error(
+                "beta_license_store_not_local",
+                "Realtor Beta could not verify its local profile parent.",
+            )
+        if not root.exists():
+            if not require_writable:
+                raise _beta_store_error(
+                    "beta_license_snapshot_invalid",
+                    "The Realtor Beta account snapshot is missing.",
+                )
+            root.mkdir(mode=0o700)
+        root_lstat = root.lstat()
+        if root.is_symlink() or not stat.S_ISDIR(root_lstat.st_mode):
+            raise _beta_store_error(
+                "beta_license_store_not_local",
+                "Realtor Beta will not use a linked or non-directory profile.",
+            )
+        if root.resolve() != root or root_lstat.st_dev != parent.stat().st_dev:
+            raise _beta_store_error(
+                "beta_license_store_not_local",
+                "Realtor Beta will not use a redirected or nonlocal profile.",
+            )
+        if hasattr(os, "getuid") and root_lstat.st_uid != os.getuid():
+            raise _beta_store_error(
+                "beta_license_store_not_local",
+                "Realtor Beta will not use a profile owned by another account.",
+            )
+        if root_lstat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise _beta_store_error(
+                "beta_license_store_not_private",
+                "The Realtor Beta profile is writable by another account.",
+            )
+        if require_writable and not (root_lstat.st_mode & stat.S_IWUSR):
+            raise _beta_store_error(
+                "beta_license_store_unwritable",
+                "The Realtor Beta profile is not writable by this account.",
+            )
+
+        if license_path.exists() or license_path.is_symlink():
+            license_lstat = license_path.lstat()
+            if (
+                license_path.is_symlink()
+                or not stat.S_ISREG(license_lstat.st_mode)
+                or license_lstat.st_nlink != 1
+                or (hasattr(os, "getuid") and license_lstat.st_uid != os.getuid())
+            ):
+                raise _beta_store_error(
+                    "beta_license_store_not_local",
+                    "Realtor Beta will not use a linked or shared license store.",
+                )
+            if stat.S_IMODE(license_lstat.st_mode) & 0o077:
+                raise _beta_store_error(
+                    "beta_license_store_not_private",
+                    "The Realtor Beta account snapshot is readable by another account.",
+                )
+
+        if require_writable:
+            dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+            dir_fd = os.open(root, dir_flags)
+            probe_name = f".license-preflight-{uuid.uuid4().hex}"
+            try:
+                probe_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                probe_flags |= getattr(os, "O_NOFOLLOW", 0)
+                probe_fd = os.open(probe_name, probe_flags, 0o600, dir_fd=dir_fd)
+                try:
+                    os.write(probe_fd, b"ok")
+                    os.fsync(probe_fd)
+                finally:
+                    os.close(probe_fd)
+                os.unlink(probe_name, dir_fd=dir_fd)
+            finally:
+                try:
+                    os.unlink(probe_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+                os.close(dir_fd)
+    except LicenseError:
+        raise
+    except Exception as exc:
+        raise _beta_store_error(
+            "beta_license_store_unavailable",
+            "Realtor Beta could not verify its local account store.",
+        ) from exc
+
+
 def backend_url() -> str:
     """Return the configured Elevation HQ license/skill API origin."""
     # Exact Beta never trusts the mutable module global or profile/process
@@ -144,6 +304,7 @@ def backend_url() -> str:
     # automations, diagnostics, and startup sync) resolves through this
     # compiled identity at the moment it creates its HTTP client.
     if _exact_realtor_beta_active():
+        preflight_beta_license_store(require_writable=True)
         return _signed_beta_backend_url()
     if not BACKEND_URL:
         raise LicenseError(
@@ -247,8 +408,234 @@ def _extract_entitlements(data: dict[str, Any]) -> list[str] | None:
     return None
 
 
+def _complete_entitlements_from_response(
+    data: dict[str, Any],
+    *,
+    fallback: list[str] | None = None,
+) -> list[str] | None:
+    entitlements = _extract_entitlements(data)
+    if _exact_realtor_beta_active() and entitlements is None:
+        raise LicenseError(
+            "Elevation HQ did not return a complete entitlement snapshot. "
+            "No paid Realtor Beta access was changed.",
+            code="beta_entitlement_snapshot_missing",
+        )
+    return fallback if entitlements is None else entitlements
+
+
+def _validate_complete_beta_license(lic: License, *, require_current: bool) -> None:
+    if not _exact_realtor_beta_active():
+        return
+    if lic.entitlements is None:
+        raise LicenseError(
+            "The Realtor Beta account snapshot is missing entitlement state.",
+            code="beta_entitlement_snapshot_missing",
+        )
+    required = {
+        "access token": lic.access_token,
+        "refresh token": lic.refresh_token,
+        "license id": lic.license_id,
+        "email": lic.email,
+    }
+    if any(not str(value or "").strip() for value in required.values()):
+        raise LicenseError(
+            "The Realtor Beta account snapshot is incomplete.",
+            code="beta_license_snapshot_invalid",
+        )
+    if int(lic.expires_at or 0) <= 0:
+        raise LicenseError(
+            "The Realtor Beta account snapshot has no valid expiry.",
+            code="beta_license_snapshot_invalid",
+        )
+    if require_current and lic.is_expired(margin=0):
+        raise LicenseError(
+            "The Realtor Beta account snapshot is already expired.",
+            code="beta_license_snapshot_expired",
+        )
+
+
+def _parse_license_payload(raw: object) -> License:
+    if not isinstance(raw, dict):
+        raise LicenseError(
+            "The account snapshot is not a JSON object.",
+            code="beta_license_snapshot_invalid",
+        )
+    try:
+        return License(
+            access_token=str(raw["access_token"]),
+            refresh_token=str(raw["refresh_token"]),
+            license_id=str(raw["license_id"]),
+            tier=str(raw.get("tier", "pro")),
+            email=str(raw.get("email", "")),
+            expires_at=int(raw.get("expires_at", 0)),
+            entitlements=_normalize_entitlements(raw.get("entitlements"))
+            if "entitlements" in raw
+            else None,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LicenseError(
+            "The account snapshot is malformed.",
+            code="beta_license_snapshot_invalid",
+        ) from exc
+
+
+def read_verified_beta_license_snapshot(*, require_current: bool) -> License:
+    """Read a structurally complete local Beta snapshot or raise typed."""
+    preflight_beta_license_store(require_writable=False)
+    try:
+        raw = json.loads(_read_beta_snapshot_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LicenseError(
+            "The Realtor Beta account snapshot is missing or unreadable.",
+            code="beta_license_snapshot_invalid",
+        ) from exc
+    lic = _parse_license_payload(raw)
+    _validate_complete_beta_license(lic, require_current=require_current)
+    return lic
+
+
+def _read_beta_snapshot_bytes() -> bytes:
+    """Read license.json without following its final path component."""
+    root = _beta_profile_root().expanduser().absolute()
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(root, dir_flags)
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open("license.json", flags, dir_fd=dir_fd)
+        try:
+            file_stat = os.fstat(fd)
+            if (
+                not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_nlink != 1
+                or stat.S_IMODE(file_stat.st_mode) & 0o077
+                or (hasattr(os, "getuid") and file_stat.st_uid != os.getuid())
+            ):
+                raise OSError("license snapshot is not a private regular file")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _atomic_beta_replace(data: bytes | None) -> None:
+    """Replace or remove license.json through a no-follow profile directory fd."""
+    root = _beta_profile_root().expanduser().absolute()
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(root, dir_flags)
+    tmp_name = f".license-{uuid.uuid4().hex}.tmp"
+    try:
+        if data is None:
+            try:
+                os.unlink("license.json", dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            try:
+                os.stat("license.json", dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError("license snapshot removal could not be verified")
+            os.fsync(dir_fd)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("license snapshot write made no progress")
+                view = view[written:]
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(
+            tmp_name,
+            "license.json",
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+        )
+        target_stat = os.stat("license.json", dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(target_stat.st_mode) or target_stat.st_nlink != 1:
+            raise OSError("atomic license target is not a private regular file")
+        os.fsync(dir_fd)
+    finally:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        os.close(dir_fd)
+
+
+def _invalidate_beta_snapshot(message: str) -> None:
+    """Remove all local paid state, raising typed if removal is unverified."""
+    if not _exact_realtor_beta_active():
+        return
+    try:
+        _atomic_beta_replace(None)
+    except Exception as exc:
+        raise LicenseError(
+            message,
+            code="beta_license_persistence_failed",
+        ) from exc
+
+
 def sync_license_entitlements(lic: License) -> None:
     """Mirror server-granted paid packs into local dashboard entitlements."""
+    if _exact_realtor_beta_active():
+        _validate_complete_beta_license(lic, require_current=True)
+        persisted = read_verified_beta_license_snapshot(require_current=True)
+        if persisted.to_dict() != lic.to_dict():
+            raise LicenseError(
+                "Realtor Beta could not verify the persisted account snapshot.",
+                code="beta_license_persistence_mismatch",
+            )
+        from elevate_cli.access import (
+            ACTIVE_AFFILIATION_STATUSES,
+            ENTITLEMENT_CORE,
+            REAL_ESTATE_ENTITLEMENTS,
+            load_access_config,
+        )
+
+        access = load_access_config()
+        granted = set(lic.entitlements or [])
+        entries = access.get("entitlements") or {}
+        authoritative = (set(entries) | granted) - {ENTITLEMENT_CORE}
+        for entitlement in sorted(authoritative):
+            entry = (access.get("entitlements") or {}).get(entitlement) or {}
+            active = str(entry.get("status") or "").lower() == "active"
+            owned = bool(entry.get("owned_snapshot"))
+            allowed = entitlement in granted
+            if active != allowed or owned != allowed:
+                raise LicenseError(
+                    "Realtor Beta entitlement verification did not match HQ.",
+                    code="beta_entitlement_persistence_mismatch",
+                )
+        affiliation_active = str(
+            (access.get("affiliation") or {}).get("status") or ""
+        ).lower() in ACTIVE_AFFILIATION_STATUSES
+        affiliation_expected = bool(granted & set(REAL_ESTATE_ENTITLEMENTS)) or any(
+            entitlement in granted
+            and bool((entries.get(entitlement) or {}).get("requires_active_affiliation"))
+            for entitlement in authoritative
+        )
+        if affiliation_active != affiliation_expected:
+            raise LicenseError(
+                "Realtor Beta affiliation verification did not match HQ.",
+                code="beta_entitlement_persistence_mismatch",
+            )
+        return
     if lic.entitlements is None:
         return
     try:
@@ -281,6 +668,11 @@ def sync_license_entitlements(lic: License) -> None:
 
 
 def load() -> Optional[License]:
+    if _exact_realtor_beta_active():
+        try:
+            return read_verified_beta_license_snapshot(require_current=False)
+        except LicenseError:
+            return None
     if not LICENSE_PATH.exists():
         return None
     try:
@@ -301,6 +693,31 @@ def load() -> Optional[License]:
 
 
 def save(lic: License) -> None:
+    if _exact_realtor_beta_active():
+        _validate_complete_beta_license(lic, require_current=True)
+        preflight_beta_license_store(require_writable=True)
+        payload = json.dumps(lic.to_dict(), indent=2).encode("utf-8")
+        try:
+            _atomic_beta_replace(payload)
+            persisted = read_verified_beta_license_snapshot(require_current=True)
+            if persisted.to_dict() != lic.to_dict():
+                raise LicenseError(
+                    "Realtor Beta could not verify its saved account snapshot.",
+                    code="beta_license_persistence_mismatch",
+                )
+        except Exception as exc:
+            # Once HQ has returned a new authoritative snapshot, restoring old
+            # paid grants would fail open if this response revoked them.
+            _invalidate_beta_snapshot(
+                "Realtor Beta could not save or invalidate its account snapshot."
+            )
+            if isinstance(exc, LicenseError):
+                raise
+            raise LicenseError(
+                "Realtor Beta could not save its account snapshot.",
+                code="beta_license_persistence_failed",
+            ) from exc
+        return
     LICENSE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = LICENSE_PATH.with_suffix(".json.tmp")
     try:
@@ -315,44 +732,165 @@ def save(lic: License) -> None:
 
 
 def clear() -> bool:
+    if _exact_realtor_beta_active():
+        preflight_beta_license_store(require_writable=True)
+        existed = LICENSE_PATH.exists()
+        _atomic_beta_replace(None)
+        return existed
     if LICENSE_PATH.exists():
         LICENSE_PATH.unlink()
         return True
     return False
 
 
+def _license_from_auth_response(
+    data: object,
+    *,
+    email: str,
+    existing: License | None = None,
+) -> License:
+    # Preserve Stable's legacy response interpretation exactly. Realtor Beta
+    # takes the stricter complete-snapshot path below.
+    if not _exact_realtor_beta_active():
+        if existing is not None:
+            return License(
+                access_token=data["access_token"],
+                refresh_token=data["refresh_token"],
+                license_id=existing.license_id,
+                tier=existing.tier,
+                email=existing.email,
+                expires_at=_decode_jwt_exp(data["access_token"]),
+                entitlements=_extract_entitlements(data)
+                if any(key in data for key in ("entitlements", "packs", "features"))
+                else existing.entitlements,
+            )
+        return License(
+            access_token=data["access_token"],
+            refresh_token=data["refresh_token"],
+            license_id=data["license_id"],
+            tier=data.get("tier", "pro"),
+            email=email,
+            expires_at=_decode_jwt_exp(data["access_token"]),
+            entitlements=_extract_entitlements(data),
+        )
+
+    if not isinstance(data, dict):
+        raise LicenseError(
+            "Elevation HQ returned an invalid account response.",
+            code="beta_license_response_invalid"
+            if _exact_realtor_beta_active()
+            else "license_error",
+        )
+    try:
+        access_token = str(data["access_token"])
+        refresh_token = str(data["refresh_token"])
+        license_id = str(data.get("license_id") or (existing.license_id if existing else ""))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LicenseError(
+            "Elevation HQ returned an incomplete account response.",
+            code="beta_license_response_invalid"
+            if _exact_realtor_beta_active()
+            else "license_error",
+        ) from exc
+    entitlements = _complete_entitlements_from_response(
+        data,
+        fallback=existing.entitlements if existing else None,
+    )
+    lic = License(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        license_id=license_id,
+        tier=str(data.get("tier") or (existing.tier if existing else "pro")),
+        email=email or (existing.email if existing else ""),
+        expires_at=_decode_jwt_exp(access_token),
+        entitlements=entitlements,
+    )
+    _validate_complete_beta_license(lic, require_current=True)
+    return lic
+
+
+def _persist_authenticated_license(lic: License) -> None:
+    save(lic)
+    try:
+        sync_license_entitlements(lic)
+    except Exception:
+        # A Beta login/refresh is not complete unless the just-written
+        # snapshot can drive the exact same local access decision. Removing it
+        # makes the failure Core-only instead of leaving a half-activated paid
+        # session behind.
+        if _exact_realtor_beta_active():
+            _invalidate_beta_snapshot(
+                "Realtor Beta could not roll back incomplete activation."
+            )
+        raise
+
+
+def _accept_authenticated_response(
+    data: object,
+    *,
+    email: str,
+    existing: License | None = None,
+) -> License:
+    """Validate and persist one HQ success response, or invalidate Beta."""
+    try:
+        lic = _license_from_auth_response(data, email=email, existing=existing)
+        _persist_authenticated_license(lic)
+        return lic
+    except Exception:
+        if _exact_realtor_beta_active():
+            _invalidate_beta_snapshot(
+                "Realtor Beta could not invalidate incomplete account state."
+            )
+        raise
+
+
+def _accept_hq_response(
+    response: Any,
+    *,
+    email: str,
+    existing: License | None = None,
+) -> License:
+    """Decode an HQ HTTP success under the same fail-closed boundary."""
+    try:
+        data = _response_json(response)
+    except Exception:
+        if _exact_realtor_beta_active():
+            _invalidate_beta_snapshot(
+                "Realtor Beta could not invalidate an invalid HQ response."
+            )
+        raise
+    return _accept_authenticated_response(data, email=email, existing=existing)
+
+
 def login(email: str, password: str, device_label: Optional[str] = None) -> License:
     """POST /api/auth/login, persist license."""
     base_url = backend_url()
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            f"{base_url}/api/auth/login",
-            json={
-                "email": email,
-                "password": password,
-                "device_label": device_label or os.uname().nodename,
-            },
-        )
-    if resp.status_code == 402:
-        raise LicenseError("No active subscription. Contact Elevation Real Estate HQ to activate Elevate.")
-    if resp.status_code == 401:
-        raise LicenseError("Invalid email or password.")
-    if not resp.is_success:
-        raise LicenseError(f"Login failed ({resp.status_code}): {resp.text[:200]}")
-
-    data = resp.json()
-    lic = License(
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        license_id=data["license_id"],
-        tier=data.get("tier", "pro"),
-        email=email,
-        expires_at=_decode_jwt_exp(data["access_token"]),
-        entitlements=_extract_entitlements(data),
+    resp = _post_hq(
+        base_url,
+        "/api/auth/login",
+        {
+            "email": email,
+            "password": password,
+            "device_label": device_label or os.uname().nodename,
+        },
     )
-    save(lic)
-    sync_license_entitlements(lic)
-    return lic
+    if resp.status_code == 402:
+        raise _auth_flow_error(
+            "No active subscription. Contact Elevation Real Estate HQ to activate Elevate.",
+            beta_code="beta_subscription_inactive",
+        )
+    if resp.status_code == 401:
+        raise _auth_flow_error(
+            "Invalid email or password.",
+            beta_code="beta_invalid_credentials",
+        )
+    if not resp.is_success:
+        raise _auth_flow_error(
+            f"Login failed ({resp.status_code}): {resp.text[:200]}",
+            beta_code="beta_auth_upstream_failed",
+        )
+
+    return _accept_hq_response(resp, email=email)
 
 
 def create_account(
@@ -370,106 +908,119 @@ def create_account(
     them per person from the control panel.
     """
     base_url = backend_url()
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            f"{base_url}/api/auth/signup",
-            json={
-                "email": email,
-                "password": password,
-                "first_name": first_name,
-                "last_name": last_name,
-                "device_label": device_label or os.uname().nodename,
-            },
-        )
-    if resp.status_code == 409:
-        raise LicenseError("An account with this email already exists — sign in instead.")
-    if resp.status_code == 400:
-        raise LicenseError("Enter a valid email and a password of at least 8 characters.")
-    if resp.status_code == 429:
-        raise LicenseError("Too many attempts. Please wait a few minutes and try again.")
-    if not resp.is_success:
-        raise LicenseError(f"Account creation failed ({resp.status_code}): {resp.text[:200]}")
-
-    data = resp.json()
-    lic = License(
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        license_id=data["license_id"],
-        tier=data.get("tier", "pro"),
-        email=email,
-        expires_at=_decode_jwt_exp(data["access_token"]),
-        entitlements=_extract_entitlements(data),
+    resp = _post_hq(
+        base_url,
+        "/api/auth/signup",
+        {
+            "email": email,
+            "password": password,
+            "first_name": first_name,
+            "last_name": last_name,
+            "device_label": device_label or os.uname().nodename,
+        },
     )
-    save(lic)
-    sync_license_entitlements(lic)
-    return lic
+    if resp.status_code == 409:
+        raise _auth_flow_error(
+            "An account with this email already exists — sign in instead.",
+            beta_code="beta_account_exists",
+        )
+    if resp.status_code == 400:
+        raise _auth_flow_error(
+            "Enter a valid email and a password of at least 8 characters.",
+            beta_code="beta_signup_invalid",
+        )
+    if resp.status_code == 429:
+        raise _auth_flow_error(
+            "Too many attempts. Please wait a few minutes and try again.",
+            beta_code="beta_auth_rate_limited",
+        )
+    if not resp.is_success:
+        raise _auth_flow_error(
+            f"Account creation failed ({resp.status_code}): {resp.text[:200]}",
+            beta_code="beta_auth_upstream_failed",
+        )
+
+    return _accept_hq_response(resp, email=email)
 
 
 def request_login_code(email: str) -> None:
     """POST /api/auth/login-code/request — HQ emails a one-time sign-in code."""
     base_url = backend_url()
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            f"{base_url}/api/auth/login-code/request",
-            json={"email": email},
-        )
+    resp = _post_hq(
+        base_url,
+        "/api/auth/login-code/request",
+        {"email": email},
+    )
     if resp.status_code == 429:
-        raise LicenseError("Too many code requests. Wait a few minutes and try again.")
+        raise _auth_flow_error(
+            "Too many code requests. Wait a few minutes and try again.",
+            beta_code="beta_auth_rate_limited",
+        )
     if not resp.is_success:
-        raise LicenseError(f"Could not send code ({resp.status_code}): {resp.text[:200]}")
+        raise _auth_flow_error(
+            f"Could not send code ({resp.status_code}): {resp.text[:200]}",
+            beta_code="beta_auth_upstream_failed",
+        )
 
 
 def login_with_code(email: str, code: str, device_label: Optional[str] = None) -> License:
     """POST /api/auth/login-code/verify, persist license. Same outcome as
     login() but authenticated by a one-time emailed code instead of a password."""
     base_url = backend_url()
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            f"{base_url}/api/auth/login-code/verify",
-            json={
-                "email": email,
-                "code": code,
-                "device_label": device_label or os.uname().nodename,
-            },
-        )
-    if resp.status_code == 402:
-        raise LicenseError("No active subscription. Contact Elevation Real Estate HQ to activate Elevate.")
-    if resp.status_code == 401:
-        raise LicenseError("Invalid or expired code.")
-    if not resp.is_success:
-        raise LicenseError(f"Code sign-in failed ({resp.status_code}): {resp.text[:200]}")
-
-    data = resp.json()
-    lic = License(
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        license_id=data["license_id"],
-        tier=data.get("tier", "pro"),
-        email=email,
-        expires_at=_decode_jwt_exp(data["access_token"]),
-        entitlements=_extract_entitlements(data),
+    resp = _post_hq(
+        base_url,
+        "/api/auth/login-code/verify",
+        {
+            "email": email,
+            "code": code,
+            "device_label": device_label or os.uname().nodename,
+        },
     )
-    save(lic)
-    sync_license_entitlements(lic)
-    return lic
+    if resp.status_code == 402:
+        raise _auth_flow_error(
+            "No active subscription. Contact Elevation Real Estate HQ to activate Elevate.",
+            beta_code="beta_subscription_inactive",
+        )
+    if resp.status_code == 401:
+        raise _auth_flow_error(
+            "Invalid or expired code.",
+            beta_code="beta_login_code_invalid",
+        )
+    if not resp.is_success:
+        raise _auth_flow_error(
+            f"Code sign-in failed ({resp.status_code}): {resp.text[:200]}",
+            beta_code="beta_auth_upstream_failed",
+        )
+
+    return _accept_hq_response(resp, email=email)
 
 
 def refresh(lic: License) -> License:
     """POST /api/license/refresh. Rotates the refresh token."""
     base_url = backend_url()
-    with httpx.Client(timeout=15.0) as client:
-        resp = client.post(
-            f"{base_url}/api/license/refresh",
-            json={"refresh_token": lic.refresh_token},
-        )
+    resp = _post_hq(
+        base_url,
+        "/api/license/refresh",
+        {"refresh_token": lic.refresh_token},
+    )
     if resp.status_code == 402:
         # Subscription explicitly inactive — definitive answer from HQ, clear
         # immediately so the user is forced through `activate` after they
         # re-subscribe.
         _reset_fail_count()
         clear()
-        raise LicenseError("Subscription inactive — license revoked. Contact Elevation Real Estate HQ.")
+        raise _auth_flow_error(
+            "Subscription inactive — license revoked. Contact Elevation Real Estate HQ.",
+            beta_code="beta_license_revoked",
+        )
     if resp.status_code == 401:
+        if _exact_realtor_beta_active():
+            _reset_fail_count()
+            clear()
+            raise LicenseError(
+                "Refresh token rejected. Sign in to Realtor Beta again.",
+                code="beta_license_revoked",
+            )
         # Refresh token *might* be invalid, but a single 401 also happens on
         # transient HQ blips (deploy mid-request, brief auth race after token
         # rotation). Require LICENSE_FAIL_THRESHOLD consecutive 401s before
@@ -487,25 +1038,18 @@ def refresh(lic: License) -> License:
             f"Refresh failed (HTTP 401, attempt {count}/{LICENSE_FAIL_THRESHOLD}). Will retry — session preserved.",
         )
     if not resp.is_success:
-        raise LicenseError(f"Refresh failed ({resp.status_code}): {resp.text[:200]}")
+        raise _auth_flow_error(
+            f"Refresh failed ({resp.status_code}): {resp.text[:200]}",
+            beta_code="beta_auth_upstream_failed",
+        )
 
     _reset_fail_count()
 
-    data = resp.json()
-    new_lic = License(
-        access_token=data["access_token"],
-        refresh_token=data["refresh_token"],
-        license_id=lic.license_id,
-        tier=lic.tier,
+    return _accept_hq_response(
+        resp,
         email=lic.email,
-        expires_at=_decode_jwt_exp(data["access_token"]),
-        entitlements=_extract_entitlements(data)
-        if any(key in data for key in ("entitlements", "packs", "features"))
-        else lic.entitlements,
+        existing=lic,
     )
-    save(new_lic)
-    sync_license_entitlements(new_lic)
-    return new_lic
 
 
 def ensure_valid() -> License:
@@ -542,6 +1086,8 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
         "skill_count": 0,
         "skill_names": [],
         "skill_error": None,
+        "skill_sync_warnings": [],
+        "activation_complete": False,
     }
 
     try:
@@ -549,6 +1095,13 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
 
         result["packs"] = dashboard_access_status().get("packs", {})
     except Exception as exc:
+        if _exact_realtor_beta_active():
+            if isinstance(exc, LicenseError):
+                raise
+            raise LicenseError(
+                "Realtor Beta could not verify local pack access.",
+                code="beta_entitlement_persistence_mismatch",
+            ) from exc
         result["access_error"] = str(exc)
 
     if sync_skills:
@@ -563,6 +1116,11 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
         except Exception as exc:
             result["skill_error"] = str(exc)
 
+    result["activation_complete"] = not bool(
+        result.get("access_error")
+        or result.get("skill_error")
+        or result.get("skill_sync_warnings")
+    )
     return result
 
 
@@ -597,10 +1155,13 @@ def cmd_activate(args) -> int:
     sync_skills = not getattr(args, "skip_skill_sync", False)
     try:
         lic = login(email, password)
+        activation = activate_install(lic, sync_skills=sync_skills)
     except LicenseError as e:
-        print(f"login failed: {e}", file=sys.stderr)
+        if e.code == "license_error":
+            print(f"login failed: {e}", file=sys.stderr)
+        else:
+            print(f"{e.code}: {e}", file=sys.stderr)
         return 1
-    activation = activate_install(lic, sync_skills=sync_skills)
     print(f"activated {lic.email} ({lic.tier}). license id: {lic.license_id}")
     print(f"dashboard packs: {_format_enabled_packs(activation.get('packs') or {})}")
     if sync_skills:
@@ -613,6 +1174,9 @@ def cmd_activate(args) -> int:
         for warning in activation.get("skill_sync_warnings") or []:
             print(f"paid skill warning: {warning}", file=sys.stderr)
     print("next: run `elevate` or `elevate dashboard`.")
+    if not activation.get("activation_complete"):
+        print("activation_incomplete: account saved but setup did not finish.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -636,7 +1200,10 @@ def cmd_license(args) -> int:
         try:
             lic = ensure_valid()
         except LicenseError as e:
-            print(f"refresh failed: {e}", file=sys.stderr)
+            if e.code == "license_error":
+                print(f"refresh failed: {e}", file=sys.stderr)
+            else:
+                print(f"{e.code}: {e}", file=sys.stderr)
             return 1
         print(status_text(lic))
         return 0
@@ -656,19 +1223,42 @@ def link_device(device_label: Optional[str] = None, *, interval_override: Option
     base_url = backend_url()
     label = device_label or os.uname().nodename
 
-    with httpx.Client(timeout=15.0) as client:
-        start = client.post(f"{base_url}/api/device/start", json={"device_label": label})
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            start = client.post(
+                f"{base_url}/api/device/start",
+                json={"device_label": label},
+            )
+    except httpx.HTTPError as exc:
+        if _exact_realtor_beta_active():
+            raise LicenseError(
+                "Elevation HQ could not start device sign-in.",
+                code="beta_device_link_upstream_unavailable",
+            ) from exc
+        raise
     if not start.is_success:
-        raise LicenseError(f"Could not start device link ({start.status_code}): {start.text[:200]}")
+        raise _auth_flow_error(
+            f"Could not start device link ({start.status_code}): {start.text[:200]}",
+            beta_code="beta_device_link_upstream_failed",
+        )
 
-    start_data = start.json()
-    device_code = start_data["device_code"]
-    user_code = start_data["user_code"]
-    verification_uri = start_data.get("verification_uri") or f"{base_url}/link"
-    verification_uri_complete = start_data.get("verification_uri_complete")
-    expires_in = int(start_data.get("expires_in", 600))
-    interval = int(interval_override or start_data.get("interval", 5))
-
+    start_data = _response_json(start)
+    try:
+        if not isinstance(start_data, dict):
+            raise TypeError("device start response is not an object")
+        device_code = start_data["device_code"]
+        user_code = start_data["user_code"]
+        verification_uri = start_data.get("verification_uri") or f"{base_url}/link"
+        verification_uri_complete = start_data.get("verification_uri_complete")
+        expires_in = int(start_data.get("expires_in", 600))
+        interval = int(interval_override or start_data.get("interval", 5))
+    except (KeyError, TypeError, ValueError) as exc:
+        if _exact_realtor_beta_active():
+            raise LicenseError(
+                "Elevation HQ returned an incomplete device sign-in response.",
+                code="beta_license_response_invalid",
+            ) from exc
+        raise
     print()
     print(f"  1. Open: {verification_uri_complete or verification_uri}")
     print(f"  2. Sign in if prompted, then enter this code: {user_code}")
@@ -678,36 +1268,62 @@ def link_device(device_label: Optional[str] = None, *, interval_override: Option
     sys.stdout.flush()
 
     deadline = time.time() + expires_in
-    with httpx.Client(timeout=15.0) as client:
-        while time.time() < deadline:
-            time.sleep(interval)
-            resp = client.post(f"{base_url}/api/device/poll", json={"device_code": device_code})
-            if resp.status_code == 410:
-                raise LicenseError("Device-link request expired or already used. Run `elevate link` again.")
-            if resp.status_code == 403:
-                raise LicenseError("Request was denied on the web.")
-            if not resp.is_success:
-                # Soft errors (rate-limited, transient) — keep polling
-                continue
-            data = resp.json()
-            status = data.get("status")
-            if status == "pending":
-                continue
-            if status == "approved":
-                lic = License(
-                    access_token=data["access_token"],
-                    refresh_token=data["refresh_token"],
-                    license_id=data["license_id"],
-                    tier=data.get("tier", "pro"),
-                    email=data.get("email", ""),
-                    expires_at=_decode_jwt_exp(data["access_token"]),
-                    entitlements=_extract_entitlements(data),
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            while time.time() < deadline:
+                time.sleep(interval)
+                resp = client.post(
+                    f"{base_url}/api/device/poll",
+                    json={"device_code": device_code},
                 )
-                save(lic)
-                sync_license_entitlements(lic)
-                return lic
+                if resp.status_code == 410:
+                    raise _auth_flow_error(
+                        "Device-link request expired or already used. Run `elevate link` again.",
+                        beta_code="beta_device_link_expired",
+                    )
+                if resp.status_code == 403:
+                    raise _auth_flow_error(
+                        "Request was denied on the web.",
+                        beta_code="beta_device_link_denied",
+                    )
+                if not resp.is_success:
+                    # Soft errors (rate-limited, transient) — keep polling.
+                    continue
+                try:
+                    data = _response_json(resp)
+                except Exception:
+                    if _exact_realtor_beta_active():
+                        _invalidate_beta_snapshot(
+                            "Realtor Beta could not invalidate an invalid device response."
+                        )
+                    raise
+                if not isinstance(data, dict):
+                    if _exact_realtor_beta_active():
+                        raise LicenseError(
+                            "Elevation HQ returned an invalid device sign-in response.",
+                            code="beta_license_response_invalid",
+                        )
+                    raise TypeError("device poll response is not an object")
+                status = data.get("status")
+                if status == "pending":
+                    continue
+                if status == "approved":
+                    return _accept_authenticated_response(
+                        data,
+                        email=str(data.get("email") or ""),
+                    )
+    except httpx.HTTPError as exc:
+        if _exact_realtor_beta_active():
+            raise LicenseError(
+                "Elevation HQ device sign-in was interrupted.",
+                code="beta_device_link_upstream_unavailable",
+            ) from exc
+        raise
 
-    raise LicenseError("Device-link request timed out. Run `elevate link` again.")
+    raise _auth_flow_error(
+        "Device-link request timed out. Run `elevate link` again.",
+        beta_code="beta_device_link_timeout",
+    )
 
 
 def cmd_link(args) -> int:
@@ -729,10 +1345,19 @@ def cmd_link(args) -> int:
         print("\ncanceled", file=sys.stderr)
         return 130
     except LicenseError as e:
-        print(f"link failed: {e}", file=sys.stderr)
+        if e.code == "license_error":
+            print(f"link failed: {e}", file=sys.stderr)
+        else:
+            print(f"{e.code}: {e}", file=sys.stderr)
         return 1
-
-    activation = activate_install(lic, sync_skills=sync_skills)
+    try:
+        activation = activate_install(lic, sync_skills=sync_skills)
+    except LicenseError as e:
+        if e.code == "license_error":
+            print(f"link failed: {e}", file=sys.stderr)
+        else:
+            print(f"{e.code}: {e}", file=sys.stderr)
+        return 1
     print(f"linked {lic.email} ({lic.tier}). license id: {lic.license_id}")
     print(f"dashboard packs: {_format_enabled_packs(activation.get('packs') or {})}")
     if sync_skills:
@@ -742,5 +1367,10 @@ def cmd_link(args) -> int:
             print(f"paid skills ready: {activation['skill_count']} at {activation.get('skills_path')}")
         else:
             print("paid skills ready: none returned for this tier")
+        for warning in activation.get("skill_sync_warnings") or []:
+            print(f"paid skill warning: {warning}", file=sys.stderr)
     print("next: run `elevate` or `elevate dashboard`.")
+    if not activation.get("activation_complete"):
+        print("activation_incomplete: account saved but setup did not finish.", file=sys.stderr)
+        return 1
     return 0

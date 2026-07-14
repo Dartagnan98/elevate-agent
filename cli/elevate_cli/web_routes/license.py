@@ -36,15 +36,49 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
     """Build routes for local access state and license activation."""
     router = APIRouter()
 
+    def _license_http_exception(exc, *, default_status: int) -> HTTPException:
+        code = str(getattr(exc, "code", "license_error") or "license_error")
+        if code == "beta_backend_identity_unavailable":
+            status = 503
+        elif code == "beta_backend_override_not_allowed" or code.startswith(
+            "beta_license_store_"
+        ):
+            status = 409
+        elif code in {
+            "beta_invalid_credentials",
+            "beta_login_code_invalid",
+            "beta_subscription_inactive",
+            "beta_account_exists",
+            "beta_signup_invalid",
+            "beta_auth_rate_limited",
+        }:
+            status = default_status
+        elif code in {
+            "beta_auth_upstream_failed",
+            "beta_auth_upstream_unavailable",
+            "beta_device_link_upstream_failed",
+            "beta_device_link_upstream_unavailable",
+        }:
+            status = 502
+        elif code == "beta_license_revoked":
+            status = 401
+        elif code.startswith("beta_license_response_") or code.startswith(
+            "beta_entitlement_snapshot_"
+        ):
+            status = 502
+        elif code.startswith("beta_"):
+            status = 500
+        else:
+            status = default_status
+        detail = exc.as_detail() if code != "license_error" else str(exc)
+        return HTTPException(status_code=status, detail=detail)
+
     def _configure_backend(lic_mod, backend_url: Optional[str], *, persist: bool) -> None:
         """Apply Stable compatibility or return a typed Beta policy error."""
         try:
             lic_mod.configure_backend_override(backend_url, persist=persist)
         except lic_mod.LicenseError as exc:
-            status_code = (
-                409 if exc.code == "beta_backend_override_not_allowed" else 503
-            )
-            raise HTTPException(status_code=status_code, detail=exc.as_detail())
+            raise _license_http_exception(exc, default_status=503)
 
     @router.get("/api/access")
     async def get_access_status():
@@ -89,12 +123,12 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         _configure_backend(lic_mod, body.backend_url, persist=True)
         try:
             lic = lic_mod.login(body.email, body.password)
+            activation = lic_mod.activate_install(
+                lic,
+                sync_skills=not body.skip_skill_sync,
+            )
         except lic_mod.LicenseError as exc:
-            raise HTTPException(status_code=401, detail=str(exc))
-        activation = lic_mod.activate_install(
-            lic,
-            sync_skills=not body.skip_skill_sync,
-        )
+            raise _license_http_exception(exc, default_status=401)
 
         return {
             "authenticated": True,
@@ -107,6 +141,8 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             "skill_count": activation.get("skill_count", 0),
             "skill_names": activation.get("skill_names", []),
             "skill_error": activation.get("skill_error"),
+            "skill_sync_warnings": activation.get("skill_sync_warnings", []),
+            "activation_complete": bool(activation.get("activation_complete")),
         }
 
     @router.post("/api/license/signup")
@@ -123,12 +159,12 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
                 first_name=body.first_name,
                 last_name=body.last_name,
             )
+            activation = lic_mod.activate_install(
+                lic,
+                sync_skills=not body.skip_skill_sync,
+            )
         except lic_mod.LicenseError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        activation = lic_mod.activate_install(
-            lic,
-            sync_skills=not body.skip_skill_sync,
-        )
+            raise _license_http_exception(exc, default_status=400)
 
         return {
             "authenticated": True,
@@ -141,6 +177,8 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             "skill_count": activation.get("skill_count", 0),
             "skill_names": activation.get("skill_names", []),
             "skill_error": activation.get("skill_error"),
+            "skill_sync_warnings": activation.get("skill_sync_warnings", []),
+            "activation_complete": bool(activation.get("activation_complete")),
         }
 
     @router.post("/api/license/request-code")
@@ -153,7 +191,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         try:
             lic_mod.request_login_code(body.email)
         except lic_mod.LicenseError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise _license_http_exception(exc, default_status=400)
         return {"ok": True}
 
     @router.post("/api/license/activate-code")
@@ -165,12 +203,12 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
         _configure_backend(lic_mod, body.backend_url, persist=False)
         try:
             lic = lic_mod.login_with_code(body.email, body.code)
+            activation = lic_mod.activate_install(
+                lic,
+                sync_skills=not body.skip_skill_sync,
+            )
         except lic_mod.LicenseError as exc:
-            raise HTTPException(status_code=401, detail=str(exc))
-        activation = lic_mod.activate_install(
-            lic,
-            sync_skills=not body.skip_skill_sync,
-        )
+            raise _license_http_exception(exc, default_status=401)
 
         return {
             "authenticated": True,
@@ -183,6 +221,8 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             "skill_count": activation.get("skill_count", 0),
             "skill_names": activation.get("skill_names", []),
             "skill_error": activation.get("skill_error"),
+            "skill_sync_warnings": activation.get("skill_sync_warnings", []),
+            "activation_complete": bool(activation.get("activation_complete")),
         }
 
     @router.post("/api/license/sync-skills")
@@ -203,7 +243,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             if lic.is_expired():
                 lic = lic_mod.refresh(lic)
         except lic_mod.LicenseError as exc:
-            raise HTTPException(status_code=401, detail=str(exc))
+            raise _license_http_exception(exc, default_status=401)
 
         try:
             sync_result = cloud_skills.sync_all()

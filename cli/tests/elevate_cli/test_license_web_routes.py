@@ -88,6 +88,20 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _local_beta_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / ".elevate-beta"
+    root.mkdir(exist_ok=True)
+    monkeypatch.setenv("ELEVATE_HOME", str(root))
+    monkeypatch.setattr(license_mod, "_beta_profile_root", lambda: root)
+    monkeypatch.setattr(license_mod, "LICENSE_PATH", root / "license.json")
+    monkeypatch.setattr(
+        license_mod,
+        "LICENSE_FAIL_PATH",
+        root / ".license_refresh_failures",
+    )
+
+
 @pytest.fixture
 def protected_profile(
     tmp_path: Path,
@@ -97,7 +111,10 @@ def protected_profile(
     license_path = tmp_path / "profile" / "license.json"
     license_path.parent.mkdir(parents=True)
     license_path.write_bytes(b'{"access_token":"existing"}\n')
+    license_path.chmod(0o600)
     monkeypatch.setattr(license_mod, "LICENSE_PATH", license_path)
+    monkeypatch.setattr(license_mod, "_beta_profile_root", lambda: license_path.parent)
+    monkeypatch.setenv("ELEVATE_HOME", str(license_path.parent))
 
     managed_env = tmp_path / "managed" / "profile.env"
     managed_env.parent.mkdir(parents=True)
@@ -187,7 +204,14 @@ def test_exact_beta_rejects_every_caller_backend_before_credentials_or_state_cha
 
 
 @pytest.mark.parametrize(
-    ("route", "payload", "upstream_status", "route_status", "upstream_path"),
+    (
+        "route",
+        "payload",
+        "upstream_status",
+        "route_status",
+        "upstream_path",
+        "error_code",
+    ),
     [
         (
             "/api/license/activate",
@@ -195,6 +219,7 @@ def test_exact_beta_rejects_every_caller_backend_before_credentials_or_state_cha
             401,
             401,
             "/api/auth/login",
+            "beta_invalid_credentials",
         ),
         (
             "/api/license/signup",
@@ -202,13 +227,15 @@ def test_exact_beta_rejects_every_caller_backend_before_credentials_or_state_cha
             400,
             400,
             "/api/auth/signup",
+            "beta_signup_invalid",
         ),
         (
             "/api/license/request-code",
             {"email": "agent@example.test"},
             500,
-            400,
+            502,
             "/api/auth/login-code/request",
+            "beta_auth_upstream_failed",
         ),
         (
             "/api/license/activate-code",
@@ -216,6 +243,7 @@ def test_exact_beta_rejects_every_caller_backend_before_credentials_or_state_cha
             401,
             401,
             "/api/auth/login-code/verify",
+            "beta_login_code_invalid",
         ),
     ],
 )
@@ -228,6 +256,7 @@ def test_exact_beta_pins_every_auth_route_to_signed_backend_and_restores_failed_
     upstream_status: int,
     route_status: int,
     upstream_path: str,
+    error_code: str,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setenv("ELEVATE_BACKEND_URL", ATTACKER_BACKEND)
@@ -244,6 +273,7 @@ def test_exact_beta_pins_every_auth_route_to_signed_backend_and_restores_failed_
     response = client.post(route, json=payload)
 
     assert response.status_code == route_status
+    assert response.json()["detail"]["code"] == error_code
     assert [call["url"] for call in calls] == [
         f"{license_mod.DEFAULT_BACKEND.rstrip('/')}{upstream_path}"
     ]
@@ -283,7 +313,14 @@ def test_exact_beta_keeps_post_login_activation_inside_signed_backend_scope(
         assert lic is license_value
         assert sync_skills is True
         observed.append(("activate", license_mod.backend_url()))
-        return {"packs": {}, "skill_count": 0, "skill_names": [], "skill_error": None}
+        return {
+            "packs": {},
+            "skill_count": 0,
+            "skill_names": [],
+            "skill_error": None,
+            "skill_sync_warnings": ["one optional skill was unavailable"],
+            "activation_complete": False,
+        }
 
     monkeypatch.setattr(license_mod, "login", login)
     monkeypatch.setattr(license_mod, "activate_install", activate_install)
@@ -300,6 +337,10 @@ def test_exact_beta_keeps_post_login_activation_inside_signed_backend_scope(
     ]
     assert license_mod.BACKEND_URL == ATTACKER_BACKEND
     assert os.environ["ELEVATE_BACKEND_URL"] == ATTACKER_BACKEND
+    assert response.json()["skill_sync_warnings"] == [
+        "one optional skill was unavailable"
+    ]
+    assert response.json()["activation_complete"] is False
 
 
 def test_exact_beta_fails_closed_when_signed_backend_identity_is_missing(
@@ -367,6 +408,44 @@ def test_exact_beta_web_skill_sync_never_sends_bearer_token_to_stale_backend(
     assert calls[0]["base_url"] != ATTACKER_BACKEND
     assert license_mod.BACKEND_URL == ATTACKER_BACKEND
     assert os.environ["ELEVATE_BACKEND_URL"] == ATTACKER_BACKEND
+
+
+@pytest.mark.parametrize(
+    ("route", "payload"),
+    [
+        (
+            "/api/license/activate",
+            {"email": "agent@example.test", "password": "secret-password"},
+        ),
+        (
+            "/api/license/signup",
+            {"email": "agent@example.test", "password": "secret-password"},
+        ),
+        ("/api/license/request-code", {"email": "agent@example.test"}),
+        (
+            "/api/license/activate-code",
+            {"email": "agent@example.test", "code": "123456"},
+        ),
+    ],
+)
+def test_exact_beta_managed_profile_is_typed_non_success_before_every_web_auth_flow(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+    payload: dict[str, str],
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    (license_mod._beta_profile_root() / ".managed").write_text("managed\n")
+
+    def fail_if_networked(**_kwargs: Any):
+        raise AssertionError("managed profile reached auth network")
+
+    monkeypatch.setattr(license_mod.httpx, "Client", fail_if_networked)
+
+    response = client.post(route, json=payload)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "beta_license_store_managed"
 
 
 @pytest.mark.parametrize(

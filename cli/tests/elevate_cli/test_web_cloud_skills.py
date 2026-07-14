@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
+
+import pytest
 
 from elevate_cli import cloud_skills
 from elevate_cli import license as license_mod
@@ -17,6 +20,15 @@ class _FakeApp:
             return handler
 
         return decorator
+
+
+@pytest.fixture(autouse=True)
+def _local_beta_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / ".elevate-beta"
+    root.mkdir()
+    monkeypatch.setenv("ELEVATE_HOME", str(root))
+    monkeypatch.setattr(license_mod, "_beta_profile_root", lambda: root)
+    monkeypatch.setattr(license_mod, "LICENSE_PATH", root / "license.json")
 
 
 def test_install_cloud_skill_lifecycle_registers_handlers(monkeypatch):

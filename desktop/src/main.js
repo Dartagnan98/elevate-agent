@@ -25,7 +25,7 @@ const { createComputerUseOverlay } = require("./computer-use-overlay");
 const dashboardBundle = require("./dashboard-bundle");
 const { createDashboardNavigation } = require("./dashboard-navigation");
 const { createDeepLinks } = require("./deep-links");
-const { createDesktopAuth } = require("./desktop-auth");
+const { createDesktopAuth, SIGNED_HQ_BASE_URL } = require("./desktop-auth");
 const { createGatewaySelfHeal } = require("./gateway-self-heal");
 const { createLauncherTools } = require("./launcher");
 const { createMainWindowController } = require("./main-window");
@@ -97,7 +97,11 @@ const HOST = "127.0.0.1";
 const START_PATH = process.env.ELEVATE_DESKTOP_START_PATH || "/chat";
 const DASHBOARD_LOAD_RETRY_LIMIT = 3;
 const DASHBOARD_LOAD_RETRY_DELAY_MS = 750;
-const HQ_BASE_URL = (process.env.ELEVATE_BACKEND_URL || "https://api.elevationrealestatehq.com").replace(/\/+$/, "");
+const HQ_BASE_URL = (
+  RELEASE_PROFILE.isBeta
+    ? SIGNED_HQ_BASE_URL
+    : process.env.ELEVATE_BACKEND_URL || SIGNED_HQ_BASE_URL
+).replace(/\/+$/, "");
 const LICENSE_PATH = RUNTIME_PATHS.licensePath;
 // Refresh access tokens with this much headroom before expiry. Mirrors
 // REFRESH_MARGIN_SECONDS in elevate_cli/license.py so the two stay in sync.
@@ -117,9 +121,12 @@ const DEFAULT_PATH = [
 ].join(":");
 const auth = createDesktopAuth({
   accessRefreshMarginMs: ACCESS_REFRESH_MARGIN_MS,
+  home: HOME,
   hqBaseUrl: HQ_BASE_URL,
+  isBeta: RELEASE_PROFILE.isBeta,
   licensePath: LICENSE_PATH,
   log,
+  profileRoot: RUNTIME_PATHS.elevateHome,
 });
 const smsOutbox = createSmsOutbox({
   log,
@@ -412,7 +419,25 @@ async function ensureValidLicense({ retry = false } = {}) {
 async function forceRefreshLicense() {
   const current = readLicense();
   if (!current || !current.refresh_token) return null;
-  const next = await refreshLicense(current);
+  let next = null;
+  try {
+    next = await refreshLicense(current);
+  } catch (err) {
+    if (
+      err &&
+      err.code === "beta_license_revoked" &&
+      mainWindow &&
+      !mainWindow.isDestroyed()
+    ) {
+      mainWindow.webContents
+        .executeJavaScript(
+          "window.dispatchEvent(new Event('elevate:auth-changed'));",
+          true,
+        )
+        .catch(() => {});
+    }
+    throw err;
+  }
   if (next && mainWindow && !mainWindow.isDestroyed()) {
     // Nudge the React side to re-check immediately rather than wait for its
     // own 30s tick.
@@ -743,11 +768,19 @@ async function startDesktop() {
     // notifies the React dashboard to re-render the sidebar/tabs.
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.on("focus", () => {
-        forceRefreshLicense().catch(() => {});
+        forceRefreshLicense().catch((err) => {
+          console.warn(
+            `[license] focus refresh failed code=${err && err.code ? err.code : "unknown"}: ${err && err.message ? err.message : err}`,
+          );
+        });
       });
     }
     setInterval(() => {
-      forceRefreshLicense().catch(() => {});
+      forceRefreshLicense().catch((err) => {
+        console.warn(
+          `[license] background refresh failed code=${err && err.code ? err.code : "unknown"}: ${err && err.message ? err.message : err}`,
+        );
+      });
     }, 60_000);
   } else {
     markStartup("desktop:backend-unavailable");
