@@ -42,6 +42,13 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.correlation import (
+    CORRELATION_HEADER,
+    EXECUTION_CORRELATION_HEADER,
+    accept_external_correlation_id,
+    is_opaque_correlation_id,
+    record_correlation_event,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -501,7 +508,14 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Elevate-Session-Id, X-Elevate-Session-Key, X-Elevate-Correlation-Id"
+    ),
+    "Access-Control-Expose-Headers": (
+        "X-Elevate-Session-Id, X-Elevate-Session-Key, "
+        "X-Elevate-Correlation-Id, X-Elevate-Execution-Correlation-Id"
+    ),
 }
 
 
@@ -777,6 +791,68 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         return "*" in self._cors_origins or origin in self._cors_origins
+
+    @staticmethod
+    def _correlation_headers(
+        correlation_id: str, execution_correlation_id: Optional[str] = None
+    ) -> Dict[str, str]:
+        """Build response headers without accepting semantic identifiers."""
+        headers = {CORRELATION_HEADER: accept_external_correlation_id(correlation_id)}
+        if (
+            execution_correlation_id
+            and is_opaque_correlation_id(execution_correlation_id)
+            and execution_correlation_id != headers[CORRELATION_HEADER]
+        ):
+            headers[EXECUTION_CORRELATION_HEADER] = execution_correlation_id
+        return headers
+
+    def _accept_request_correlation(
+        self,
+        request: "web.Request",
+        *,
+        endpoint: str,
+    ) -> str:
+        """Mint/validate one immutable root for a valid external API request."""
+        correlation_id = accept_external_correlation_id(
+            request.headers.get(CORRELATION_HEADER, "")
+        )
+        record_correlation_event(
+            "gateway.api.request.accepted",
+            correlation_id=correlation_id,
+            status="accepted",
+            source="api_server",
+            component=f"gateway.api.{endpoint}",
+        )
+        return correlation_id
+
+    @staticmethod
+    def _record_idempotency_receipt(
+        *,
+        accepted_correlation_id: str,
+        result: Any,
+        endpoint: str,
+    ) -> Optional[str]:
+        """Link a duplicate HTTP acceptance to the immutable cached execution."""
+        execution_correlation_id = (
+            str(result.get("_elevate_correlation_id") or "")
+            if isinstance(result, dict)
+            else ""
+        )
+        if (
+            is_opaque_correlation_id(execution_correlation_id)
+            and execution_correlation_id != accepted_correlation_id
+        ):
+            record_correlation_event(
+                "gateway.api.request.replayed",
+                correlation_id=accepted_correlation_id,
+                parent_correlation_id=execution_correlation_id,
+                relation="duplicate_of",
+                status="completed",
+                source="api_server",
+                component=f"gateway.api.{endpoint}",
+            )
+            return execution_correlation_id
+        return None
 
     # ------------------------------------------------------------------
     # Auth helper
@@ -1310,6 +1386,11 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id = _derive_chat_session_id(system_prompt, first_user)
             # history already set from request body above
 
+        correlation_id = self._accept_request_correlation(
+            request,
+            endpoint="chat_completions",
+        )
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -1372,12 +1453,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=_on_tool_progress,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             ))
 
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             )
 
         # Non-streaming: run the agent (with optional Idempotency-Key)
@@ -1388,6 +1471,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -1400,6 +1484,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
+                    headers=self._correlation_headers(correlation_id),
                 )
         else:
             try:
@@ -1409,9 +1494,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
+                    headers=self._correlation_headers(correlation_id),
                 )
 
-        response_headers = {"X-Elevate-Session-Id": session_id}
+        execution_correlation_id = self._record_idempotency_receipt(
+            accepted_correlation_id=correlation_id,
+            result=result,
+            endpoint="chat_completions",
+        )
+        response_headers = self._correlation_headers(
+            correlation_id, execution_correlation_id
+        )
+        response_headers["X-Elevate-Session-Id"] = session_id
         if gateway_session_key:
             response_headers["X-Elevate-Session-Key"] = gateway_session_key
         if not agent_result_succeeded(result):
@@ -1453,6 +1547,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
         gateway_session_key: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
 
@@ -1477,6 +1572,8 @@ class APIServerAdapter(BasePlatformAdapter):
             sse_headers["X-Elevate-Session-Id"] = session_id
         if gateway_session_key:
             sse_headers["X-Elevate-Session-Key"] = gateway_session_key
+        if correlation_id:
+            sse_headers.update(self._correlation_headers(correlation_id))
         response = web.StreamResponse(status=200, headers=sse_headers)
         await response.prepare(request)
 
@@ -1606,6 +1703,7 @@ class APIServerAdapter(BasePlatformAdapter):
         store: bool,
         session_id: str,
         gateway_session_key: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> "web.StreamResponse":
         """Write an SSE stream for POST /v1/responses (OpenAI Responses API).
 
@@ -1648,6 +1746,8 @@ class APIServerAdapter(BasePlatformAdapter):
             sse_headers["X-Elevate-Session-Id"] = session_id
         if gateway_session_key:
             sse_headers["X-Elevate-Session-Key"] = gateway_session_key
+        if correlation_id:
+            sse_headers.update(self._correlation_headers(correlation_id))
         response = web.StreamResponse(status=200, headers=sse_headers)
         await response.prepare(request)
 
@@ -2130,6 +2230,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # Reuse session from previous_response_id chain so the dashboard
         # groups the entire conversation under one session entry.
         session_id = stored_session_id or str(uuid.uuid4())
+        correlation_id = self._accept_request_correlation(
+            request,
+            endpoint="responses",
+        )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
@@ -2184,6 +2288,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             ))
 
             response_id = f"resp_{uuid.uuid4().hex[:28]}"
@@ -2205,6 +2310,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 store=store,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             )
 
         async def _compute_response():
@@ -2214,6 +2320,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=instructions,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                correlation_id=correlation_id,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2229,6 +2336,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
+                    headers=self._correlation_headers(correlation_id),
                 )
         else:
             try:
@@ -2238,6 +2346,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
+                    headers=self._correlation_headers(correlation_id),
                 )
 
         final_response = result.get("final_response", "")
@@ -2294,7 +2403,15 @@ class APIServerAdapter(BasePlatformAdapter):
             if conversation and response_succeeded:
                 self._response_store.set_conversation(conversation, response_id)
 
-        response_headers = {"X-Elevate-Session-Id": session_id}
+        execution_correlation_id = self._record_idempotency_receipt(
+            accepted_correlation_id=correlation_id,
+            result=result,
+            endpoint="responses",
+        )
+        response_headers = self._correlation_headers(
+            correlation_id, execution_correlation_id
+        )
+        response_headers["X-Elevate-Session-Id"] = session_id
         if gateway_session_key:
             response_headers["X-Elevate-Session-Key"] = gateway_session_key
         return web.json_response(response_data, headers=response_headers)
@@ -2845,6 +2962,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2857,33 +2975,97 @@ class APIServerAdapter(BasePlatformAdapter):
         callers (e.g. the SSE writer) to call ``agent.interrupt()`` from
         another thread to stop in-progress LLM calls.
         """
+        correlation_id = accept_external_correlation_id(correlation_id)
         loop = asyncio.get_running_loop()
 
         def _run():
-            agent = self._create_agent(
-                ephemeral_system_prompt=ephemeral_system_prompt,
-                session_id=session_id,
-                stream_delta_callback=stream_delta_callback,
-                tool_progress_callback=tool_progress_callback,
-                tool_start_callback=tool_start_callback,
-                tool_complete_callback=tool_complete_callback,
-                gateway_session_key=gateway_session_key,
-            )
-            if agent_ref is not None:
-                agent_ref[0] = agent
-            result = agent.run_conversation(
-                user_message=user_message,
-                conversation_history=conversation_history,
-                task_id="default",
-            )
-            usage = {
-                "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-            }
-            return result, usage
+            from gateway.session_context import clear_session_vars, set_session_vars
 
-        return await loop.run_in_executor(None, _run)
+            session_tokens = set_session_vars(
+                platform=Platform.API_SERVER.value,
+                session_key=str(gateway_session_key or ""),
+                message_id="",
+                correlation_id=correlation_id,
+            )
+            try:
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=stream_delta_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    tool_start_callback=tool_start_callback,
+                    tool_complete_callback=tool_complete_callback,
+                    gateway_session_key=gateway_session_key,
+                )
+                agent._elevate_turn_correlation_id = correlation_id
+                agent._elevate_parent_correlation_id = ""
+                agent._elevate_correlation_relation = ""
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    task_id="default",
+                )
+                if isinstance(result, dict):
+                    # Stamp once at execution. Idempotent waiters may inspect
+                    # this immutable value, but never overwrite it with their
+                    # own later acceptance root.
+                    result = dict(result)
+                    result.setdefault("_elevate_correlation_id", correlation_id)
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                return result, usage
+            finally:
+                clear_session_vars(session_tokens)
+
+        record_correlation_event(
+            "gateway.api.run.started",
+            correlation_id=correlation_id,
+            status="started",
+            source="api_server",
+            component="gateway.api.execution",
+        )
+        try:
+            result, usage = await loop.run_in_executor(None, _run)
+        except asyncio.CancelledError:
+            record_correlation_event(
+                "gateway.api.run.cancelled",
+                correlation_id=correlation_id,
+                status="cancelled",
+                source="api_server",
+                component="gateway.api.execution",
+                failed=True,
+                severity="warning",
+            )
+            raise
+        except Exception:
+            record_correlation_event(
+                "gateway.api.run.failed",
+                correlation_id=correlation_id,
+                status="failed",
+                source="api_server",
+                component="gateway.api.execution",
+                failed=True,
+                severity="warning",
+            )
+            raise
+
+        succeeded = agent_result_succeeded(result)
+        record_correlation_event(
+            "gateway.api.run.completed" if succeeded else "gateway.api.run.failed",
+            correlation_id=correlation_id,
+            status="completed" if succeeded else "failed",
+            source="api_server",
+            component="gateway.api.execution",
+            success=succeeded,
+            failed=not succeeded,
+            severity="info" if succeeded else "warning",
+        )
+        return result, usage
 
     # ------------------------------------------------------------------
     # /v1/runs — structured event streaming
@@ -2892,7 +3074,12 @@ class APIServerAdapter(BasePlatformAdapter):
     _MAX_CONCURRENT_RUNS = 10  # Prevent unbounded resource allocation
     _RUN_STREAM_TTL = 300  # seconds before orphaned runs are swept
 
-    def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop"):
+    def _make_run_event_callback(
+        self,
+        run_id: str,
+        loop: "asyncio.AbstractEventLoop",
+        correlation_id: Optional[str] = None,
+    ):
         """Return a tool_progress_callback that pushes structured events to the run's SSE queue."""
         def _push(event: Dict[str, Any]) -> None:
             q = self._run_streams.get(run_id)
@@ -2909,6 +3096,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 _push({
                     "event": "tool.started",
                     "run_id": run_id,
+                    "correlation_id": correlation_id,
                     "timestamp": ts,
                     "tool": tool_name,
                     "preview": preview,
@@ -2917,6 +3105,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 _push({
                     "event": "tool.completed",
                     "run_id": run_id,
+                    "correlation_id": correlation_id,
                     "timestamp": ts,
                     "tool": tool_name,
                     "duration": round(kwargs.get("duration", 0), 3),
@@ -2926,6 +3115,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 _push({
                     "event": "reasoning.available",
                     "run_id": run_id,
+                    "correlation_id": correlation_id,
                     "timestamp": ts,
                     "text": preview or "",
                 })
@@ -2960,12 +3150,16 @@ class APIServerAdapter(BasePlatformAdapter):
             return web.json_response(_openai_error("No user message found in input"), status=400)
 
         run_id = f"run_{uuid.uuid4().hex}"
+        correlation_id = self._accept_request_correlation(
+            request,
+            endpoint="runs",
+        )
         loop = asyncio.get_running_loop()
         q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
         self._run_streams[run_id] = q
         self._run_streams_created[run_id] = time.time()
 
-        event_cb = self._make_run_event_callback(run_id, loop)
+        event_cb = self._make_run_event_callback(run_id, loop, correlation_id)
 
         # Also wire stream_delta_callback so message.delta events flow through
         def _text_cb(delta: Optional[str]) -> None:
@@ -2975,6 +3169,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 loop.call_soon_threadsafe(q.put_nowait, {
                     "event": "message.delta",
                     "run_id": run_id,
+                    "correlation_id": correlation_id,
                     "timestamp": time.time(),
                     "delta": delta,
                 })
@@ -3040,31 +3235,21 @@ class APIServerAdapter(BasePlatformAdapter):
 
         async def _run_and_close():
             try:
-                agent = self._create_agent(
+                result, usage = await self._run_agent(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
                     ephemeral_system_prompt=ephemeral_system_prompt,
                     session_id=session_id,
                     stream_delta_callback=_text_cb,
                     tool_progress_callback=event_cb,
+                    correlation_id=correlation_id,
                 )
-                def _run_sync():
-                    r = agent.run_conversation(
-                        user_message=user_message,
-                        conversation_history=conversation_history,
-                        task_id="default",
-                    )
-                    u = {
-                        "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                        "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                    }
-                    return r, u
-
-                result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 if agent_result_succeeded(result):
                     q.put_nowait({
                         "event": "run.completed",
                         "run_id": run_id,
+                        "correlation_id": correlation_id,
                         "timestamp": time.time(),
                         "output": final_response,
                         "usage": usage,
@@ -3073,6 +3258,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     q.put_nowait({
                         "event": "run.failed",
                         "run_id": run_id,
+                        "correlation_id": correlation_id,
                         "timestamp": time.time(),
                         "error": agent_result_error(result),
                         "usage": usage,
@@ -3083,6 +3269,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     q.put_nowait({
                         "event": "run.failed",
                         "run_id": run_id,
+                        "correlation_id": correlation_id,
                         "timestamp": time.time(),
                         "error": str(exc),
                     })
@@ -3103,7 +3290,15 @@ class APIServerAdapter(BasePlatformAdapter):
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
 
-        return web.json_response({"run_id": run_id, "status": "started"}, status=202)
+        return web.json_response(
+            {
+                "run_id": run_id,
+                "status": "started",
+                "correlation_id": correlation_id,
+            },
+            status=202,
+            headers=self._correlation_headers(correlation_id),
+        )
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
         """GET /v1/runs/{run_id}/events — SSE stream of structured agent lifecycle events."""

@@ -222,6 +222,7 @@ class TestRunAgentViaProxy:
             ],
         )
         session = _FakeSession(resp)
+        correlation_id = "corr_" + "e" * 32
 
         with patch("gateway.run._load_gateway_config", return_value={}):
             with _patch_aiohttp(session):
@@ -235,6 +236,7 @@ class TestRunAgentViaProxy:
                         ],
                         source=source,
                         session_id="session-abc",
+                        correlation_id=correlation_id,
                     )
 
         # Verify request URL
@@ -245,6 +247,7 @@ class TestRunAgentViaProxy:
 
         # Verify session ID header
         assert session.captured_headers["X-Elevate-Session-Id"] == "session-abc"
+        assert session.captured_headers["X-Elevate-Correlation-Id"] == correlation_id
 
         # Verify messages include system, history, and current message
         messages = session.captured_json["messages"]

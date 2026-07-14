@@ -69,6 +69,30 @@ def test_set_session_env_sets_contextvars(monkeypatch):
     runner._clear_session_env(tokens)
 
 
+def test_set_session_env_keeps_reply_anchor_separate_from_correlation():
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="dm",
+        user_id="123456",
+        thread_id="17585",
+    )
+    context = SessionContext(source=source, connected_platforms=[], home_channels={})
+    root = "corr_" + "c" * 32
+
+    tokens = runner._set_session_env(
+        context,
+        message_id="telegram-message-99",
+        correlation_id=root,
+    )
+    try:
+        assert get_session_env("ELEVATE_SESSION_MESSAGE_ID") == "telegram-message-99"
+        assert get_session_env("ELEVATE_SESSION_CORRELATION_ID") == root
+    finally:
+        runner._clear_session_env(tokens)
+
+
 def test_clear_session_env_restores_previous_state(monkeypatch):
     """_clear_session_env should restore contextvars to their pre-handler values."""
     runner = object.__new__(GatewayRunner)

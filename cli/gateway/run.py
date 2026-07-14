@@ -16,6 +16,7 @@ Usage:
 import asyncio
 import concurrent.futures
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -2898,7 +2899,15 @@ class GatewayRunner:
     # into that reply) or the idle wake watcher (a standalone follow-up
     # message sent to the chat).
 
-    def _park_platform_delegate_result(self, session_key: str, results: list) -> None:
+    def _park_platform_delegate_result(
+        self,
+        session_key: str,
+        results: list,
+        *,
+        correlation_id: str,
+        parent_correlation_id: str,
+        task_id: str = "",
+    ) -> None:
         blocks: list[str] = []
         overall = "completed"
         goals: list[str] = []
@@ -2928,6 +2937,10 @@ class GatewayRunner:
             "status": overall,
             "goal": "; ".join(goals),
             "summary": "\n\n---\n\n".join(blocks) or "✅ Background task complete.",
+            "correlation_id": correlation_id,
+            "parent_correlation_id": parent_correlation_id,
+            "relation": "delegate_result",
+            "task_id": task_id,
         }
         with self._pending_platform_delegates_lock:
             self._pending_platform_delegates.setdefault(session_key, []).append(entry)
@@ -3027,9 +3040,17 @@ class GatewayRunner:
         with self._pending_cron_context_lock:
             return self._pending_cron_context.pop(session_key, [])
 
-    def _make_platform_delegate_sink(self, *, session_key, session_id, source, loop):
+    def _make_platform_delegate_sink(
+        self, *, session_key, session_id, source, loop, correlation_id
+    ):
         """Build the completion callback delegate_task fires for an async
         (non-blocking) delegation dispatched from a platform message turn."""
+        from gateway.correlation import accept_external_correlation_id
+
+        # Capture the immutable origin now. The cached parent agent is reused
+        # and its mutable turn attributes may point at a later request by the
+        # time a child finishes.
+        origin_correlation_id = accept_external_correlation_id(correlation_id)
         platform = source.platform
         chat_id = getattr(source, "chat_id", None)
         thread_id = getattr(source, "thread_id", None)
@@ -3065,7 +3086,28 @@ class GatewayRunner:
                 results = (payload or {}).get("results") or []
                 if not results:
                     return
-                self._park_platform_delegate_result(session_key, results)
+                from gateway.correlation import mint_correlation_id, record_correlation_event
+
+                callback_correlation_id = mint_correlation_id()
+                async_task_id = str((payload or {}).get("task_id") or "")
+                record_correlation_event(
+                    "gateway.delegate.result.received",
+                    correlation_id=callback_correlation_id,
+                    session_id=session_id,
+                    parent_correlation_id=origin_correlation_id,
+                    relation="delegate_result",
+                    status="completed",
+                    source="gateway",
+                    component="gateway.delegate",
+                    task_id=async_task_id or None,
+                )
+                self._park_platform_delegate_result(
+                    session_key,
+                    results,
+                    correlation_id=callback_correlation_id,
+                    parent_correlation_id=origin_correlation_id,
+                    task_id=async_task_id,
+                )
                 threading.Thread(
                     target=_watcher,
                     name=f"platform-delegate-wake-{session_id}",
@@ -3096,25 +3138,60 @@ class GatewayRunner:
             "Reply in plain text suitable for messaging."
         )
         stored = "[Background task result]\n\n" + summaries
+        from gateway.correlation import (
+            correlation_scope,
+            is_opaque_correlation_id,
+            mint_correlation_id,
+            record_correlation_event,
+        )
+
+        wake_correlation_id = mint_correlation_id()
+        callback_roots = [
+            str(e.get("correlation_id") or "")
+            for e in drained
+            if isinstance(e, dict) and is_opaque_correlation_id(e.get("correlation_id"))
+        ]
+        primary_parent = callback_roots[0] if callback_roots else None
+        for callback_root in callback_roots:
+            record_correlation_event(
+                "gateway.delegate.result.wake_started",
+                correlation_id=wake_correlation_id,
+                session_id=session_id,
+                parent_correlation_id=callback_root,
+                relation="delegate_result",
+                status="started",
+                source="gateway",
+                component="gateway.delegate",
+            )
         response = ""
         agent = None
+        wake_execution_attempted = False
+        wake_execution_succeeded = False
         with self._agent_cache_lock:
             cached = self._agent_cache.get(session_key)
             if cached:
                 agent = cached[0]
         if agent is not None and session_key not in self._running_agents:
+            wake_execution_attempted = True
             # Register as the running turn so user messages queue/interrupt
             # through the normal busy handling instead of colliding.
             self._running_agents[session_key] = agent
             self._running_agents_ts[session_key] = time.time()
             try:
-                result = agent.run_conversation(
-                    wake_prompt,
-                    task_id=session_id,
-                    persist_user_message=stored,
+                agent._elevate_turn_correlation_id = wake_correlation_id
+                agent._elevate_parent_correlation_id = primary_parent or ""
+                agent._elevate_correlation_relation = (
+                    "delegate_result" if primary_parent else ""
                 )
+                with correlation_scope(wake_correlation_id, session_id):
+                    result = agent.run_conversation(
+                        wake_prompt,
+                        task_id=session_id,
+                        persist_user_message=stored,
+                    )
                 if isinstance(result, dict):
                     response = str(result.get("final_response") or "").strip()
+                    wake_execution_succeeded = agent_result_succeeded(result)
             except Exception:
                 logger.exception(
                     "platform delegate wake turn failed (session %s)", session_key
@@ -3122,6 +3199,29 @@ class GatewayRunner:
             finally:
                 self._running_agents.pop(session_key, None)
                 self._running_agents_ts.pop(session_key, None)
+        record_correlation_event(
+            "gateway.delegate.result.wake_completed"
+            if (not wake_execution_attempted or wake_execution_succeeded)
+            else "gateway.delegate.result.wake_failed",
+            correlation_id=wake_correlation_id,
+            session_id=session_id,
+            parent_correlation_id=primary_parent,
+            relation="delegate_result" if primary_parent else None,
+            status=(
+                "completed"
+                if (not wake_execution_attempted or wake_execution_succeeded)
+                else "failed"
+            ),
+            source="gateway",
+            component="gateway.delegate",
+            success=(not wake_execution_attempted or wake_execution_succeeded),
+            failed=(wake_execution_attempted and not wake_execution_succeeded),
+            severity=(
+                "info"
+                if (not wake_execution_attempted or wake_execution_succeeded)
+                else "warning"
+            ),
+        )
         if not response:
             response = summaries
         try:
@@ -3135,7 +3235,13 @@ class GatewayRunner:
                 is_explicit=bool(chat_id),
             )
             fut = asyncio.run_coroutine_threadsafe(
-                self.delivery_router.deliver(response, [target]), loop
+                self.delivery_router.deliver(
+                    response,
+                    [target],
+                    correlation_id=wake_correlation_id,
+                    correlation_session_id=session_id,
+                ),
+                loop,
             )
             fut.result(timeout=120)
         except Exception:
@@ -5312,6 +5418,15 @@ class GatewayRunner:
         6. Run agent conversation
         7. Return response
         """
+        from gateway.correlation import accept_external_correlation_id
+
+        # Adapters normally validate this at their acceptance boundary. Keep
+        # the runner safe for plugin/direct dispatch paths too, without ever
+        # deriving a root from platform/customer identifiers.
+        event.correlation_id = accept_external_correlation_id(
+            getattr(event, "correlation_id", None)
+        )
+
         # Hot-reload config.yaml edits (dashboard/TUI writes) before
         # processing — the runner otherwise serves startup-time settings
         # until the next launchd kickstart.
@@ -6434,17 +6549,28 @@ class GatewayRunner:
             logger.debug("Agent lane resolution skipped: %s", exc)
         
         # Set session context variables for tools (task-local, concurrency-safe)
+        _session_env_kwargs = {
+            "agent_id": str(getattr(event, "agent_id", "") or ""),
+            # Platform message ID remains the reply anchor. Correlation gets a
+            # dedicated context variable so background topic replies do not
+            # regress while tools still see the immutable execution root.
+            "message_id": str(getattr(event, "message_id", "") or ""),
+            "correlation_id": str(getattr(event, "correlation_id", "") or ""),
+        }
         try:
-            _session_env_tokens = self._set_session_env(
-                context,
-                agent_id=str(getattr(event, "agent_id", "") or ""),
-            )
-        except TypeError as exc:
-            if "agent_id" not in str(exc):
-                raise
-            # Backward-compatible for lightweight tests/subclasses that stubbed
-            # _set_session_env before agent lane context added agent_id.
-            _session_env_tokens = self._set_session_env(context)
+            _set_env_sig = inspect.signature(self._set_session_env)
+        except (TypeError, ValueError):
+            _set_env_sig = None
+        if _set_env_sig is not None and not any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in _set_env_sig.parameters.values()
+        ):
+            _session_env_kwargs = {
+                key: value
+                for key, value in _session_env_kwargs.items()
+                if key in _set_env_sig.parameters
+            }
+        _session_env_tokens = self._set_session_env(context, **_session_env_kwargs)
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -7175,6 +7301,18 @@ class GatewayRunner:
 
             # Run the agent
             _turn_started_at = time.monotonic()
+            _run_correlation_id = str(getattr(event, "correlation_id", "") or "")
+            from gateway.correlation import record_correlation_event
+
+            record_correlation_event(
+                "gateway.run.started",
+                correlation_id=_run_correlation_id,
+                session_id=session_entry.session_id,
+                status="started",
+                source="gateway",
+                component="gateway.runner",
+            )
+            _run_terminal_recorded = False
             agent_result = await self._run_agent(
                 message=message_text,
                 context_prompt=context_prompt,
@@ -7184,10 +7322,24 @@ class GatewayRunner:
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event.message_id,
+                correlation_id=_run_correlation_id,
                 channel_prompt=event.channel_prompt,
                 persist_user_message=getattr(event, "_persist_user_message", None),
             )
             _turn_latency_ms = int(max(0.0, time.monotonic() - _turn_started_at) * 1000)
+            _execution_succeeded = agent_result_succeeded(agent_result)
+            record_correlation_event(
+                "gateway.run.completed" if _execution_succeeded else "gateway.run.failed",
+                correlation_id=_run_correlation_id,
+                session_id=session_entry.session_id,
+                status="completed" if _execution_succeeded else "failed",
+                source="gateway",
+                component="gateway.runner",
+                success=_execution_succeeded,
+                failed=not _execution_succeeded,
+                severity="info" if _execution_succeeded else "warning",
+            )
+            _run_terminal_recorded = True
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -7479,8 +7631,42 @@ class GatewayRunner:
                 return None
 
             return response
-            
+
+        except asyncio.CancelledError:
+            if not locals().get("_run_terminal_recorded", False):
+                try:
+                    from gateway.correlation import record_correlation_event
+
+                    record_correlation_event(
+                        "gateway.run.cancelled",
+                        correlation_id=str(getattr(event, "correlation_id", "") or ""),
+                        session_id=getattr(session_entry, "session_id", None),
+                        status="cancelled",
+                        source="gateway",
+                        component="gateway.runner",
+                        failed=True,
+                        severity="warning",
+                    )
+                except Exception:
+                    pass
+            raise
         except Exception as e:
+            if not locals().get("_run_terminal_recorded", False):
+                try:
+                    from gateway.correlation import record_correlation_event
+
+                    record_correlation_event(
+                        "gateway.run.failed",
+                        correlation_id=str(getattr(event, "correlation_id", "") or ""),
+                        session_id=getattr(session_entry, "session_id", None),
+                        status="failed",
+                        source="gateway",
+                        component="gateway.runner",
+                        failed=True,
+                        severity="warning",
+                    )
+                except Exception:
+                    pass
             # Stop typing indicator on error too
             try:
                 _err_adapter = self.adapters.get(source.platform)
@@ -11579,7 +11765,14 @@ class GatewayRunner:
         finally:
             notify_path.unlink(missing_ok=True)
 
-    def _set_session_env(self, context: SessionContext, *, agent_id: str = "") -> list:
+    def _set_session_env(
+        self,
+        context: SessionContext,
+        *,
+        agent_id: str = "",
+        message_id: str = "",
+        correlation_id: str = "",
+    ) -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -11598,6 +11791,8 @@ class GatewayRunner:
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             agent_id=agent_id,
+            message_id=message_id,
+            correlation_id=correlation_id,
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -12522,6 +12717,7 @@ class GatewayRunner:
         session_key: str = None,
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Elevate API server instead of
         running a local AIAgent.
@@ -12620,6 +12816,10 @@ class GatewayRunner:
             headers["Authorization"] = f"Bearer {proxy_key}"
         if session_id:
             headers["X-Elevate-Session-Id"] = session_id
+        if correlation_id:
+            from gateway.correlation import accept_external_correlation_id, CORRELATION_HEADER
+
+            headers[CORRELATION_HEADER] = accept_external_correlation_id(correlation_id)
 
         body = {
             "model": "elevate",
@@ -12870,6 +13070,7 @@ class GatewayRunner:
         run_generation: Optional[int] = None,
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
         persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -12885,6 +13086,10 @@ class GatewayRunner:
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
+        from gateway.correlation import accept_external_correlation_id
+
+        correlation_id = accept_external_correlation_id(correlation_id)
+
         # ---- Proxy mode: delegate to remote API server ----
         if self._get_proxy_url():
             return await self._run_agent_via_proxy(
@@ -12896,6 +13101,7 @@ class GatewayRunner:
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event_message_id,
+                correlation_id=correlation_id,
             )
 
         from run_agent import AIAgent
@@ -13515,6 +13721,12 @@ class GatewayRunner:
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
+            # The cached agent is mutable, so callbacks must capture this root
+            # when they are created. Delayed child completions must never read
+            # a later turn's replacement value from the agent object.
+            agent._elevate_turn_correlation_id = correlation_id
+            agent._elevate_parent_correlation_id = ""
+            agent._elevate_correlation_relation = ""
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
@@ -13536,6 +13748,7 @@ class GatewayRunner:
                     session_id=session_id,
                     source=source,
                     loop=_loop_for_step,
+                    correlation_id=correlation_id,
                 )
             except Exception:
                 logger.debug("could not attach platform delegate sink", exc_info=True)
@@ -13846,6 +14059,29 @@ class GatewayRunner:
                 # API-only context — the stored user message stays clean.
                 _parked = self._drain_platform_delegate_results(session_key or "")
                 if _parked:
+                    from gateway.correlation import (
+                        is_opaque_correlation_id,
+                        record_correlation_event,
+                    )
+
+                    for _parked_entry in _parked:
+                        _callback_root = (
+                            str(_parked_entry.get("correlation_id") or "")
+                            if isinstance(_parked_entry, dict)
+                            else ""
+                        )
+                        if is_opaque_correlation_id(_callback_root):
+                            record_correlation_event(
+                                "gateway.delegate.result.consumed",
+                                correlation_id=correlation_id,
+                                session_id=session_id,
+                                parent_correlation_id=_callback_root,
+                                relation="delegate_result",
+                                status="consumed",
+                                source="gateway",
+                                component="gateway.delegate",
+                                task_id=str(_parked_entry.get("task_id") or "") or None,
+                            )
                     _parked_summaries = "\n\n---\n\n".join(
                         str(e.get("summary") or "") for e in _parked
                     ).strip()
@@ -14600,6 +14836,7 @@ class GatewayRunner:
                 next_message = pending
                 next_message_id = None
                 next_channel_prompt = None
+                next_correlation_id = correlation_id
                 if pending_event is not None:
                     next_source = getattr(pending_event, "source", None) or source
                     next_message = await self._prepare_inbound_message_text(
@@ -14611,6 +14848,7 @@ class GatewayRunner:
                         return result
                     next_message_id = getattr(pending_event, "message_id", None)
                     next_channel_prompt = getattr(pending_event, "channel_prompt", None)
+                    next_correlation_id = getattr(pending_event, "correlation_id", None)
 
                 # Restart typing indicator so the user sees activity while
                 # the follow-up turn runs.  The outer _process_message_background
@@ -14635,6 +14873,7 @@ class GatewayRunner:
                     run_generation=run_generation,
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
+                    correlation_id=next_correlation_id,
                     channel_prompt=next_channel_prompt,
                 )
         finally:

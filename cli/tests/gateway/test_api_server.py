@@ -23,6 +23,7 @@ from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient as AioHTTPTestClient, TestServer
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
+from gateway.correlation import CORRELATION_HEADER, EXECUTION_CORRELATION_HEADER
 from gateway.platforms.api_server import (
     APIServerAdapter,
     ResponseStore,
@@ -1575,6 +1576,42 @@ class TestResponsesStreaming:
 
 class TestStructuredRuns:
     @pytest.mark.asyncio
+    async def test_run_acceptance_and_terminal_events_preserve_root(self, adapter):
+        app = _create_app(adapter)
+        app.router.add_post("/v1/runs", adapter._handle_runs)
+        app.router.add_get("/v1/runs/{run_id}/events", adapter._handle_run_events)
+        root = "corr_" + "d" * 32
+        fake_agent = MagicMock()
+        fake_agent.session_prompt_tokens = 1
+        fake_agent.session_completion_tokens = 1
+        fake_agent.session_total_tokens = 2
+        fake_agent.run_conversation.return_value = {
+            "final_response": "done",
+            "messages": [],
+            "completed": True,
+        }
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=fake_agent):
+                auth = {
+                    "Authorization": f"Bearer {adapter._api_key}",
+                    CORRELATION_HEADER: root,
+                }
+                start = await cli.post("/v1/runs", json={"input": "do it"}, headers=auth)
+                start_data = await start.json()
+                events = await cli.get(
+                    f"/v1/runs/{start_data['run_id']}/events",
+                    headers={"Authorization": f"Bearer {adapter._api_key}"},
+                )
+                body = await events.text()
+
+        assert start.status == 202
+        assert start.headers[CORRELATION_HEADER] == root
+        assert start_data["correlation_id"] == root
+        assert '"event": "run.completed"' in body
+        assert f'"correlation_id": "{root}"' in body
+
+    @pytest.mark.asyncio
     async def test_nonempty_failed_result_emits_run_failed(self, adapter):
         app = _create_app(adapter)
         app.router.add_post("/v1/runs", adapter._handle_runs)
@@ -2417,3 +2454,191 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+class TestExternalCorrelationLineage:
+    @pytest.mark.asyncio
+    async def test_semantic_headers_and_idempotency_keys_cannot_become_roots(self, adapter):
+        app = _create_app(adapter)
+        semantic_root = "Buyer Jane / 123 Main Street"
+        idempotency_key = "offer-for-jane@example.com"
+        session_key = "customer:Buyer Jane:123 Main Street"
+        events = []
+
+        def capture_event(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return True
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run,
+                patch(
+                    "gateway.platforms.api_server.record_correlation_event",
+                    side_effect=capture_event,
+                ),
+            ):
+                mock_run.return_value = (
+                    {"final_response": "Done", "messages": [], "completed": True},
+                    {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        CORRELATION_HEADER: semantic_root,
+                        "Idempotency-Key": idempotency_key,
+                        "X-Elevate-Session-Key": session_key,
+                    },
+                    json={
+                        "model": "elevate",
+                        "messages": [{"role": "user", "content": "prepare the offer"}],
+                    },
+                )
+
+        response_root = resp.headers[CORRELATION_HEADER]
+        assert response_root.startswith("corr_")
+        assert len(response_root) == 37
+        assert response_root not in {semantic_root, idempotency_key, session_key}
+        assert mock_run.call_args.kwargs["correlation_id"] == response_root
+        serialized = repr(events)
+        assert semantic_root not in serialized
+        assert idempotency_key not in serialized
+        assert session_key not in serialized
+        assert "jane@example.com" not in serialized
+
+    @pytest.mark.asyncio
+    async def test_concurrent_idempotent_waiter_cannot_relabel_first_execution(self, adapter):
+        app = _create_app(adapter)
+        root_a = "corr_" + "a" * 32
+        root_b = "corr_" + "b" * 32
+        idem = f"idem-{uuid.uuid4().hex}"
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+        events = []
+
+        async def fake_run(**kwargs):
+            execution_root = kwargs["correlation_id"]
+            calls.append(execution_root)
+            started.set()
+            await release.wait()
+            return (
+                {
+                    "final_response": "Done",
+                    "messages": [],
+                    "completed": True,
+                    "_elevate_correlation_id": execution_root,
+                },
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        def capture_event(event_type, **kwargs):
+            events.append((event_type, kwargs))
+            return True
+
+        body = {
+            "model": "elevate",
+            "messages": [{"role": "user", "content": "same request"}],
+        }
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(adapter, "_run_agent", side_effect=fake_run),
+                patch(
+                    "gateway.platforms.api_server.record_correlation_event",
+                    side_effect=capture_event,
+                ),
+            ):
+                first_task = asyncio.create_task(
+                    cli.post(
+                        "/v1/chat/completions",
+                        headers={CORRELATION_HEADER: root_a, "Idempotency-Key": idem},
+                        json=body,
+                    )
+                )
+                await started.wait()
+                second_task = asyncio.create_task(
+                    cli.post(
+                        "/v1/chat/completions",
+                        headers={CORRELATION_HEADER: root_b, "Idempotency-Key": idem},
+                        json=body,
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert calls == [root_a]
+                release.set()
+                first, second = await asyncio.gather(first_task, second_task)
+
+        assert calls == [root_a]
+        assert first.headers[CORRELATION_HEADER] == root_a
+        assert EXECUTION_CORRELATION_HEADER not in first.headers
+        assert second.headers[CORRELATION_HEADER] == root_b
+        assert second.headers[EXECUTION_CORRELATION_HEADER] == root_a
+        replay = [item for item in events if item[0] == "gateway.api.request.replayed"]
+        assert len(replay) == 1
+        assert replay[0][1]["correlation_id"] == root_b
+        assert replay[0][1]["parent_correlation_id"] == root_a
+        assert replay[0][1]["relation"] == "duplicate_of"
+
+    @pytest.mark.asyncio
+    async def test_executor_context_and_agent_identity_stay_request_local(self, adapter):
+        import threading
+
+        from gateway.session_context import get_session_env
+
+        barrier = threading.Barrier(2)
+        observed = []
+
+        class FakeAgent:
+            session_prompt_tokens = 0
+            session_completion_tokens = 0
+            session_total_tokens = 0
+
+            def run_conversation(self, **_kwargs):
+                barrier.wait(timeout=5)
+                observed.append(
+                    (
+                        self._elevate_turn_correlation_id,
+                        get_session_env("ELEVATE_SESSION_CORRELATION_ID"),
+                        get_session_env("ELEVATE_SESSION_MESSAGE_ID"),
+                    )
+                )
+                return {"final_response": "ok", "completed": True}
+
+        adapter._create_agent = MagicMock(side_effect=[FakeAgent(), FakeAgent()])
+        root_a = "corr_" + "1" * 32
+        root_b = "corr_" + "2" * 32
+        # These are deliberately shaped like valid opaque internal session
+        # IDs. API sessions are still caller-controlled, so execution
+        # diagnostics must omit them rather than relying on shape alone.
+        external_session_a = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        external_session_b = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        events = []
+
+        with patch(
+            "gateway.platforms.api_server.record_correlation_event",
+            side_effect=lambda event_type, **kwargs: events.append(
+                (event_type, kwargs)
+            )
+            or True,
+        ):
+            first, second = await asyncio.gather(
+                adapter._run_agent(
+                    user_message="A",
+                    conversation_history=[],
+                    session_id=external_session_a,
+                    correlation_id=root_a,
+                ),
+                adapter._run_agent(
+                    user_message="B",
+                    conversation_history=[],
+                    session_id=external_session_b,
+                    correlation_id=root_b,
+                ),
+            )
+
+        assert {item[:2] for item in observed} == {(root_a, root_a), (root_b, root_b)}
+        assert all(message_id == "" for _, _, message_id in observed)
+        assert first[0]["_elevate_correlation_id"] == root_a
+        assert second[0]["_elevate_correlation_id"] == root_b
+        assert all("session_id" not in kwargs for _, kwargs in events)
+        assert external_session_a not in repr(events)
+        assert external_session_b not in repr(events)

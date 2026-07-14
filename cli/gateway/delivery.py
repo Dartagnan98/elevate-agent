@@ -132,7 +132,9 @@ class DeliveryRouter:
         targets: List[DeliveryTarget],
         job_id: Optional[str] = None,
         job_name: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None,
+        correlation_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Deliver content to all specified targets.
@@ -154,7 +156,13 @@ class DeliveryRouter:
                 if target.platform == Platform.LOCAL:
                     result = self._deliver_local(content, job_id, job_name, metadata)
                 else:
-                    result = await self._deliver_to_platform(target, content, metadata)
+                    result = await self._deliver_to_platform(
+                        target,
+                        content,
+                        metadata,
+                        correlation_id=correlation_id,
+                        correlation_session_id=correlation_session_id,
+                    )
                 
                 results[target.to_string()] = {
                     "success": True,
@@ -227,7 +235,10 @@ class DeliveryRouter:
         self,
         target: DeliveryTarget,
         content: str,
-        metadata: Optional[Dict[str, Any]]
+        metadata: Optional[Dict[str, Any]],
+        *,
+        correlation_id: Optional[str] = None,
+        correlation_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Deliver content to a messaging platform."""
         adapter = self.adapters.get(target.platform)
@@ -251,8 +262,15 @@ class DeliveryRouter:
         send_metadata = dict(metadata or {})
         if target.thread_id and "thread_id" not in send_metadata:
             send_metadata["thread_id"] = target.thread_id
+        if correlation_id and hasattr(adapter, "_send_with_retry"):
+            return await adapter._send_with_retry(
+                target.chat_id,
+                content,
+                metadata=send_metadata or None,
+                correlation_id=correlation_id,
+                correlation_session_id=correlation_session_id,
+            )
         return await adapter.send(target.chat_id, content, metadata=send_metadata or None)
-
 
 
 

@@ -958,6 +958,15 @@ class MessageEvent:
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Privacy-safe execution lineage. Appended to preserve positional
+    # compatibility for older MessageEvent constructors. Platform
+    # message/chat/user identifiers are routing data and must never be reused
+    # as correlation identifiers. handle_message validates or replaces this
+    # root at the external acceptance boundary.
+    correlation_id: Optional[str] = None
+    parent_correlation_id: Optional[str] = None
+    relation: Optional[str] = None
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -2404,6 +2413,8 @@ class BasePlatformAdapter(ABC):
         metadata: Any = None,
         max_retries: int = 2,
         base_delay: float = 2.0,
+        correlation_id: Optional[str] = None,
+        correlation_session_id: Optional[str] = None,
     ) -> "SendResult":
         """
         Send a message with automatic retry for transient network errors.
@@ -2414,12 +2425,88 @@ class BasePlatformAdapter(ABC):
         know to retry rather than waiting indefinitely.
         """
 
-        result = await self.send(
-            chat_id=chat_id,
-            content=content,
-            reply_to=reply_to,
-            metadata=metadata,
+        from gateway.correlation import (
+            accept_external_correlation_id,
+            current_correlation_id,
+            current_correlation_session_id,
+            mint_attempt_id,
+            record_correlation_event,
         )
+
+        root_correlation_id = accept_external_correlation_id(
+            correlation_id or current_correlation_id()
+        )
+        lineage_session_id = (
+            str(correlation_session_id or current_correlation_session_id() or "") or None
+        )
+        previous_attempt_id: Optional[str] = None
+        attempt_count = 0
+
+        async def _send_attempt(attempt_content: str) -> "SendResult":
+            nonlocal previous_attempt_id, attempt_count
+            attempt_count += 1
+            attempt_id = mint_attempt_id()
+            parent_id = previous_attempt_id or root_correlation_id
+            relation = "retry_of" if previous_attempt_id else "delivery_attempt"
+            record_correlation_event(
+                "gateway.delivery.attempt.started",
+                correlation_id=attempt_id,
+                session_id=lineage_session_id,
+                parent_correlation_id=parent_id,
+                relation=relation,
+                status="started",
+                source="gateway",
+                component="gateway.delivery",
+                attempt_count=attempt_count,
+                retry_count=max(0, attempt_count - 1),
+            )
+            try:
+                attempt_result = await self.send(
+                    chat_id=chat_id,
+                    content=attempt_content,
+                    reply_to=reply_to,
+                    metadata=metadata,
+                )
+            except BaseException:
+                record_correlation_event(
+                    "gateway.delivery.attempt.failed",
+                    correlation_id=attempt_id,
+                    session_id=lineage_session_id,
+                    parent_correlation_id=parent_id,
+                    relation=relation,
+                    status="failed",
+                    source="gateway",
+                    component="gateway.delivery",
+                    failed=True,
+                    attempt_count=attempt_count,
+                    retry_count=max(0, attempt_count - 1),
+                    severity="warning",
+                )
+                previous_attempt_id = attempt_id
+                raise
+
+            succeeded = bool(getattr(attempt_result, "success", False))
+            record_correlation_event(
+                "gateway.delivery.attempt.completed"
+                if succeeded
+                else "gateway.delivery.attempt.failed",
+                correlation_id=attempt_id,
+                session_id=lineage_session_id,
+                parent_correlation_id=parent_id,
+                relation=relation,
+                status="completed" if succeeded else "failed",
+                source="gateway",
+                component="gateway.delivery",
+                success=succeeded,
+                failed=not succeeded,
+                attempt_count=attempt_count,
+                retry_count=max(0, attempt_count - 1),
+                severity="info" if succeeded else "warning",
+            )
+            previous_attempt_id = attempt_id
+            return attempt_result
+
+        result = await _send_attempt(content)
 
         if result.success:
             return result
@@ -2441,12 +2528,7 @@ class BasePlatformAdapter(ABC):
                     self.name, attempt, max_retries, delay, error_str,
                 )
                 await asyncio.sleep(delay)
-                result = await self.send(
-                    chat_id=chat_id,
-                    content=content,
-                    reply_to=reply_to,
-                    metadata=metadata,
-                )
+                result = await _send_attempt(content)
                 if result.success:
                     logger.info("[%s] Send succeeded on retry %d", self.name, attempt)
                     return result
@@ -2461,18 +2543,15 @@ class BasePlatformAdapter(ABC):
                     "Please try again \u2014 your request was processed but the response could not be sent."
                 )
                 try:
-                    await self.send(chat_id=chat_id, content=notice, reply_to=reply_to, metadata=metadata)
+                    await _send_attempt(notice)
                 except Exception as notify_err:
                     logger.debug("[%s] Could not send delivery-failure notice: %s", self.name, notify_err)
                 return result
 
         # Non-network / post-retry formatting failure: try plain text as fallback
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
-        fallback_result = await self.send(
-            chat_id=chat_id,
-            content=f"(Response formatting failed, plain text:)\n\n{content[:3500]}",
-            reply_to=reply_to,
-            metadata=metadata,
+        fallback_result = await _send_attempt(
+            f"(Response formatting failed, plain text:)\n\n{content[:3500]}"
         )
         if not fallback_result.success:
             logger.error("[%s] Fallback send also failed: %s", self.name, fallback_result.error)
@@ -2711,6 +2790,39 @@ class BasePlatformAdapter(ABC):
         await self._drain_pending_after_session_command(session_key, command_guard)
 
     async def handle_message(self, event: MessageEvent) -> None:
+        """Accept an external platform event under an immutable opaque root."""
+        if not self._message_handler:
+            return
+
+        from gateway.correlation import (
+            accept_external_correlation_id,
+            correlation_scope,
+            record_correlation_event,
+        )
+
+        event.correlation_id = accept_external_correlation_id(
+            getattr(event, "correlation_id", None)
+        )
+        # Parent/relation values on inbound platform objects are untrusted.
+        event.parent_correlation_id = None
+        event.relation = None
+        session_key = build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+        platform_name = _platform_name(getattr(event.source, "platform", None)) or "unknown"
+        record_correlation_event(
+            "gateway.request.accepted",
+            correlation_id=event.correlation_id,
+            status="accepted",
+            source="gateway",
+            component=f"gateway.platform.{platform_name}",
+        )
+        with correlation_scope(event.correlation_id, session_key):
+            await self._handle_message_accepted(event)
+
+    async def _handle_message_accepted(self, event: MessageEvent) -> None:
         """
         Process an incoming message.
         
@@ -2837,10 +2949,37 @@ class BasePlatformAdapter(ABC):
         return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+        """Run one accepted event with its own task-local lineage."""
+        from gateway.correlation import accept_external_correlation_id, correlation_scope
+
+        event.correlation_id = accept_external_correlation_id(
+            getattr(event, "correlation_id", None)
+        )
+        with correlation_scope(event.correlation_id, session_key):
+            await self._process_message_background_scoped(event, session_key)
+
+    async def _process_message_background_scoped(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
         # Track delivery outcomes for the processing-complete hook
         delivery_attempted = False
         delivery_succeeded = False
+
+        def _record_request_terminal(outcome: ProcessingOutcome) -> None:
+            from gateway.correlation import record_correlation_event
+
+            succeeded = outcome == ProcessingOutcome.SUCCESS
+            cancelled = outcome == ProcessingOutcome.CANCELLED
+            status = "cancelled" if cancelled else ("completed" if succeeded else "failed")
+            record_correlation_event(
+                f"gateway.request.{status}",
+                correlation_id=str(getattr(event, "correlation_id", "") or ""),
+                status=status,
+                source="gateway",
+                component=f"gateway.platform.{_platform_name(self.platform) or 'unknown'}",
+                success=succeeded,
+                failed=not succeeded,
+                severity="info" if succeeded else "warning",
+            )
 
         def _record_delivery(result):
             nonlocal delivery_attempted, delivery_succeeded
@@ -3070,11 +3209,15 @@ class BasePlatformAdapter(ABC):
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
+            _processing_outcome = (
+                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE
+            )
             await self._run_processing_hook(
                 "on_processing_complete",
                 event,
-                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE,
+                _processing_outcome,
             )
+            _record_request_terminal(_processing_outcome)
 
             # Check if there's a pending message that was queued during our processing
             if session_key in self._pending_messages:
@@ -3107,16 +3250,18 @@ class BasePlatformAdapter(ABC):
             if current_task is None or current_task not in self._expected_cancelled_tasks:
                 outcome = ProcessingOutcome.FAILURE
             await self._run_processing_hook("on_processing_complete", event, outcome)
+            _record_request_terminal(outcome)
             raise
         except Exception as e:
             await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
+            _record_request_terminal(ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:
                 error_type = type(e).__name__
                 error_detail = str(e)[:300] if str(e) else "no details available"
                 _thread_metadata = self._event_delivery_metadata(event)
-                await self.send(
+                await self._send_with_retry(
                     chat_id=event.source.chat_id,
                     content=(
                         f"Sorry, I encountered an error ({error_type}).\n"
