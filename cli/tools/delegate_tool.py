@@ -1798,6 +1798,61 @@ def _resolve_beta_delegation_runtime(
     )
 
 
+def _cleanup_unstarted_beta_child(
+    child: Any,
+    parent_agent: Any,
+    *,
+    error: str,
+) -> None:
+    """Undo registrations for a Beta child built but never submitted to run."""
+    active_children = getattr(parent_agent, "_active_children", None)
+    if isinstance(active_children, list):
+        lock = getattr(parent_agent, "_active_children_lock", None)
+
+        def _remove() -> None:
+            active_children[:] = [item for item in active_children if item is not child]
+
+        if lock:
+            with lock:
+                _remove()
+        else:
+            _remove()
+
+    subagent_id = getattr(child, "_subagent_id", None)
+    if isinstance(subagent_id, str) and subagent_id:
+        _unregister_subagent(subagent_id)
+
+    # _build_child_agent already emitted spawn_requested when a progress
+    # callback exists. Close that card truthfully: the child failed to start,
+    # so it did not complete any delegated work.
+    progress = getattr(child, "tool_progress_callback", None)
+    if callable(progress):
+        try:
+            progress(
+                "subagent.complete",
+                preview=error,
+                status="failed",
+                duration_seconds=0.0,
+                summary=error,
+                child_session_id=getattr(child, "session_id", None),
+            )
+        except Exception:
+            logger.debug("Failed to close unstarted Beta child progress", exc_info=True)
+
+    try:
+        session_db = getattr(child, "_session_db", None)
+        session_id = getattr(child, "session_id", None)
+        if session_db is not None and session_id:
+            session_db.end_session(session_id, "delegation_start_failed")
+    except Exception:
+        logger.debug("Failed to end unstarted Beta child session", exc_info=True)
+
+    try:
+        child.close()
+    except Exception:
+        logger.debug("Failed to close partially built Beta child", exc_info=True)
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -3384,13 +3439,15 @@ def delegate_task(
     except Exception as exc:
         if not beta_provider_active:
             raise
+        visible_error = _beta_delegate_error(exc)
         for _i, _t, built_child in children:
-            try:
-                built_child.close()
-            except Exception:
-                logger.debug("Failed to close partially built Beta child", exc_info=True)
+            _cleanup_unstarted_beta_child(
+                built_child,
+                parent_agent,
+                error=visible_error,
+            )
         return tool_error(
-            _beta_delegate_error(exc),
+            visible_error,
             code=str(
                 getattr(exc, "code", "")
                 or "beta_delegate_provider_policy_failed"

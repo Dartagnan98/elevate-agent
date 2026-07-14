@@ -17,6 +17,7 @@ import pytest
 from elevate_cli.beta_provider_policy import (
     BETA_ALLOWED_PROVIDER,
     BETA_CODEX_BASE_URL,
+    BetaProviderPolicyError,
     canonical_beta_provider,
 )
 from tools import delegate_tool as delegate
@@ -84,6 +85,7 @@ def _install_fake_agent(monkeypatch, *, result=None):
         child.session_prompt_tokens = 0
         child.session_completion_tokens = 0
         child.session_reasoning_tokens = 0
+        child._session_db = None
         child.tool_progress_callback = kwargs.get("tool_progress_callback")
         child.run_conversation.return_value = result or {
             "final_response": "done",
@@ -225,6 +227,72 @@ def test_parallel_beta_children_each_fresh_resolve_and_never_share_cached_auth(
     assert all(call["providers_allowed"] is None for call in agent_calls)
     assert all(child._credential_pool is None for child in children)
     assert all(child._credential_pool is not parent._credential_pool for child in children)
+
+
+def test_second_child_build_failure_cleans_unstarted_child_registrations(
+    monkeypatch, tmp_path
+):
+    resolve_count = 0
+
+    def _runtime(**_kwargs):
+        nonlocal resolve_count
+        resolve_count += 1
+        if resolve_count == 2:
+            raise BetaProviderPolicyError(
+                "Auth disappeared before the second child.",
+                code="beta_codex_auth_required",
+            )
+        return {
+            "provider": BETA_ALLOWED_PROVIDER,
+            "requested_provider": BETA_ALLOWED_PROVIDER,
+            "api_mode": "codex_responses",
+            "base_url": BETA_CODEX_BASE_URL,
+            "api_key": "fresh-first-child-token",
+            "source": "elevate-auth-store",
+            "auth_store": str(tmp_path / "auth.json"),
+        }
+
+    _install_beta_boundary(
+        monkeypatch,
+        tmp_path,
+        runtime_resolver=_runtime,
+    )
+    _agent_calls, children = _install_fake_agent(monkeypatch)
+    events = []
+    parent = _parent()
+
+    def _progress(event_type, _tool_name, _preview, _args, **payload):
+        events.append((event_type, payload))
+        if event_type == "subagent.spawn_requested":
+            delegate._register_subagent(
+                {
+                    "subagent_id": payload["subagent_id"],
+                    "agent": children[0],
+                }
+            )
+
+    parent.tool_progress_callback = _progress
+
+    result = json.loads(
+        delegate.delegate_task(
+            tasks=[{"goal": "first"}, {"goal": "second"}],
+            parent_agent=parent,
+        )
+    )
+
+    assert result["code"] == "beta_codex_auth_required"
+    assert resolve_count == 2
+    assert len(children) == 1
+    first_child = children[0]
+    assert parent._active_children == []
+    assert first_child._subagent_id not in delegate._active_subagents
+    first_child.close.assert_called_once_with()
+    completion_events = [
+        payload for event_type, payload in events if event_type == "subagent.complete"
+    ]
+    assert len(completion_events) == 1
+    assert completion_events[0]["status"] == "failed"
+    assert "beta_codex_auth_required" in completion_events[0]["summary"]
 
 
 @pytest.mark.parametrize(
