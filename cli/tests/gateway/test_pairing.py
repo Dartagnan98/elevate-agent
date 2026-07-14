@@ -177,6 +177,28 @@ class TestHashedStorage:
         assert result["user_id"] == "user1"
         assert result["user_name"] == "Bob"
 
+    def test_before_commit_failure_keeps_code_pending_and_user_unapproved(self, tmp_path):
+        """A prerequisite write failure must leave the one-time code retryable."""
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            code = store.generate_code("telegram", "user1", "Bob")
+
+            def fail_authorization(_result):
+                raise OSError("injected authorization failure")
+
+            try:
+                store.approve_code("telegram", code, before_commit=fail_authorization)
+            except OSError as exc:
+                assert str(exc) == "injected authorization failure"
+            else:
+                raise AssertionError("approve_code unexpectedly swallowed prerequisite failure")
+
+            assert store.is_approved("telegram", "user1") is False
+            assert [entry["user_id"] for entry in store.list_pending("telegram")] == ["user1"]
+
+            result = store.approve_code("telegram", code)
+            assert result and result["user_id"] == "user1"
+
     def test_invalid_code_rejected(self, tmp_path):
         """approve_code with a wrong code should fail."""
         with patch("gateway.pairing.PAIRING_DIR", tmp_path):

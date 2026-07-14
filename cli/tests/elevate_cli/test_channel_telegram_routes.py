@@ -222,6 +222,97 @@ def test_exact_beta_pair_start_closes_stale_open_access_flags(monkeypatch):
     assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "pair"
 
 
+def test_exact_beta_pair_start_reports_saved_config_when_restart_spawn_fails(monkeypatch):
+    from elevate_cli.config import load_env
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    def fail_spawn(_args, _action):
+        raise OSError("injected spawn failure")
+
+    resp = make_client(spawn=fail_spawn).post(
+        "/api/telegram/pair/start",
+        json={"bot_token": "123456:ABCDEFGHIJKLMNOPQRSTUVWX"},
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == {
+        "code": "beta_gateway_restart_not_started",
+        "message": (
+            "Telegram was saved securely, but the agent restart did not start. "
+            "Retry the connection to start it."
+        ),
+        "configurationSaved": True,
+        "restartStarted": False,
+    }
+    env = load_env()
+    assert env["TELEGRAM_BOT_TOKEN"] == "123456:ABCDEFGHIJKLMNOPQRSTUVWX"
+    assert env["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] == "pair"
+
+
+def test_exact_beta_pair_approval_write_failure_does_not_consume_code(monkeypatch):
+    consumed = []
+
+    class Store:
+        def approve_code(self, platform, code, before_commit=None):
+            assert platform == "telegram"
+            assert code == "abc123"
+            before_commit({"user_id": "222", "user_name": "Ada", "agent_id": ""})
+            consumed.append(code)
+            return {"user_id": "222", "user_name": "Ada", "agent_id": ""}
+
+    gateway_module = types.ModuleType("gateway")
+    gateway_module.__path__ = []
+    pairing_module = types.ModuleType("gateway.pairing")
+    pairing_module.PairingStore = Store
+    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
+    monkeypatch.setitem(sys.modules, "gateway.pairing", pairing_module)
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        channel_telegram,
+        "save_env_values",
+        lambda _updates: (_ for _ in ()).throw(OSError("injected durable-write failure")),
+    )
+
+    resp = make_client().post(
+        "/api/telegram/pair/approve",
+        json={"code": "abc123", "set_home": True},
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["code"] == "beta_pairing_authorization_not_saved"
+    assert resp.json()["detail"]["retryable"] is True
+    assert consumed == []
+
+
+def test_exact_beta_pair_approval_rejects_non_numeric_user_without_consuming_code(monkeypatch):
+    consumed = []
+
+    class Store:
+        def approve_code(self, platform, code, before_commit=None):
+            before_commit({"user_id": "*", "user_name": "Mallory", "agent_id": ""})
+            consumed.append((platform, code))
+            return {"user_id": "*", "user_name": "Mallory", "agent_id": ""}
+
+    gateway_module = types.ModuleType("gateway")
+    gateway_module.__path__ = []
+    pairing_module = types.ModuleType("gateway.pairing")
+    pairing_module.PairingStore = Store
+    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
+    monkeypatch.setitem(sys.modules, "gateway.pairing", pairing_module)
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    resp = make_client().post(
+        "/api/telegram/pair/approve",
+        json={"code": "abc123"},
+    )
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["code"] == "beta_pairing_authorization_not_saved"
+    assert resp.json()["detail"]["retryable"] is True
+    assert consumed == []
+
+
 def test_exact_beta_status_reports_stale_open_access_sources(monkeypatch):
     from elevate_cli.config import save_env_values
 

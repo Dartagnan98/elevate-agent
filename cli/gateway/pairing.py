@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from elevate_constants import get_elevate_dir
 from utils import atomic_replace
@@ -241,7 +241,12 @@ class PairingStore:
 
             return code
 
-    def approve_code(self, platform: str, code: str) -> Optional[dict]:
+    def approve_code(
+        self,
+        platform: str,
+        code: str,
+        before_commit: Optional[Callable[[dict], None]] = None,
+    ) -> Optional[dict]:
         """
         Approve a pairing code. Adds the user to the approved list.
 
@@ -249,6 +254,11 @@ class PairingStore:
         invalid/expired OR the platform is currently locked out after
         ``MAX_FAILED_ATTEMPTS`` failed approvals (#10195). Callers can
         disambiguate with ``_is_locked_out(platform)``.
+
+        ``before_commit`` runs while the matching request is still pending and
+        before either pairing file changes.  Dashboard callers use it to make
+        the runtime authorization write a prerequisite for consuming the code;
+        an exception leaves the code available for a truthful retry.
 
         Verification: the user-provided code is hashed with each stored
         entry's salt and compared to the stored hash using constant-time
@@ -297,19 +307,25 @@ class PairingStore:
                 self._record_failed_attempt(platform)
                 return None
 
-            del pending[matched_key]
-            self._save_json(self._pending_path(platform), pending)
-
-            # Add to approved list, scoped to the agent the code was minted for.
             agent_id = matched_entry.get("agent_id", "") or ""
-            self._approve_user(platform, matched_entry["user_id"],
-                               matched_entry.get("user_name", ""), agent_id)
-
-            return {
+            result = {
                 "user_id": matched_entry["user_id"],
                 "user_name": matched_entry.get("user_name", ""),
                 "agent_id": agent_id,
             }
+            if before_commit is not None:
+                before_commit(dict(result))
+
+            # Add to the approved list before consuming the request. If this
+            # durable write fails, the one-time code remains retryable. If the
+            # later pending-file write fails, reusing the code is idempotent for
+            # the same user rather than losing a valid approval.
+            self._approve_user(platform, matched_entry["user_id"],
+                               matched_entry.get("user_name", ""), agent_id)
+            del pending[matched_key]
+            self._save_json(self._pending_path(platform), pending)
+
+            return result
 
     def list_pending(self, platform: str = None) -> list:
         """List pending pairing requests, optionally filtered by platform.

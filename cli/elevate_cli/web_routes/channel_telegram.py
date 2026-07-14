@@ -119,6 +119,19 @@ def register_telegram_routes(
             proc = spawn_elevate_action(["gateway", "restart"], "gateway-restart")
         except Exception as exc:
             log.exception("Failed to spawn gateway restart during telegram pair start")
+            if beta_provider_policy_active():
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "beta_gateway_restart_not_started",
+                        "message": (
+                            "Telegram was saved securely, but the agent restart did not start. "
+                            "Retry the connection to start it."
+                        ),
+                        "configurationSaved": True,
+                        "restartStarted": False,
+                    },
+                )
             raise HTTPException(status_code=500, detail=f"Failed to restart gateway: {exc}")
 
         return {
@@ -155,12 +168,70 @@ def register_telegram_routes(
             raise HTTPException(status_code=400, detail="code is required")
         enforce_beta_env_store_local()
 
+        authorization_saved = False
+
+        def save_pairing_authorization(result: dict[str, Any]) -> None:
+            nonlocal authorization_saved
+            user_id = canonicalize_beta_env_value(
+                "TELEGRAM_ALLOWED_USERS",
+                str(result.get("user_id") or ""),
+                looks_like_telegram_bot_token=looks_like_telegram_bot_token,
+            )
+            existing = telegram_env_value("TELEGRAM_ALLOWED_USERS").strip()
+            existing_ids = [v.strip() for v in existing.split(",") if v.strip()]
+            updates: dict[str, str] = {}
+            if user_id not in existing_ids:
+                existing_ids.append(user_id)
+                updates["TELEGRAM_ALLOWED_USERS"] = ",".join(existing_ids)
+            updates["TELEGRAM_UNAUTHORIZED_DM_BEHAVIOR"] = "ignore"
+            if set_home:
+                updates["TELEGRAM_HOME_CHANNEL"] = user_id
+            save_telegram_values(
+                updates,
+                stable_alias_keys={"TELEGRAM_HOME_CHANNEL"},
+            )
+            authorization_saved = True
+
         try:
             from gateway.pairing import PairingStore
             store = PairingStore()
-            result = store.approve_code("telegram", code)
+            if beta_provider_policy_active():
+                result = store.approve_code(
+                    "telegram",
+                    code,
+                    before_commit=save_pairing_authorization,
+                )
+            else:
+                result = store.approve_code("telegram", code)
         except Exception as exc:
             log.exception("Failed to approve telegram pairing")
+            if beta_provider_policy_active() and authorization_saved:
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "beta_pairing_record_not_saved",
+                        "message": (
+                            "The user is authorized, but Elevate could not finish recording "
+                            "the pairing. Retry to reconcile the record."
+                        ),
+                        "authorizationSaved": True,
+                        "pairingRecorded": False,
+                    },
+                )
+            if beta_provider_policy_active():
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "beta_pairing_authorization_not_saved",
+                        "message": (
+                            "Elevate could not authorize this user. The pairing code was not "
+                            "consumed; fix the local profile and retry."
+                        ),
+                        "authorizationSaved": False,
+                        "pairingRecorded": False,
+                        "retryable": True,
+                    },
+                )
             raise HTTPException(status_code=500, detail=str(exc))
         if result is None:
             raise HTTPException(status_code=404, detail="Code not found or expired")
@@ -168,7 +239,7 @@ def register_telegram_routes(
         user_id = str(result.get("user_id") or "").strip()
         user_name = str(result.get("user_name") or "").strip()
 
-        if user_id:
+        if user_id and not beta_provider_policy_active():
             existing = telegram_env_value("TELEGRAM_ALLOWED_USERS").strip()
             existing_ids = [v.strip() for v in existing.split(",") if v.strip()]
             updates: dict[str, str] = {}
