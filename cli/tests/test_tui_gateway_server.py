@@ -4353,6 +4353,56 @@ def test_model_options_does_not_overwrite_curated_models(monkeypatch):
     assert listing.call_count == 1
 
 
+def test_exact_beta_model_options_canonicalizes_before_generic_discovery(monkeypatch):
+    """A stale session/config cannot leak alternate provider state to the TUI."""
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    session = _session(
+        agent=types.SimpleNamespace(
+            provider="anthropic",
+            model="claude-opus-4-6",
+        )
+    )
+    monkeypatch.setitem(server._sessions, "beta-session", session)
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: pytest.fail("generic config discovery reached in exact Beta"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_resolve_model",
+        lambda: pytest.fail("generic model resolution reached in exact Beta"),
+    )
+    codex_rows = [
+        {
+            "slug": "openai-codex",
+            "name": "OpenAI Codex",
+            "models": ["gpt-5.5"],
+            "is_current": True,
+        }
+    ]
+
+    with patch(
+        "elevate_cli.model_switch.list_authenticated_providers",
+        return_value=codex_rows,
+    ) as listing:
+        resp = server._methods["model.options"](
+            101,
+            {"session_id": "beta-session"},
+        )
+
+    assert resp["result"] == {
+        "providers": codex_rows,
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+    }
+    listing.assert_called_once_with(
+        current_provider="openai-codex",
+        current_model="gpt-5.5",
+        max_models=50,
+    )
+
+
 def test_model_options_propagates_list_exception(monkeypatch):
     """If list_authenticated_providers itself raises, surface as an RPC
     error rather than swallowing to a blank picker."""

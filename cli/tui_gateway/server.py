@@ -8181,9 +8181,37 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     try:
         from elevate_cli.model_switch import list_authenticated_providers
+        from elevate_cli.beta_provider_policy import (
+            BETA_ALLOWED_MODELS,
+            BETA_ALLOWED_PROVIDER,
+            BETA_DEFAULT_MODEL,
+            beta_provider_policy_active,
+        )
 
         session = _sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
+        if beta_provider_policy_active():
+            # Return before generic config/provider discovery.  A stale live
+            # agent may still carry a pre-policy model, so canonicalize the
+            # response independently of both disk config and session state.
+            live_model = str(getattr(agent, "model", "") or "").strip()
+            current_model = (
+                live_model if live_model in BETA_ALLOWED_MODELS else BETA_DEFAULT_MODEL
+            )
+            providers = list_authenticated_providers(
+                current_provider=BETA_ALLOWED_PROVIDER,
+                current_model=current_model,
+                max_models=50,
+            )
+            return _ok(
+                rid,
+                {
+                    "providers": providers,
+                    "model": current_model,
+                    "provider": BETA_ALLOWED_PROVIDER,
+                },
+            )
+
         cfg = _load_cfg()
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or _resolve_model()
