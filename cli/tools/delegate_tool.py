@@ -35,7 +35,7 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FuturesTimeoutError,
 )
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from agent.result_outcome import agent_result_error, agent_result_succeeded
 from toolsets import TOOLSETS
@@ -1446,6 +1446,358 @@ def _build_child_progress_callback(
     return _callback
 
 
+def _beta_delegate_error(error: Exception) -> str:
+    """Return a typed, user-visible exact-Beta delegation failure."""
+    code = str(getattr(error, "code", "") or "beta_delegate_provider_policy_failed")
+    return f"Error [{code}]: {error}"
+
+
+def _beta_value_present(value: Any) -> bool:
+    """Treat the empty config shapes accepted elsewhere as absent."""
+    return value not in (None, False, "", (), [], {})
+
+
+def _validate_beta_delegate_role(value: Any, *, source: str) -> None:
+    """Reject malformed/stale role overrides instead of silently coercing them."""
+    if value in (None, ""):
+        return
+    role = str(value).strip().lower()
+    if role not in {"leaf", "orchestrator"}:
+        from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow {source} {role!r}.",
+            code="beta_delegate_role_not_allowed",
+        )
+
+
+def _validate_beta_delegate_provider_surface(
+    values: Mapping[str, Any] | None,
+    *,
+    source: str,
+) -> None:
+    """Validate one provider-bearing delegate/agent override surface.
+
+    The normal harness intentionally supports direct endpoints, API keys,
+    ACP transports, provider filters, and fallback chains.  Exact lowercase
+    Beta may not inherit any of those escape hatches.  Empty values remain
+    valid so old config files do not need cosmetic rewrites.
+    """
+    if not isinstance(values, Mapping):
+        return
+
+    from elevate_cli.beta_provider_policy import (
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        canonical_beta_provider,
+    )
+
+    provider = values.get("provider")
+    if _beta_value_present(provider):
+        canonical_beta_provider(provider, source=f"{source} provider")
+
+    model = values.get("model")
+    if not _beta_value_present(model):
+        model = values.get("default")
+    if _beta_value_present(model):
+        beta_model_or_default(model, source=f"{source} model")
+
+    base_url = values.get("base_url")
+    if _beta_value_present(base_url) and (
+        str(base_url).strip().rstrip("/") != BETA_CODEX_BASE_URL.rstrip("/")
+    ):
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow a custom {source} endpoint.",
+            code="beta_delegate_custom_endpoint_not_allowed",
+        )
+
+    api_mode = values.get("api_mode")
+    if _beta_value_present(api_mode) and str(api_mode).strip() != "codex_responses":
+        raise BetaProviderPolicyError(
+            f"Realtor Beta {source} must use the Codex Responses transport.",
+            code="beta_delegate_api_mode_not_allowed",
+        )
+
+    for key in ("api_key", "key_env", "api_key_env", "uses_env_secret"):
+        if _beta_value_present(values.get(key)):
+            raise BetaProviderPolicyError(
+                "Realtor Beta delegated inference uses current-profile Codex "
+                "auth, not API-key overrides.",
+                code="beta_delegate_api_key_not_allowed",
+            )
+
+    for key in (
+        "fallback",
+        "fallback_model",
+        "fallback_providers",
+        "_fallback_chain",
+        "providers_allowed",
+        "providers_ignored",
+        "providers_order",
+        "provider_sort",
+    ):
+        if _beta_value_present(values.get(key)):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow delegated provider fallback or routing.",
+                code="beta_delegate_fallback_not_allowed",
+            )
+
+    for key in ("custom_provider", "custom_providers"):
+        if _beta_value_present(values.get(key)):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow custom delegated providers.",
+                code="beta_delegate_custom_provider_not_allowed",
+            )
+
+    for key in ("acp_command", "command", "acp_args", "args"):
+        if _beta_value_present(values.get(key)):
+            raise BetaProviderPolicyError(
+                "Realtor Beta delegated inference cannot use an ACP transport override.",
+                code="beta_delegate_transport_override_not_allowed",
+            )
+
+    runtime_type = values.get("runtime_type")
+    if _beta_value_present(runtime_type) and (
+        str(runtime_type).strip().lower() != "native"
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta delegated agents must use the native Codex runtime.",
+            code="beta_delegate_transport_override_not_allowed",
+        )
+
+
+def _beta_parent_provider_surface(parent_agent: Any) -> dict[str, Any]:
+    """Copy only provider-bearing parent fields; never copy cached secrets."""
+    return {
+        "provider": getattr(parent_agent, "provider", None),
+        "model": getattr(parent_agent, "model", None),
+        "base_url": getattr(parent_agent, "base_url", None),
+        "api_mode": getattr(parent_agent, "api_mode", None),
+        "fallback_model": getattr(parent_agent, "_fallback_model", None),
+        "fallback_providers": getattr(parent_agent, "_fallback_chain", None),
+        "providers_allowed": getattr(parent_agent, "providers_allowed", None),
+        "providers_ignored": getattr(parent_agent, "providers_ignored", None),
+        "providers_order": getattr(parent_agent, "providers_order", None),
+        "provider_sort": getattr(parent_agent, "provider_sort", None),
+        "acp_command": getattr(parent_agent, "acp_command", None),
+        "acp_args": getattr(parent_agent, "acp_args", None),
+    }
+
+
+def _beta_delegate_selected_model(
+    config: Mapping[str, Any], delegation_config: Mapping[str, Any]
+) -> str:
+    """Select an allowed model from the fresh current-profile config."""
+    from elevate_cli.beta_provider_policy import beta_model_or_default
+
+    delegated_model = str(delegation_config.get("model") or "").strip()
+    model_config = config.get("model")
+    model_config = model_config if isinstance(model_config, Mapping) else {}
+    configured_model = str(
+        model_config.get("default") or model_config.get("model") or ""
+    ).strip()
+    return beta_model_or_default(
+        delegated_model or configured_model,
+        source="delegated model",
+    )
+
+
+def _validate_beta_delegate_runtime(
+    runtime: Mapping[str, Any],
+    *,
+    model: str,
+    elevate_home: Any,
+) -> dict[str, Any]:
+    """Reduce a fresh resolver result to the only Beta child runtime allowed."""
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        canonical_beta_provider,
+    )
+
+    if not isinstance(runtime, Mapping):
+        raise BetaProviderPolicyError(
+            "Realtor Beta delegated provider resolution returned an invalid payload.",
+            code="beta_delegate_runtime_not_local",
+        )
+
+    canonical_beta_provider(runtime.get("provider"), source="delegated runtime provider")
+    requested_provider = runtime.get("requested_provider")
+    if _beta_value_present(requested_provider):
+        canonical_beta_provider(
+            requested_provider,
+            source="delegated requested provider",
+        )
+    canonical_model = beta_model_or_default(model, source="delegated runtime model")
+    expected_auth_store = str(elevate_home / "auth.json")
+    if (
+        runtime.get("api_mode") != "codex_responses"
+        or runtime.get("source") != "elevate-auth-store"
+        or runtime.get("auth_store") != expected_auth_store
+        or _beta_value_present(runtime.get("credential_pool"))
+        or _beta_value_present(runtime.get("fallback_model"))
+        or _beta_value_present(runtime.get("fallback_providers"))
+        or _beta_value_present(runtime.get("custom_providers"))
+        or _beta_value_present(runtime.get("command"))
+        or _beta_value_present(runtime.get("args"))
+        or str(runtime.get("base_url") or "").strip().rstrip("/")
+        != BETA_CODEX_BASE_URL.rstrip("/")
+        or not str(runtime.get("api_key") or "").strip()
+    ):
+        raise BetaProviderPolicyError(
+            "Realtor Beta delegated execution requires current-profile OpenAI "
+            "Codex provider-state auth.",
+            code="beta_delegate_runtime_not_local",
+        )
+
+    return {
+        "provider": BETA_ALLOWED_PROVIDER,
+        "model": canonical_model,
+        "base_url": BETA_CODEX_BASE_URL,
+        "api_key": str(runtime["api_key"]),
+        "api_mode": "codex_responses",
+    }
+
+
+def _beta_delegate_child_runtime_error(child: Any) -> str | None:
+    """Return a visible failure if a confined child drifted providers in-run."""
+    if getattr(child, "_beta_delegate_provider_confined", False) is not True:
+        return None
+
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_MODELS,
+        BETA_ALLOWED_PROVIDER,
+        BETA_CODEX_BASE_URL,
+    )
+
+    provider = str(getattr(child, "provider", "") or "").strip().lower()
+    model = str(getattr(child, "model", "") or "").strip()
+    base_url = str(getattr(child, "base_url", "") or "").strip().rstrip("/")
+    api_mode = str(getattr(child, "api_mode", "") or "").strip()
+    if (
+        provider != BETA_ALLOWED_PROVIDER
+        or model not in BETA_ALLOWED_MODELS
+        or base_url != BETA_CODEX_BASE_URL.rstrip("/")
+        or api_mode != "codex_responses"
+        or _beta_value_present(getattr(child, "_fallback_chain", None))
+        or _beta_value_present(getattr(child, "_credential_pool", None))
+        or _beta_value_present(getattr(child, "acp_command", None))
+        or _beta_value_present(getattr(child, "acp_args", None))
+    ):
+        return (
+            "Error [beta_delegate_runtime_drift]: Realtor Beta stopped the "
+            "delegated child because its provider runtime changed. No fallback "
+            "provider was used and the task was not completed."
+        )
+    return None
+
+
+def _resolve_beta_delegation_runtime(
+    *,
+    parent_agent: Any,
+    requested_model: Any,
+    override_provider: Any,
+    override_base_url: Any,
+    override_api_key: Any,
+    override_api_mode: Any,
+    override_acp_command: Any,
+    override_acp_args: Any,
+    role: Any,
+    task_overrides: Mapping[str, Any] | None,
+    specialist_definition: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Fresh-resolve and sanitize one exact-Beta child runtime.
+
+    Called once per child immediately before ``AIAgent`` construction.  It
+    deliberately ignores parent clients, API keys, and credential pools.
+    """
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_PROVIDER,
+        BetaProviderPolicyError,
+        read_beta_codex_auth_status,
+        validate_beta_config_for_persistence,
+    )
+    from elevate_cli.config import get_elevate_home, load_config
+    from elevate_cli.runtime_provider import resolve_runtime_provider
+
+    _validate_beta_delegate_role(role, source="delegated role")
+    _validate_beta_delegate_provider_surface(
+        _beta_parent_provider_surface(parent_agent),
+        source="parent",
+    )
+    _validate_beta_delegate_provider_surface(
+        {
+            "model": requested_model,
+            "provider": override_provider,
+            "base_url": override_base_url,
+            "api_key": override_api_key,
+            "api_mode": override_api_mode,
+            "acp_command": override_acp_command,
+            "acp_args": override_acp_args,
+        },
+        source="call override",
+    )
+    _validate_beta_delegate_provider_surface(
+        task_overrides,
+        source="task override",
+    )
+    if isinstance(specialist_definition, Mapping):
+        _validate_beta_delegate_provider_surface(
+            specialist_definition.get("runtime"),
+            source="specialist runtime",
+        )
+
+    elevate_home = get_elevate_home()
+    config_before = load_config()
+    config_before = config_before if isinstance(config_before, Mapping) else {}
+    auth_before = read_beta_codex_auth_status(elevate_home)
+    validate_beta_config_for_persistence(config_before, auth_before)
+    delegation_before = _load_config()
+    delegation_before = (
+        delegation_before if isinstance(delegation_before, Mapping) else {}
+    )
+    _validate_beta_delegate_provider_surface(
+        delegation_before,
+        source="delegation config",
+    )
+    selected_model = _beta_delegate_selected_model(config_before, delegation_before)
+
+    # This is the canonical boundary. It re-reads current-profile config/auth,
+    # performs any same-provider Codex refresh, and cannot consult a pool in Beta.
+    runtime = resolve_runtime_provider(
+        requested=BETA_ALLOWED_PROVIDER,
+        target_model=selected_model,
+    )
+
+    # Close the auth/config race after resolver work. A disappearing auth store
+    # or newly-hostile config fails before the child client can be constructed.
+    config_after = load_config()
+    config_after = config_after if isinstance(config_after, Mapping) else {}
+    auth_after = read_beta_codex_auth_status(elevate_home)
+    validate_beta_config_for_persistence(config_after, auth_after)
+    delegation_after = _load_config()
+    delegation_after = delegation_after if isinstance(delegation_after, Mapping) else {}
+    _validate_beta_delegate_provider_surface(
+        delegation_after,
+        source="delegation config",
+    )
+    final_model = _beta_delegate_selected_model(config_after, delegation_after)
+    if final_model != selected_model:
+        raise BetaProviderPolicyError(
+            "Realtor Beta model configuration changed while delegation was starting; retry.",
+            code="beta_delegate_config_changed",
+        )
+
+    return _validate_beta_delegate_runtime(
+        runtime,
+        model=final_model,
+        elevate_home=elevate_home,
+    )
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -1473,6 +1825,9 @@ def _build_child_agent(
     # the "child ⊆ parent toolsets" rule — orchestrator + specialist-fleet
     # model. Unknown id → generic subagent.
     agent: Optional[str] = None,
+    # Raw per-task object, used only by exact Beta to reject stale provider
+    # escape fields that the stable delegate schema otherwise ignores.
+    task_overrides: Optional[Mapping[str, Any]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1759,6 +2114,41 @@ def _build_child_agent(
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
 
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    beta_provider_active = beta_provider_policy_active()
+    if beta_provider_active:
+        # Re-resolve inside this per-child construction path, after prompt,
+        # role, toolset, and specialist work and immediately before AIAgent
+        # creates its client. Never reuse the parent client/key/pool or the
+        # earlier delegate_task credential snapshot.
+        beta_runtime = _resolve_beta_delegation_runtime(
+            parent_agent=parent_agent,
+            requested_model=model,
+            override_provider=override_provider,
+            override_base_url=override_base_url,
+            override_api_key=override_api_key,
+            override_api_mode=override_api_mode,
+            override_acp_command=override_acp_command,
+            override_acp_args=override_acp_args,
+            role=role,
+            task_overrides=task_overrides,
+            specialist_definition=_spec_def,
+        )
+        effective_model = beta_runtime["model"]
+        effective_provider = beta_runtime["provider"]
+        effective_base_url = beta_runtime["base_url"]
+        effective_api_key = beta_runtime["api_key"]
+        effective_api_mode = beta_runtime["api_mode"]
+        effective_acp_command = None
+        effective_acp_args = []
+        parent_fallback = None
+        child_providers_allowed = None
+        child_providers_ignored = None
+        child_providers_order = None
+        child_provider_sort = None
+        child_openrouter_min_coding_score = None
+
     child = AIAgent(
         base_url=effective_base_url,
         api_key=effective_api_key,
@@ -1797,6 +2187,10 @@ def _build_child_agent(
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
     )
+    if beta_provider_active:
+        # Runtime proof consumed by result normalization. The fresh credential
+        # itself is intentionally not copied into this metadata.
+        child._beta_delegate_provider_confined = True
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Set delegation depth so children can't spawn grandchildren
     child._delegate_depth = child_depth
@@ -1818,9 +2212,10 @@ def _build_child_agent(
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
-    child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
-    if child_pool is not None:
-        child._credential_pool = child_pool
+    if not beta_provider_active:
+        child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
+        if child_pool is not None:
+            child._credential_pool = child_pool
 
     # Register child for interrupt propagation
     if hasattr(parent_agent, "_active_children"):
@@ -2233,6 +2628,14 @@ def _run_single_child(
                 pass
 
             is_timeout = isinstance(_timeout_exc, (FuturesTimeoutError, TimeoutError))
+            beta_confined = (
+                getattr(child, "_beta_delegate_provider_confined", False) is True
+            )
+            failure_status = (
+                "failed"
+                if beta_confined
+                else ("timeout" if is_timeout else "error")
+            )
             duration = round(time.monotonic() - child_start, 2)
             logger.warning(
                 "Subagent %d %s after %.1fs",
@@ -2276,7 +2679,7 @@ def _run_single_child(
                             if is_timeout
                             else str(_timeout_exc)
                         ),
-                        status="timeout" if is_timeout else "error",
+                        status=failure_status,
                         duration_seconds=duration,
                         summary="",
                         child_session_id=getattr(child, "session_id", None),
@@ -2302,12 +2705,19 @@ def _run_single_child(
                     )
             else:
                 _err = str(_timeout_exc)
+            if beta_confined:
+                code = (
+                    "beta_delegate_timeout"
+                    if is_timeout
+                    else "beta_delegate_provider_failed"
+                )
+                _err = f"Error [{code}]: {_err}"
 
             _timeout_entry: Dict[str, Any] = {
                 "task_index": task_index,
                 "subagent_id": _subagent_id,
                 "child_session_id": getattr(child, "session_id", None),
-                "status": "timeout" if is_timeout else "error",
+                "status": failure_status,
                 "summary": None,
                 "error": _err,
                 "exit_reason": "timeout" if is_timeout else "error",
@@ -2341,9 +2751,12 @@ def _run_single_child(
         completed = result.get("completed", False)
         interrupted = result.get("interrupted", False)
         api_calls = result.get("api_calls", 0)
+        beta_runtime_error = _beta_delegate_child_runtime_error(child)
 
         if interrupted:
             status = "interrupted"
+        elif beta_runtime_error:
+            status = "failed"
         elif agent_result_succeeded(result):
             status = "completed"
         else:
@@ -2449,8 +2862,9 @@ def _run_single_child(
             ),
         }
         if status == "failed":
-            entry["error"] = agent_result_error(
-                result, "Subagent did not produce a response."
+            entry["error"] = beta_runtime_error or agent_result_error(
+                result,
+                "Subagent did not produce a response.",
             )
 
         # Partial-success contract: any non-completed outcome (failed run,
@@ -2578,13 +2992,21 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
+        beta_confined = (
+            getattr(child, "_beta_delegate_provider_confined", False) is True
+        )
+        visible_error = (
+            f"Error [beta_delegate_provider_failed]: {exc}"
+            if beta_confined
+            else str(exc)
+        )
         _error_entry: Dict[str, Any] = {
             "task_index": task_index,
             "subagent_id": _subagent_id,
             "child_session_id": getattr(child, "session_id", None),
-            "status": "error",
+            "status": "failed" if beta_confined else "error",
             "summary": None,
-            "error": str(exc),
+            "error": visible_error,
             "api_calls": 0,
             "duration_seconds": duration,
             "_child_role": getattr(child, "_delegate_role", None),
@@ -2768,6 +3190,33 @@ def delegate_task(
             "(`p` in /agents) or the `delegation.pause` RPC before retrying."
         )
 
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    beta_provider_active = beta_provider_policy_active()
+    if beta_provider_active:
+        # Fail before any child/session is constructed when a stale tool schema
+        # or caller tries to smuggle provider-bearing fields into the otherwise
+        # permissive delegate payload. The same checks run again at each final
+        # child construction boundary to close config/auth races.
+        try:
+            _validate_beta_delegate_role(role, source="top-level role")
+            _validate_beta_delegate_provider_surface(
+                {
+                    **_extra,
+                    "acp_command": acp_command,
+                    "acp_args": acp_args,
+                },
+                source="top-level call override",
+            )
+        except Exception as exc:
+            return tool_error(
+                _beta_delegate_error(exc),
+                code=str(
+                    getattr(exc, "code", "")
+                    or "beta_delegate_provider_policy_failed"
+                ),
+            )
+
     # Normalise the top-level role once; per-task overrides re-normalise.
     top_role = _normalize_role(role)
 
@@ -2808,10 +3257,22 @@ def delegate_task(
     # bundle (base_url, api_key, api_mode) via the same runtime provider system
     # used by CLI/gateway startup.  When unconfigured, returns None values so
     # children inherit from the parent.
-    try:
-        creds = _resolve_delegation_credentials(cfg, parent_agent)
-    except ValueError as exc:
-        return tool_error(str(exc))
+    if beta_provider_active:
+        # Exact Beta resolves independently for every child immediately before
+        # its AIAgent/client construction. Do not take a reusable credential
+        # snapshot here.
+        creds = {
+            "model": None,
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+    else:
+        try:
+            creds = _resolve_delegation_credentials(cfg, parent_agent)
+        except ValueError as exc:
+            return tool_error(str(exc))
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -2849,6 +3310,24 @@ def delegate_task(
             )
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
+        if beta_provider_active:
+            try:
+                _validate_beta_delegate_role(
+                    task.get("role") or role,
+                    source=f"task {i} role",
+                )
+                _validate_beta_delegate_provider_surface(
+                    task,
+                    source=f"task {i} override",
+                )
+            except Exception as exc:
+                return tool_error(
+                    _beta_delegate_error(exc),
+                    code=str(
+                        getattr(exc, "code", "")
+                        or "beta_delegate_provider_policy_failed"
+                    ),
+                )
 
     overall_start = time.monotonic()
     results = []
@@ -2897,10 +3376,26 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                task_overrides=t,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
+    except Exception as exc:
+        if not beta_provider_active:
+            raise
+        for _i, _t, built_child in children:
+            try:
+                built_child.close()
+            except Exception:
+                logger.debug("Failed to close partially built Beta child", exc_info=True)
+        return tool_error(
+            _beta_delegate_error(exc),
+            code=str(
+                getattr(exc, "code", "")
+                or "beta_delegate_provider_policy_failed"
+            ),
+        )
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
