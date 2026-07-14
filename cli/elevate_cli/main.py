@@ -242,6 +242,27 @@ def _relative_time(ts) -> str:
 
 def _has_any_provider_configured() -> bool:
     """Check if at least one inference provider is usable."""
+    # Exact Realtor Beta has one inference authority: current-profile Codex
+    # state.  Do this before importing the generic registry/auth resolver so
+    # ambient API keys, host credentials, credential pools, and provider
+    # status probes cannot make a fresh Beta profile look configured.
+    from elevate_cli.beta_provider_policy import (
+        beta_provider_policy_active,
+        build_beta_primary_overlay,
+        read_beta_codex_auth_status,
+    )
+
+    if beta_provider_policy_active():
+        from elevate_cli.config import read_raw_config
+        from elevate_constants import get_elevate_home
+
+        try:
+            auth_status = read_beta_codex_auth_status(get_elevate_home())
+            overlay = build_beta_primary_overlay(read_raw_config(), auth_status)
+        except Exception:
+            return False
+        return overlay.get("status") == "configured"
+
     from elevate_cli.config import get_env_path, get_elevate_home, load_config
     from elevate_cli.auth import get_auth_status
 

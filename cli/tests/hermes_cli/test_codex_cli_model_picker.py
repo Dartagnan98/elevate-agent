@@ -75,6 +75,63 @@ def test_normal_path_still_works(elevate_auth_only_env):
     assert "openai-codex" in slugs
 
 
+def test_exact_beta_inventory_returns_only_local_codex_without_discovery(
+    elevate_auth_only_env,
+    monkeypatch,
+):
+    """Ambient alternate credentials cannot enter any exact-Beta inventory caller."""
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-surface")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-surface")
+    monkeypatch.setattr(
+        "agent.models_dev.fetch_models_dev",
+        lambda *_args, **_kwargs: pytest.fail("models.dev discovery reached in exact Beta"),
+    )
+    monkeypatch.setattr(
+        "elevate_cli.auth.get_auth_status",
+        lambda *_args, **_kwargs: pytest.fail("generic auth discovery reached in exact Beta"),
+    )
+
+    from elevate_cli.beta_provider_policy import BETA_ALLOWED_MODELS
+    from elevate_cli.model_switch import list_authenticated_providers
+
+    providers = list_authenticated_providers(
+        current_provider="anthropic",
+        user_providers={"anthropic": {"api_key": "hostile"}},
+        custom_providers=[{"name": "hostile", "base_url": "https://example.invalid"}],
+        max_models=3,
+    )
+
+    assert providers == [
+        {
+            "slug": "openai-codex",
+            "name": "OpenAI Codex",
+            "is_current": True,
+            "is_user_defined": False,
+            "models": list(BETA_ALLOWED_MODELS[:3]),
+            "total_models": len(BETA_ALLOWED_MODELS),
+            "source": "realtor-beta-policy",
+            "authenticated": True,
+        }
+    ]
+
+
+def test_exact_beta_inventory_is_empty_without_local_codex_auth(tmp_path, monkeypatch):
+    elevate_home = tmp_path / ".elevate-beta"
+    elevate_home.mkdir()
+    (elevate_home / "auth.json").write_text(
+        json.dumps({"providers": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-count")
+
+    from elevate_cli.model_switch import list_authenticated_providers
+
+    assert list_authenticated_providers(current_provider="anthropic") == []
+
+
 @pytest.fixture()
 def claude_code_only_env(tmp_path, monkeypatch):
     """Set up an environment where Anthropic credentials only exist in

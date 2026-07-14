@@ -1,5 +1,6 @@
 """Tests for API-key provider support (z.ai/GLM, Kimi, MiniMax, AI Gateway)."""
 
+import json
 import os
 
 import pytest
@@ -654,6 +655,65 @@ class TestRuntimeProviderResolution:
 # =============================================================================
 
 class TestHasAnyProviderConfigured:
+
+    def test_exact_beta_ignores_ambient_alternate_credentials(self, monkeypatch, tmp_path):
+        """Only current-profile Codex state can satisfy Beta first-run readiness."""
+        from elevate_cli import config as config_module
+
+        elevate_home = tmp_path / ".elevate-beta"
+        elevate_home.mkdir()
+        (elevate_home / "config.yaml").write_text(
+            "model:\n  provider: anthropic\n  default: claude-opus-4-6\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-count")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-count")
+        monkeypatch.setattr(config_module, "get_elevate_home", lambda: elevate_home)
+        monkeypatch.setattr(
+            "elevate_cli.auth.get_auth_status",
+            lambda *_args, **_kwargs: pytest.fail("generic auth status reached in exact Beta"),
+        )
+
+        from elevate_cli.main import _has_any_provider_configured
+
+        assert _has_any_provider_configured() is False
+
+    def test_exact_beta_uses_local_codex_auth_without_generic_discovery(self, monkeypatch, tmp_path):
+        """A valid current-profile Codex state enables the default Beta model."""
+        from elevate_cli import config as config_module
+
+        elevate_home = tmp_path / ".elevate-beta"
+        elevate_home.mkdir()
+        (elevate_home / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (elevate_home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "providers": {
+                        "openai-codex": {
+                            "tokens": {
+                                "access_token": "opaque-access-token",
+                                "refresh_token": "opaque-refresh-token",
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+        monkeypatch.setenv("GEMINI_API_KEY", "must-not-be-read")
+        monkeypatch.setattr(config_module, "get_elevate_home", lambda: elevate_home)
+        monkeypatch.setattr(
+            "elevate_cli.auth.get_auth_status",
+            lambda *_args, **_kwargs: pytest.fail("generic auth status reached in exact Beta"),
+        )
+
+        from elevate_cli.main import _has_any_provider_configured
+
+        assert _has_any_provider_configured() is True
 
     def test_glm_key_counts(self, monkeypatch, tmp_path):
         from elevate_cli import config as config_module

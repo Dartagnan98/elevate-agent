@@ -1065,6 +1065,43 @@ def list_authenticated_providers(
 
     Only includes providers that have API keys set or are user-defined endpoints.
     """
+    # Inventory is itself a provider-discovery entry point.  Exact Realtor
+    # Beta must return before registry, models.dev, credential-pool, custom
+    # endpoint, or ambient-key inspection.  A disconnected profile returns an
+    # empty authenticated inventory; onboarding owns the Codex connect CTA.
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_MODELS,
+        BETA_ALLOWED_PROVIDER,
+        beta_provider_policy_active,
+        read_beta_codex_auth_status,
+    )
+
+    if beta_provider_policy_active():
+        from elevate_constants import get_elevate_home
+
+        auth_status = read_beta_codex_auth_status(get_elevate_home())
+        if not auth_status.get("logged_in"):
+            return []
+        try:
+            limit = max(0, int(max_models))
+        except (TypeError, ValueError):
+            limit = 8
+        models = list(BETA_ALLOWED_MODELS)
+        return [
+            {
+                "slug": BETA_ALLOWED_PROVIDER,
+                "name": "OpenAI Codex",
+                # Exact Beta canonicalizes stale config before it reaches the
+                # picker.  With one supported provider, that row is current.
+                "is_current": True,
+                "is_user_defined": False,
+                "models": models[:limit],
+                "total_models": len(models),
+                "source": "realtor-beta-policy",
+                "authenticated": True,
+            }
+        ]
+
     import os
     from agent.models_dev import (
         PROVIDER_TO_MODELS_DEV,
