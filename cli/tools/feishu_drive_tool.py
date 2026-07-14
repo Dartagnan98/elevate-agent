@@ -390,6 +390,7 @@ registry.register(
     is_async=False,
     description="List document comments",
     emoji="\U0001f4ac",
+    effects={"read:feishu", "credential_access:feishu"},
 )
 
 registry.register(
@@ -402,6 +403,7 @@ registry.register(
     is_async=False,
     description="List comment replies",
     emoji="\U0001f4ac",
+    effects={"read:feishu", "credential_access:feishu"},
 )
 
 registry.register(
