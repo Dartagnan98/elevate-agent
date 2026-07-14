@@ -38,6 +38,7 @@ const { createCrashReporter } = require("./crash-reporter");
 const { createInstallerController } = require("./installer");
 const {
   applyElectronProfile,
+  backendRuntimeExpectation,
   resolveReleaseProfile,
   resolveRuntimePaths,
 } = require("./release-profile");
@@ -51,6 +52,10 @@ const RUNTIME_PATHS = resolveRuntimePaths({
   profile: RELEASE_PROFILE,
   home: HOME,
   env: process.env,
+});
+const BACKEND_RUNTIME_EXPECTATION = backendRuntimeExpectation({
+  profile: RELEASE_PROFILE,
+  paths: RUNTIME_PATHS,
 });
 process.env.ELEVATE_HOME = RUNTIME_PATHS.elevateHome;
 process.env.ELEVATE_RELEASE_CHANNEL = RELEASE_PROFILE.channel;
@@ -522,7 +527,12 @@ async function requestJson(pathname, timeoutMs = 2000, port = backendPort) {
 }
 
 async function backendIsReady(port = backendPort) {
-  return backendHttp.backendIsReady({ http, host: HOST, port });
+  return backendHttp.backendIsReady({
+    http,
+    host: HOST,
+    port,
+    expectedRuntime: BACKEND_RUNTIME_EXPECTATION,
+  });
 }
 
 async function dashboardChatEnabled(port = backendPort) {

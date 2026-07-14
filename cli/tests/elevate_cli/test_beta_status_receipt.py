@@ -1,0 +1,150 @@
+"""Runtime truth receipts used by the Realtor Beta desktop boundary."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_MODELS_VERSION,
+    BETA_ALLOWED_PROVIDER,
+    BETA_DEFAULT_MODEL,
+    BETA_PROVIDER_POLICY_VERSION,
+)
+from elevate_cli.web_routes.status import (
+    _beta_runtime_receipt,
+    create_status_router,
+)
+
+
+def _config(
+    *,
+    provider: str = BETA_ALLOWED_PROVIDER,
+    model: str = BETA_DEFAULT_MODEL,
+) -> dict:
+    return {
+        "model": {
+            "provider": provider,
+            "default": model,
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_mode": "codex_responses",
+        }
+    }
+
+
+def _auth(*, ready: bool = True, reason: str | None = None) -> dict:
+    return {"logged_in": ready, "reason": reason}
+
+
+def test_beta_runtime_receipt_reports_only_public_runtime_truth(tmp_path):
+    home = tmp_path / "profile" / ".." / ".elevate-beta"
+
+    receipt = _beta_runtime_receipt(
+        elevate_home=home,
+        config=_config(),
+        auth_status={
+            "logged_in": True,
+            "reason": None,
+            "auth_store": "/secret/auth.json",
+            "access_token": "must-not-leak",
+        },
+    )
+
+    assert receipt == {
+        "releaseChannel": "beta",
+        "elevateHome": str(home.resolve(strict=False)),
+        "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
+        "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
+        "allowedProvider": BETA_ALLOWED_PROVIDER,
+        "configuredProvider": BETA_ALLOWED_PROVIDER,
+        "configuredModel": BETA_DEFAULT_MODEL,
+        "authReady": True,
+        "authReason": None,
+        "runtimeReady": True,
+        "blockedReason": None,
+    }
+    assert "secret" not in repr(receipt).lower()
+    assert "auth.json" not in repr(receipt)
+
+
+@pytest.mark.parametrize(
+    ("config", "auth_status", "expected_reason"),
+    [
+        (_config(provider="anthropic"), _auth(), "beta_provider_not_allowed"),
+        ({"model": {"default": BETA_DEFAULT_MODEL}}, _auth(), "beta_model_configuration_incomplete"),
+        (_config(model="hostile-model"), _auth(), "beta_model_not_allowed"),
+        (_config(), _auth(ready=False, reason="missing_auth_store"), "missing_auth_store"),
+        ({}, _auth(), "missing_beta_provider"),
+    ],
+)
+def test_beta_runtime_receipt_fails_closed_with_typed_reason(
+    tmp_path,
+    config,
+    auth_status,
+    expected_reason,
+):
+    receipt = _beta_runtime_receipt(
+        elevate_home=tmp_path,
+        config=config,
+        auth_status=auth_status,
+    )
+
+    assert receipt["runtimeReady"] is False
+    assert receipt["blockedReason"] == expected_reason
+
+
+def _status_endpoint(**kwargs):
+    router = create_status_router(
+        workspace_root=Path("/tmp/workspace"),
+        get_session_db=lambda: None,
+        session_active_window_sec=25,
+        check_config_version_func=lambda: (1, 1),
+        get_running_pid_func=lambda: None,
+        read_runtime_status_func=lambda: None,
+        gateway_health_url_func=lambda: None,
+        probe_gateway_health_func=lambda: (False, None),
+        **kwargs,
+    )
+    return next(route.endpoint for route in router.routes if route.path == "/api/status")
+
+
+def test_status_adds_receipt_only_for_exact_lowercase_beta(monkeypatch, tmp_path):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path / ".elevate-beta"))
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    endpoint = _status_endpoint(
+        read_raw_config_func=_config,
+        get_elevate_home_func=lambda: tmp_path / ".elevate-beta",
+        read_beta_codex_auth_status_func=lambda _home: _auth(),
+    )
+
+    payload = asyncio.run(endpoint())
+
+    assert payload["beta_runtime"]["runtimeReady"] is True
+    assert payload["beta_runtime"]["releaseChannel"] == "beta"
+
+
+@pytest.mark.parametrize("channel", ["latest", "Beta", "BETA", " beta"])
+def test_stable_and_non_exact_channels_keep_legacy_status_shape(
+    monkeypatch,
+    tmp_path,
+    channel,
+):
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path / ".elevate"))
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", channel)
+
+    def forbidden_read():
+        raise AssertionError("Stable status must not enter the Beta receipt lane")
+
+    endpoint = _status_endpoint(
+        read_raw_config_func=forbidden_read,
+        get_elevate_home_func=lambda: tmp_path / ".elevate",
+        read_beta_codex_auth_status_func=lambda _home: forbidden_read(),
+    )
+
+    payload = asyncio.run(endpoint())
+
+    assert "beta_runtime" not in payload
+    assert "version" in payload
+    assert "gateway_running" in payload

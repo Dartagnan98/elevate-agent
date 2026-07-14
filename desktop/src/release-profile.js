@@ -34,6 +34,19 @@ const BETA = Object.freeze({
   workspaceName: "Elevation Beta",
   preferredPort: 9139,
   gatewayLabel: "ai.elevate.gateway-beta",
+  providerPolicyVersion: "realtor-beta-codex-v1",
+  allowedModelsVersion: "2026-07-14-v1",
+  allowedProvider: "openai-codex",
+  allowedModels: Object.freeze([
+    "gpt-5.5",
+    "gpt-5.4-mini",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex-mini",
+  ]),
 });
 
 function resolveReleaseProfile(channel) {
@@ -82,6 +95,18 @@ function resolveRuntimePaths({ profile, home, env = {} }) {
   };
 }
 
+function backendRuntimeExpectation({ profile, paths }) {
+  if (!profile.isBeta) return null;
+  return Object.freeze({
+    releaseChannel: profile.channel,
+    elevateHome: path.resolve(paths.elevateHome),
+    providerPolicyVersion: profile.providerPolicyVersion,
+    allowedModelsVersion: profile.allowedModelsVersion,
+    allowedProvider: profile.allowedProvider,
+    allowedModels: profile.allowedModels,
+  });
+}
+
 function applyElectronProfile({ app, fs, profile, paths }) {
   app.setName(profile.productName);
   if (!profile.isBeta) return;
@@ -105,6 +130,7 @@ module.exports = {
   STABLE,
   artifactFileName,
   applyElectronProfile,
+  backendRuntimeExpectation,
   downloadAliasFileName,
   downloadAliasFileNames,
   releaseArtifactNames,

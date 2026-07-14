@@ -59,16 +59,40 @@ async function requestJson(deps) {
   }
 }
 
-async function backendIsReady({ http, host, port }) {
+function betaRuntimeMatches(payload, expectedRuntime) {
+  const receipt = payload && payload.beta_runtime;
+  return Boolean(
+    receipt &&
+      typeof receipt === "object" &&
+      receipt.releaseChannel === expectedRuntime.releaseChannel &&
+      receipt.elevateHome === expectedRuntime.elevateHome &&
+      receipt.providerPolicyVersion === expectedRuntime.providerPolicyVersion &&
+      receipt.allowedModelsVersion === expectedRuntime.allowedModelsVersion &&
+      receipt.allowedProvider === expectedRuntime.allowedProvider &&
+      receipt.configuredProvider === expectedRuntime.allowedProvider &&
+      typeof receipt.configuredModel === "string" &&
+      Array.isArray(expectedRuntime.allowedModels) &&
+      expectedRuntime.allowedModels.includes(receipt.configuredModel) &&
+      receipt.authReady === true &&
+      receipt.authReason === null &&
+      receipt.runtimeReady === true &&
+      receipt.blockedReason === null
+  );
+}
+
+async function backendIsReady({ http, host, port, expectedRuntime = null }) {
   const status = await request({ http, host, pathname: "/api/status", timeoutMs: 2000, port });
   if (status !== 200) return false;
   const payload = await requestJson({ http, host, pathname: "/api/status", timeoutMs: 2000, port });
-  return Boolean(
+  const legacyReady = Boolean(
     payload &&
       typeof payload === "object" &&
       typeof payload.version === "string" &&
       Object.prototype.hasOwnProperty.call(payload, "gateway_running"),
   );
+  if (!legacyReady) return false;
+  if (!expectedRuntime) return true;
+  return betaRuntimeMatches(payload, expectedRuntime);
 }
 
 async function dashboardChatEnabled({ http, host, port }) {
@@ -78,6 +102,7 @@ async function dashboardChatEnabled({ http, host, port }) {
 
 module.exports = {
   backendIsReady,
+  betaRuntimeMatches,
   dashboardChatEnabled,
   request,
   requestJson,

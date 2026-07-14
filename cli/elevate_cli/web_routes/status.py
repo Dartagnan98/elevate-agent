@@ -13,11 +13,22 @@ from typing import Any, Callable
 from fastapi import APIRouter
 
 from elevate_cli import __release_date__, __version__
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_MODELS,
+    BETA_ALLOWED_MODELS_VERSION,
+    BETA_ALLOWED_PROVIDER,
+    BETA_PROVIDER_POLICY_VERSION,
+    BetaProviderPolicyError,
+    beta_provider_policy_active,
+    read_beta_codex_auth_status,
+    validate_beta_config_for_persistence,
+)
 from elevate_cli.config import (
     check_config_version,
     get_config_path,
     get_elevate_home,
     get_env_path,
+    read_raw_config,
 )
 from gateway.status import get_running_pid, read_runtime_status
 
@@ -81,6 +92,81 @@ def _store_status_payload(payload: dict[str, Any]) -> None:
         _status_cache_expires_at = time.monotonic() + _STATUS_CACHE_TTL_SEC
 
 
+def _configured_primary(config: Any) -> tuple[str, str]:
+    """Return only public-safe string fields from the raw primary config."""
+    if not isinstance(config, dict):
+        return "", ""
+    model = config.get("model")
+    if not isinstance(model, dict):
+        return "", ""
+    provider_value = model.get("provider")
+    model_value = model.get("default") or model.get("model")
+    provider = provider_value.strip() if isinstance(provider_value, str) else ""
+    model_id = model_value.strip() if isinstance(model_value, str) else ""
+    return provider, model_id
+
+
+def _beta_runtime_receipt(
+    *,
+    elevate_home: Path,
+    config: Any,
+    auth_status: Any,
+) -> dict[str, Any]:
+    """Build the public-safe, pure-read receipt used for Beta adoption.
+
+    Config validation is run with a synthetic ready auth flag so config-policy
+    failures remain distinct from the current profile's local auth reason.  No
+    secret values, auth paths, tokens, custom endpoints, or provider metadata
+    are copied into the receipt.
+    """
+    normalized_home = elevate_home.expanduser().resolve(strict=False)
+    raw_config = config if isinstance(config, dict) else {}
+    local_auth = auth_status if isinstance(auth_status, dict) else {}
+    configured_provider, configured_model = _configured_primary(raw_config)
+
+    blocked_reason: str | None = None
+    try:
+        validate_beta_config_for_persistence(
+            raw_config,
+            {"logged_in": True},
+            environ={"ELEVATE_RELEASE_CHANNEL": "beta"},
+        )
+    except BetaProviderPolicyError as exc:
+        blocked_reason = exc.code
+
+    if blocked_reason is None and not configured_provider:
+        blocked_reason = "missing_beta_provider"
+    if blocked_reason is None and not configured_model:
+        blocked_reason = "missing_beta_model"
+
+    auth_ready = bool(local_auth.get("logged_in"))
+    auth_reason = local_auth.get("reason")
+    if not isinstance(auth_reason, str):
+        auth_reason = None
+    if blocked_reason is None and not auth_ready:
+        blocked_reason = auth_reason or "beta_codex_auth_required"
+
+    runtime_ready = (
+        blocked_reason is None
+        and auth_ready
+        and configured_provider == BETA_ALLOWED_PROVIDER
+        and configured_model in BETA_ALLOWED_MODELS
+    )
+    return {
+        "releaseChannel": "beta",
+        "elevateHome": str(normalized_home),
+        "providerPolicyVersion": BETA_PROVIDER_POLICY_VERSION,
+        "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
+        "allowedProvider": BETA_ALLOWED_PROVIDER,
+        "configuredProvider": configured_provider,
+        "configuredModel": configured_model,
+        "authReady": auth_ready,
+        "authReason": auth_reason,
+        "runtimeReady": runtime_ready,
+        "blockedReason": blocked_reason,
+    }
+
+
 def create_status_router(
     *,
     workspace_root: Path,
@@ -91,6 +177,9 @@ def create_status_router(
     read_runtime_status_func=read_runtime_status,
     gateway_health_url_func=lambda: _GATEWAY_HEALTH_URL,
     probe_gateway_health_func=_probe_gateway_health,
+    read_raw_config_func=read_raw_config,
+    get_elevate_home_func=get_elevate_home,
+    read_beta_codex_auth_status_func=read_beta_codex_auth_status,
     log: logging.Logger | None = None,
 ) -> APIRouter:
     """Build the dashboard status route."""
@@ -200,6 +289,15 @@ def create_status_router(
             "gateway_updated_at": gateway_updated_at,
             "active_sessions": active_sessions,
         }
+        if beta_provider_policy_active():
+            elevate_home = get_elevate_home_func()
+            raw_config = read_raw_config_func()
+            auth_status = read_beta_codex_auth_status_func(elevate_home)
+            payload["beta_runtime"] = _beta_runtime_receipt(
+                elevate_home=Path(elevate_home),
+                config=raw_config,
+                auth_status=auth_status,
+            )
         _store_status_payload(payload)
         return payload
 

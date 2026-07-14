@@ -11,6 +11,7 @@ const createBuilderConfig = require("../electron-builder.config");
 const {
   artifactFileName,
   applyElectronProfile,
+  backendRuntimeExpectation,
   downloadAliasFileName,
   downloadAliasFileNames,
   releaseArtifactNames,
@@ -103,6 +104,39 @@ test("Beta runtime roots cannot inherit Stable state", () => {
   );
   assert.equal(beta.gatewayLabel, "ai.elevate.gateway-beta");
   assert.equal(stable.gatewayLabel, "ai.elevate.gateway");
+});
+
+test("desktop requires the exact Beta runtime receipt and leaves Stable legacy-compatible", () => {
+  const home = "/Users/tester";
+  const stableProfile = resolveReleaseProfile("latest");
+  const betaProfile = resolveReleaseProfile("beta");
+  const stablePaths = resolveRuntimePaths({ profile: stableProfile, home });
+  const betaPaths = resolveRuntimePaths({ profile: betaProfile, home });
+
+  assert.equal(
+    backendRuntimeExpectation({ profile: stableProfile, paths: stablePaths }),
+    null,
+  );
+  assert.deepEqual(
+    backendRuntimeExpectation({ profile: betaProfile, paths: betaPaths }),
+    {
+      releaseChannel: "beta",
+      elevateHome: "/Users/tester/.elevate-beta",
+      providerPolicyVersion: "realtor-beta-codex-v1",
+      allowedModelsVersion: "2026-07-14-v1",
+      allowedProvider: "openai-codex",
+      allowedModels: [
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini",
+      ],
+    },
+  );
 });
 
 test("Electron path overrides apply only to Beta", () => {

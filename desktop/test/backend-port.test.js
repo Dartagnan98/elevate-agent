@@ -88,3 +88,15 @@ test("backend port controller picks the first empty fallback port", async () => 
 
   assert.equal(selectedPort(), 9121);
 });
+
+test("backend port controller does not adopt a preferred backend rejected by readiness", async () => {
+  const { controller, selectedPort } = makeController({
+    ready: { 9119: false },
+    bundle: { 9119: true },
+    chat: { 9119: true },
+  });
+
+  await controller.chooseBackendPort();
+
+  assert.equal(selectedPort(), 9120);
+});
