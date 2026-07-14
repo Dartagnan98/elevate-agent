@@ -1,4 +1,4 @@
-"""Tests for the unused atomic registry shadow-execution primitive."""
+"""Tests for the atomic registry shadow-execution primitive."""
 
 import asyncio
 import hashlib
@@ -66,14 +66,14 @@ def test_entry_id_is_monotonic_for_every_successful_registration() -> None:
 def test_prepare_binds_exact_args_entry_effects_resolver_and_policy() -> None:
     registry = ToolRegistry()
     resolver_args = []
-    handler_args = []
+    handler_calls = []
 
     def resolve(args: dict):
         resolver_args.append(args)
         return {"read"}
 
-    def handler(args: dict) -> str:
-        handler_args.append(args)
+    def handler(args: dict, **kwargs) -> str:
+        handler_calls.append((args, kwargs))
         return json.dumps(args)
 
     registry.register(
@@ -86,26 +86,51 @@ def test_prepare_binds_exact_args_entry_effects_resolver_and_policy() -> None:
     )
     policy = _policy()
     original_args = {"b": [2], "a": 1}
+    original_handler_kwargs = {
+        "task_id": "task-snapshot",
+        "user_task": None,
+        "enabled_tools": ["skills_list"],
+    }
     token = set_current_execution_policy(policy)
     try:
         prepared = registry._prepare_shadow_call(
             "snapshot",
             original_args,
             _context("call-snapshot", policy_revision=3),
+            handler_kwargs=original_handler_kwargs,
         )
     finally:
         reset_current_execution_policy(token)
 
     original_args["b"].append(3)
+    original_handler_kwargs["enabled_tools"].append("terminal")
+    original_handler_kwargs["task_id"] = "mutated"
     outcome = registry._start_prepared_shadow(prepared)
     expected_json = '{"a":1,"b":[2]}'
+    expected_handler_kwargs_json = (
+        '{"enabled_tools":["skills_list"],'
+        '"task_id":"task-snapshot","user_task":null}'
+    )
 
     assert outcome.started is True
     assert json.loads(outcome.result) == {"a": 1, "b": [2]}
     assert resolver_args == [{"a": 1, "b": [2]}]
-    assert handler_args == [{"a": 1, "b": [2]}]
+    assert handler_calls == [
+        (
+            {"a": 1, "b": [2]},
+            {
+                "enabled_tools": ["skills_list"],
+                "task_id": "task-snapshot",
+                "user_task": None,
+            },
+        )
+    ]
     assert prepared.canonical_args_json == expected_json
     assert prepared.args_digest == hashlib.sha256(expected_json.encode()).hexdigest()
+    assert prepared.canonical_handler_kwargs_json == expected_handler_kwargs_json
+    assert prepared.handler_kwargs_digest == hashlib.sha256(
+        expected_handler_kwargs_json.encode()
+    ).hexdigest()
     assert prepared.captured_handler is handler
     assert prepared.captured_effect_resolver is resolve
     assert prepared.captured_effects == frozenset({Effect(EffectKind.READ)})
@@ -190,6 +215,45 @@ def test_shadow_api_rejects_unbound_start_time_handler_kwargs() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "handler_kwargs",
+    [
+        {"parent_agent": object()},
+        {"task_id": object()},
+        {"enabled_tools": ["read_file", object()]},
+        {"user_task": float("nan")},
+    ],
+    ids=["opaque-parent-agent", "opaque-task", "opaque-enabled", "non-finite"],
+)
+def test_non_json_or_opaque_handler_context_never_starts(handler_kwargs) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "strict_context",
+        "core",
+        _schema("strict_context"),
+        lambda args, **kwargs: calls.append((args, kwargs)) or "unexpected",
+        effects={"read"},
+    )
+
+    outcome = registry.execute_shadow(
+        "strict_context",
+        {},
+        context=_context("call-invalid-context"),
+        execution_policy=_policy(),
+        handler_kwargs=handler_kwargs,
+    )
+
+    assert outcome.started is False
+    assert calls == []
+    assert outcome.prepared.canonical_args_json == "{}"
+    assert outcome.prepared.args_digest == hashlib.sha256(b"{}").hexdigest()
+    assert outcome.prepared.canonical_handler_kwargs_json is None
+    assert outcome.prepared.handler_kwargs_digest is None
+    assert outcome.prepared.preparation_error.startswith("invalid_handler_context:")
+    assert json.loads(outcome.result)["shadow_status"] == "invalid_handler_context"
+
+
 def test_execute_shadow_runs_async_captured_handler(monkeypatch) -> None:
     registry = ToolRegistry()
     seen = []
@@ -222,6 +286,73 @@ def test_execute_shadow_runs_async_captured_handler(monkeypatch) -> None:
     assert outcome.started is True
     assert outcome.result == "async-result"
     assert seen == [{"value": 7}]
+
+
+def test_shadow_preserves_sync_non_string_result_parity() -> None:
+    registry = ToolRegistry()
+    payload = {"_multimodal": True, "content": [{"type": "text", "text": "ok"}]}
+
+    def handler(_args: dict, **_kwargs):
+        return payload
+
+    registry.register(
+        "sync_multimodal",
+        "core",
+        _schema("sync_multimodal"),
+        handler,
+        effects={"read"},
+    )
+
+    legacy = registry.dispatch("sync_multimodal", {}, task_id="task-sync")
+    outcome = registry.execute_shadow(
+        "sync_multimodal",
+        {},
+        context=_context("call-sync-multimodal"),
+        execution_policy=_policy(),
+        handler_kwargs={"task_id": "task-sync"},
+    )
+
+    assert legacy is payload
+    assert outcome.result is payload
+    assert type(outcome.result) is type(legacy)
+
+
+def test_shadow_preserves_async_non_string_result_parity(monkeypatch) -> None:
+    registry = ToolRegistry()
+    payload = [
+        {"type": "text", "text": "ok"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+
+    async def handler(_args: dict, **_kwargs):
+        await asyncio.sleep(0)
+        return payload
+
+    model_tools = types.ModuleType("model_tools")
+    model_tools._run_async = asyncio.run
+    model_tools._sanitize_tool_error = lambda raw: raw
+    monkeypatch.setitem(sys.modules, "model_tools", model_tools)
+    registry.register(
+        "async_multimodal",
+        "core",
+        _schema("async_multimodal"),
+        handler,
+        is_async=True,
+        effects={"read"},
+    )
+
+    legacy = registry.dispatch("async_multimodal", {}, user_task="show it")
+    outcome = registry.execute_shadow(
+        "async_multimodal",
+        {},
+        context=_context("call-async-multimodal"),
+        execution_policy=_policy(),
+        handler_kwargs={"user_task": "show it"},
+    )
+
+    assert legacy is payload
+    assert outcome.result is payload
+    assert type(outcome.result) is type(legacy)
 
 
 @pytest.mark.parametrize(

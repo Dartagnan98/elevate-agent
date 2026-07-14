@@ -14,6 +14,7 @@ from tools.approval import (
     authorize_effects,
     execution_policy_for_permission_mode,
     get_current_execution_policy,
+    get_current_execution_policy_revision,
     get_session_permission_mode_for_policy,
     reset_current_execution_policy,
     set_current_execution_policy,
@@ -210,17 +211,34 @@ def test_execution_policy_context_binding_restores_prior_value() -> None:
     outer = ExecutionPolicy.for_mode("turn-outer", ExecutionPolicyMode.READ_ONLY)
     inner = ExecutionPolicy.for_mode("turn-inner", ExecutionPolicyMode.PLAN)
     assert get_current_execution_policy() is None
+    assert get_current_execution_policy_revision() is None
 
-    outer_token = set_current_execution_policy(outer)
+    outer_token = set_current_execution_policy(outer, policy_revision=4)
     inner_token = set_current_execution_policy(inner)
     try:
         assert get_current_execution_policy() is inner
+        assert get_current_execution_policy_revision() is None
         reset_current_execution_policy(inner_token)
         assert get_current_execution_policy() is outer
+        assert get_current_execution_policy_revision() == 4
     finally:
         reset_current_execution_policy(outer_token)
 
     assert get_current_execution_policy() is None
+    assert get_current_execution_policy_revision() is None
+
+
+@pytest.mark.parametrize("revision", [True, -1, 1.5, "1"])
+def test_execution_policy_context_rejects_invalid_revision_without_leaking(
+    revision,
+) -> None:
+    policy = ExecutionPolicy.for_mode("turn-invalid-revision", "read_only")
+
+    with pytest.raises((TypeError, ValueError)):
+        set_current_execution_policy(policy, policy_revision=revision)
+
+    assert get_current_execution_policy() is None
+    assert get_current_execution_policy_revision() is None
 
 
 def test_narrow_rejects_effect_scope_and_mode_widening() -> None:

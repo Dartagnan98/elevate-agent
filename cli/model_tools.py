@@ -29,7 +29,7 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import discover_builtin_tools, registry
+from tools.registry import ToolCallContext, discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
 # Memo for get_tool_definitions(). Building the list resolves toolsets, runs
@@ -795,6 +795,84 @@ def _coerce_boolean(value: str):
     return value
 
 
+def _dispatch_model_registry_call(
+    function_name: str,
+    function_args: Dict[str, Any],
+    *,
+    handler_kwargs: Dict[str, Any],
+    session_id: Optional[str],
+    tool_call_id: Optional[str],
+) -> Any:
+    """Use the observational atomic path only with a complete durable identity."""
+    from tools.approval import (
+        ExecutionPolicy,
+        get_current_execution_policy,
+        get_current_execution_policy_revision,
+    )
+
+    policy = get_current_execution_policy()
+    revision = get_current_execution_policy_revision()
+    durable_session_id = session_id.strip() if isinstance(session_id, str) else ""
+    durable_invocation_id = (
+        tool_call_id.strip() if isinstance(tool_call_id, str) else ""
+    )
+    missing = []
+    if not isinstance(policy, ExecutionPolicy):
+        missing.append("policy")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        missing.append("policy_revision")
+    if not durable_session_id:
+        missing.append("session_id")
+    if not durable_invocation_id:
+        missing.append("tool_call_id")
+
+    if missing:
+        logger.debug(
+            "registry shadow fallback: missing durable identity fields=%s",
+            ",".join(missing),
+        )
+        return registry.dispatch(function_name, function_args, **handler_kwargs)
+
+    # Hallucinated or stale tool names retain the exact legacy unknown-tool
+    # payload. Atomic shadow status is internal metadata, not model output.
+    if registry.get_entry(function_name) is None:
+        logger.debug("registry shadow fallback: tool registration unavailable")
+        return registry.dispatch(function_name, function_args, **handler_kwargs)
+
+    try:
+        context = ToolCallContext(
+            session_id=durable_session_id,
+            invocation_id=durable_invocation_id,
+            accepted_turn_id=policy.accepted_turn_id,
+            policy_revision=revision,
+        )
+    except (TypeError, ValueError):
+        logger.debug("registry shadow fallback: invalid durable identity")
+        return registry.dispatch(function_name, function_args, **handler_kwargs)
+
+    outcome = registry.execute_shadow(
+        function_name,
+        function_args,
+        context=context,
+        execution_policy=policy,
+        handler_kwargs=handler_kwargs,
+    )
+    authorization = outcome.prepared.authorization
+    if authorization.allowed:
+        logger.debug(
+            "registry shadow authorization observed: allowed=true started=%s",
+            outcome.started,
+        )
+    else:
+        logger.info(
+            "registry shadow authorization observed: allowed=false reason=%s "
+            "started=%s enforcement=false",
+            authorization.reason,
+            outcome.started,
+        )
+    return outcome.result
+
+
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -876,16 +954,26 @@ def handle_function_call(
             # Prefer the caller-provided list so subagents can't overwrite
             # the parent's tool set via the process-global.
             sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-            result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                enabled_tools=sandbox_enabled,
+            result = _dispatch_model_registry_call(
+                function_name,
+                function_args,
+                handler_kwargs={
+                    "task_id": task_id,
+                    "enabled_tools": sandbox_enabled,
+                },
+                session_id=session_id,
+                tool_call_id=tool_call_id,
             )
         else:
-            result = registry.dispatch(
-                function_name, function_args,
-                task_id=task_id,
-                user_task=user_task,
+            result = _dispatch_model_registry_call(
+                function_name,
+                function_args,
+                handler_kwargs={
+                    "task_id": task_id,
+                    "user_task": user_task,
+                },
+                session_id=session_id,
+                tool_call_id=tool_call_id,
             )
 
         try:

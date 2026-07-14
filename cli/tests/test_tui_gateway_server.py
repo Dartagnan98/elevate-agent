@@ -1151,6 +1151,7 @@ def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
         ExecutionPolicyMode,
         execution_policy_for_permission_mode,
         get_current_execution_policy,
+        get_current_execution_policy_revision,
     )
 
     class _NarrowingReceiptDB(_PromptReceiptDB):
@@ -1165,6 +1166,8 @@ def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
                 )
                 self.rows[key]["effective_policy"] = effective.to_dict()
                 receipt["effective_policy"] = effective.to_dict()
+                self.rows[key]["policy_revision"] = 5
+                receipt["policy_revision"] = 5
             return receipt
 
     db = _NarrowingReceiptDB()
@@ -1173,6 +1176,7 @@ def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
     class _Agent:
         def run_conversation(self, *_args, **_kwargs):
             captured["policy"] = get_current_execution_policy()
+            captured["policy_revision"] = get_current_execution_policy_revision()
             return {
                 "final_response": "ok",
                 "messages": [{"role": "assistant", "content": "ok"}],
@@ -1219,7 +1223,9 @@ def test_prompt_submit_binds_only_effective_policy_read_back_from_receipt(
         )
         assert stored["effective_policy"] == expected_effective.to_dict()
         assert captured["policy"] == expected_effective
+        assert captured["policy_revision"] == 5
         assert get_current_execution_policy() is None
+        assert get_current_execution_policy_revision() is None
     finally:
         approval.clear_session("session-key")
         server._sessions.pop("sid", None)
@@ -1998,11 +2004,19 @@ def test_prompt_submit_releases_running_before_auto_title(monkeypatch):
 def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
     from elevate_state import SessionDB
     from tools import approval
-    from tools.approval import get_current_execution_policy
+    from tools.approval import (
+        get_current_execution_policy,
+        get_current_execution_policy_revision,
+    )
 
     db = SessionDB(db_path=tmp_path / "state.db")
     db.create_session("session-key", source="tui")
-    calls = {"correlation_ids": [], "policies": [], "runs": 0}
+    calls = {
+        "correlation_ids": [],
+        "policies": [],
+        "policy_revisions": [],
+        "runs": 0,
+    }
     recorder_calls = _capture_session_recorder(monkeypatch)
 
     class _Agent:
@@ -2014,6 +2028,9 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
                 get_session_env("ELEVATE_SESSION_MESSAGE_ID")
             )
             calls["policies"].append(get_current_execution_policy())
+            calls["policy_revisions"].append(
+                get_current_execution_policy_revision()
+            )
             return {
                 "final_response": "",
                 "messages": [
@@ -2107,6 +2124,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
         assert len(calls["policies"]) == 1
         assert calls["policies"][0].mode.value == "plan"
         assert calls["policies"][0].accepted_turn_id == "user-receipt-1"
+        assert calls["policy_revisions"] == [0]
         assert len(db.get_messages("session-key")) == 1
         assert db.get_recoverable_prompt_receipt("session-key") is None
     finally:
@@ -2122,6 +2140,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
         "policyless_running",
         "malformed_accepted",
         "malformed_effective",
+        "negative_revision",
     ],
 )
 def test_recovery_interrupts_and_persists_unsafe_policy_receipt(
@@ -2164,6 +2183,12 @@ def test_recovery_interrupts_and_persists_unsafe_policy_receipt(
             "UPDATE prompt_receipts SET effective_policy_json = ? "
             "WHERE session_id = ? AND client_message_id = ?",
             ("{malformed", "session-key", "unsafe-user"),
+        )
+    elif variant == "negative_revision":
+        db._conn.execute(
+            "UPDATE prompt_receipts SET policy_revision = ? "
+            "WHERE session_id = ? AND client_message_id = ?",
+            (-1, "session-key", "unsafe-user"),
         )
 
     emitted = []

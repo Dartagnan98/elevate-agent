@@ -187,10 +187,9 @@ class ToolCallContext:
 class PreparedToolCall:
     """Immutable shadow snapshot of one registry tool call.
 
-    The canonical JSON text is the authoritative argument snapshot.  Both the
-    effect resolver and handler receive a fresh decode of that same text, so a
-    caller mutating its original dict after preparation cannot change what was
-    authorized or executed.
+    Canonical JSON is authoritative for arguments and supported handler kwargs.
+    The resolver and handler receive fresh decodes, so a caller mutating either
+    original object after preparation cannot change what was authorized or run.
     """
 
     tool_name: str
@@ -199,6 +198,8 @@ class PreparedToolCall:
     registry_generation: int
     canonical_args_json: Optional[str]
     args_digest: Optional[str]
+    canonical_handler_kwargs_json: Optional[str]
+    handler_kwargs_digest: Optional[str]
     captured_handler: Optional[Callable] = field(repr=False, compare=False)
     captured_is_async: bool = False
     captured_effects: frozenset = frozenset()
@@ -222,13 +223,22 @@ class PreparedToolCall:
             raise ValueError("prepared call argument snapshot is not an object")
         return value
 
+    def thaw_handler_kwargs(self) -> dict:
+        """Return fresh handler kwargs from the bound JSON snapshot."""
+        if self.canonical_handler_kwargs_json is None:
+            raise ValueError("prepared call has no handler-kwargs snapshot")
+        value = json.loads(self.canonical_handler_kwargs_json)
+        if not isinstance(value, dict):  # defensive; preparation enforces this
+            raise ValueError("prepared handler kwargs are not an object")
+        return value
+
 
 @dataclass(frozen=True, slots=True)
 class ShadowToolExecution:
-    """Result of the unused, non-enforcing shadow execution primitive."""
+    """Result of the non-enforcing atomic shadow execution primitive."""
 
     prepared: PreparedToolCall
-    result: str
+    result: Any
     started: bool
     start_generation: int
     stale_reason: Optional[str] = None
@@ -269,6 +279,25 @@ def _canonicalize_tool_args(args: Any) -> tuple[str, str]:
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return canonical, digest
+
+
+_SHADOW_HANDLER_KWARGS = frozenset({"task_id", "user_task", "enabled_tools"})
+
+
+def _canonicalize_handler_kwargs(kwargs: Any) -> tuple[str, str]:
+    """Freeze the JSON-safe model-tools context accepted by shadow dispatch."""
+    if kwargs is None:
+        kwargs = {}
+    if not isinstance(kwargs, dict):
+        raise TypeError("handler kwargs must be a JSON object")
+    unexpected = sorted(
+        (str(key) for key in kwargs if key not in _SHADOW_HANDLER_KWARGS)
+    )
+    if unexpected:
+        raise ValueError(
+            "unsupported handler kwargs: " + ", ".join(map(str, unexpected))
+        )
+    return _canonicalize_tool_args(kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -575,8 +604,10 @@ class ToolRegistry:
         args: Any,
         context: ToolCallContext,
         execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
+        *,
+        handler_kwargs: Any = None,
     ) -> PreparedToolCall:
-        """Freeze one registry entry, argument object, effects, and policy.
+        """Freeze one registry entry, invocation inputs, effects, and policy.
 
         This is deliberately private: production callers continue to use
         :meth:`dispatch`.  Splitting preparation from start gives the race
@@ -626,6 +657,8 @@ class ToolRegistry:
 
         canonical_args_json = None
         args_digest = None
+        canonical_handler_kwargs_json = None
+        handler_kwargs_digest = None
         preparation_error = "unknown_tool" if entry is None else None
         try:
             canonical_args_json, args_digest = _canonicalize_tool_args(args)
@@ -634,11 +667,24 @@ class ToolRegistry:
                 preparation_error = (
                     f"invalid_arguments:{type(exc).__name__}:{exc}"
                 )
+        try:
+            canonical_handler_kwargs_json, handler_kwargs_digest = (
+                _canonicalize_handler_kwargs(handler_kwargs)
+            )
+        except Exception as exc:
+            if preparation_error is None:
+                preparation_error = (
+                    f"invalid_handler_context:{type(exc).__name__}:{exc}"
+                )
 
         unknown_effect = Effect(EffectKind.UNKNOWN)
         resolved_effects = set(static_effects)
         effect_resolution_error = None
-        if entry is None or canonical_args_json is None:
+        if (
+            entry is None
+            or canonical_args_json is None
+            or canonical_handler_kwargs_json is None
+        ):
             resolved_effects.add(unknown_effect)
         elif effect_resolver is not None:
             try:
@@ -667,6 +713,8 @@ class ToolRegistry:
             registry_generation=generation,
             canonical_args_json=canonical_args_json,
             args_digest=args_digest,
+            canonical_handler_kwargs_json=canonical_handler_kwargs_json,
+            handler_kwargs_digest=handler_kwargs_digest,
             captured_handler=handler,
             captured_is_async=is_async,
             captured_effects=static_effects,
@@ -709,9 +757,14 @@ class ToolRegistry:
                 f"Unknown tool: {prepared.tool_name}",
             )
         if prepared.preparation_error is not None:
+            status = (
+                "invalid_handler_context"
+                if prepared.preparation_error.startswith("invalid_handler_context:")
+                else "invalid_arguments"
+            )
             return self._shadow_start_error(
                 prepared,
-                "invalid_arguments",
+                status,
                 prepared.preparation_error,
             )
 
@@ -761,14 +814,13 @@ class ToolRegistry:
             if handler is None:  # defensive; a valid entry always has one
                 raise RuntimeError("prepared call has no captured handler")
             args = prepared.thaw_args()
+            handler_kwargs = prepared.thaw_handler_kwargs()
             if prepared.captured_is_async:
                 from model_tools import _run_async
 
-                result = _run_async(handler(args))
+                result = _run_async(handler(args, **handler_kwargs))
             else:
-                result = handler(args)
-            if not isinstance(result, str):
-                result = str(result)
+                result = handler(args, **handler_kwargs)
         except Exception as exc:
             logger.exception(
                 "Tool %s shadow execution error: %s",
@@ -798,21 +850,20 @@ class ToolRegistry:
         *,
         context: ToolCallContext,
         execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
+        handler_kwargs: Any = None,
     ) -> ShadowToolExecution:
         """Exercise the atomic registry path without enforcing its decision.
 
-        No production dispatch adapter calls this method yet. Authorization is
-        returned for observation only; even a denied call executes after its
-        registration identity has been revalidated.
+        Authorization is returned for observation only; even a denied call
+        executes after its registration identity and every handler input have
+        been revalidated from their prepared snapshots.
         """
-        # TODO(ERB-406 production routing): explicitly model any legacy
-        # non-JSON handler context before cutover. This shadow boundary rejects
-        # arbitrary start-time kwargs so every executable input is prepared.
         prepared = self._prepare_shadow_call(
             name,
             args,
             context,
             execution_policy,
+            handler_kwargs=handler_kwargs,
         )
         return self._start_prepared_shadow(prepared)
 

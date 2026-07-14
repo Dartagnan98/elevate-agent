@@ -4536,6 +4536,7 @@ def _execution_policy_from_receipt(receipt: dict):
     client_message_id = str(receipt.get("client_message_id") or "")
     if not client_message_id:
         raise ValueError("prompt receipt is missing client_message_id")
+    _execution_policy_revision_from_receipt(receipt)
     accepted_data = receipt.get("accepted_policy")
     effective_data = receipt.get("effective_policy")
     if not isinstance(accepted_data, dict) or not isinstance(effective_data, dict):
@@ -4568,6 +4569,16 @@ def _execution_policy_from_receipt(receipt: dict):
         ) != effective:
             raise ValueError("prompt receipt effective policy exceeds Beta ceiling")
     return effective
+
+
+def _execution_policy_revision_from_receipt(receipt: dict) -> int:
+    """Return one validated durable prompt-receipt policy revision."""
+    revision = receipt.get("policy_revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise ValueError("prompt receipt policy revision must be an integer")
+    if revision < 0:
+        raise ValueError("prompt receipt policy revision cannot be negative")
+    return revision
 
 
 def _interrupt_untrusted_prompt_receipt(
@@ -5404,6 +5415,9 @@ def _(rid, params: dict) -> dict:
 
             try:
                 receipt_execution_policy = _execution_policy_from_receipt(receipt)
+                receipt_policy_revision = _execution_policy_revision_from_receipt(
+                    receipt
+                )
             except Exception as exc:
                 logger.warning(
                     "prompt.submit refused unsafe receipt policy "
@@ -5500,7 +5514,10 @@ def _(rid, params: dict) -> dict:
                 return
             from tools.approval import set_current_execution_policy
 
-            policy_token = set_current_execution_policy(receipt_execution_policy)
+            policy_token = set_current_execution_policy(
+                receipt_execution_policy,
+                policy_revision=receipt_policy_revision,
+            )
             turn_started_at = time.monotonic()
             # Server-initiated wake turns have no optimistic user bubble. Emit
             # their stored marker only after this worker owns the durable claim.

@@ -962,27 +962,61 @@ def execution_policy_for_permission_mode(
 _current_execution_policy: contextvars.ContextVar[Optional[ExecutionPolicy]] = (
     contextvars.ContextVar("current_execution_policy", default=None)
 )
+_current_execution_policy_revision: contextvars.ContextVar[Optional[int]] = (
+    contextvars.ContextVar("current_execution_policy_revision", default=None)
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPolicyContextToken:
+    """Tokens required to restore one policy-and-revision context binding."""
+
+    policy_token: contextvars.Token[Optional[ExecutionPolicy]]
+    revision_token: contextvars.Token[Optional[int]]
 
 
 def set_current_execution_policy(
     policy: ExecutionPolicy,
-) -> contextvars.Token[Optional[ExecutionPolicy]]:
-    """Bind the validated durable policy for the current worker context."""
+    *,
+    policy_revision: Optional[int] = None,
+) -> ExecutionPolicyContextToken:
+    """Bind one validated durable policy and its receipt revision."""
     if not isinstance(policy, ExecutionPolicy):
         raise TypeError("current execution policy must be an ExecutionPolicy")
-    return _current_execution_policy.set(policy)
+    if policy_revision is not None and (
+        isinstance(policy_revision, bool) or not isinstance(policy_revision, int)
+    ):
+        raise TypeError("current execution policy revision must be an integer")
+    if policy_revision is not None and policy_revision < 0:
+        raise ValueError("current execution policy revision cannot be negative")
+
+    policy_token = _current_execution_policy.set(policy)
+    try:
+        revision_token = _current_execution_policy_revision.set(policy_revision)
+    except BaseException:
+        _current_execution_policy.reset(policy_token)
+        raise
+    return ExecutionPolicyContextToken(policy_token, revision_token)
 
 
 def reset_current_execution_policy(
-    token: contextvars.Token[Optional[ExecutionPolicy]],
+    token: ExecutionPolicyContextToken,
 ) -> None:
-    """Restore the worker's prior accepted-turn policy binding."""
-    _current_execution_policy.reset(token)
+    """Restore the worker's prior policy and receipt-revision binding."""
+    if not isinstance(token, ExecutionPolicyContextToken):
+        raise TypeError("invalid execution policy context token")
+    _current_execution_policy_revision.reset(token.revision_token)
+    _current_execution_policy.reset(token.policy_token)
 
 
 def get_current_execution_policy() -> Optional[ExecutionPolicy]:
     """Return the bound durable policy, or ``None`` outside an accepted turn."""
     return _current_execution_policy.get()
+
+
+def get_current_execution_policy_revision() -> Optional[int]:
+    """Return the bound durable receipt revision, if one was supplied."""
+    return _current_execution_policy_revision.get()
 
 
 @dataclass(frozen=True, slots=True)

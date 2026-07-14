@@ -2363,6 +2363,42 @@ class TestConcurrentToolExecution:
         assert {entry[0] for entry in completes} == {"c1", "c2"}
         assert {entry[3] for entry in completes} == {'{"id":1}', '{"id":2}'}
 
+    def test_concurrent_workers_propagate_policy_and_receipt_revision(self, agent):
+        from tools.approval import (
+            ExecutionPolicy,
+            get_current_execution_policy,
+            get_current_execution_policy_revision,
+            reset_current_execution_policy,
+            set_current_execution_policy,
+        )
+
+        tc1 = _mock_tool_call(name="web_search", arguments='{"query":"one"}', call_id="c1")
+        tc2 = _mock_tool_call(name="read_file", arguments='{"path":"two"}', call_id="c2")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        captured = []
+        policy = ExecutionPolicy.for_mode("accepted-concurrent", "read_only")
+
+        def _handle(*_args, **_kwargs):
+            captured.append(
+                (
+                    get_current_execution_policy(),
+                    get_current_execution_policy_revision(),
+                )
+            )
+            return '{"ok":true}'
+
+        token = set_current_execution_policy(policy, policy_revision=13)
+        try:
+            with patch("run_agent.handle_function_call", side_effect=_handle):
+                agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+        finally:
+            reset_current_execution_policy(token)
+
+        assert len(captured) == 2
+        assert all(bound_policy is policy for bound_policy, _revision in captured)
+        assert {revision for _bound_policy, revision in captured} == {13}
+
     def test_invoke_tool_handles_agent_level_tools(self, agent):
         """_invoke_tool should handle todo tool directly."""
         with patch("tools.todo_tool.todo_tool", return_value='{"ok":true}') as mock_todo:
