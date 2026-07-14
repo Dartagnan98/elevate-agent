@@ -27,7 +27,7 @@ from typing import Any, Iterator, Optional, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolClosed, PoolTimeout
 
 from elevate_cli.data import migrations
 from elevate_cli.data import pg_server
@@ -38,6 +38,10 @@ from elevate_constants import get_account_key, get_elevate_home
 # on-disk name for installs that migrated SQLite→PG before scoping landed; the
 # boot-time migration adopts it into the first account's DB.
 LEGACY_APP_DB_NAME = "elevate_operational"
+
+
+class OperationalStoreNotReady(RuntimeError):
+    """The operational store has not completed its normal write-side startup."""
 
 
 def _app_db_name() -> str:
@@ -565,6 +569,68 @@ def connect() -> Iterator[PgConnection]:
 
 
 @contextmanager
+def connect_ready_read_only() -> Iterator[PgConnection]:
+    """Read an already-initialized operational store without bootstrapping it.
+
+    This is the connection boundary for tools whose declared effect is a pure
+    read.  It deliberately never calls :func:`_get_pool`: a cold call must not
+    adopt a legacy database, create an account database, run migrations, or
+    import legacy state just because the model asked to inspect data.
+
+    The pool lock stays held for the bounded read so an account switch or test
+    reset cannot close/rebind the selected pool between validation and query.
+    PostgreSQL enforces the read-only contract, and ``force_rollback`` ensures
+    the transaction is never committed even after a successful read.
+    """
+    key = get_account_key()
+    with _schema_lock:
+        schema_ready = _schema_ready_for == key
+    if not schema_ready:
+        raise OperationalStoreNotReady(
+            "operational store startup has not completed for this account"
+        )
+
+    try:
+        with _pool_lock:
+            # Re-read account identity after waiting for the pool lock.  A
+            # license switch between the first snapshot and this point must
+            # fail closed rather than expose the previous account's rows.
+            if (
+                get_account_key() != key
+                or _pool is None
+                or _pool_account != key
+                or _schema_ready_for != key
+            ):
+                raise OperationalStoreNotReady(
+                    "operational store is not ready for the active account"
+                )
+
+            pool = _pool
+            with pool.connection() as raw:
+                with raw.transaction(force_rollback=True):
+                    with raw.cursor() as cur:
+                        cur.execute("SET TRANSACTION READ ONLY")
+                    yield PgConnection(raw)
+                    # The license file can change without taking _pool_lock.
+                    # Revalidate after the caller computed its snapshot so a
+                    # mid-query account switch discards old-account rows
+                    # instead of returning them to the new active account.
+                    if (
+                        get_account_key() != key
+                        or _pool is not pool
+                        or _pool_account != key
+                        or _schema_ready_for != key
+                    ):
+                        raise OperationalStoreNotReady(
+                            "active account changed during operational store read"
+                        )
+    except (PoolClosed, PoolTimeout) as exc:
+        raise OperationalStoreNotReady(
+            "operational store read pool is not available"
+        ) from exc
+
+
+@contextmanager
 def transaction(conn: PgConnection) -> Iterator[PgConnection]:
     """Open an explicit write transaction inside an already-open ``conn``.
 
@@ -588,4 +654,10 @@ def transaction(conn: PgConnection) -> Iterator[PgConnection]:
         raw.commit()
 
 
-__all__ = ["connect", "transaction", "PgConnection"]
+__all__ = [
+    "connect",
+    "connect_ready_read_only",
+    "OperationalStoreNotReady",
+    "transaction",
+    "PgConnection",
+]

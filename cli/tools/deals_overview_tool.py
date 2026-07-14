@@ -58,11 +58,14 @@ def _deals_overview_handler(args: dict[str, Any], **_: Any) -> str:
     near_subject_days = max(0, _int("near_subject_days", 21))
     stale_days = max(1, _int("stale_days", 14))
 
-    from elevate_cli.data.connection import connect
+    from elevate_cli.data.connection import (
+        OperationalStoreNotReady,
+        connect_ready_read_only,
+    )
     from elevate_cli.data.deals import deals_overview
 
     try:
-        with connect() as conn:
+        with connect_ready_read_only() as conn:
             snap = deals_overview(
                 conn,
                 status=status,
@@ -72,6 +75,15 @@ def _deals_overview_handler(args: dict[str, Any], **_: Any) -> str:
                 near_subject_days=near_subject_days,
                 stale_days=stale_days,
             )
+    except OperationalStoreNotReady:
+        return tool_result(
+            success=False,
+            error="operational_store_not_ready",
+            message=(
+                "Deals data is still starting for the active account. "
+                "Wait for Elevate startup to complete, then retry once."
+            ),
+        )
     except ValueError as exc:
         return tool_error(str(exc))
     except Exception as exc:  # pragma: no cover — safety net
@@ -172,4 +184,5 @@ registry.register(
         "closings-soon, subjects-soon, stale-stages, thin deal list."
     ),
     emoji="",
+    effects={"read:deals"},
 )
