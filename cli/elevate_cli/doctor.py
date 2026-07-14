@@ -23,6 +23,12 @@ _DHH = display_elevate_home()  # user-facing display path (e.g. ~/.elevate or ~/
 load_elevate_dotenv(elevate_home=ELEVATE_HOME, project_env=PROJECT_ROOT / ".env")
 
 from elevate_cli.colors import Colors, color
+from elevate_cli.beta_provider_policy import (
+    BETA_ALLOWED_MODELS,
+    BETA_ALLOWED_PROVIDER,
+    beta_provider_policy_active,
+    read_beta_codex_auth_status,
+)
 from elevate_cli.models import _ELEVATE_USER_AGENT
 from elevate_constants import OPENROUTER_MODELS_URL
 from utils import base_url_host_matches
@@ -166,6 +172,7 @@ def run_doctor(args):
     """Run diagnostic checks."""
     should_fix = getattr(args, 'fix', False)
     ack_target = getattr(args, 'ack', None)
+    realtor_beta = beta_provider_policy_active()
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `elevate`.
@@ -338,27 +345,38 @@ def run_doctor(args):
         
         # Check for common issues
         content = env_path.read_text()
-        if _has_provider_env_config(content):
+        if realtor_beta:
+            check_ok(
+                "Primary inference fixed to OpenAI Codex",
+                "(auth is read only from this Beta profile's auth.json)",
+            )
+        elif _has_provider_env_config(content):
             check_ok("API key or custom endpoint configured")
         else:
             check_warn(f"No API key found in {_DHH}/.env")
             issues.append("Run 'elevate setup' to configure API keys")
     else:
-        # Also check project root as fallback
-        fallback_env = PROJECT_ROOT / '.env'
-        if fallback_env.exists():
-            check_ok(".env file exists (in project directory)")
+        if realtor_beta:
+            check_ok(
+                "No primary-inference .env key required",
+                "(OpenAI Codex auth stays in this Beta profile's auth.json)",
+            )
         else:
-            check_fail(f"{_DHH}/.env file missing")
-            if should_fix:
-                env_path.parent.mkdir(parents=True, exist_ok=True)
-                env_path.touch()
-                check_ok(f"Created empty {_DHH}/.env")
-                check_info("Run 'elevate setup' to configure API keys")
-                fixed_count += 1
+            # Also check project root as fallback
+            fallback_env = PROJECT_ROOT / '.env'
+            if fallback_env.exists():
+                check_ok(".env file exists (in project directory)")
             else:
-                check_info("Run 'elevate setup' to create one")
-                issues.append("Run 'elevate setup' to create .env")
+                check_fail(f"{_DHH}/.env file missing")
+                if should_fix:
+                    env_path.parent.mkdir(parents=True, exist_ok=True)
+                    env_path.touch()
+                    check_ok(f"Created empty {_DHH}/.env")
+                    check_info("Run 'elevate setup' to configure API keys")
+                    fixed_count += 1
+                else:
+                    check_info("Run 'elevate setup' to create one")
+                    issues.append("Run 'elevate setup' to create .env")
     
     # Check ~/.elevate/config.yaml (primary) or project cli-config.yaml (fallback)
     config_path = ELEVATE_HOME / 'config.yaml'
@@ -374,90 +392,111 @@ def run_doctor(args):
             provider = provider_raw.lower()
             default_model = (model_section.get("default") or model_section.get("model") or "").strip()
 
-            known_providers: set = set()
-            try:
-                from elevate_cli.auth import PROVIDER_REGISTRY
-                known_providers = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto"}
-            except Exception:
-                pass
-            try:
-                from elevate_cli.config import get_compatible_custom_providers as _compatible_custom_providers
-                from elevate_cli.providers import resolve_provider_full as _resolve_provider_full
-            except Exception:
-                _compatible_custom_providers = None
-                _resolve_provider_full = None
-
-            custom_providers = []
-            if _compatible_custom_providers is not None:
-                try:
-                    custom_providers = _compatible_custom_providers(cfg)
-                except Exception:
-                    custom_providers = []
-
-            user_providers = cfg.get("providers")
-            if isinstance(user_providers, dict):
-                known_providers.update(str(name).strip().lower() for name in user_providers if str(name).strip())
-            for entry in custom_providers:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "").strip()
-                if name:
-                    known_providers.add("custom:" + name.lower().replace(" ", "-"))
-
-            canonical_provider = provider
-            if provider and _resolve_provider_full is not None and provider != "auto":
-                provider_def = _resolve_provider_full(provider, user_providers, custom_providers)
-                canonical_provider = provider_def.id if provider_def is not None else None
-
-            if provider and provider != "auto":
-                if canonical_provider is None or (known_providers and canonical_provider not in known_providers):
-                    known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
+            if realtor_beta:
+                if provider not in {"", "auto", BETA_ALLOWED_PROVIDER}:
                     check_fail(
-                        f"model.provider '{provider_raw}' is not a recognised provider",
-                        f"(known: {known_list})",
+                        f"model.provider '{provider_raw}' is blocked by Realtor Beta policy",
+                        "(OpenAI Codex only)",
                     )
                     issues.append(
-                        f"model.provider '{provider_raw}' is unknown. "
-                        f"Valid providers: {known_list}. "
-                        f"Fix: run 'elevate config set model.provider <valid_provider>'"
+                        f"Realtor Beta only supports model.provider "
+                        f"'{BETA_ALLOWED_PROVIDER}'; configured value "
+                        f"'{provider_raw}' is blocked."
                     )
-
-            # Warn if model is set to a provider-prefixed name on a provider that doesn't use them
-            if default_model and "/" in default_model and canonical_provider and canonical_provider not in ("openrouter", "custom", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface", "nous"):
-                check_warn(
-                    f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
-                    "(vendor-prefixed slugs belong to aggregators like openrouter)",
-                )
-                issues.append(
-                    f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
-                    "Either set model.provider to 'openrouter', or drop the vendor prefix."
-                )
-
-            # Check credentials for the configured provider.
-            # Limit to API-key providers in PROVIDER_REGISTRY — other provider
-            # types (OAuth, SDK, openrouter/anthropic/custom/auto) have their
-            # own env-var checks elsewhere in doctor, and get_auth_status()
-            # returns a bare {logged_in: False} for anything it doesn't
-            # explicitly dispatch, which would produce false positives.
-            if canonical_provider and canonical_provider not in ("auto", "custom", "openrouter"):
+                if default_model and default_model not in BETA_ALLOWED_MODELS:
+                    check_fail(
+                        f"model.default '{default_model}' is blocked by Realtor Beta policy",
+                        "(choose a supported OpenAI Codex model)",
+                    )
+                    issues.append(
+                        f"Realtor Beta does not support model.default "
+                        f"'{default_model}'."
+                    )
+            else:
+                known_providers: set = set()
                 try:
-                    from elevate_cli.auth import PROVIDER_REGISTRY, get_auth_status
-                    pconfig = PROVIDER_REGISTRY.get(canonical_provider)
-                    if pconfig and getattr(pconfig, "auth_type", "") == "api_key":
-                        status = get_auth_status(canonical_provider) or {}
-                        configured = bool(status.get("configured") or status.get("logged_in") or status.get("api_key"))
-                        if not configured:
-                            check_fail(
-                                f"model.provider '{canonical_provider}' is set but no API key is configured",
-                                "(check ~/.elevate/.env or run 'elevate setup')",
-                            )
-                            issues.append(
-                                f"No credentials found for provider '{canonical_provider}'. "
-                                f"Run 'elevate setup' or set the provider's API key in {_DHH}/.env, "
-                                f"or switch providers with 'elevate config set model.provider <name>'"
-                            )
+                    from elevate_cli.auth import PROVIDER_REGISTRY
+                    known_providers = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto"}
                 except Exception:
                     pass
+                try:
+                    from elevate_cli.config import get_compatible_custom_providers as _compatible_custom_providers
+                    from elevate_cli.providers import resolve_provider_full as _resolve_provider_full
+                except Exception:
+                    _compatible_custom_providers = None
+                    _resolve_provider_full = None
+
+                custom_providers = []
+                if _compatible_custom_providers is not None:
+                    try:
+                        custom_providers = _compatible_custom_providers(cfg)
+                    except Exception:
+                        custom_providers = []
+
+                user_providers = cfg.get("providers")
+                if isinstance(user_providers, dict):
+                    known_providers.update(str(name).strip().lower() for name in user_providers if str(name).strip())
+                for entry in custom_providers:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = str(entry.get("name") or "").strip()
+                    if name:
+                        known_providers.add("custom:" + name.lower().replace(" ", "-"))
+
+                canonical_provider = provider
+                if provider and _resolve_provider_full is not None and provider != "auto":
+                    provider_def = _resolve_provider_full(provider, user_providers, custom_providers)
+                    canonical_provider = provider_def.id if provider_def is not None else None
+
+                if provider and provider != "auto":
+                    if canonical_provider is None or (known_providers and canonical_provider not in known_providers):
+                        known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
+                        check_fail(
+                            f"model.provider '{provider_raw}' is not a recognised provider",
+                            f"(known: {known_list})",
+                        )
+                        issues.append(
+                            f"model.provider '{provider_raw}' is unknown. "
+                            f"Valid providers: {known_list}. "
+                            f"Fix: run 'elevate config set model.provider <valid_provider>'"
+                        )
+
+                # Warn if model is set to a provider-prefixed name on a provider that doesn't use them
+                if default_model and "/" in default_model and canonical_provider and canonical_provider not in ("openrouter", "custom", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface", "nous"):
+                    check_warn(
+                        f"model.default '{default_model}' uses a vendor/model slug but provider is '{provider_raw}'",
+                        "(vendor-prefixed slugs belong to aggregators like openrouter)",
+                    )
+                    issues.append(
+                        f"model.default '{default_model}' is vendor-prefixed but model.provider is '{provider_raw}'. "
+                        "Either set model.provider to 'openrouter', or drop the vendor prefix."
+                    )
+
+                # Check credentials for the configured provider.
+                # Limit to API-key providers in PROVIDER_REGISTRY — other provider
+                # types (OAuth, SDK, openrouter/anthropic/custom/auto) have their
+                # own env-var checks elsewhere in doctor, and get_auth_status()
+                # returns a bare {logged_in: False} for anything it doesn't
+                # explicitly dispatch, which would produce false positives.
+                if canonical_provider and canonical_provider not in ("auto", "custom", "openrouter"):
+                    try:
+                        from elevate_cli.auth import PROVIDER_REGISTRY, get_auth_status
+                        pconfig = PROVIDER_REGISTRY.get(canonical_provider)
+                        if pconfig and getattr(pconfig, "auth_type", "") == "api_key":
+                            status = get_auth_status(canonical_provider) or {}
+                            configured = bool(status.get("configured") or status.get("logged_in") or status.get("api_key"))
+                            if not configured:
+                                check_fail(
+                                    f"model.provider '{canonical_provider}' is set but no API key is configured",
+                                    "(check ~/.elevate/.env or run 'elevate setup')",
+                                )
+                                issues.append(
+                                    f"No credentials found for provider '{canonical_provider}'. "
+                                    f"Run 'elevate setup' or set the provider's API key in {_DHH}/.env, "
+                                    f"or switch providers with 'elevate config set model.provider <name>'"
+                                )
+                    except Exception:
+                        pass
 
         except Exception as e:
             check_warn("Could not validate model/provider config", f"({e})")
@@ -467,7 +506,15 @@ def run_doctor(args):
             check_ok("cli-config.yaml exists (in project directory)")
         else:
             example_config = PROJECT_ROOT / 'cli-config.yaml.example'
-            if should_fix and example_config.exists():
+            if should_fix and realtor_beta:
+                check_warn(
+                    "Realtor Beta config not initialized",
+                    "(use Beta onboarding; generic provider examples are not copied)",
+                )
+                manual_issues.append(
+                    "Complete Realtor Beta onboarding to create the Codex-only config"
+                )
+            elif should_fix and example_config.exists():
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(example_config), str(config_path))
                 check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
@@ -489,7 +536,15 @@ def run_doctor(args):
                     f"Config version outdated (v{current_ver} → v{latest_ver})",
                     "(new settings available)"
                 )
-                if should_fix:
+                if should_fix and realtor_beta:
+                    check_warn(
+                        "Generic config auto-migration disabled in Realtor Beta",
+                        "(use Beta onboarding to refresh the Codex-only config)",
+                    )
+                    manual_issues.append(
+                        "Complete Realtor Beta onboarding to refresh the config schema"
+                    )
+                elif should_fix:
                     try:
                         migrate_config(interactive=False, quiet=False)
                         check_ok("Config migrated to latest version")
@@ -511,11 +566,20 @@ def run_doctor(args):
                 raw_config = yaml.safe_load(f) or {}
             stale_root_keys = [k for k in ("provider", "base_url") if k in raw_config and isinstance(raw_config[k], str)]
             if stale_root_keys:
-                check_warn(
-                    f"Stale root-level config keys: {', '.join(stale_root_keys)}",
-                    "(should be under 'model:' section)"
-                )
-                if should_fix:
+                if realtor_beta:
+                    check_warn(
+                        f"Blocked root-level provider keys: {', '.join(stale_root_keys)}",
+                        "(Realtor Beta does not migrate alternate provider transport state)",
+                    )
+                    issues.append(
+                        "Remove stale root-level provider/base_url keys through "
+                        "Realtor Beta onboarding"
+                    )
+                elif should_fix:
+                    check_warn(
+                        f"Stale root-level config keys: {', '.join(stale_root_keys)}",
+                        "(should be under 'model:' section)",
+                    )
                     model_section = raw_config.setdefault("model", {})
                     for k in stale_root_keys:
                         if not model_section.get(k):
@@ -527,6 +591,10 @@ def run_doctor(args):
                     check_ok("Migrated stale root-level keys into model section")
                     fixed_count += 1
                 else:
+                    check_warn(
+                        f"Stale root-level config keys: {', '.join(stale_root_keys)}",
+                        "(should be under 'model:' section)",
+                    )
                     issues.append("Stale root-level provider/base_url in config.yaml — run 'elevate doctor --fix'")
         except Exception:
             pass
@@ -615,30 +683,31 @@ def run_doctor(args):
     # =========================================================================
     # Check: xAI Model Retirement (May 15, 2026)
     # =========================================================================
-    print()
-    print(color("◆ xAI Model Retirement (May 15, 2026)", Colors.CYAN, Colors.BOLD))
-    try:
-        from elevate_cli.config import load_config
-        from elevate_cli.xai_retirement import (
-            MIGRATION_GUIDE_URL,
-            find_retired_xai_refs,
-            format_issue,
-        )
-
-        _xai_cfg = load_config()
-        retired_refs = find_retired_xai_refs(_xai_cfg)
-        if not retired_refs:
-            check_ok("No retired xAI models in config")
-        else:
-            for ref in retired_refs:
-                check_warn(format_issue(ref))
-            check_info(f"Migration guide: {MIGRATION_GUIDE_URL}")
-            manual_issues.append(
-                f"Update {len(retired_refs)} retired xAI model reference(s) "
-                f"in config.yaml — see {MIGRATION_GUIDE_URL}"
+    if not realtor_beta:
+        print()
+        print(color("◆ xAI Model Retirement (May 15, 2026)", Colors.CYAN, Colors.BOLD))
+        try:
+            from elevate_cli.config import load_config
+            from elevate_cli.xai_retirement import (
+                MIGRATION_GUIDE_URL,
+                find_retired_xai_refs,
+                format_issue,
             )
-    except Exception as _xai_check_err:
-        check_warn("xAI retirement check skipped", f"({_xai_check_err})")
+
+            _xai_cfg = load_config()
+            retired_refs = find_retired_xai_refs(_xai_cfg)
+            if not retired_refs:
+                check_ok("No retired xAI models in config")
+            else:
+                for ref in retired_refs:
+                    check_warn(format_issue(ref))
+                check_info(f"Migration guide: {MIGRATION_GUIDE_URL}")
+                manual_issues.append(
+                    f"Update {len(retired_refs)} retired xAI model reference(s) "
+                    f"in config.yaml — see {MIGRATION_GUIDE_URL}"
+                )
+        except Exception as _xai_check_err:
+            check_warn("xAI retirement check skipped", f"({_xai_check_err})")
 
     # =========================================================================
     # Check: Auth providers
@@ -646,69 +715,83 @@ def run_doctor(args):
     print()
     print(color("◆ Auth Providers", Colors.CYAN, Colors.BOLD))
 
-    try:
-        from elevate_cli.auth import (
-            get_nous_auth_status,
-            get_codex_auth_status,
-            get_gemini_oauth_auth_status,
-        )
-
-        nous_status = get_nous_auth_status()
-        if nous_status.get("logged_in"):
-            check_ok("Nous Portal auth", "(logged in)")
-        else:
-            check_warn("Nous Portal auth", "(not logged in)")
-
-        codex_status = get_codex_auth_status()
+    if realtor_beta:
+        codex_status = read_beta_codex_auth_status(ELEVATE_HOME)
         if codex_status.get("logged_in"):
-            check_ok("OpenAI Codex auth", "(logged in)")
+            check_ok(
+                "OpenAI Codex auth",
+                "(logged in; verified locally in this Beta profile)",
+            )
         else:
-            check_warn("OpenAI Codex auth", "(not logged in)")
-            if codex_status.get("error"):
-                check_info(codex_status["error"])
+            check_warn(
+                "OpenAI Codex auth",
+                f"(not logged in: {codex_status.get('reason') or 'unavailable'})",
+            )
+        check_info("Realtor Beta supports OpenAI Codex only")
+    else:
+        try:
+            from elevate_cli.auth import (
+                get_nous_auth_status,
+                get_codex_auth_status,
+                get_gemini_oauth_auth_status,
+            )
 
-        gemini_status = get_gemini_oauth_auth_status()
-        if gemini_status.get("logged_in"):
-            email = gemini_status.get("email") or ""
-            project = gemini_status.get("project_id") or ""
-            pieces = []
-            if email:
-                pieces.append(email)
-            if project:
-                pieces.append(f"project={project}")
-            suffix = f" ({', '.join(pieces)})" if pieces else ""
-            check_ok("Google Gemini OAuth", f"(logged in{suffix})")
-        else:
-            check_warn("Google Gemini OAuth", "(not logged in)")
-    except Exception as e:
-        check_warn("Auth provider status", f"(could not check: {e})")
+            nous_status = get_nous_auth_status()
+            if nous_status.get("logged_in"):
+                check_ok("Nous Portal auth", "(logged in)")
+            else:
+                check_warn("Nous Portal auth", "(not logged in)")
 
-    # MiniMax OAuth — separate try/except so an import failure here cannot
-    # disrupt the already-printed Nous/Codex/Gemini rows above.
-    try:
-        from elevate_cli.auth import get_minimax_oauth_auth_status
-        minimax_status = get_minimax_oauth_auth_status() or {}
-        if minimax_status.get("logged_in"):
-            region = minimax_status.get("region", "global")
-            check_ok("MiniMax OAuth", f"(logged in, region={region})")
-        else:
-            check_warn("MiniMax OAuth", "(not logged in)")
-    except Exception:
-        pass
+            codex_status = get_codex_auth_status()
+            if codex_status.get("logged_in"):
+                check_ok("OpenAI Codex auth", "(logged in)")
+            else:
+                check_warn("OpenAI Codex auth", "(not logged in)")
+                if codex_status.get("error"):
+                    check_info(codex_status["error"])
 
-    # xAI OAuth — separate try/except so an import failure here cannot
-    # disrupt the already-printed rows above.
-    try:
-        from elevate_cli.auth import get_xai_oauth_auth_status
-        xai_oauth_status = get_xai_oauth_auth_status() or {}
-        if xai_oauth_status.get("logged_in"):
-            check_ok("xAI OAuth", "(logged in)")
-        else:
-            check_warn("xAI OAuth", "(not logged in)")
-            if xai_oauth_status.get("error"):
-                check_info(xai_oauth_status["error"])
-    except Exception:
-        pass
+            gemini_status = get_gemini_oauth_auth_status()
+            if gemini_status.get("logged_in"):
+                email = gemini_status.get("email") or ""
+                project = gemini_status.get("project_id") or ""
+                pieces = []
+                if email:
+                    pieces.append(email)
+                if project:
+                    pieces.append(f"project={project}")
+                suffix = f" ({', '.join(pieces)})" if pieces else ""
+                check_ok("Google Gemini OAuth", f"(logged in{suffix})")
+            else:
+                check_warn("Google Gemini OAuth", "(not logged in)")
+        except Exception as e:
+            check_warn("Auth provider status", f"(could not check: {e})")
+
+        # MiniMax OAuth — separate try/except so an import failure here cannot
+        # disrupt the already-printed Nous/Codex/Gemini rows above.
+        try:
+            from elevate_cli.auth import get_minimax_oauth_auth_status
+            minimax_status = get_minimax_oauth_auth_status() or {}
+            if minimax_status.get("logged_in"):
+                region = minimax_status.get("region", "global")
+                check_ok("MiniMax OAuth", f"(logged in, region={region})")
+            else:
+                check_warn("MiniMax OAuth", "(not logged in)")
+        except Exception:
+            pass
+
+        # xAI OAuth — separate try/except so an import failure here cannot
+        # disrupt the already-printed rows above.
+        try:
+            from elevate_cli.auth import get_xai_oauth_auth_status
+            xai_oauth_status = get_xai_oauth_auth_status() or {}
+            if xai_oauth_status.get("logged_in"):
+                check_ok("xAI OAuth", "(logged in)")
+            else:
+                check_warn("xAI OAuth", "(not logged in)")
+                if xai_oauth_status.get("error"):
+                    check_info(xai_oauth_status["error"])
+        except Exception:
+            pass
 
     if _which("codex"):
         check_ok("codex CLI")
@@ -1117,8 +1200,14 @@ def run_doctor(args):
     # =========================================================================
     print()
     print(color("◆ API Connectivity", Colors.CYAN, Colors.BOLD))
-    
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+
+    if realtor_beta:
+        check_ok(
+            "OpenAI Codex only",
+            "(auth checked locally; inference-provider network probes disabled)",
+        )
+
+    openrouter_key = None if realtor_beta else os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         print("  Checking OpenRouter API...", end="", flush=True)
         try:
@@ -1148,11 +1237,14 @@ def run_doctor(args):
         except Exception as e:
             print(f"\r  {color('✗', Colors.RED)} OpenRouter API {color(f'({e})', Colors.DIM)}                ")
             issues.append("Check network connectivity")
-    else:
+    elif not realtor_beta:
         check_warn("OpenRouter API", "(not configured)")
-    
-    from elevate_cli.auth import get_anthropic_key
-    anthropic_key = get_anthropic_key()
+
+    if realtor_beta:
+        anthropic_key = None
+    else:
+        from elevate_cli.auth import get_anthropic_key
+        anthropic_key = get_anthropic_key()
     if anthropic_key:
         print("  Checking Anthropic API...", end="", flush=True)
         try:
@@ -1183,7 +1275,7 @@ def run_doctor(args):
     # -- API-key providers --
     # Tuple: (name, env_vars, default_url, base_env, supports_models_endpoint)
     # If supports_models_endpoint is False, we skip the health check and just show "configured"
-    _apikey_providers = [
+    _apikey_providers = [] if realtor_beta else [
         ("Z.AI / GLM",      ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "https://api.z.ai/api/paas/v4/models", "GLM_BASE_URL", True),
         ("Kimi / Moonshot",  ("KIMI_API_KEY",),                              "https://api.moonshot.ai/v1/models",   "KIMI_BASE_URL", True),
         ("StepFun Step Plan",   ("STEPFUN_API_KEY",),                           "https://api.stepfun.ai/step_plan/v1/models", "STEPFUN_BASE_URL", True),
@@ -1254,28 +1346,29 @@ def run_doctor(args):
 
     # -- AWS Bedrock --
     # Bedrock uses the AWS SDK credential chain, not API keys.
-    try:
-        from agent.bedrock_adapter import has_aws_credentials, resolve_aws_auth_env_var, resolve_bedrock_region
-        if has_aws_credentials():
-            _auth_var = resolve_aws_auth_env_var()
-            _region = resolve_bedrock_region()
-            _label = "AWS Bedrock".ljust(20)
-            print(f"  Checking AWS Bedrock...", end="", flush=True)
-            try:
-                import boto3
-                _br_client = boto3.client("bedrock", region_name=_region)
-                _br_resp = _br_client.list_foundation_models()
-                _model_count = len(_br_resp.get("modelSummaries", []))
-                print(f"\r  {color('✓', Colors.GREEN)} {_label} {color(f'({_auth_var}, {_region}, {_model_count} models)', Colors.DIM)}           ")
-            except ImportError:
-                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(boto3 not installed — {sys.executable} -m pip install boto3)', Colors.DIM)}           ")
-                issues.append(f"Install boto3 for Bedrock: {sys.executable} -m pip install boto3")
-            except Exception as _e:
-                _err_name = type(_e).__name__
-                print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_err_name}: {_e})', Colors.DIM)}           ")
-                issues.append(f"AWS Bedrock: {_err_name} — check IAM permissions for bedrock:ListFoundationModels")
-    except ImportError:
-        pass  # bedrock_adapter not available — skip silently
+    if not realtor_beta:
+        try:
+            from agent.bedrock_adapter import has_aws_credentials, resolve_aws_auth_env_var, resolve_bedrock_region
+            if has_aws_credentials():
+                _auth_var = resolve_aws_auth_env_var()
+                _region = resolve_bedrock_region()
+                _label = "AWS Bedrock".ljust(20)
+                print("  Checking AWS Bedrock...", end="", flush=True)
+                try:
+                    import boto3
+                    _br_client = boto3.client("bedrock", region_name=_region)
+                    _br_resp = _br_client.list_foundation_models()
+                    _model_count = len(_br_resp.get("modelSummaries", []))
+                    print(f"\r  {color('✓', Colors.GREEN)} {_label} {color(f'({_auth_var}, {_region}, {_model_count} models)', Colors.DIM)}           ")
+                except ImportError:
+                    print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'(boto3 not installed — {sys.executable} -m pip install boto3)', Colors.DIM)}           ")
+                    issues.append(f"Install boto3 for Bedrock: {sys.executable} -m pip install boto3")
+                except Exception as _e:
+                    _err_name = type(_e).__name__
+                    print(f"\r  {color('⚠', Colors.YELLOW)} {_label} {color(f'({_err_name}: {_e})', Colors.DIM)}           ")
+                    issues.append(f"AWS Bedrock: {_err_name} — check IAM permissions for bedrock:ListFoundationModels")
+        except ImportError:
+            pass  # bedrock_adapter not available — skip silently
 
     # =========================================================================
     # Check: Submodules

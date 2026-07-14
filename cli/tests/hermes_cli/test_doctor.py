@@ -199,7 +199,6 @@ class TestDoctorMemoryProviderSection:
         except Exception:
             pass
 
-        import io, contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             doctor_mod.run_doctor(Namespace(fix=False))
@@ -338,7 +337,6 @@ def test_run_doctor_termux_does_not_mark_browser_available_without_agent_browser
     except Exception:
         pass
 
-    import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         doctor_mod.run_doctor(Namespace(fix=False))
@@ -387,7 +385,6 @@ def test_run_doctor_kimi_cn_env_is_detected_and_probe_is_null_safe(monkeypatch, 
     import httpx
     monkeypatch.setattr(httpx, "get", fake_get)
 
-    import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         doctor_mod.run_doctor(Namespace(fix=False))
@@ -439,7 +436,6 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     import httpx
     monkeypatch.setattr(httpx, "get", fake_get)
 
-    import io, contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         doctor_mod.run_doctor(Namespace(fix=False))
@@ -451,3 +447,218 @@ def test_run_doctor_opencode_go_skips_invalid_models_probe(monkeypatch, tmp_path
     )
     assert not any(url == "https://opencode.ai/zen/go/v1/models" for url, _, _ in calls)
     assert not any("opencode" in url.lower() and "models" in url.lower() for url, _, _ in calls)
+
+
+def _prepare_beta_doctor(monkeypatch, tmp_path, *, release_channel="beta"):
+    home = tmp_path / ".elevate"
+    home.mkdir(parents=True, exist_ok=True)
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+
+    (home / "config.yaml").write_text(
+        "provider: anthropic\n"
+        "base_url: https://api.anthropic.com\n"
+        "model:\n"
+        "  provider: openrouter\n"
+        "  default: anthropic/claude-sonnet-4\n"
+        "memory: {}\n",
+        encoding="utf-8",
+    )
+    (home / "auth.json").write_text(
+        '{"providers":{"openai-codex":{"tokens":'
+        '{"access_token":"local-token","refresh_token":"local-refresh"}}}}',
+        encoding="utf-8",
+    )
+
+    provider_keys = (
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GLM_API_KEY",
+        "KIMI_API_KEY",
+        "KIMI_CN_API_KEY",
+        "STEPFUN_API_KEY",
+        "ARCEEAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "HF_TOKEN",
+        "NVIDIA_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "MINIMAX_API_KEY",
+        "MINIMAX_CN_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "KILOCODE_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "OPENCODE_GO_API_KEY",
+    )
+    (home / ".env").write_text(
+        "".join(f"{key}=hostile-{key.lower()}\n" for key in provider_keys),
+        encoding="utf-8",
+    )
+    for key in provider_keys:
+        monkeypatch.setenv(key, f"hostile-{key.lower()}")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "hostile-aws-key")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "hostile-aws-secret")
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", release_channel)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+
+    monkeypatch.setattr(doctor_mod, "ELEVATE_HOME", home)
+    monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project)
+    monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+    monkeypatch.setattr(doctor_mod, "_which", lambda _command: None)
+    monkeypatch.setattr(doctor_mod, "_check_gateway_service_linger", lambda _issues: None)
+    monkeypatch.setattr(doctor_mod, "_honcho_is_configured_for_doctor", lambda: False)
+
+    fake_model_tools = types.SimpleNamespace(
+        check_tool_availability=lambda *a, **kw: (["firecrawl"], []),
+        TOOLSET_REQUIREMENTS={"firecrawl": {"name": "Firecrawl (tool credential)"}},
+    )
+    monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+    from elevate_cli import debug_browser
+    from elevate_cli import profiles
+
+    monkeypatch.setattr(debug_browser, "is_supported", lambda: False)
+    monkeypatch.setattr(profiles, "list_profiles", lambda: [])
+    return home
+
+
+def test_realtor_beta_doctor_never_reaches_alternate_provider_paths(
+    monkeypatch,
+    tmp_path,
+):
+    home = _prepare_beta_doctor(monkeypatch, tmp_path)
+
+    def forbidden(name):
+        def _forbidden(*_args, **_kwargs):
+            raise AssertionError(f"unsupported provider path reached: {name}")
+
+        return _forbidden
+
+    from elevate_cli import auth as auth_mod
+    from elevate_cli import config as config_mod
+    from elevate_cli import providers as providers_mod
+    from elevate_cli import xai_retirement
+    from agent import bedrock_adapter
+    import httpx
+
+    unsupported_auth = (
+        "get_nous_auth_status",
+        "get_codex_auth_status",
+        "get_gemini_oauth_auth_status",
+        "get_minimax_oauth_auth_status",
+        "get_xai_oauth_auth_status",
+        "get_anthropic_key",
+        "get_auth_status",
+    )
+    for name in unsupported_auth:
+        monkeypatch.setattr(auth_mod, name, forbidden(name))
+    monkeypatch.setattr(
+        providers_mod,
+        "resolve_provider_full",
+        forbidden("resolve_provider_full"),
+    )
+    monkeypatch.setattr(config_mod, "check_config_version", lambda: (0, 999))
+    monkeypatch.setattr(
+        config_mod,
+        "migrate_config",
+        forbidden("generic config migration"),
+    )
+    monkeypatch.setattr(
+        xai_retirement,
+        "find_retired_xai_refs",
+        forbidden("find_retired_xai_refs"),
+    )
+    monkeypatch.setattr(
+        bedrock_adapter,
+        "has_aws_credentials",
+        forbidden("has_aws_credentials"),
+    )
+    monkeypatch.setattr(httpx, "get", forbidden("httpx.get"))
+    monkeypatch.setattr(
+        doctor_mod.subprocess,
+        "run",
+        forbidden("provider subprocess"),
+    )
+
+    actual_reader = doctor_mod.read_beta_codex_auth_status
+    local_auth_reads = []
+
+    def audited_local_reader(elevate_home):
+        local_auth_reads.append(elevate_home)
+        return actual_reader(elevate_home)
+
+    monkeypatch.setattr(
+        doctor_mod,
+        "read_beta_codex_auth_status",
+        audited_local_reader,
+    )
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=True))
+    out = buf.getvalue()
+
+    assert local_auth_reads == [home]
+    assert "OpenAI Codex auth" in out
+    assert "verified locally in this Beta profile" in out
+    assert "Realtor Beta supports OpenAI Codex only" in out
+    assert "inference-provider network probes disabled" in out
+    assert "model.provider 'openrouter' is blocked by Realtor Beta policy" in out
+    assert "model.default 'anthropic/claude-sonnet-4' is blocked" in out
+    assert "Generic config auto-migration disabled in Realtor Beta" in out
+    assert "Blocked root-level provider keys: provider, base_url" in out
+    assert "Tool Availability" in out
+    assert "Firecrawl (tool credential)" in out
+
+    assert "Nous Portal auth" not in out
+    assert "Google Gemini OAuth" not in out
+    assert "MiniMax OAuth" not in out
+    assert "xAI OAuth" not in out
+    assert "xAI Model Retirement" not in out
+    assert "OpenRouter API" not in out
+    assert "Anthropic API" not in out
+    assert "AWS Bedrock" not in out
+    assert "Z.AI / GLM" not in out
+    assert "Kimi / Moonshot" not in out
+
+    config_after = (home / "config.yaml").read_text(encoding="utf-8")
+    assert "provider: anthropic" in config_after
+    assert "base_url: https://api.anthropic.com" in config_after
+
+
+def test_nonexact_beta_doctor_preserves_generic_provider_diagnostics(
+    monkeypatch,
+    tmp_path,
+):
+    _prepare_beta_doctor(monkeypatch, tmp_path, release_channel="Beta")
+
+    from elevate_cli import auth as auth_mod
+    from agent import bedrock_adapter
+    import httpx
+
+    monkeypatch.setattr(auth_mod, "get_nous_auth_status", lambda: {})
+    monkeypatch.setattr(auth_mod, "get_codex_auth_status", lambda: {})
+    monkeypatch.setattr(auth_mod, "get_gemini_oauth_auth_status", lambda: {})
+    monkeypatch.setattr(auth_mod, "get_minimax_oauth_auth_status", lambda: {})
+    monkeypatch.setattr(auth_mod, "get_xai_oauth_auth_status", lambda: {})
+    monkeypatch.setattr(auth_mod, "get_anthropic_key", lambda: None)
+    monkeypatch.setattr(bedrock_adapter, "has_aws_credentials", lambda: False)
+
+    http_calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        http_calls.append((url, headers, timeout))
+        return types.SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        doctor_mod.run_doctor(Namespace(fix=False))
+    out = buf.getvalue()
+
+    assert "Nous Portal auth" in out
+    assert "Google Gemini OAuth" in out
+    assert "MiniMax OAuth" in out
+    assert "xAI OAuth" in out
+    assert "OpenRouter API" in out
+    assert any(url == doctor_mod.OPENROUTER_MODELS_URL for url, _, _ in http_calls)
