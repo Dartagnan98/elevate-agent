@@ -113,11 +113,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "effects", "effect_resolver",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 effects=None, effect_resolver=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -136,6 +138,11 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        # Frozen static effect metadata plus an optional argument-dependent
+        # resolver.  These are introspection-only until the live dispatch
+        # adapters explicitly invoke the effect-policy evaluator.
+        self.effects = effects
+        self.effect_resolver = effect_resolver
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +284,8 @@ class ToolRegistry:
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
+        effects=None,
+        effect_resolver: Callable = None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -320,6 +329,13 @@ class ToolRegistry:
                     )
                     return
             schema = _normalize_function_schema(name, schema)
+            if effect_resolver is not None and not callable(effect_resolver):
+                raise TypeError(f"Tool '{name}' effect_resolver must be callable")
+            normalized_effects = None
+            if effects is not None:
+                from tools.approval import normalize_effects
+
+                normalized_effects = normalize_effects(effects)
             self._tools[name] = ToolEntry(
                 name=name,
                 toolset=toolset,
@@ -332,6 +348,8 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                effects=normalized_effects,
+                effect_resolver=effect_resolver,
             )
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
@@ -479,6 +497,59 @@ class ToolRegistry:
         """Return the toolset a tool belongs to, or None."""
         entry = self.get_entry(name)
         return entry.toolset if entry else None
+
+    def get_effect_metadata(self, name: str) -> dict:
+        """Return typed effect declaration metadata for one tool.
+
+        Undeclared and unknown tools are reported as ``unknown``.  The
+        resolver callable itself is never exposed through introspection.
+        """
+        from tools.approval import Effect, EffectKind
+
+        entry = self.get_entry(name)
+        if entry is None:
+            return {
+                "declared": False,
+                "effects": frozenset({Effect(EffectKind.UNKNOWN)}),
+                "has_resolver": False,
+            }
+        declared = bool(entry.effects) or entry.effect_resolver is not None
+        if declared:
+            effects = entry.effects or frozenset()
+        else:
+            effects = frozenset({Effect(EffectKind.UNKNOWN)})
+        return {
+            "declared": declared,
+            "effects": effects,
+            "has_resolver": entry.effect_resolver is not None,
+        }
+
+    def resolve_effects(self, name: str, args: Optional[dict] = None):
+        """Resolve a tool's complete typed effect set for the supplied args.
+
+        Static and dynamic effects are unioned.  Missing declarations, empty
+        resolver results, malformed metadata, and resolver exceptions produce
+        ``unknown`` so a restricted policy cannot fail open.
+        """
+        from tools.approval import Effect, EffectKind, normalize_effects
+
+        entry = self.get_entry(name)
+        if entry is None:
+            return frozenset({Effect(EffectKind.UNKNOWN)})
+
+        resolved = set(entry.effects or ())
+        if entry.effect_resolver is not None:
+            try:
+                dynamic = normalize_effects(
+                    entry.effect_resolver(dict(args) if isinstance(args, dict) else {})
+                )
+            except Exception as exc:
+                logger.warning("effect_resolver for tool %s raised %s", name, exc)
+                dynamic = frozenset({Effect(EffectKind.UNKNOWN)})
+            resolved.update(dynamic)
+        if not resolved:
+            resolved.add(Effect(EffectKind.UNKNOWN))
+        return frozenset(resolved)
 
     def get_emoji(self, name: str, default: str = "⚡") -> str:
         """Return the emoji for a tool, or *default* if unset."""

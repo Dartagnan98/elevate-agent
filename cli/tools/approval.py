@@ -16,6 +16,9 @@ import sys
 import threading
 import time
 import unicodedata
+from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 from elevate_cli.config import cfg_get
 
@@ -630,6 +633,325 @@ def is_session_yolo_enabled(session_key: str) -> bool:
 def is_current_session_yolo_enabled() -> bool:
     """Return True when the active approval session has YOLO bypass enabled."""
     return is_session_yolo_enabled(get_current_session_key(default=""))
+
+
+# ---------------------------------------------------------------------------
+# Accepted-turn effect policy
+# ---------------------------------------------------------------------------
+# This vocabulary describes what a tool call can do, independently of the
+# tool's name.  It is deliberately small: scopes refine an effect without
+# creating a second, incompatible permission language (for example,
+# ``write_external:crm`` or ``message_external:sms``).
+class EffectKind(str, Enum):
+    READ = "read"
+    WRITE_LOCAL = "write_local"
+    WRITE_EXTERNAL = "write_external"
+    MESSAGE_EXTERNAL = "message_external"
+    DESTRUCTIVE = "destructive"
+    CREDENTIAL_ACCESS = "credential_access"
+    FINANCIAL = "financial"
+    SPAWN = "spawn"
+    UNKNOWN = "unknown"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+_EFFECT_SCOPE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
+
+
+@dataclass(frozen=True, slots=True)
+class Effect:
+    """One frozen effect capability, optionally narrowed to a scope."""
+
+    kind: EffectKind
+    scope: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        kind = self.kind
+        if not isinstance(kind, EffectKind):
+            try:
+                kind = EffectKind(str(kind).strip().lower())
+            except ValueError as exc:
+                raise ValueError(f"Unknown effect kind: {self.kind!r}") from exc
+            object.__setattr__(self, "kind", kind)
+
+        if self.scope is None:
+            return
+        scope = str(self.scope).strip().lower()
+        if not _EFFECT_SCOPE_RE.fullmatch(scope):
+            raise ValueError(f"Invalid effect scope: {self.scope!r}")
+        object.__setattr__(self, "scope", scope)
+
+    @classmethod
+    def parse(cls, value: "Effect | EffectKind | str") -> "Effect":
+        """Parse ``kind`` or ``kind:scope`` into a canonical frozen effect."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, EffectKind):
+            return cls(value)
+        if not isinstance(value, str):
+            raise TypeError(
+                "Effect must be Effect, EffectKind, or str; "
+                f"got {type(value).__name__}"
+            )
+        raw = value.strip().lower()
+        if not raw:
+            raise ValueError("Effect value cannot be empty")
+        kind, separator, scope = raw.partition(":")
+        if separator and not scope:
+            raise ValueError(f"Invalid scoped effect: {value!r}")
+        return cls(EffectKind(kind), scope if separator else None)
+
+    def __str__(self) -> str:
+        if self.scope:
+            return f"{self.kind.value}:{self.scope}"
+        return self.kind.value
+
+
+EffectInput = Effect | EffectKind | str
+
+
+def normalize_effects(
+    effects: EffectInput | Iterable[EffectInput] | None,
+) -> frozenset[Effect]:
+    """Return a canonical immutable effect set.
+
+    ``None`` and an empty iterable remain empty here so policy construction can
+    intentionally narrow to zero capabilities.  Registry resolution and
+    authorization separately convert an undeclared/empty operation to
+    ``unknown`` so restricted execution fails closed.
+    """
+    if effects is None:
+        return frozenset()
+    if isinstance(effects, (Effect, EffectKind, str)):
+        values: Iterable[EffectInput] = (effects,)
+    else:
+        values = effects
+    return frozenset(Effect.parse(effect) for effect in values)
+
+
+def _effect_is_within(effect: Effect, capability: Effect) -> bool:
+    """Whether *effect* is no broader than *capability*."""
+    if effect.kind is not capability.kind:
+        return False
+    # An unscoped capability covers every scope of the same kind.  A scoped
+    # capability never covers an unscoped (broader) request.
+    return capability.scope is None or effect.scope == capability.scope
+
+
+def _effect_intersection(left: Effect, right: Effect) -> Optional[Effect]:
+    """Return the narrower common capability, or None when disjoint."""
+    if left.kind is not right.kind:
+        return None
+    if left.scope == right.scope:
+        return left
+    if left.scope is None:
+        return right
+    if right.scope is None:
+        return left
+    return None
+
+
+class ExecutionPolicyMode(str, Enum):
+    DEFAULT = "default"
+    PLAN = "plan"
+    READ_ONLY = "read_only"
+    DRAFT_ONLY = "draft_only"
+
+    @classmethod
+    def parse(cls, value: "ExecutionPolicyMode | str") -> "ExecutionPolicyMode":
+        if isinstance(value, cls):
+            return value
+        normalized = str(value).strip().lower().replace("-", "_")
+        return cls(normalized)
+
+
+_ALL_DECLARED_EFFECTS = frozenset(
+    Effect(kind) for kind in EffectKind if kind is not EffectKind.UNKNOWN
+)
+_POLICY_MODE_CEILINGS = {
+    ExecutionPolicyMode.DEFAULT: _ALL_DECLARED_EFFECTS,
+    ExecutionPolicyMode.PLAN: frozenset({
+        Effect(EffectKind.READ),
+        Effect(EffectKind.WRITE_LOCAL, "session_plan"),
+    }),
+    ExecutionPolicyMode.READ_ONLY: frozenset({Effect(EffectKind.READ)}),
+    ExecutionPolicyMode.DRAFT_ONLY: frozenset({
+        Effect(EffectKind.READ),
+        Effect(EffectKind.WRITE_LOCAL, "draft"),
+        Effect(EffectKind.WRITE_LOCAL, "session_plan"),
+    }),
+}
+
+
+class PolicyWideningError(ValueError):
+    """Raised when a derived accepted-turn policy would add capability."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPolicy:
+    """Immutable capabilities frozen when one user turn is accepted.
+
+    A policy can produce a narrower child policy, but it cannot change the
+    accepted-turn identity or add a capability.  Scopes participate in the
+    intersection: ``write_local:workspace`` is narrower than ``write_local``.
+    """
+
+    accepted_turn_id: str
+    mode: ExecutionPolicyMode
+    allowed_effects: frozenset[Effect]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.accepted_turn_id, str):
+            raise TypeError("accepted_turn_id must be a string")
+        accepted_turn_id = self.accepted_turn_id.strip()
+        if not accepted_turn_id:
+            raise ValueError("accepted_turn_id is required")
+        object.__setattr__(self, "accepted_turn_id", accepted_turn_id)
+
+        try:
+            mode = ExecutionPolicyMode.parse(self.mode)
+        except ValueError as exc:
+            raise ValueError(f"Unknown execution policy mode: {self.mode!r}") from exc
+        object.__setattr__(self, "mode", mode)
+
+        normalized = normalize_effects(self.allowed_effects)
+        if any(effect.kind is EffectKind.UNKNOWN for effect in normalized):
+            raise ValueError("unknown cannot be granted by an execution policy")
+        ceiling = _POLICY_MODE_CEILINGS[mode]
+        outside_ceiling = {
+            effect
+            for effect in normalized
+            if not any(_effect_is_within(effect, limit) for limit in ceiling)
+        }
+        if outside_ceiling:
+            rendered = ", ".join(sorted(map(str, outside_ceiling)))
+            raise ValueError(f"Effects exceed {mode.value} policy ceiling: {rendered}")
+        object.__setattr__(self, "allowed_effects", normalized)
+
+    @classmethod
+    def for_mode(
+        cls,
+        accepted_turn_id: str,
+        mode: ExecutionPolicyMode | str,
+    ) -> "ExecutionPolicy":
+        """Freeze the safest complete capability set for *mode*."""
+        normalized_mode = ExecutionPolicyMode.parse(mode)
+        return cls(
+            accepted_turn_id=accepted_turn_id,
+            mode=normalized_mode,
+            allowed_effects=_POLICY_MODE_CEILINGS[normalized_mode],
+        )
+
+    def narrow(
+        self,
+        allowed_effects: EffectInput | Iterable[EffectInput] | None,
+        *,
+        mode: ExecutionPolicyMode | str | None = None,
+    ) -> "ExecutionPolicy":
+        """Return a set-intersection policy; reject every widening attempt."""
+        requested = normalize_effects(allowed_effects)
+        widening = {
+            effect
+            for effect in requested
+            if not any(
+                _effect_is_within(effect, current)
+                for current in self.allowed_effects
+            )
+        }
+        if widening:
+            rendered = ", ".join(sorted(map(str, widening)))
+            raise PolicyWideningError(f"Cannot widen accepted-turn effects: {rendered}")
+
+        target_mode = self.mode if mode is None else ExecutionPolicyMode.parse(mode)
+        current_ceiling = _POLICY_MODE_CEILINGS[self.mode]
+        target_ceiling = _POLICY_MODE_CEILINGS[target_mode]
+        if any(
+            not any(_effect_is_within(effect, current) for current in current_ceiling)
+            for effect in target_ceiling
+        ):
+            raise PolicyWideningError(
+                f"Cannot widen policy mode from {self.mode.value} to {target_mode.value}"
+            )
+
+        intersection = {
+            common
+            for current in self.allowed_effects
+            for desired in requested
+            if (common := _effect_intersection(current, desired)) is not None
+        }
+        return ExecutionPolicy(
+            accepted_turn_id=self.accepted_turn_id,
+            mode=target_mode,
+            allowed_effects=frozenset(intersection),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EffectAuthorization:
+    """Auditable result from the pure effect-policy evaluator."""
+
+    allowed: bool
+    accepted_turn_id: Optional[str]
+    requested_effects: frozenset[Effect]
+    denied_effects: frozenset[Effect]
+    reason: str
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+
+def authorize_effects(
+    policy: Optional[ExecutionPolicy],
+    effects: EffectInput | Iterable[EffectInput] | None,
+) -> EffectAuthorization:
+    """Evaluate effects against one frozen policy without mutating runtime state.
+
+    Missing, empty, malformed, and explicitly unknown effect declarations all
+    become ``unknown`` and are denied.  This makes restricted plan/read-only/
+    draft-only calls fail closed while leaving live dispatch unchanged until
+    its adapters explicitly invoke this evaluator.
+    """
+    try:
+        requested = normalize_effects(effects)
+    except Exception:
+        requested = frozenset({Effect(EffectKind.UNKNOWN)})
+    if not requested:
+        requested = frozenset({Effect(EffectKind.UNKNOWN)})
+
+    if not isinstance(policy, ExecutionPolicy):
+        return EffectAuthorization(
+            allowed=False,
+            accepted_turn_id=None,
+            requested_effects=requested,
+            denied_effects=requested,
+            reason="missing_policy" if policy is None else "invalid_policy",
+        )
+
+    unknown = {effect for effect in requested if effect.kind is EffectKind.UNKNOWN}
+    denied = {
+        effect
+        for effect in requested
+        if effect.kind is EffectKind.UNKNOWN
+        or not any(
+            _effect_is_within(effect, capability)
+            for capability in policy.allowed_effects
+        )
+    }
+    if unknown:
+        reason = "unknown_effect"
+    elif denied:
+        reason = "effect_not_allowed"
+    else:
+        reason = "allowed"
+    return EffectAuthorization(
+        allowed=not denied,
+        accepted_turn_id=policy.accepted_turn_id,
+        requested_effects=requested,
+        denied_effects=frozenset(denied),
+        reason=reason,
+    )
 
 
 # ---------------------------------------------------------------------------
