@@ -52,6 +52,34 @@ from utils import env_var_enabled
 from elevate_cli.config import cfg_get
 
 
+def _exact_realtor_beta_active() -> bool:
+    """Return true only for the exact Realtor Beta release-channel value."""
+    return os.environ.get("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+def _code_bundled_plugins_dir() -> Path:
+    """Return the plugin root shipped beside this module."""
+    return Path(__file__).resolve().parent.parent / "plugins"
+
+
+def _is_trusted_beta_bundled_path(path: Union[str, Path, None]) -> bool:
+    """Whether *path* resolves inside the code-shipped Beta plugin root.
+
+    Resolving both sides rejects symlinks in the signed bundle that escape to
+    mutable user or project locations.
+    """
+    if path is None:
+        return False
+    bundled_root = _code_bundled_plugins_dir()
+    if bundled_root.is_symlink():
+        return False
+    try:
+        Path(path).resolve().relative_to(bundled_root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def get_bundled_plugins_dir() -> Path:
     """Locate the bundled ``plugins/`` directory.
 
@@ -59,10 +87,16 @@ def get_bundled_plugins_dir() -> Path:
     installs) so read-only store paths are consulted first.  Falls back to
     the in-repo path used during development.
     """
+    # Exact Realtor Beta executes only code shipped inside its signed bundle.
+    # In particular, a profile/project environment cannot relabel an
+    # arbitrary writable directory as "bundled" via this compatibility knob.
+    if _exact_realtor_beta_active():
+        return _code_bundled_plugins_dir()
+
     env_override = os.getenv("ELEVATE_BUNDLED_PLUGINS")
     if env_override:
         return Path(env_override)
-    return Path(__file__).resolve().parent.parent / "plugins"
+    return _code_bundled_plugins_dir()
 
 try:
     import yaml
@@ -836,29 +870,37 @@ class PluginManager:
         logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
         manifests.extend(bundled_platforms)
 
-        # 2. User plugins (~/.elevate/plugins/)
-        user_dir = get_elevate_home() / "plugins"
-        logger.debug("Scanning user plugins: %s", user_dir)
-        user_manifests = self._scan_directory(user_dir, source="user")
-        logger.debug("  user: %d manifest(s)", len(user_manifests))
-        manifests.extend(user_manifests)
-
-        # 3. Project plugins (./.elevate/plugins/)
-        if _env_enabled("ELEVATE_ENABLE_PROJECT_PLUGINS"):
-            project_dir = Path.cwd() / ".elevate" / "plugins"
-            logger.debug("Scanning project plugins: %s", project_dir)
-            project_manifests = self._scan_directory(project_dir, source="project")
-            logger.debug("  project: %d manifest(s)", len(project_manifests))
-            manifests.extend(project_manifests)
-        else:
+        if _exact_realtor_beta_active():
             logger.debug(
-                "Project plugins disabled (set ELEVATE_ENABLE_PROJECT_PLUGINS=1 to enable)"
+                "Exact Realtor Beta: user, project, and entry-point plugins disabled"
             )
+        else:
+            # 2. User plugins (~/.elevate/plugins/)
+            user_dir = get_elevate_home() / "plugins"
+            logger.debug("Scanning user plugins: %s", user_dir)
+            user_manifests = self._scan_directory(user_dir, source="user")
+            logger.debug("  user: %d manifest(s)", len(user_manifests))
+            manifests.extend(user_manifests)
 
-        # 4. Pip / entry-point plugins
-        ep_manifests = self._scan_entry_points()
-        logger.debug("  entrypoints: %d manifest(s)", len(ep_manifests))
-        manifests.extend(ep_manifests)
+            # 3. Project plugins (./.elevate/plugins/)
+            if _env_enabled("ELEVATE_ENABLE_PROJECT_PLUGINS"):
+                project_dir = Path.cwd() / ".elevate" / "plugins"
+                logger.debug("Scanning project plugins: %s", project_dir)
+                project_manifests = self._scan_directory(
+                    project_dir, source="project"
+                )
+                logger.debug("  project: %d manifest(s)", len(project_manifests))
+                manifests.extend(project_manifests)
+            else:
+                logger.debug(
+                    "Project plugins disabled "
+                    "(set ELEVATE_ENABLE_PROJECT_PLUGINS=1 to enable)"
+                )
+
+            # 4. Pip / entry-point plugins
+            ep_manifests = self._scan_entry_points()
+            logger.debug("  entrypoints: %d manifest(s)", len(ep_manifests))
+            manifests.extend(ep_manifests)
 
         # Load each manifest (skip user-disabled plugins).
         # Later sources override earlier ones on key collision — user
@@ -999,11 +1041,29 @@ class PluginManager:
         cap at 2 so ``<root>/a/b/c/`` is ignored.
         """
         manifests: List[PluginManifest] = []
+        if _exact_realtor_beta_active() and (
+            source != "bundled" or not _is_trusted_beta_bundled_path(path)
+        ):
+            logger.warning(
+                "Exact Realtor Beta refused untrusted plugin scan: source=%s path=%s",
+                source,
+                path,
+            )
+            return manifests
         if not path.is_dir():
             return manifests
 
         for child in sorted(path.iterdir()):
             if not child.is_dir():
+                continue
+            if (
+                _exact_realtor_beta_active()
+                and not _is_trusted_beta_bundled_path(child)
+            ):
+                logger.warning(
+                    "Exact Realtor Beta ignored plugin outside bundle: %s",
+                    child,
+                )
                 continue
             if depth == 0 and skip_names and child.name in skip_names:
                 continue
@@ -1137,6 +1197,8 @@ class PluginManager:
     def _scan_entry_points(self) -> List[PluginManifest]:
         """Check ``importlib.metadata`` for pip-installed plugins."""
         manifests: List[PluginManifest] = []
+        if _exact_realtor_beta_active():
+            return manifests
         try:
             eps = importlib.metadata.entry_points()
             # Python 3.12+ returns a SelectableGroups; earlier returns dict
@@ -1167,6 +1229,18 @@ class PluginManager:
     def _load_plugin(self, manifest: PluginManifest) -> None:
         """Import a plugin module and call its ``register(ctx)`` function."""
         loaded = LoadedPlugin(manifest=manifest)
+        if _exact_realtor_beta_active() and (
+            manifest.source != "bundled"
+            or not _is_trusted_beta_bundled_path(manifest.path)
+        ):
+            loaded.error = "untrusted plugin source blocked by Realtor Beta policy"
+            self._plugins[manifest.key or manifest.name] = loaded
+            logger.warning(
+                "Exact Realtor Beta refused plugin load: source=%s path=%s",
+                manifest.source,
+                manifest.path,
+            )
+            return
         logger.debug(
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
             manifest.key or manifest.name, manifest.source, manifest.kind, manifest.path,
@@ -1241,6 +1315,12 @@ class PluginManager:
         ``elevate_plugins.image_gen__openai`` without colliding with any
         future ``tts/openai``.
         """
+        if _exact_realtor_beta_active() and (
+            manifest.source != "bundled"
+            or not _is_trusted_beta_bundled_path(manifest.path)
+        ):
+            raise ImportError("Untrusted plugin module blocked by Realtor Beta policy")
+
         plugin_dir = Path(manifest.path)  # type: ignore[arg-type]
         init_file = plugin_dir / "__init__.py"
         if not init_file.exists():
@@ -1273,6 +1353,8 @@ class PluginManager:
 
     def _load_entrypoint_module(self, manifest: PluginManifest) -> types.ModuleType:
         """Load a pip-installed plugin via its entry-point reference."""
+        if _exact_realtor_beta_active():
+            raise ImportError("Entry-point plugins are disabled in Realtor Beta")
         eps = importlib.metadata.entry_points()
         if hasattr(eps, "select"):
             group_eps = eps.select(group=ENTRY_POINTS_GROUP)

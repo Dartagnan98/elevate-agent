@@ -232,25 +232,67 @@ def _discover_user_themes() -> list:
 
 
 _dashboard_plugins_cache: Optional[list] = None
+_dashboard_plugins_cache_beta_only: Optional[bool] = None
+
+
+def _exact_realtor_beta_active() -> bool:
+    return os.environ.get("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+def _trusted_beta_plugins_root() -> Path:
+    """Code-shipped plugin root covered by the desktop app signature."""
+    return Path(__file__).resolve().parents[2] / "plugins"
+
+
+def _is_trusted_beta_dashboard_path(path: Any) -> bool:
+    bundled_root = _trusted_beta_plugins_root()
+    if bundled_root.is_symlink():
+        return False
+    try:
+        Path(path).resolve().relative_to(bundled_root.resolve())
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _is_trusted_beta_dashboard_plugin(plugin: Dict[str, Any]) -> bool:
+    return (
+        plugin.get("source") == "bundled"
+        and _is_trusted_beta_dashboard_path(plugin.get("_dir"))
+    )
 
 
 def _discover_dashboard_plugins(project_root: Path, log: logging.Logger) -> list:
     """Scan plugins/*/dashboard/manifest.json for dashboard extensions."""
     plugins = []
     seen_names: set = set()
-    search_dirs = [
-        (get_elevate_home() / "plugins", "user"),
-        (project_root / "plugins" / "memory", "bundled"),
-        (project_root / "plugins", "bundled"),
-    ]
-    if os.environ.get("ELEVATE_ENABLE_PROJECT_PLUGINS"):
-        search_dirs.append((Path.cwd() / ".elevate" / "plugins", "project"))
+    beta_only = _exact_realtor_beta_active()
+    if beta_only:
+        bundled_root = _trusted_beta_plugins_root()
+        search_dirs = [
+            (bundled_root / "memory", "bundled"),
+            (bundled_root, "bundled"),
+        ]
+    else:
+        search_dirs = [
+            (get_elevate_home() / "plugins", "user"),
+            (project_root / "plugins" / "memory", "bundled"),
+            (project_root / "plugins", "bundled"),
+        ]
+        if os.environ.get("ELEVATE_ENABLE_PROJECT_PLUGINS"):
+            search_dirs.append((Path.cwd() / ".elevate" / "plugins", "project"))
 
     for plugins_root, source in search_dirs:
         if not plugins_root.is_dir():
             continue
         for child in sorted(plugins_root.iterdir()):
             if not child.is_dir():
+                continue
+            if beta_only and not _is_trusted_beta_dashboard_path(child):
+                log.warning(
+                    "Exact Realtor Beta ignored dashboard plugin outside bundle: %s",
+                    child,
+                )
                 continue
             manifest_file = child / "dashboard" / "manifest.json"
             if not manifest_file.exists():
@@ -297,9 +339,23 @@ def _discover_dashboard_plugins(project_root: Path, log: logging.Logger) -> list
 
 
 def _get_dashboard_plugins(project_root: Path, log: logging.Logger, force_rescan: bool = False) -> list:
-    global _dashboard_plugins_cache
-    if _dashboard_plugins_cache is None or force_rescan:
+    global _dashboard_plugins_cache, _dashboard_plugins_cache_beta_only
+    beta_only = _exact_realtor_beta_active()
+    if (
+        _dashboard_plugins_cache is None
+        or force_rescan
+        or _dashboard_plugins_cache_beta_only != beta_only
+    ):
         _dashboard_plugins_cache = _discover_dashboard_plugins(project_root, log)
+        _dashboard_plugins_cache_beta_only = beta_only
+    if beta_only:
+        # Defense in depth for a cache populated before the immutable launch
+        # identity was established or replaced by a test/in-process caller.
+        return [
+            plugin
+            for plugin in _dashboard_plugins_cache
+            if _is_trusted_beta_dashboard_plugin(plugin)
+        ]
     return _dashboard_plugins_cache
 
 
@@ -355,6 +411,11 @@ def create_dashboard_router(*, project_root: Path, log: logging.Logger | None = 
         plugin = next((p for p in plugins if p["name"] == plugin_name), None)
         if not plugin:
             raise HTTPException(status_code=404, detail="Plugin not found")
+        if (
+            _exact_realtor_beta_active()
+            and not _is_trusted_beta_dashboard_plugin(plugin)
+        ):
+            raise HTTPException(status_code=404, detail="Plugin not found")
 
         base = Path(plugin["_dir"])
         target = (base / file_path).resolve()
@@ -384,10 +445,24 @@ def mount_dashboard_plugin_api_routes(app: Any, *, project_root: Path, log: logg
     """Import and mount backend API routes from plugins that declare them."""
     _log = log or logging.getLogger(__name__)
     for plugin in _get_dashboard_plugins(project_root, _log):
+        if (
+            _exact_realtor_beta_active()
+            and not _is_trusted_beta_dashboard_plugin(plugin)
+        ):
+            continue
         api_file_name = plugin.get("_api_file")
         if not api_file_name:
             continue
         api_path = Path(plugin["_dir"]) / api_file_name
+        if _exact_realtor_beta_active():
+            try:
+                api_path.resolve().relative_to(Path(plugin["_dir"]).resolve())
+            except (OSError, RuntimeError, ValueError):
+                _log.warning(
+                    "Exact Realtor Beta blocked dashboard plugin API outside bundle: %s",
+                    api_path,
+                )
+                continue
         if not api_path.exists():
             _log.warning("Plugin %s declares api=%s but file not found", plugin["name"], api_file_name)
             continue
