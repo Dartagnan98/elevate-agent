@@ -23,7 +23,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -4191,45 +4191,8 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
-def save_env_value(key: str, value: str):
-    """Save or update a value in ~/.elevate/.env."""
-    if is_managed():
-        managed_error(f"set {key}")
-        return
-    if not _ENV_VAR_NAME_RE.match(key):
-        raise ValueError(f"Invalid environment variable name: {key!r}")
-    value = value.replace("\n", "").replace("\r", "")
-    # API keys / tokens must be ASCII — strip non-ASCII with a warning.
-    value = _check_non_ascii_credential(key, value)
-    ensure_elevate_home()
-    env_path = get_env_path()
-    
-    # On Windows, open() defaults to the system locale (cp1252) which can
-    # cause OSError errno 22 on UTF-8 .env files.
-    read_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
-    write_kw = {"encoding": "utf-8"} if _IS_WINDOWS else {}
-
-    lines = []
-    if env_path.exists():
-        with open(env_path, **read_kw) as f:
-            lines = f.readlines()
-        # Sanitize on every read: split concatenated keys, drop stale placeholders
-        lines = _sanitize_env_lines(lines)
-    
-    # Find and update or append
-    found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-    
-    if not found:
-        # Ensure there's a newline at the end of the file before appending
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += "\n"
-        lines.append(f"{key}={value}\n")
-    
+def _write_env_lines_atomically(env_path: Path, lines: List[str]) -> None:
+    """Replace an env file without exposing a partial write."""
     fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
     # Preserve original permissions so Docker volume mounts aren't clobbered.
     original_mode = None
@@ -4239,6 +4202,7 @@ def save_env_value(key: str, value: str):
         except OSError:
             pass
     try:
+        write_kw = {"encoding": "utf-8"} if _IS_WINDOWS else {}
         with os.fdopen(fd, 'w', **write_kw) as f:
             f.writelines(lines)
             f.flush()
@@ -4258,63 +4222,147 @@ def save_env_value(key: str, value: str):
         raise
     _secure_file(env_path)
 
-    os.environ[key] = value
 
+def save_env_values(values: Mapping[str, str]) -> None:
+    """Save multiple env values with one atomic file replacement.
 
-def remove_env_value(key: str) -> bool:
-    """Remove a key from ~/.elevate/.env and os.environ.
-
-    Returns True if the key was found and removed, False otherwise.
+    Every key and value is validated before the env file or ``os.environ`` is
+    changed. Process environment values are updated only after the replacement
+    succeeds, so an I/O failure cannot leave memory ahead of durable state.
     """
+    items = list(values.items())
+    if not items:
+        return
     if is_managed():
-        managed_error(f"remove {key}")
-        return False
-    if not _ENV_VAR_NAME_RE.match(key):
-        raise ValueError(f"Invalid environment variable name: {key!r}")
+        action = f"set {items[0][0]}" if len(items) == 1 else "set environment values"
+        managed_error(action)
+        return
+
+    # Validate the complete request before ensure_elevate_home() or any other
+    # operation that can mutate disk/process state.
+    for key, value in items:
+        if not isinstance(key, str) or not _ENV_VAR_NAME_RE.match(key):
+            raise ValueError(f"Invalid environment variable name: {key!r}")
+        if not isinstance(value, str):
+            raise TypeError(f"Environment variable {key!r} value must be a string")
+
+    sanitized_values = [
+        (
+            key,
+            _check_non_ascii_credential(
+                key,
+                value.replace("\n", "").replace("\r", ""),
+            ),
+        )
+        for key, value in items
+    ]
+
+    ensure_elevate_home()
+    env_path = get_env_path()
+
+    # On Windows, open() defaults to the system locale (cp1252) which can
+    # cause OSError errno 22 on UTF-8 .env files.
+    read_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
+    lines: List[str] = []
+    if env_path.exists():
+        with open(env_path, **read_kw) as f:
+            lines = f.readlines()
+        # Sanitize on every read: split concatenated keys, drop stale placeholders.
+        lines = _sanitize_env_lines(lines)
+
+    # Apply each update to the in-memory snapshot, preserving the existing
+    # single-key behavior of replacing the first match or appending the key.
+    for key, value in sanitized_values:
+        found = False
+        for index, line in enumerate(lines):
+            if line.strip().startswith(f"{key}="):
+                lines[index] = f"{key}={value}\n"
+                found = True
+                break
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(f"{key}={value}\n")
+
+    _write_env_lines_atomically(env_path, lines)
+
+    for key, value in sanitized_values:
+        os.environ[key] = value
+
+
+def save_env_value(key: str, value: str):
+    """Save or update a value in ~/.elevate/.env."""
+    save_env_values({key: value})
+
+
+def remove_env_values(keys: Iterable[str]) -> List[str]:
+    """Remove multiple env keys with at most one atomic file replacement.
+
+    Returns the keys found in the env file, once each and in caller order.
+    Every key is validated before the file or ``os.environ`` is changed.
+    """
+    requested_keys = list(keys)
+    if not requested_keys:
+        return []
+    if is_managed():
+        action = (
+            f"remove {requested_keys[0]}"
+            if len(requested_keys) == 1
+            else "remove environment values"
+        )
+        managed_error(action)
+        return []
+
+    for key in requested_keys:
+        if not isinstance(key, str) or not _ENV_VAR_NAME_RE.match(key):
+            raise ValueError(f"Invalid environment variable name: {key!r}")
+
     env_path = get_env_path()
     if not env_path.exists():
-        os.environ.pop(key, None)
-        return False
+        for key in requested_keys:
+            os.environ.pop(key, None)
+        return []
 
     read_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
-    write_kw = {"encoding": "utf-8"} if _IS_WINDOWS else {}
-
     with open(env_path, **read_kw) as f:
         lines = f.readlines()
     lines = _sanitize_env_lines(lines)
 
-    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
-    found = len(new_lines) < len(lines)
+    requested_set = set(requested_keys)
+    found_set = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        matching_key = next(
+            (key for key in requested_set if stripped.startswith(f"{key}=")),
+            None,
+        )
+        if matching_key is None:
+            new_lines.append(line)
+        else:
+            found_set.add(matching_key)
 
-    if found:
-        fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent), suffix='.tmp', prefix='.env_')
-        # Preserve original permissions so Docker volume mounts aren't clobbered.
-        original_mode = None
-        try:
-            original_mode = stat.S_IMODE(env_path.stat().st_mode)
-        except OSError:
-            pass
-        try:
-            with os.fdopen(fd, 'w', **write_kw) as f:
-                f.writelines(new_lines)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, env_path)
-            if original_mode is not None:
-                try:
-                    os.chmod(env_path, original_mode)
-                except OSError:
-                    pass
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        _secure_file(env_path)
+    if found_set:
+        _write_env_lines_atomically(env_path, new_lines)
 
-    os.environ.pop(key, None)
-    return found
+    for key in requested_keys:
+        os.environ.pop(key, None)
+
+    found_keys = []
+    reported = set()
+    for key in requested_keys:
+        if key in found_set and key not in reported:
+            found_keys.append(key)
+            reported.add(key)
+    return found_keys
+
+
+def remove_env_value(key: str) -> bool:
+    """Remove one key from ~/.elevate/.env and os.environ.
+
+    Returns True if the key was found and removed, False otherwise.
+    """
+    return bool(remove_env_values([key]))
 
 
 def save_anthropic_oauth_token(value: str, save_fn=None):

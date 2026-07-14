@@ -2,24 +2,27 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 
 from elevate_cli.config import (
     DEFAULT_CONFIG,
-    get_elevate_home,
+    _sanitize_env_lines,
     ensure_elevate_home,
+    get_elevate_home,
     get_compatible_custom_providers,
     load_config,
     load_env,
     migrate_config,
     remove_env_value,
+    remove_env_values,
     save_config,
     save_env_value,
     save_env_value_secure,
+    save_env_values,
     sanitize_env_file,
-    _sanitize_env_lines,
 )
 
 
@@ -184,6 +187,101 @@ class TestSaveEnvValueSecure:
             assert env_mode == 0o600
 
 
+class TestSaveEnvValues:
+    def test_saves_multiple_keys_with_one_atomic_replace(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text("KEY_B=old_b\nKEEP=unchanged\nKEY_A=old_a\n")
+        real_replace = os.replace
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "old_a",
+                "KEY_B": "old_b",
+            },
+        ):
+            with patch(
+                "elevate_cli.config.os.replace",
+                wraps=real_replace,
+            ) as replace_mock:
+                save_env_values({"KEY_A": "new_a", "KEY_B": "new_b"})
+
+            assert replace_mock.call_count == 1
+            assert env_path.read_text() == (
+                "KEY_B=new_b\nKEEP=unchanged\nKEY_A=new_a\n"
+            )
+            assert os.environ["KEY_A"] == "new_a"
+            assert os.environ["KEY_B"] == "new_b"
+
+    def test_invalid_key_leaves_file_and_process_environment_untouched(self, tmp_path):
+        env_path = tmp_path / ".env"
+        original = b"KEY_A=old_a\nKEY_B=old_b\n"
+        env_path.write_bytes(original)
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "old_a",
+                "KEY_B": "old_b",
+            },
+        ):
+            with patch("elevate_cli.config.os.replace") as replace_mock:
+                with pytest.raises(ValueError, match="Invalid environment variable"):
+                    save_env_values({"KEY_A": "new_a", "BAD-NAME": "new_b"})
+
+            replace_mock.assert_not_called()
+            assert env_path.read_bytes() == original
+            assert os.environ["KEY_A"] == "old_a"
+            assert os.environ["KEY_B"] == "old_b"
+
+    def test_invalid_value_leaves_file_and_process_environment_untouched(self, tmp_path):
+        env_path = tmp_path / ".env"
+        original = b"KEY_A=old_a\nKEY_B=old_b\n"
+        env_path.write_bytes(original)
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "old_a",
+                "KEY_B": "old_b",
+            },
+        ):
+            with pytest.raises(TypeError, match="value must be a string"):
+                save_env_values({"KEY_A": "new_a", "KEY_B": None})
+
+            assert env_path.read_bytes() == original
+            assert os.environ["KEY_A"] == "old_a"
+            assert os.environ["KEY_B"] == "old_b"
+
+    def test_replace_failure_leaves_file_and_process_environment_untouched(self, tmp_path):
+        env_path = tmp_path / ".env"
+        original = b"KEY_A=old_a\nKEY_B=old_b\n"
+        env_path.write_bytes(original)
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "old_a",
+                "KEY_B": "old_b",
+            },
+        ):
+            with patch(
+                "elevate_cli.config.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with pytest.raises(OSError, match="replace failed"):
+                    save_env_values({"KEY_A": "new_a", "KEY_B": "new_b"})
+
+            assert env_path.read_bytes() == original
+            assert os.environ["KEY_A"] == "old_a"
+            assert os.environ["KEY_B"] == "old_b"
+            assert list(tmp_path.glob(".env_*.tmp")) == []
+
+
 class TestRemoveEnvValue:
     def test_removes_key_from_env_file(self, tmp_path):
         env_path = tmp_path / ".env"
@@ -225,6 +323,108 @@ class TestRemoveEnvValue:
         with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path), "ORPHAN_KEY": "orphan"}):
             remove_env_value("ORPHAN_KEY")
             assert "ORPHAN_KEY" not in os.environ
+
+
+class TestRemoveEnvValues:
+    def test_removes_multiple_keys_with_one_replace_and_returns_caller_order(
+        self, tmp_path
+    ):
+        env_path = tmp_path / ".env"
+        env_path.write_text("KEY_B=value_b\nKEEP=value\nKEY_A=value_a\n")
+        real_replace = os.replace
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "value_a",
+                "KEY_B": "value_b",
+                "MISSING_KEY": "process_only",
+            },
+        ):
+            with patch(
+                "elevate_cli.config.os.replace",
+                wraps=real_replace,
+            ) as replace_mock:
+                removed = remove_env_values(["KEY_A", "MISSING_KEY", "KEY_B"])
+
+            assert replace_mock.call_count == 1
+            assert removed == ["KEY_A", "KEY_B"]
+            assert env_path.read_text() == "KEEP=value\n"
+            assert "KEY_A" not in os.environ
+            assert "KEY_B" not in os.environ
+            assert "MISSING_KEY" not in os.environ
+
+    def test_invalid_key_leaves_file_and_process_environment_untouched(self, tmp_path):
+        env_path = tmp_path / ".env"
+        original = b"KEY_A=value_a\nKEY_B=value_b\n"
+        env_path.write_bytes(original)
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "value_a",
+                "KEY_B": "value_b",
+            },
+        ):
+            with patch("elevate_cli.config.os.replace") as replace_mock:
+                with pytest.raises(ValueError, match="Invalid environment variable"):
+                    remove_env_values(["KEY_A", "BAD-NAME", "KEY_B"])
+
+            replace_mock.assert_not_called()
+            assert env_path.read_bytes() == original
+            assert os.environ["KEY_A"] == "value_a"
+            assert os.environ["KEY_B"] == "value_b"
+
+    def test_missing_file_clears_process_environment(self, tmp_path):
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "value_a",
+                "KEY_B": "value_b",
+            },
+        ):
+            removed = remove_env_values(["KEY_A", "KEY_B"])
+
+            assert removed == []
+            assert "KEY_A" not in os.environ
+            assert "KEY_B" not in os.environ
+            assert not (tmp_path / ".env").exists()
+
+    def test_replace_failure_leaves_file_and_process_environment_untouched(self, tmp_path):
+        env_path = tmp_path / ".env"
+        original = b"KEY_A=value_a\nKEY_B=value_b\n"
+        env_path.write_bytes(original)
+
+        with patch.dict(
+            os.environ,
+            {
+                "ELEVATE_HOME": str(tmp_path),
+                "KEY_A": "value_a",
+                "KEY_B": "value_b",
+            },
+        ):
+            with patch(
+                "elevate_cli.config.os.replace",
+                side_effect=OSError("replace failed"),
+            ):
+                with pytest.raises(OSError, match="replace failed"):
+                    remove_env_values(["KEY_A", "KEY_B"])
+
+            assert env_path.read_bytes() == original
+            assert os.environ["KEY_A"] == "value_a"
+            assert os.environ["KEY_B"] == "value_b"
+            assert list(tmp_path.glob(".env_*.tmp")) == []
+
+    def test_single_key_wrapper_preserves_boolean_result(self, tmp_path):
+        env_path = tmp_path / ".env"
+        env_path.write_text("KEY_A=value_a\n")
+
+        with patch.dict(os.environ, {"ELEVATE_HOME": str(tmp_path)}):
+            assert remove_env_value("KEY_A") is True
+            assert remove_env_value("KEY_A") is False
 
 
 class TestSaveConfigAtomicity:
