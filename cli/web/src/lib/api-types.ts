@@ -23,6 +23,8 @@ export interface LicenseActivateResponse {
   skill_count: number;
   skill_names: string[];
   skill_error: string | null;
+  skill_sync_warnings: string[];
+  activation_complete: boolean;
 }
 
 export interface LicenseSyncSkillsResponse {

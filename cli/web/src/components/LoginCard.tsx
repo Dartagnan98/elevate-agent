@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2, LogOut, Package } from "lucide-react";
 import { api } from "@/lib/api";
 import { useTheme } from "@/themes/context";
@@ -23,6 +23,40 @@ interface Props {
   onAuthChange?: (authenticated: boolean, packs?: LicenseStatusResponse["packs"]) => void;
 }
 
+type ActivationOutcomeHandlers = {
+  confirmed: (result: LicenseActivateResponse) => void;
+  incomplete: (message: string, result: LicenseActivateResponse) => void;
+};
+
+function activationIncompleteMessage(result: LicenseActivateResponse): string {
+  const warning = Array.isArray(result.skill_sync_warnings)
+    ? result.skill_sync_warnings.find((item) => typeof item === "string" && item.trim())
+    : undefined;
+  const detail = result.skill_error?.trim() || warning?.trim();
+  const prefix =
+    "Your account was verified, but Elevate could not finish this device's required setup. " +
+    "Workspace access was not granted.";
+  return detail ? `${prefix} ${detail} Try again.` : `${prefix} Try again.`;
+}
+
+/**
+ * Keep the security-sensitive activation decision independently testable.
+ * Older or partial server responses must never fall through to the success path.
+ */
+// This export is a narrow test seam for the fail-closed activation boundary.
+// eslint-disable-next-line react-refresh/only-export-components
+export function applyActivationOutcome(
+  result: LicenseActivateResponse,
+  handlers: ActivationOutcomeHandlers,
+): boolean {
+  if (result.authenticated !== true || result.activation_complete !== true) {
+    handlers.incomplete(activationIncompleteMessage(result), result);
+    return false;
+  }
+  handlers.confirmed(result);
+  return true;
+}
+
 export function LoginCard({ onAuthChange }: Props) {
   const { themeName } = useTheme();
   const logoSrc =
@@ -40,11 +74,17 @@ export function LoginCard({ onAuthChange }: Props) {
   const [code, setCode] = useState("");
   const [codeSent, setCodeSent] = useState(false);
   const [requestingCode, setRequestingCode] = useState(false);
+  const incompleteActivation = useRef(false);
 
   const loadStatus = useCallback(async () => {
     try {
       const status = await api.getLicenseStatus();
       setLicenseStatus(status);
+      if (status.authenticated && incompleteActivation.current) {
+        setPhase("error");
+        onAuthChange?.(false, status.packs);
+        return;
+      }
       if (status.authenticated) {
         setPhase("authenticated");
         onAuthChange?.(true, status.packs);
@@ -53,7 +93,7 @@ export function LoginCard({ onAuthChange }: Props) {
         onAuthChange?.(false, status.packs);
       }
     } catch {
-      setPhase("logged_out");
+      if (!incompleteActivation.current) setPhase("logged_out");
     }
   }, [onAuthChange]);
 
@@ -77,33 +117,39 @@ export function LoginCard({ onAuthChange }: Props) {
     };
   }, [loadStatus]);
 
-  // Shared success path for both password and code sign-in.
-  //
-  // Sign-in now returns BEFORE skill packs are downloaded (activate is called
-  // with skip_skill_sync). We flip straight to "success" and let the user into
-  // the app immediately, then sync packs in the BACKGROUND — a full pack
-  // download used to block the "Signing in..." button for several seconds.
-  // When the background sync lands we re-fire auth-changed + reload status so
-  // any newly-unlocked tabs appear without a manual reload.
+  // Shared confirmation boundary for password, code, and account creation.
+  // Required setup runs inline. A partial response stays logged out and can be
+  // retried by the user; it is never converted into success by a background job.
   const completeActivation = async (result: LicenseActivateResponse) => {
-    setActivationResult(result);
-    setPhase("success");
-    onAuthChange?.(true, result.packs);
+    const confirmed = applyActivationOutcome(result, {
+      confirmed: (confirmedResult) => {
+        incompleteActivation.current = false;
+        setActivationResult(confirmedResult);
+        setError(null);
+        setPhase("success");
+        onAuthChange?.(true, confirmedResult.packs);
+      },
+      incomplete: (message, incompleteResult) => {
+        incompleteActivation.current = true;
+        setActivationResult(null);
+        setLicenseStatus(null);
+        setPhase("error");
+        setError(message);
+        onAuthChange?.(false, incompleteResult.packs);
+
+        // Account creation can be retried as a normal sign-in. A consumed or
+        // expired one-time code must be requested again instead of replayed.
+        if (mode === "create") setMode("password");
+        if (mode === "code") {
+          setCode("");
+          setCodeSent(false);
+        }
+      },
+    });
+    if (!confirmed) return;
+
     window.dispatchEvent(new Event("elevate:auth-changed"));
     await loadStatus();
-
-    if (result.skill_count <= 0) {
-      void api
-        .syncLicenseSkills()
-        .then(() => {
-          window.dispatchEvent(new Event("elevate:auth-changed"));
-          return loadStatus();
-        })
-        .catch(() => {
-          // Background skill sync is best-effort; the 60s license refresh and
-          // focus re-check will pick packs up if this transient-fails.
-        });
-    }
   };
 
   const showAuthError = (err: unknown, invalidMsg: string) => {
@@ -129,12 +175,11 @@ export function LoginCard({ onAuthChange }: Props) {
 
   const handleSignIn = async () => {
     if (!email.trim() || !password) return;
+    incompleteActivation.current = true;
     setPhase("signing_in");
     setError(null);
     try {
-      // Skip the inline skill-pack download so sign-in returns fast; packs
-      // sync in the background (completeActivation).
-      const result = await api.activateLicense(email.trim(), password, undefined, true);
+      const result = await api.activateLicense(email.trim(), password);
       await completeActivation(result);
     } catch (err: unknown) {
       showAuthError(err, "Invalid email or password.");
@@ -158,6 +203,7 @@ export function LoginCard({ onAuthChange }: Props) {
       setError("Passwords don't match.");
       return;
     }
+    incompleteActivation.current = true;
     setPhase("signing_in");
     setError(null);
     try {
@@ -166,8 +212,6 @@ export function LoginCard({ onAuthChange }: Props) {
         password,
         firstName.trim(),
         lastName.trim(),
-        undefined,
-        true,
       );
       await completeActivation(result);
     } catch (err: unknown) {
@@ -225,10 +269,11 @@ export function LoginCard({ onAuthChange }: Props) {
 
   const handleVerifyCode = async () => {
     if (!email.trim() || !code.trim()) return;
+    incompleteActivation.current = true;
     setPhase("signing_in");
     setError(null);
     try {
-      const result = await api.activateWithCode(email.trim(), code.trim(), true);
+      const result = await api.activateWithCode(email.trim(), code.trim());
       await completeActivation(result);
     } catch (err: unknown) {
       showAuthError(err, "Invalid or expired code.");
@@ -238,6 +283,7 @@ export function LoginCard({ onAuthChange }: Props) {
   const handleLogout = async () => {
     try {
       const result = await api.logoutLicense();
+      incompleteActivation.current = false;
       setLicenseStatus(null);
       setActivationResult(null);
       setPhase("logged_out");
