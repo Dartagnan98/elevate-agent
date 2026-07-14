@@ -1,6 +1,6 @@
 """Tests for user-defined quick commands that bypass the agent loop."""
 import subprocess
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 from rich.text import Text
 import pytest
 
@@ -127,6 +127,32 @@ class TestCLIQuickCommands:
         args = cli.console.print.call_args[0][0]
         assert "timed out" in args.lower()
 
+    def test_exact_beta_blocks_stale_exec_quick_command(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        cli = self._make_cli(
+            {"escape": {"type": "exec", "command": "untrusted-command"}}
+        )
+
+        with patch("subprocess.run") as process:
+            result = cli.process_command("/escape")
+
+        assert result is True
+        process.assert_not_called()
+        assert "unavailable in Realtor Beta" in str(
+            cli.console.print.call_args.args[0]
+        )
+
+    def test_non_exact_channel_keeps_exec_quick_command(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+        cli = self._make_cli(
+            {"compat": {"type": "exec", "command": "echo stable"}}
+        )
+
+        result = cli.process_command("/compat")
+
+        assert result is True
+        assert self._printed_plain(cli.console.print.call_args.args[0]) == "stable"
+
 
 # ── Gateway tests ──────────────────────────────────────────────────────────
 
@@ -205,3 +231,25 @@ class TestGatewayQuickCommands:
         event = self._make_event("limits")
         result = await runner._handle_message(event)
         assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_exact_beta_blocks_stale_exec_quick_command(self, monkeypatch):
+        from gateway.run import GatewayRunner
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner.config = {
+            "quick_commands": {
+                "escape": {"type": "exec", "command": "untrusted-command"},
+            }
+        }
+        runner._running_agents = {}
+        runner._pending_messages = {}
+        runner._is_user_authorized = MagicMock(return_value=True)
+
+        event = self._make_event("escape")
+        with patch("asyncio.create_subprocess_shell") as process:
+            result = await runner._handle_message(event)
+
+        process.assert_not_called()
+        assert "unavailable in Realtor Beta" in result

@@ -335,3 +335,12 @@ class TestAllowPrivateUrlsConfig:
         )
 
         assert browser_tool._allow_private_urls() is False
+
+    def test_exact_beta_ignores_stale_private_url_config(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setattr(
+            "elevate_cli.config.read_raw_config",
+            lambda: {"browser": {"allow_private_urls": True}},
+        )
+
+        assert browser_tool._allow_private_urls() is False

@@ -827,6 +827,11 @@ def load_gateway_config() -> GatewayConfig:
 
     # Override with environment variables
     _apply_env_overrides(config)
+
+    # Exact Beta has one signed remote channel.  Filter after every config and
+    # environment source has been merged so stale ambient tokens cannot boot
+    # an unsupported listener or outbound adapter.
+    _filter_beta_supported_platforms(config)
     
     # --- Validate loaded values ---
     _validate_gateway_config(config)
@@ -932,6 +937,27 @@ def _beta_active_telegram_agent_token_envs() -> Optional[frozenset[str]]:
         # Pack discovery participates in authorization, so a partially
         # installed or unreadable exact-Beta policy fails closed.
         return frozenset()
+
+
+def _filter_beta_supported_platforms(config: GatewayConfig) -> None:
+    """Remove adapters outside the signed in-app + Telegram Beta surface."""
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+    except Exception:
+        beta_active = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+    if not beta_active:
+        return
+
+    allowed = {Platform.LOCAL, Platform.TELEGRAM, Platform.API_SERVER}
+    for platform in list(config.platforms):
+        if platform not in allowed:
+            logger.warning(
+                "Ignoring unsupported %s adapter in exact Realtor Beta",
+                platform.value,
+            )
+            config.platforms.pop(platform, None)
 
 
 def _telegram_agent_token_env(agent_id: str) -> str:

@@ -254,6 +254,24 @@ class TestGlobalAllowPrivateUrls:
         monkeypatch.setenv("ELEVATE_ALLOW_PRIVATE_URLS", "false")
         assert _global_allow_private_urls() is False
 
+    def test_exact_beta_ignores_ambient_private_url_override(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("ELEVATE_ALLOW_PRIVATE_URLS", "true")
+
+        assert _global_allow_private_urls() is False
+
+    def test_exact_beta_ignores_stale_private_url_config(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.delenv("ELEVATE_ALLOW_PRIVATE_URLS", raising=False)
+        cfg = {
+            "security": {"allow_private_urls": True},
+            "browser": {"allow_private_urls": True},
+        }
+        with patch("elevate_cli.config.read_raw_config", return_value=cfg) as read:
+            assert _global_allow_private_urls() is False
+
+        read.assert_not_called()
+
     def test_config_security_section(self, monkeypatch):
         """security.allow_private_urls in config enables the toggle."""
         monkeypatch.delenv("ELEVATE_ALLOW_PRIVATE_URLS", raising=False)

@@ -6211,6 +6211,14 @@ class ElevateCLI:
             base_cmd = cmd_lower.split()[0]
             quick_commands = self.config.get("quick_commands", {})
             if base_cmd.lstrip("/") in quick_commands:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                if beta_provider_policy_active():
+                    self.console.print(
+                        "Config-defined quick commands are unavailable in Realtor Beta. "
+                        "Ask me to do the task so the normal tool and approval record is preserved."
+                    )
+                    return True
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess

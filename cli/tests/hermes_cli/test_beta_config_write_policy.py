@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -131,6 +132,91 @@ def _valid_beta_config():
             },
             "beta_memory_embeddings_not_allowed",
         ),
+        (
+            {"quick_commands": {"escape": {"type": "exec", "command": "id"}}},
+            "beta_quick_commands_not_allowed",
+        ),
+        (
+            {"hooks": {"pre_tool_call": [{"command": "untrusted-hook"}]}},
+            "beta_shell_hooks_not_allowed",
+        ),
+        ({"hooks_auto_accept": True}, "beta_shell_hooks_not_allowed"),
+        (
+            {"command_allowlist": ["pipe remote content to shell"]},
+            "beta_command_allowlist_not_allowed",
+        ),
+        ({"approvals": {"mode": "smart"}}, "beta_approval_mode_not_allowed"),
+        ({"approvals": {"mode": False}}, "beta_approval_mode_not_allowed"),
+        (
+            {"approvals": {"permission_mode": "bypassPermissions"}},
+            "beta_permission_mode_not_allowed",
+        ),
+        (
+            {"approvals": {"cron_mode": "approve"}},
+            "beta_cron_approval_not_allowed",
+        ),
+        (
+            {"terminal": {"backend": "ssh", "ssh_host": "hostile.invalid"}},
+            "beta_terminal_backend_not_allowed",
+        ),
+        (
+            {"security": {"allow_private_urls": True}},
+            "beta_private_urls_not_allowed",
+        ),
+        (
+            {"browser": {"allow_private_urls": "yes"}},
+            "beta_private_urls_not_allowed",
+        ),
+        (
+            {"platforms": {"discord": {"enabled": True, "token": "hostile"}}},
+            "beta_platform_not_allowed",
+        ),
+        (
+            {"platforms": {"webhook": {"enabled": True, "extra": {"routes": {}}}}},
+            "beta_platform_not_allowed",
+        ),
+        (
+            {"platforms": {"telegram": {"enabled": True, "token": "hostile"}}},
+            "beta_platform_credential_not_allowed",
+        ),
+        (
+            {
+                "platforms": {
+                    "telegram": {
+                        "extra": {
+                            "agent_bots": {
+                                "admin": {"token": "hostile", "agent_id": "admin"},
+                            }
+                        }
+                    }
+                }
+            },
+            "beta_platform_credential_not_allowed",
+        ),
+        (
+            {"ELEVATE_ALLOW_PRIVATE_URLS": "true"},
+            "beta_direct_env_config_not_allowed",
+        ),
+        (
+            {"providers": {"anthropic": {"api_key": "hostile"}}},
+            "beta_provider_registry_not_allowed",
+        ),
+        (
+            {"credential_pool_strategies": {"anthropic": "round-robin"}},
+            "beta_credential_pool_not_allowed",
+        ),
+        (
+            {"auxiliary": {"vision": {"provider": "anthropic"}}},
+            "beta_auxiliary_provider_not_allowed",
+        ),
+        (
+            {"auxiliary": {"vision": {"base_url": "https://hostile.invalid"}}},
+            "beta_auxiliary_endpoint_not_allowed",
+        ),
+        (
+            {"delegation": {"provider": "openrouter", "model": "hostile"}},
+            "beta_auxiliary_provider_not_allowed",
+        ),
     ],
 )
 def test_beta_save_rejects_provider_escape_before_profile_mutation(
@@ -197,6 +283,18 @@ def test_beta_current_local_holographic_profile_shape_persists(beta_home):
     assert written["plugins"] == config["plugins"]
 
 
+def test_beta_signed_default_config_shape_remains_persistable(beta_home):
+    _write_local_codex_auth(beta_home)
+
+    config_module.save_config(copy.deepcopy(config_module.DEFAULT_CONFIG))
+
+    written = yaml.safe_load((beta_home / "config.yaml").read_text(encoding="utf-8"))
+    assert written["terminal"]["backend"] == "local"
+    assert set(written["platforms"]) == {"telegram", "api_server"}
+    assert written["approvals"]["mode"] == "manual"
+    assert written["quick_commands"] == {}
+
+
 def test_non_beta_channels_keep_existing_config_behavior(tmp_path, monkeypatch):
     home = tmp_path / "stable"
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
@@ -209,6 +307,28 @@ def test_non_beta_channels_keep_existing_config_behavior(tmp_path, monkeypatch):
             "plugins": {
                 "elevate-memory-store": {"embedding_enabled": True},
             },
+            "quick_commands": {
+                "compat": {"type": "exec", "command": "echo stable"},
+            },
+            "hooks": {
+                "pre_tool_call": [{"command": "stable-hook"}],
+            },
+            "hooks_auto_accept": True,
+            "command_allowlist": ["stable-pattern"],
+            "approvals": {
+                "mode": "smart",
+                "permission_mode": "bypassPermissions",
+                "cron_mode": "approve",
+            },
+            "terminal": {"backend": "ssh"},
+            "security": {"allow_private_urls": True},
+            "browser": {"allow_private_urls": True},
+            "platforms": {"discord": {"enabled": True, "token": "stable-token"}},
+            "ELEVATE_ALLOW_PRIVATE_URLS": "true",
+            "providers": {"anthropic": {"api_key": "stable-key"}},
+            "credential_pool_strategies": {"anthropic": "round-robin"},
+            "auxiliary": {"vision": {"provider": "anthropic"}},
+            "delegation": {"provider": "openrouter", "model": "stable-model"},
         }
     )
 
@@ -216,6 +336,14 @@ def test_non_beta_channels_keep_existing_config_behavior(tmp_path, monkeypatch):
     assert written["model"]["provider"] == "gemini"
     assert written["memory"]["provider"] == "hindsight"
     assert written["plugins"]["elevate-memory-store"]["embedding_enabled"] is True
+    assert written["quick_commands"]["compat"]["command"] == "echo stable"
+    assert written["terminal"]["backend"] == "ssh"
+    assert written["security"]["allow_private_urls"] is True
+    assert written["platforms"]["discord"]["enabled"] is True
+    assert written["ELEVATE_ALLOW_PRIVATE_URLS"] == "true"
+    assert written["providers"]["anthropic"]["api_key"] == "stable-key"
+    assert written["auxiliary"]["vision"]["provider"] == "anthropic"
+    assert written["delegation"]["provider"] == "openrouter"
 
 
 def _config_client(*, load_config_func=lambda: {}, save_config_func=lambda _cfg: None):
@@ -330,6 +458,69 @@ def test_beta_config_routes_reject_memory_inference_before_save(
         )
     else:
         response = client.put("/api/config", json={"config": config})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == code
+    assert saved == []
+    assert not beta_home.exists()
+
+
+@pytest.mark.parametrize("raw_route", [False, True])
+@pytest.mark.parametrize(
+    ("config", "code"),
+    [
+        (
+            {"quick_commands": {"escape": {"type": "exec", "command": "id"}}},
+            "beta_quick_commands_not_allowed",
+        ),
+        (
+            {"command_allowlist": ["pipe remote content to shell"]},
+            "beta_command_allowlist_not_allowed",
+        ),
+        (
+            {"approvals": {"mode": "smart"}},
+            "beta_approval_mode_not_allowed",
+        ),
+        (
+            {"terminal": {"backend": "ssh"}},
+            "beta_terminal_backend_not_allowed",
+        ),
+        (
+            {"browser": {"allow_private_urls": True}},
+            "beta_private_urls_not_allowed",
+        ),
+        (
+            {"platforms": {"discord": {"enabled": True, "token": "hostile"}}},
+            "beta_platform_not_allowed",
+        ),
+        (
+            {"ELEVATE_YOLO_MODE": "1"},
+            "beta_direct_env_config_not_allowed",
+        ),
+        (
+            {"auxiliary": {"approval": {"provider": "anthropic"}}},
+            "beta_auxiliary_provider_not_allowed",
+        ),
+    ],
+)
+def test_beta_config_routes_reject_runtime_escape_before_save(
+    beta_home,
+    raw_route,
+    config,
+    code,
+):
+    saved = []
+    client = _config_client(save_config_func=saved.append)
+    payload = (
+        {"yaml_text": yaml.safe_dump(config)}
+        if raw_route
+        else {"config": config}
+    )
+
+    response = client.put(
+        "/api/config/raw" if raw_route else "/api/config",
+        json=payload,
+    )
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == code

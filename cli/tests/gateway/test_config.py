@@ -10,6 +10,7 @@ from gateway.config import (
     PlatformConfig,
     SessionResetPolicy,
     _apply_env_overrides,
+    _filter_beta_supported_platforms,
     load_gateway_config,
 )
 
@@ -276,6 +277,57 @@ class TestGatewayConfigRoundtrip:
 
         assert restored.unauthorized_dm_behavior == "ignore"
         assert restored.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
+
+
+class TestBetaPlatformContainment:
+    def test_exact_beta_removes_unsupported_adapters_after_merge(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        config = GatewayConfig(
+            platforms={
+                Platform.LOCAL: PlatformConfig(enabled=True),
+                Platform.TELEGRAM: PlatformConfig(enabled=True, token="telegram-token"),
+                Platform.API_SERVER: PlatformConfig(enabled=True),
+                Platform.DISCORD: PlatformConfig(enabled=True, token="discord-token"),
+                Platform.SLACK: PlatformConfig(enabled=True, token="slack-token"),
+                Platform.WEBHOOK: PlatformConfig(enabled=True),
+            }
+        )
+
+        _filter_beta_supported_platforms(config)
+
+        assert set(config.platforms) == {
+            Platform.LOCAL,
+            Platform.TELEGRAM,
+            Platform.API_SERVER,
+        }
+
+    def test_non_exact_channel_keeps_existing_adapter_behavior(self, monkeypatch):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+        config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="discord-token"),
+                Platform.WEBHOOK: PlatformConfig(enabled=True),
+            }
+        )
+
+        _filter_beta_supported_platforms(config)
+
+        assert set(config.platforms) == {Platform.DISCORD, Platform.WEBHOOK}
+
+    def test_exact_beta_drops_ambient_unsupported_tokens(self, tmp_path, monkeypatch):
+        elevate_home = tmp_path / ".elevate-beta"
+        elevate_home.mkdir()
+        monkeypatch.setenv("ELEVATE_HOME", str(elevate_home))
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "ambient-discord-token")
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "ambient-slack-token")
+        monkeypatch.setenv("WHATSAPP_ENABLED", "true")
+
+        config = load_gateway_config()
+
+        assert Platform.DISCORD not in config.platforms
+        assert Platform.SLACK not in config.platforms
+        assert Platform.WHATSAPP not in config.platforms
 
 
 class TestLoadGatewayConfig:

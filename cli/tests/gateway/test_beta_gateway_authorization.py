@@ -102,3 +102,15 @@ def test_stable_keeps_legacy_wildcard_compatibility(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", "*")
 
     assert _runner()._is_user_authorized(_source()) is True
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [Platform.DISCORD, Platform.SLACK, Platform.WEBHOOK, Platform.HOMEASSISTANT],
+)
+def test_beta_refuses_to_construct_unsupported_adapters(platform):
+    runner = _runner()
+
+    adapter = runner._create_adapter(platform, SimpleNamespace(extra={}))
+
+    assert adapter is None

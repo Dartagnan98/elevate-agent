@@ -5048,6 +5048,19 @@ class GatewayRunner:
         config: Any
     ) -> Optional[BasePlatformAdapter]:
         """Create the appropriate adapter for a platform."""
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active() and platform not in {
+            Platform.LOCAL,
+            Platform.TELEGRAM,
+            Platform.API_SERVER,
+        }:
+            logger.warning(
+                "Refusing unsupported %s adapter in exact Realtor Beta",
+                platform.value,
+            )
+            return None
+
         if hasattr(config, "extra") and isinstance(config.extra, dict):
             config.extra.setdefault(
                 "group_sessions_per_user",
@@ -6131,6 +6144,13 @@ class GatewayRunner:
             if not isinstance(quick_commands, dict):
                 quick_commands = {}
             if command in quick_commands:
+                from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+                if beta_provider_policy_active():
+                    return (
+                        "🔒 Config-defined quick commands are unavailable in Realtor Beta. "
+                        "Ask me to do the task so the normal tool and approval record is preserved."
+                    )
                 qcmd = quick_commands[command]
                 if qcmd.get("type") == "exec":
                     exec_cmd = qcmd.get("command", "")

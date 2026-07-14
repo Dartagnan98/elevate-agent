@@ -1038,6 +1038,17 @@ def _get_env_config() -> Dict[str, Any]:
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     env_type = os.getenv("TERMINAL_ENV", "local")
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+    except Exception:
+        beta_active = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+    if beta_active:
+        # Realtor Beta is itself the full local terminal harness. Ambient or
+        # stale profile values must not silently redirect commands to SSH,
+        # Docker, or a paid cloud executor.
+        env_type = "local"
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
 

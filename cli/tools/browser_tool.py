@@ -1207,6 +1207,16 @@ def _allow_private_urls() -> bool:
     for the process lifetime.  Defaults to ``False`` (SSRF protection active).
     """
     global _cached_allow_private_urls, _allow_private_urls_resolved
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+    except Exception:
+        beta_active = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+    if beta_active:
+        _allow_private_urls_resolved = True
+        _cached_allow_private_urls = False
+        return False
     if _allow_private_urls_resolved:
         return _cached_allow_private_urls
 

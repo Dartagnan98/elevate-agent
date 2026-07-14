@@ -99,6 +99,16 @@ def _global_allow_private_urls() -> bool:
     Result is cached for the process lifetime.
     """
     global _allow_private_resolved, _cached_allow_private
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        beta_active = beta_provider_policy_active()
+    except Exception:
+        beta_active = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+    if beta_active:
+        _allow_private_resolved = True
+        _cached_allow_private = False
+        return False
     if _allow_private_resolved:
         return _cached_allow_private
 

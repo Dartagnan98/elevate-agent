@@ -15,6 +15,7 @@ def _clear_terminal_env(monkeypatch):
         "MODAL_TOKEN_SECRET",
         "HOME",
         "USERPROFILE",
+        "ELEVATE_RELEASE_CHANNEL",
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
@@ -89,6 +90,32 @@ def test_ssh_backend_without_host_or_user_logs_and_returns_false(monkeypatch, ca
         "SSH backend selected but TERMINAL_SSH_HOST and TERMINAL_SSH_USER" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_exact_beta_forces_the_local_terminal_harness(monkeypatch, tmp_path):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_SSH_HOST", "hostile.invalid")
+    monkeypatch.setenv("TERMINAL_SSH_USER", "operator")
+    monkeypatch.setenv("TERMINAL_CWD", "~/remote-work")
+    monkeypatch.setattr(terminal_tool_module, "_safe_getcwd", lambda: str(tmp_path))
+
+    config = terminal_tool_module._get_env_config()
+
+    assert config["env_type"] == "local"
+    assert terminal_tool_module.check_terminal_requirements() is True
+
+
+def test_non_exact_channel_keeps_remote_terminal_selection(monkeypatch):
+    _clear_terminal_env(monkeypatch)
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_SSH_HOST", "stable.example")
+    monkeypatch.setenv("TERMINAL_SSH_USER", "stable-user")
+
+    assert terminal_tool_module._get_env_config()["env_type"] == "ssh"
+    assert terminal_tool_module.check_terminal_requirements() is True
 
 
 def test_modal_backend_without_token_or_config_logs_specific_error(monkeypatch, caplog, tmp_path):

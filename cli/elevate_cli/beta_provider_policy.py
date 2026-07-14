@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,6 +33,9 @@ BETA_ALLOWED_MODELS = (
     "gpt-5.1-codex-max",
     "gpt-5.1-codex-mini",
 )
+
+_BETA_ALLOWED_CONFIG_PLATFORMS = frozenset({"telegram", "api_server"})
+_BETA_ENV_CONFIG_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 class BetaProviderPolicyError(ValueError):
@@ -137,6 +141,239 @@ def _validate_beta_memory_config(
         )
 
 
+def _beta_truthy(value: Any) -> bool:
+    """Interpret config booleans without importing the wider runtime."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enabled",
+    }
+
+
+def _validate_beta_runtime_config(config: Mapping[str, Any]) -> None:
+    """Reject mutable config that can reopen unsigned Beta runtime lanes.
+
+    ``config.yaml`` is bridged into several long-lived runtime subsystems.  In
+    Stable it intentionally supports operator-defined shell commands, remote
+    terminal backends, platform adapters, and SSRF opt-outs.  Realtor Beta has
+    signed product surfaces for those decisions instead, so neither the raw
+    editor nor the normalized config API may silently re-enable them.
+    """
+    for raw_key, value in config.items():
+        key = str(raw_key or "")
+        if _BETA_ENV_CONFIG_KEY_RE.fullmatch(key) and value not in (None, ""):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow config.yaml to inject runtime environment settings.",
+                code="beta_direct_env_config_not_allowed",
+            )
+
+    if config.get("quick_commands") not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow config-defined quick commands.",
+            code="beta_quick_commands_not_allowed",
+        )
+
+    if config.get("hooks") not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow config-defined shell hooks.",
+            code="beta_shell_hooks_not_allowed",
+        )
+    if _beta_truthy(config.get("hooks_auto_accept")):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow automatic shell-hook approval.",
+            code="beta_shell_hooks_not_allowed",
+        )
+
+    if config.get("command_allowlist") not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow permanent dangerous-command approvals.",
+            code="beta_command_allowlist_not_allowed",
+        )
+
+    approvals = config.get("approvals")
+    if approvals not in (None, "", {}):
+        if not isinstance(approvals, Mapping):
+            raise BetaProviderPolicyError(
+                "Realtor Beta approval settings must be a mapping.",
+                code="beta_approval_config_invalid",
+            )
+        mode_value = approvals.get("mode", "manual")
+        if isinstance(mode_value, bool):
+            mode = "off" if mode_value is False else "manual"
+        else:
+            mode = str(mode_value or "manual").strip().lower()
+        if mode != "manual":
+            raise BetaProviderPolicyError(
+                "Realtor Beta requires human review and does not allow automatic approval modes.",
+                code="beta_approval_mode_not_allowed",
+            )
+        permission_mode = str(
+            approvals.get("permission_mode") or "default"
+        ).strip()
+        if permission_mode == "bypassPermissions":
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow bypassing action permissions.",
+                code="beta_permission_mode_not_allowed",
+            )
+        cron_mode = str(approvals.get("cron_mode") or "deny").strip().lower()
+        if cron_mode != "deny":
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow unattended jobs to approve dangerous commands.",
+                code="beta_cron_approval_not_allowed",
+            )
+
+    terminal = config.get("terminal")
+    if terminal not in (None, "", {}):
+        if not isinstance(terminal, Mapping):
+            raise BetaProviderPolicyError(
+                "Realtor Beta terminal settings must be a mapping.",
+                code="beta_terminal_config_invalid",
+            )
+        backend = str(
+            terminal.get("backend") or terminal.get("env_type") or "local"
+        ).strip().lower()
+        if backend != "local":
+            raise BetaProviderPolicyError(
+                "Realtor Beta uses its local terminal harness and does not allow a remote terminal backend.",
+                code="beta_terminal_backend_not_allowed",
+            )
+
+    for section_name in ("security", "browser"):
+        section = config.get(section_name)
+        if section in (None, "", {}):
+            continue
+        if not isinstance(section, Mapping):
+            raise BetaProviderPolicyError(
+                f"Realtor Beta {section_name} settings must be a mapping.",
+                code="beta_url_safety_config_invalid",
+            )
+        if _beta_truthy(section.get("allow_private_urls")):
+            raise BetaProviderPolicyError(
+                "Realtor Beta does not allow disabling private-network URL protection.",
+                code="beta_private_urls_not_allowed",
+            )
+
+    platforms = config.get("platforms")
+    if platforms not in (None, "", {}):
+        if not isinstance(platforms, Mapping):
+            raise BetaProviderPolicyError(
+                "Realtor Beta platform settings must be a mapping.",
+                code="beta_platform_config_invalid",
+            )
+        unsupported = sorted(
+            str(name)
+            for name in platforms
+            if str(name) not in _BETA_ALLOWED_CONFIG_PLATFORMS
+        )
+        if unsupported:
+            raise BetaProviderPolicyError(
+                "Realtor Beta supports only its in-app surface and Telegram pairing; "
+                f"unsupported platform config: {', '.join(unsupported)}.",
+                code="beta_platform_not_allowed",
+            )
+        for platform_name, platform_config in platforms.items():
+            if not isinstance(platform_config, Mapping):
+                raise BetaProviderPolicyError(
+                    f"Realtor Beta {platform_name} platform settings must be a mapping.",
+                    code="beta_platform_config_invalid",
+                )
+            if any(
+                str(platform_config.get(secret_key) or "").strip()
+                for secret_key in ("token", "api_key")
+            ):
+                raise BetaProviderPolicyError(
+                    "Realtor Beta stores channel credentials only through its signed setup flow.",
+                    code="beta_platform_credential_not_allowed",
+                )
+            extra = platform_config.get("extra")
+            if (
+                isinstance(extra, Mapping)
+                and extra.get("agent_bots") not in (None, "", (), [], {})
+            ):
+                raise BetaProviderPolicyError(
+                    "Realtor Beta loads signed agent Telegram bots only from its profile credential store.",
+                    code="beta_platform_credential_not_allowed",
+                )
+
+
+def _validate_beta_inference_block(value: Any, *, source: str) -> None:
+    """Keep auxiliary and delegated inference on the signed Codex lane."""
+    if value in (None, "", {}):
+        return
+    if not isinstance(value, Mapping):
+        raise BetaProviderPolicyError(
+            f"Realtor Beta {source} settings must be a mapping.",
+            code="beta_auxiliary_config_invalid",
+        )
+
+    provider = str(value.get("provider") or "auto").strip().lower()
+    if provider not in {"auto", BETA_ALLOWED_PROVIDER}:
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow {source} provider {provider!r}.",
+            code="beta_auxiliary_provider_not_allowed",
+        )
+    model = str(value.get("model") or value.get("default") or "").strip()
+    if model and model not in BETA_ALLOWED_MODELS:
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow {source} model {model!r}.",
+            code="beta_auxiliary_model_not_allowed",
+        )
+    base_url = str(value.get("base_url") or "").strip().rstrip("/")
+    if base_url and base_url != BETA_CODEX_BASE_URL.rstrip("/"):
+        raise BetaProviderPolicyError(
+            f"Realtor Beta does not allow a custom {source} endpoint.",
+            code="beta_auxiliary_endpoint_not_allowed",
+        )
+    if any(
+        str(value.get(key) or "").strip()
+        for key in ("api_key", "key_env")
+    ):
+        raise BetaProviderPolicyError(
+            f"Realtor Beta {source} uses profile-local Codex auth, not API keys.",
+            code="beta_auxiliary_api_key_not_allowed",
+        )
+    for key in ("fallback_model", "fallback_providers", "credential_pool"):
+        if value.get(key) not in (None, "", (), [], {}):
+            raise BetaProviderPolicyError(
+                f"Realtor Beta does not allow {source} provider fallback.",
+                code="beta_auxiliary_fallback_not_allowed",
+            )
+
+
+def _validate_beta_inference_config(config: Mapping[str, Any]) -> None:
+    if config.get("providers") not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta stores Codex authentication in its profile auth store, not config providers.",
+            code="beta_provider_registry_not_allowed",
+        )
+    if config.get("credential_pool_strategies") not in (None, "", (), [], {}):
+        raise BetaProviderPolicyError(
+            "Realtor Beta does not allow inference credential pools.",
+            code="beta_credential_pool_not_allowed",
+        )
+
+    auxiliary = config.get("auxiliary")
+    if auxiliary not in (None, "", {}):
+        if not isinstance(auxiliary, Mapping):
+            raise BetaProviderPolicyError(
+                "Realtor Beta auxiliary settings must be a mapping.",
+                code="beta_auxiliary_config_invalid",
+            )
+        for task_name, task_config in auxiliary.items():
+            _validate_beta_inference_block(
+                task_config,
+                source=f"auxiliary {task_name}",
+            )
+
+    _validate_beta_inference_block(config.get("delegation"), source="delegation")
+
+
 def validate_beta_config_for_persistence(
     config: Mapping[str, Any],
     auth_status: Mapping[str, Any],
@@ -159,6 +396,8 @@ def validate_beta_config_for_persistence(
             code="beta_config_invalid",
         )
 
+    _validate_beta_runtime_config(config)
+    _validate_beta_inference_config(config)
     _validate_beta_memory_config(config, environ=environ)
 
     for key in ("fallback_model", "fallback_providers"):
