@@ -539,13 +539,16 @@ class ToolRegistry:
 
         resolved = set(entry.effects or ())
         if entry.effect_resolver is not None:
-            try:
-                dynamic = normalize_effects(
-                    entry.effect_resolver(dict(args) if isinstance(args, dict) else {})
-                )
-            except Exception as exc:
-                logger.warning("effect_resolver for tool %s raised %s", name, exc)
+            if not isinstance(args, dict):
                 dynamic = frozenset({Effect(EffectKind.UNKNOWN)})
+            else:
+                try:
+                    dynamic = normalize_effects(entry.effect_resolver(dict(args)))
+                except Exception as exc:
+                    logger.warning("effect_resolver for tool %s raised %s", name, exc)
+                    dynamic = frozenset({Effect(EffectKind.UNKNOWN)})
+                if not dynamic:
+                    dynamic = frozenset({Effect(EffectKind.UNKNOWN)})
             resolved.update(dynamic)
         if not resolved:
             resolved.add(Effect(EffectKind.UNKNOWN))

@@ -262,6 +262,70 @@ def test_registry_resolver_only_metadata_is_declared_without_static_unknown() ->
     })
 
 
+@pytest.mark.parametrize("dynamic_effects", [None, set()])
+def test_registry_empty_dynamic_resolution_adds_unknown_and_denies(
+    dynamic_effects,
+) -> None:
+    registry = ToolRegistry()
+    registry.register(
+        name="incomplete_dynamic_tool",
+        toolset="plugin",
+        schema=_schema("incomplete_dynamic_tool"),
+        handler=_handler,
+        effects={"read"},
+        effect_resolver=lambda _args: dynamic_effects,
+    )
+
+    effects = registry.resolve_effects(
+        "incomplete_dynamic_tool",
+        {"action": "unclassified_mutation"},
+    )
+    assert effects == frozenset({
+        Effect.parse("read"),
+        Effect(EffectKind.UNKNOWN),
+    })
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode("turn-read", ExecutionPolicyMode.READ_ONLY),
+        effects,
+    )
+    assert decision.allowed is False
+    assert decision.reason == "unknown_effect"
+
+
+def test_registry_non_dict_resolver_args_add_unknown_without_coercion() -> None:
+    registry = ToolRegistry()
+    resolver_calls = []
+
+    def resolve(args: dict):
+        resolver_calls.append(args)
+        return {"read"}
+
+    registry.register(
+        name="shape_sensitive_tool",
+        toolset="plugin",
+        schema=_schema("shape_sensitive_tool"),
+        handler=_handler,
+        effects={"read"},
+        effect_resolver=resolve,
+    )
+
+    effects = registry.resolve_effects(
+        "shape_sensitive_tool",
+        ["mutating", "payload"],  # type: ignore[arg-type]
+    )
+    assert resolver_calls == []
+    assert effects == frozenset({
+        Effect.parse("read"),
+        Effect(EffectKind.UNKNOWN),
+    })
+    decision = authorize_effects(
+        ExecutionPolicy.for_mode("turn-read", ExecutionPolicyMode.READ_ONLY),
+        effects,
+    )
+    assert decision.allowed is False
+    assert decision.reason == "unknown_effect"
+
+
 def test_registry_resolver_failure_adds_unknown_instead_of_failing_open() -> None:
     registry = ToolRegistry()
     registry.register(
