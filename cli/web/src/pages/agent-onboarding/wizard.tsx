@@ -18,6 +18,7 @@ import { api } from "@/lib/api";
 import type {
   AgentHubAgent,
   AgentSetupSnapshot,
+  BetaRuntimeReceipt,
   OAuthProvider,
   TelegramApprovedEntry,
   TelegramPendingEntry,
@@ -55,14 +56,27 @@ import {
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
 import {
+  type BetaPrimaryUiContract,
   canonicalizePrimaryDraftForOnboarding,
-  scopeOAuthProvidersForOnboarding,
+  resolveBetaPrimaryUiContract,
 } from "./beta-provider-ui";
 
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err) return err;
   return fallback;
+}
+
+function betaContractForSetup(
+  setup: AgentSetupSnapshot,
+  runtime: BetaRuntimeReceipt | undefined,
+): BetaPrimaryUiContract {
+  const primary = setup.items.find((item) => item.key === "model_primary");
+  return resolveBetaPrimaryUiContract({
+    runtime,
+    setupProvider: primary?.provider,
+    setupValue: primary?.value,
+  });
 }
 
 // Static fallback catalogs. Mirrors `_PROVIDER_MODELS` + `DEFAULT_CODEX_MODELS`
@@ -285,15 +299,21 @@ export function AgentOnboardingWizard({
   onFinishLater,
   onFinish,
   realtorBeta = false,
+  betaRuntime,
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
   onFinishLater: () => void;
   onFinish: () => void;
   realtorBeta?: boolean;
+  betaRuntime?: BetaRuntimeReceipt;
 }) {
   const [draft, setDraft] = useState<AgentSetupDraft>(() =>
-    canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+    canonicalizePrimaryDraftForOnboarding(
+      draftFromSnapshot(setup),
+      realtorBeta,
+      betaContractForSetup(setup, betaRuntime),
+    ),
   );
   const [saving, setSaving] = useState(false);
   const [completing, setCompleting] = useState(false);
@@ -310,65 +330,51 @@ export function AgentOnboardingWizard({
   );
   const primaryItemValue = (primaryItem?.value ?? {}) as Record<string, unknown>;
   const existingRuntimeProvider = String(primaryItemValue.runtimeProvider ?? "");
+  const betaPrimaryContract = useMemo(
+    () => betaContractForSetup(setup, betaRuntime),
+    [betaRuntime, setup],
+  );
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
   useEffect(() => {
     setDraft(
-      canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+      canonicalizePrimaryDraftForOnboarding(
+        draftFromSnapshot(setup),
+        realtorBeta,
+        betaPrimaryContract,
+      ),
     );
-  }, [setup, realtorBeta]);
+  }, [betaPrimaryContract, setup, realtorBeta]);
 
-  // Pull real CLI auth state so the Brain step reflects what's actually
-  // signed in (anthropic via PKCE, claude-code subscription, etc) — NOT
-  // just what's in ~/.elevate/.env. Refreshes when the user lands on or
-  // returns to step 1.
-  useEffect(() => {
-    let cancelled = false;
-    const fetchProviders = () => {
-      api
-        .getOAuthProviders()
-        .then((resp) => {
-          if (cancelled) return;
-          const scopedProviders = scopeOAuthProvidersForOnboarding(
-            resp.providers,
-            realtorBeta,
-          );
-          setOauthProviders(scopedProviders);
-          if (realtorBeta) {
-            setDraft((prev) => canonicalizePrimaryDraftForOnboarding(prev, true));
-            return;
-          }
-          // Auto-default primaryProvider when nothing is picked yet but
-          // a CLI provider is signed in. Saves the user a click when they
-          // already authed via `elevate auth add anthropic`.
-          const current = draftRef.current.primaryProvider;
-          if (!current.trim()) {
-            const live = scopedProviders.find(
-              (p) => isOAuthProviderUsable(p) && p.id !== "claude-code",
-            );
-            const fallback = scopedProviders.find(isOAuthProviderUsable);
-            const pick = live ?? fallback;
-            if (pick) {
-              setDraft((prev) =>
-                prev.primaryProvider.trim()
-                  ? prev
-                  : { ...prev, primaryProvider: resolvePrimaryWizardProvider(pick.id) },
-              );
-            }
-          }
-        })
-        .catch(() => {
-          // Keep null: a transport failure is unknown, not disconnected.
-        });
-    };
-    if (AGENT_WIZARD_STEPS[stepIdx]?.id === "models") {
-      fetchProviders();
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [stepIdx, realtorBeta]);
+  // OAuthProvidersCard owns the request lifecycle and publishes every
+  // loading/success state here. Validation and the visible row can therefore
+  // never disagree after a failed request followed by Refresh.
+  const handleOAuthProvidersChange = useCallback(
+    (providers: OAuthProvider[] | null) => {
+      setOauthProviders(providers);
+      if (providers === null) return;
+      setError(null);
+      if (realtorBeta) return;
+
+      // Preserve Stable's convenience default when a CLI provider is already
+      // signed in and the operator has not selected one yet.
+      const current = draftRef.current.primaryProvider;
+      if (current.trim()) return;
+      const live = providers.find(
+        (provider) => isOAuthProviderUsable(provider) && provider.id !== "claude-code",
+      );
+      const fallback = providers.find(isOAuthProviderUsable);
+      const pick = live ?? fallback;
+      if (!pick) return;
+      setDraft((prev) =>
+        prev.primaryProvider.trim()
+          ? prev
+          : { ...prev, primaryProvider: resolvePrimaryWizardProvider(pick.id) },
+      );
+    },
+    [realtorBeta],
+  );
 
   const connectedProviderIds = useMemo(() => {
     if (!oauthProviders) return new Set<string>();
@@ -509,6 +515,9 @@ export function AgentOnboardingWizard({
 
   const missingMessage = useMemo(() => {
     if (step.id === "models") {
+      if (realtorBeta && !betaPrimaryContract.valid) {
+        return betaPrimaryContract.error;
+      }
       // A provider is "available" if either: the user signed in via CLI/wizard
       // OAuth (real auth store), OR a key is detected in ~/.elevate/.env, OR
       // the user pasted one in this session.
@@ -570,6 +579,7 @@ export function AgentOnboardingWizard({
     primaryItem,
     primaryDirectSecretPresent,
     realtorBeta,
+    betaPrimaryContract,
   ]);
 
   const canAdvance = missingMessage == null;
@@ -582,7 +592,14 @@ export function AgentOnboardingWizard({
     setSaving(true);
     setError(null);
     try {
-      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
+      if (realtorBeta && !betaPrimaryContract.valid) {
+        throw new Error(betaPrimaryContract.error);
+      }
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(
+        draft,
+        realtorBeta,
+        betaPrimaryContract,
+      );
       const updated = await api.updateAgentSetup(
         buildItemUpdates(
           draftToSave,
@@ -605,13 +622,21 @@ export function AgentOnboardingWizard({
     primaryItem,
     primaryDirectSecretPresent,
     realtorBeta,
+    betaPrimaryContract,
   ]);
 
   const handleFinish = useCallback(async () => {
     setError(null);
     setCompleting(true);
     try {
-      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
+      if (realtorBeta && !betaPrimaryContract.valid) {
+        throw new Error(betaPrimaryContract.error);
+      }
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(
+        draft,
+        realtorBeta,
+        betaPrimaryContract,
+      );
       await api.updateAgentSetup(
         buildItemUpdates(
           draftToSave,
@@ -638,6 +663,7 @@ export function AgentOnboardingWizard({
     primaryItem,
     primaryDirectSecretPresent,
     realtorBeta,
+    betaPrimaryContract,
   ]);
 
   const handleNext = useCallback(async () => {
@@ -727,18 +753,16 @@ export function AgentOnboardingWizard({
                   <div className="-mx-1">
                     <OAuthProvidersCard
                       realtorBeta
+                      onProvidersChange={handleOAuthProvidersChange}
                       onError={(msg) => setError(msg)}
-                      onSuccess={() => {
-                        api.getOAuthProviders()
-                          .then((resp) =>
-                            setOauthProviders(
-                              scopeOAuthProvidersForOnboarding(resp.providers, true),
-                            ),
-                          )
-                          .catch(() => {});
-                      }}
+                      onSuccess={() => setError(null)}
                     />
                   </div>
+                  {!betaPrimaryContract.valid && (
+                    <p role="alert" className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] leading-5 text-destructive">
+                      {betaPrimaryContract.error}
+                    </p>
+                  )}
                   <p
                     className="mt-3 text-[12px] leading-5 text-muted-foreground"
                     aria-live="polite"
@@ -758,11 +782,9 @@ export function AgentOnboardingWizard({
                   >
                     <div className="-mx-1">
                       <OAuthProvidersCard
+                        onProvidersChange={handleOAuthProvidersChange}
                         onError={(msg) => setError(msg)}
-                        onSuccess={() => {
-                          // Re-pull so the wizard picks up the new auth state.
-                          api.getOAuthProviders().then((resp) => setOauthProviders(resp.providers)).catch(() => {});
-                        }}
+                        onSuccess={() => setError(null)}
                       />
                     </div>
                   </WizardSection>

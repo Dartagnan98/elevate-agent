@@ -222,8 +222,8 @@ describe("agent onboarding OAuth readiness", () => {
     const serializer = fs.readFileSync(new URL("../index.tsx", import.meta.url), "utf8");
     const wizard = fs.readFileSync(new URL("../wizard.tsx", import.meta.url), "utf8");
 
-    expect(serializer).toContain("runtimeProvider: primaryRuntimeProvider");
-    expect(serializer).toContain("resolveConfiguredPrimaryRuntimeProvider({");
+    expect(serializer).toContain("const primaryUpdate = buildPrimaryModelItemUpdate({");
+    expect(serializer).toContain("primaryUpdate,");
     expect(serializer).toContain("primaryProvider: resolvePrimaryWizardProvider(");
     expect(wizard).toContain("oauthProviders.filter(isOAuthProviderUsable)");
     expect(wizard).toContain("const primaryReady = isPrimaryModelReady({");
@@ -233,9 +233,7 @@ describe("agent onboarding OAuth readiness", () => {
         /buildItemUpdates\(\s*draftToSave,\s*oauthProviders,\s*primaryItem,\s*primaryDirectSecretPresent,\s*\)/g,
       ),
     ).toHaveLength(2);
-    expect(wizard).toContain(
-      "canonicalizePrimaryDraftForOnboarding(draft, realtorBeta)",
-    );
+    expect(wizard).toContain("canonicalizePrimaryDraftForOnboarding(");
     expect(wizard).toContain('setup.items.find((item) => item.key === "model_primary")');
     expect(wizard).not.toContain("setOauthProviders([])");
     expect(wizard).toContain("onEnvStateChange={handleApiKeyEnvStateChange}");
@@ -245,9 +243,7 @@ describe("agent onboarding OAuth readiness", () => {
         /buildItemUpdates\(\s*draftToSave,\s*oauthProviders,\s*primaryItem,?\s*\)/g,
       ),
     ).toHaveLength(2);
-    expect(serializer).toContain(
-      "canonicalizePrimaryDraftForOnboarding(draft, realtorBeta)",
-    );
+    expect(serializer).toContain("canonicalizePrimaryDraftForOnboarding(");
     expect(serializer).toContain("api.getOAuthProviders()");
   });
 });

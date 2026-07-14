@@ -1,4 +1,8 @@
-import type { OAuthProvider, OAuthProviderStatus } from "@/lib/api-types";
+import type {
+  AgentSetupItemUpdate,
+  OAuthProvider,
+  OAuthProviderStatus,
+} from "@/lib/api-types";
 
 const PRIMARY_OAUTH_RUNTIME_PROVIDER: Record<string, string> = {
   openai: "openai-codex",
@@ -153,4 +157,47 @@ export function isPrimaryModelReady({
   }
   const value = (existingPrimary.value ?? {}) as Record<string, unknown>;
   return String(value.model ?? "").trim() === model;
+}
+
+export function buildPrimaryModelItemUpdate({
+  selectedProvider,
+  selectedModel,
+  apiKey,
+  secretPresent,
+  oauthProviders,
+  existingPrimary,
+}: {
+  selectedProvider: string;
+  selectedModel: string;
+  apiKey: string;
+  secretPresent: boolean;
+  oauthProviders: OAuthProvider[] | null;
+  existingPrimary?: ExistingPrimarySetup;
+}): AgentSetupItemUpdate {
+  const hasSecret = Boolean(apiKey.trim()) || secretPresent;
+  const ready = isPrimaryModelReady({
+    selectedProvider,
+    selectedModel,
+    hasSecret,
+    oauthProviders,
+    existingPrimary,
+  });
+  const existingValue = (existingPrimary?.value ?? {}) as Record<string, unknown>;
+  const runtimeProvider = resolveConfiguredPrimaryRuntimeProvider({
+    selectedProvider,
+    hasDirectSecret: hasSecret,
+    providers: oauthProviders,
+    existingRuntimeProvider: String(existingValue.runtimeProvider ?? ""),
+  }) || null;
+  return {
+    key: "model_primary",
+    status: ready ? "configured" : "missing",
+    provider: selectedProvider.trim() || null,
+    value: {
+      model: selectedModel.trim(),
+      runtimeProvider,
+      apiKey,
+      usesEnvSecret: !apiKey.trim() && secretPresent,
+    },
+  };
 }

@@ -15,6 +15,7 @@ import type {
   AgentSetupItem,
   AgentSetupItemUpdate,
   AgentSetupSnapshot,
+  BetaRuntimeReceipt,
   OAuthProvider,
   StatusResponse,
 } from "@/lib/api-types";
@@ -27,14 +28,15 @@ import {
   AgentOnboardingWizard,
 } from "./wizard";
 import {
-  isPrimaryModelReady,
+  buildPrimaryModelItemUpdate,
   isUsableSecretPresence,
-  resolveConfiguredPrimaryRuntimeProvider,
   resolvePrimaryWizardProvider,
 } from "./oauth-readiness";
 import { exitAgentOnboardingToChat } from "./onboarding-exit";
 import {
+  type BetaPrimaryUiContract,
   canonicalizePrimaryDraftForOnboarding,
+  resolveBetaPrimaryUiContract,
   scopeOAuthProvidersForOnboarding,
 } from "./beta-provider-ui";
 
@@ -42,6 +44,18 @@ function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err) return err;
   return fallback;
+}
+
+function betaContractForSetup(
+  setup: AgentSetupSnapshot,
+  runtime: BetaRuntimeReceipt | undefined,
+): BetaPrimaryUiContract {
+  const primary = setup.items.find((item) => item.key === "model_primary");
+  return resolveBetaPrimaryUiContract({
+    runtime,
+    setupProvider: primary?.provider,
+    setupValue: primary?.value,
+  });
 }
 
 export const SUBAGENT_KEYS = [
@@ -296,20 +310,14 @@ export function buildItemUpdates(
   primarySecretPresent = draft.primarySecretPresent,
 ): AgentSetupItemUpdate[] {
   const primaryHasSecret = Boolean(draft.primaryApiKey.trim()) || primarySecretPresent;
-  const primaryReady = isPrimaryModelReady({
+  const primaryUpdate = buildPrimaryModelItemUpdate({
     selectedProvider: draft.primaryProvider,
     selectedModel: draft.primaryModel,
-    hasSecret: primaryHasSecret,
+    apiKey: draft.primaryApiKey,
+    secretPresent: primarySecretPresent,
     oauthProviders,
     existingPrimary,
   });
-  const existingPrimaryValue = (existingPrimary?.value ?? {}) as Record<string, unknown>;
-  const primaryRuntimeProvider = resolveConfiguredPrimaryRuntimeProvider({
-    selectedProvider: draft.primaryProvider,
-    hasDirectSecret: primaryHasSecret,
-    providers: oauthProviders,
-    existingRuntimeProvider: String(existingPrimaryValue.runtimeProvider ?? ""),
-  }) || null;
   const embeddingHasKey = draft.embeddingShareKey
     ? primaryHasSecret
     : Boolean(draft.embeddingApiKey.trim()) || draft.embeddingSecretPresent;
@@ -345,17 +353,7 @@ export function buildItemUpdates(
   const outSlackReady = draft.outboundSlackEnabled && slackReady;
 
   return [
-    {
-      key: "model_primary",
-      status: (primaryReady ? "configured" : "missing") as AdminSetupItemStatus,
-      provider: draft.primaryProvider.trim() || null,
-      value: {
-        model: draft.primaryModel.trim(),
-        runtimeProvider: primaryRuntimeProvider,
-        apiKey: draft.primaryApiKey,
-        usesEnvSecret: !draft.primaryApiKey.trim() && primarySecretPresent,
-      },
-    },
+    primaryUpdate,
     {
       key: "model_embedding",
       status: (embeddingReady ? "configured" : "missing") as AdminSetupItemStatus,
@@ -641,15 +639,21 @@ export function AgentSetupLaunch({
   forceOnboarding = false,
   onForceOnboardingDone,
   realtorBeta = false,
+  betaRuntime,
 }: {
   setup: AgentSetupSnapshot;
   onSetupUpdated: (next: AgentSetupSnapshot) => void;
   forceOnboarding?: boolean;
   onForceOnboardingDone?: () => void;
   realtorBeta?: boolean;
+  betaRuntime?: BetaRuntimeReceipt;
 }) {
   const [draft, setDraft] = useState<AgentSetupDraft>(() =>
-    canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+    canonicalizePrimaryDraftForOnboarding(
+      draftFromSnapshot(setup),
+      realtorBeta,
+      betaContractForSetup(setup, betaRuntime),
+    ),
   );
   const [saving, setSaving] = useState(false);
   const [completing, setCompleting] = useState(false);
@@ -659,11 +663,16 @@ export function AgentSetupLaunch({
 
   useEffect(() => {
     setDraft(
-      canonicalizePrimaryDraftForOnboarding(draftFromSnapshot(setup), realtorBeta),
+      canonicalizePrimaryDraftForOnboarding(
+        draftFromSnapshot(setup),
+        realtorBeta,
+        betaContractForSetup(setup, betaRuntime),
+      ),
     );
-  }, [setup, realtorBeta]);
+  }, [betaRuntime, setup, realtorBeta]);
 
   useEffect(() => {
+    if (realtorBeta) return;
     let cancelled = false;
     api.getOAuthProviders()
       .then((response) => {
@@ -687,6 +696,10 @@ export function AgentSetupLaunch({
     [setup.items],
   );
   const primaryItem = byKey.get("model_primary");
+  const betaPrimaryContract = useMemo(
+    () => betaContractForSetup(setup, betaRuntime),
+    [betaRuntime, setup],
+  );
   const embeddingItem = byKey.get("model_embedding");
   const imageItem = byKey.get("model_image");
   const memoryItem = byKey.get("memory_store");
@@ -696,12 +709,27 @@ export function AgentSetupLaunch({
   const subagentsItem = byKey.get("subagents_pack");
   const agentChannelRoutingItem = byKey.get("agent_channel_routing");
 
+  const handleOAuthProvidersChange = useCallback(
+    (providers: OAuthProvider[] | null) => {
+      setOauthProviders(providers);
+      if (providers !== null) setError(null);
+    },
+    [],
+  );
+
   const save = useCallback(async () => {
     setSaving(true);
     setError(null);
     setSavedMessage(null);
     try {
-      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
+      if (realtorBeta && !betaPrimaryContract.valid) {
+        throw new Error(betaPrimaryContract.error);
+      }
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(
+        draft,
+        realtorBeta,
+        betaPrimaryContract,
+      );
       const updated = await api.updateAgentSetup(
         buildItemUpdates(draftToSave, oauthProviders, primaryItem),
       );
@@ -716,14 +744,28 @@ export function AgentSetupLaunch({
     } finally {
       setSaving(false);
     }
-  }, [draft, oauthProviders, onSetupUpdated, primaryItem, realtorBeta]);
+  }, [
+    betaPrimaryContract,
+    draft,
+    oauthProviders,
+    onSetupUpdated,
+    primaryItem,
+    realtorBeta,
+  ]);
 
   const markComplete = useCallback(async () => {
     setCompleting(true);
     setError(null);
     setSavedMessage(null);
     try {
-      const draftToSave = canonicalizePrimaryDraftForOnboarding(draft, realtorBeta);
+      if (realtorBeta && !betaPrimaryContract.valid) {
+        throw new Error(betaPrimaryContract.error);
+      }
+      const draftToSave = canonicalizePrimaryDraftForOnboarding(
+        draft,
+        realtorBeta,
+        betaPrimaryContract,
+      );
       await api.updateAgentSetup(
         buildItemUpdates(draftToSave, oauthProviders, primaryItem),
       );
@@ -742,6 +784,7 @@ export function AgentSetupLaunch({
     onForceOnboardingDone,
     primaryItem,
     realtorBeta,
+    betaPrimaryContract,
   ]);
 
   const updateField = useCallback(
@@ -765,6 +808,7 @@ export function AgentSetupLaunch({
   );
 
   const pct = setup.completionPct ?? 0;
+  const betaPolicyBlocked = realtorBeta && !betaPrimaryContract.valid;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-6">
@@ -816,17 +860,15 @@ export function AgentSetupLaunch({
         >
           <OAuthProvidersCard
             realtorBeta
+            onProvidersChange={handleOAuthProvidersChange}
             onError={(message) => setError(message)}
-            onSuccess={() => {
-              api.getOAuthProviders()
-                .then((response) =>
-                  setOauthProviders(
-                    scopeOAuthProvidersForOnboarding(response.providers, true),
-                  ),
-                )
-                .catch(() => {});
-            }}
+            onSuccess={() => setError(null)}
           />
+          {!betaPrimaryContract.valid && (
+            <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] leading-5 text-destructive">
+              {betaPrimaryContract.error}
+            </p>
+          )}
           <p className="text-[11.5px] leading-5 text-muted-foreground">
             No provider picker, model picker, or API key is needed in Realtor Beta.
           </p>
@@ -1250,19 +1292,21 @@ export function AgentSetupLaunch({
 
       <div className="sticky bottom-2 z-10 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-card/95 px-3 py-2 backdrop-blur">
         <div className="text-[11.5px] text-muted-foreground">
-          {setup.complete
+          {betaPolicyBlocked
+            ? "Realtor Beta model policy needs attention."
+            : setup.complete
             ? "All required items connected."
             : `${setup.missingRequiredKeys.length} required item(s) outstanding.`}
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void save()} disabled={saving || completing}>
+          <Button variant="outline" size="sm" onClick={() => void save()} disabled={saving || completing || betaPolicyBlocked}>
             {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
             Save
           </Button>
           <Button
             size="sm"
             onClick={() => void markComplete()}
-            disabled={completing || saving || setup.requiredCount === 0}
+            disabled={completing || saving || setup.requiredCount === 0 || betaPolicyBlocked}
             className={cn(setup.complete ? "" : "opacity-95")}
           >
             {completing ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
@@ -1415,6 +1459,7 @@ export function AgentOnboardingPage() {
       <AgentOnboardingWizard
         setup={setup}
         realtorBeta={realtorBeta}
+        betaRuntime={runtimeStatus.beta_runtime}
         onSetupUpdated={setSetup}
         onFinishLater={finishOnboardingLater}
         onFinish={() => {
@@ -1474,6 +1519,7 @@ export function AgentOnboardingPage() {
       <AgentSetupLaunch
         setup={setup}
         realtorBeta={realtorBeta}
+        betaRuntime={runtimeStatus.beta_runtime}
         onSetupUpdated={setSetup}
         forceOnboarding={forceOnboarding}
         onForceOnboardingDone={() => setForceOnboarding(false)}

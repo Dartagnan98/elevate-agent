@@ -1,13 +1,25 @@
-import fs from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { OAuthProvider } from "@/lib/api-types";
+import type {
+  AgentSetupItem,
+  BetaRuntimeReceipt,
+  OAuthProvider,
+} from "@/lib/api-types";
 import {
-  REALTOR_BETA_DEFAULT_MODEL,
+  buildPrimaryModelItemUpdate,
+  isPrimaryModelReady,
+} from "../oauth-readiness";
+import {
+  REALTOR_BETA_ALLOWED_MODELS_VERSION,
   REALTOR_BETA_OAUTH_PROVIDER_ID,
+  REALTOR_BETA_PROVIDER_POLICY_VERSION,
   canonicalizePrimaryDraftForOnboarding,
   isOAuthProviderAllowedInOnboarding,
-  scopeOAuthProvidersForOnboarding,
+  oauthProviderRowsForOnboarding,
+  refreshOAuthProvidersForOnboarding,
+  resolveBetaPrimaryUiContract,
 } from "../beta-provider-ui";
+
+const BETA_MODEL = "gpt-5.5";
 
 function provider(id: string, loggedIn = true): OAuthProvider {
   return {
@@ -20,90 +32,218 @@ function provider(id: string, loggedIn = true): OAuthProvider {
   };
 }
 
-function source(relative: string): string {
-  return fs.readFileSync(new URL(relative, import.meta.url), "utf8");
+function betaRuntime(
+  overrides: Partial<BetaRuntimeReceipt> = {},
+): BetaRuntimeReceipt {
+  return {
+    releaseChannel: "beta",
+    elevateHome: "/tmp/elevate-beta",
+    providerPolicyVersion: REALTOR_BETA_PROVIDER_POLICY_VERSION,
+    allowedModelsVersion: REALTOR_BETA_ALLOWED_MODELS_VERSION,
+    allowedProvider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+    configuredProvider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+    configuredModel: BETA_MODEL,
+    authReady: true,
+    authReason: null,
+    runtimeReady: true,
+    blockedReason: null,
+    ...overrides,
+  };
+}
+
+function primaryItem(): AgentSetupItem {
+  return {
+    key: "model_primary",
+    category: "model",
+    label: "Primary model",
+    description: null,
+    required: true,
+    status: "configured",
+    provider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+    value: {
+      model: BETA_MODEL,
+      runtimeProvider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+      policyVersion: REALTOR_BETA_PROVIDER_POLICY_VERSION,
+      allowedModelsVersion: REALTOR_BETA_ALLOWED_MODELS_VERSION,
+    },
+    notes: null,
+    sortOrder: 1,
+    updatedAt: null,
+  };
+}
+
+function browserDraft() {
+  return {
+    primaryProvider: "anthropic",
+    primaryModel: "claude-opus-4-7",
+    primaryApiKey: "must-not-survive",
+    primarySecretPresent: true,
+    primarySecretPreview: "…live",
+  };
+}
+
+function betaContract(primary = primaryItem()) {
+  return resolveBetaPrimaryUiContract({
+    runtime: betaRuntime(),
+    setupProvider: primary.provider,
+    setupValue: primary.value,
+  });
 }
 
 describe("Realtor Beta onboarding provider UI", () => {
-  it("never exposes or authorizes a returned non-Codex OAuth provider", () => {
-    const returned = [
-      provider("anthropic"),
-      provider(REALTOR_BETA_OAUTH_PROVIDER_ID),
-      provider("google-gemini-cli"),
-    ];
+  it("recovers from an initial provider failure and publishes Refresh state that unlocks Next", async () => {
+    const primary = primaryItem();
+    const contract = betaContract(primary);
+    const draft = canonicalizePrimaryDraftForOnboarding(
+      browserDraft(),
+      true,
+      contract,
+    );
+    let sharedProviders: OAuthProvider[] | null = null;
+    const published: Array<OAuthProvider[] | null> = [];
+    let attempts = 0;
+    const refresh = () => refreshOAuthProvidersForOnboarding({
+      realtorBeta: true,
+      load: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("gateway restarting");
+        return {
+          providers: [
+            provider("anthropic"),
+            provider(REALTOR_BETA_OAUTH_PROVIDER_ID),
+          ],
+        };
+      },
+      publish: (next) => {
+        sharedProviders = next;
+        published.push(next);
+      },
+    });
+    const ready = () => isPrimaryModelReady({
+      selectedProvider: draft.primaryProvider,
+      selectedModel: draft.primaryModel,
+      hasSecret: false,
+      oauthProviders: sharedProviders,
+      existingPrimary: primary,
+    });
 
-    expect(scopeOAuthProvidersForOnboarding(returned, true).map((item) => item.id))
-      .toEqual([REALTOR_BETA_OAUTH_PROVIDER_ID]);
-    expect(isOAuthProviderAllowedInOnboarding("anthropic", true)).toBe(false);
-    expect(isOAuthProviderAllowedInOnboarding("google-gemini-cli", true)).toBe(false);
-    expect(
-      isOAuthProviderAllowedInOnboarding(REALTOR_BETA_OAUTH_PROVIDER_ID, true),
-    ).toBe(true);
+    const failed = await refresh();
+    expect(failed.error).toContain("press Refresh");
+    expect(sharedProviders).toBeNull();
+    expect(ready()).toBe(false);
 
-    expect(scopeOAuthProvidersForOnboarding(returned, false)).toBe(returned);
-    expect(isOAuthProviderAllowedInOnboarding("anthropic", false)).toBe(true);
+    const recovered = await refresh();
+    expect(recovered.error).toBeNull();
+    expect(sharedProviders?.map((item) => item.id)).toEqual([
+      REALTOR_BETA_OAUTH_PROVIDER_ID,
+    ]);
+    expect(ready()).toBe(true);
+    expect(published.map((items) => items?.map((item) => item.id) ?? null))
+      .toEqual([null, null, null, [REALTOR_BETA_OAUTH_PROVIDER_ID]]);
   });
 
-  it("repairs a stale provider, model, and direct key before an exact-Beta save", () => {
-    const draft = canonicalizePrimaryDraftForOnboarding(
-      {
-        primaryProvider: "anthropic",
-        primaryModel: "claude-opus-4-7",
-        primaryApiKey: "must-not-survive",
-        primarySecretPresent: true,
-        primarySecretPreview: "…live",
-        untouched: "preserved",
-      },
+  it("builds only the exact-Beta Codex row and permits only its supported actions", () => {
+    const rows = oauthProviderRowsForOnboarding(
+      [
+        provider("anthropic", false),
+        provider(REALTOR_BETA_OAUTH_PROVIDER_ID, false),
+        provider("google-gemini-cli", false),
+      ],
       true,
     );
 
-    expect(draft).toMatchObject({
-      primaryProvider: REALTOR_BETA_OAUTH_PROVIDER_ID,
-      primaryModel: REALTOR_BETA_DEFAULT_MODEL,
-      primaryApiKey: "",
-      primarySecretPresent: false,
-      primarySecretPreview: "",
-      untouched: "preserved",
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      provider: { id: REALTOR_BETA_OAUTH_PROVIDER_ID },
+      showDocs: false,
+      showCopyCommand: false,
+      canStartLogin: true,
+      canDisconnect: false,
+    });
+    expect(isOAuthProviderAllowedInOnboarding("anthropic", true)).toBe(false);
+    expect(isOAuthProviderAllowedInOnboarding("google-gemini-cli", true)).toBe(false);
+  });
+
+  it("serializes a stale browser draft to the backend-authored Codex provider and model", () => {
+    const primary = primaryItem();
+    const contract = betaContract(primary);
+    const draft = canonicalizePrimaryDraftForOnboarding(
+      browserDraft(),
+      true,
+      contract,
+    );
+    const primaryUpdate = buildPrimaryModelItemUpdate({
+      selectedProvider: draft.primaryProvider,
+      selectedModel: draft.primaryModel,
+      apiKey: draft.primaryApiKey,
+      secretPresent: draft.primarySecretPresent,
+      oauthProviders: [provider(REALTOR_BETA_OAUTH_PROVIDER_ID)],
+      existingPrimary: primary,
+    });
+
+    expect(primaryUpdate).toEqual({
+      key: "model_primary",
+      status: "configured",
+      provider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+      value: {
+        model: BETA_MODEL,
+        runtimeProvider: REALTOR_BETA_OAUTH_PROVIDER_ID,
+        apiKey: "",
+        usesEnvSecret: false,
+      },
     });
   });
 
-  it("preserves an allowed Codex model while leaving Stable drafts byte-for-byte alone", () => {
-    const allowed = {
-      primaryProvider: "openai-codex",
-      primaryModel: "gpt-5.4-mini",
-      primaryApiKey: "",
-      primarySecretPresent: false,
-      primarySecretPreview: "",
-    };
-    expect(canonicalizePrimaryDraftForOnboarding(allowed, true).primaryModel)
-      .toBe("gpt-5.4-mini");
+  it("fails closed with an actionable error when the runtime model policy is newer", () => {
+    const primary = primaryItem();
+    const contract = resolveBetaPrimaryUiContract({
+      runtime: betaRuntime({ allowedModelsVersion: "2099-01-01-v2" }),
+      setupProvider: primary.provider,
+      setupValue: primary.value,
+    });
+    const draft = canonicalizePrimaryDraftForOnboarding(
+      browserDraft(),
+      true,
+      contract,
+    );
 
-    const stable = { ...allowed, primaryProvider: "anthropic" };
-    expect(canonicalizePrimaryDraftForOnboarding(stable, false)).toBe(stable);
+    expect(contract.valid).toBe(false);
+    expect(contract.error).toContain("Update Elevation Beta");
+    expect(draft.primaryProvider).toBe(REALTOR_BETA_OAUTH_PROVIDER_ID);
+    expect(draft.primaryModel).toBe("");
   });
 
-  it("renders only the scoped sign-in path in both Beta onboarding surfaces", () => {
-    const wizard = source("../wizard.tsx");
-    const page = source("../index.tsx");
-    const oauthCard = source("../../../components/OAuthProvidersCard.tsx");
+  it("leaves Stable rows, refresh semantics, and drafts unchanged", async () => {
+    const returned = [provider("anthropic", false), provider("openai-codex")];
+    const rows = oauthProviderRowsForOnboarding(returned, false);
+    expect(rows.map((row) => row.provider)).toEqual(returned);
+    expect(rows[0]).toMatchObject({
+      showDocs: true,
+      showCopyCommand: true,
+      canStartLogin: true,
+      canDisconnect: false,
+    });
 
-    expect(wizard).toContain('title="Connect OpenAI Codex"');
-    expect(wizard).toContain("No API key or model choice is needed.");
-    expect(wizard).toContain("<OAuthProvidersCard\n                      realtorBeta");
-    expect(wizard).toContain('title="Or paste API keys"');
-    expect(wizard).toContain("realtorBeta ? (");
+    const published: Array<OAuthProvider[] | null> = [];
+    const failed = await refreshOAuthProvidersForOnboarding({
+      realtorBeta: false,
+      load: async () => {
+        throw new Error("offline");
+      },
+      publish: (next) => published.push(next),
+    });
+    expect(failed.error).toContain("Failed to load providers");
+    expect(published).toEqual([]);
 
-    expect(page).toContain('title="OpenAI Codex"');
-    expect(page).toContain("No provider picker, model picker, or API key is needed");
-    expect(page).toContain("<OAuthProvidersCard\n            realtorBeta");
-
-    expect(oauthCard).toContain(
-      "scopeOAuthProvidersForOnboarding(resp.providers, realtorBeta)",
-    );
-    expect(oauthCard).toContain("!p.status.logged_in && !realtorBeta");
-    expect(oauthCard).toContain("p.docs_url && !realtorBeta");
-    expect(oauthCard).toContain(
-      "isOAuthProviderAllowedInOnboarding(loginFor.id, realtorBeta)",
-    );
+    const stableDraft = {
+      primaryProvider: "anthropic",
+      primaryModel: "claude-opus-4-7",
+      primaryApiKey: "secret",
+      primarySecretPresent: true,
+      primarySecretPreview: "…live",
+    };
+    expect(
+      canonicalizePrimaryDraftForOnboarding(stableDraft, false, betaContract()),
+    ).toBe(stableDraft);
   });
 });

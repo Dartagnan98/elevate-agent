@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { ShieldCheck, ShieldOff, Copy, ExternalLink, RefreshCw, LogOut, Terminal, LogIn } from "lucide-react";
 import { api, type OAuthProvider } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,12 +10,14 @@ import { ListSkeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 import {
   isOAuthProviderAllowedInOnboarding,
-  scopeOAuthProvidersForOnboarding,
+  oauthProviderRowsForOnboarding,
+  refreshOAuthProvidersForOnboarding,
 } from "@/pages/agent-onboarding/beta-provider-ui";
 
 interface Props {
   onError?: (msg: string) => void;
   onSuccess?: (msg: string) => void;
+  onProvidersChange?: (providers: OAuthProvider[] | null) => void;
   realtorBeta?: boolean;
 }
 
@@ -44,9 +46,15 @@ function formatExpiresAt(expiresAt: string | number | null | undefined, expiresI
   }
 }
 
-export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: Props) {
+export function OAuthProvidersCard({
+  onError,
+  onSuccess,
+  onProvidersChange,
+  realtorBeta = false,
+}: Props) {
   const [providers, setProviders] = useState<OAuthProvider[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
@@ -54,62 +62,80 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
-  onErrorRef.current = onError;
+  const onSuccessRef = useRef(onSuccess);
+  const onProvidersChangeRef = useRef(onProvidersChange);
 
-  const refresh = useCallback(() => {
+  useEffect(() => {
+    onErrorRef.current = onError;
+    onSuccessRef.current = onSuccess;
+    onProvidersChangeRef.current = onProvidersChange;
+  }, [onError, onProvidersChange, onSuccess]);
+
+  const refresh = useCallback(async () => {
     setLoading(true);
-    api
-      .getOAuthProviders()
-      .then((resp) =>
-        setProviders(scopeOAuthProvidersForOnboarding(resp.providers, realtorBeta)),
-      )
-      .catch((e) => onErrorRef.current?.(`Failed to load providers: ${e}`))
-      .finally(() => setLoading(false));
+    setLoadError(null);
+    const result = await refreshOAuthProvidersForOnboarding({
+      load: api.getOAuthProviders,
+      realtorBeta,
+      publish: (nextProviders) => {
+        setProviders(nextProviders);
+        onProvidersChangeRef.current?.(nextProviders);
+      },
+    });
+    if (result.error) {
+      setLoadError(result.error);
+      onErrorRef.current?.(result.error);
+    }
+    setLoading(false);
   }, [realtorBeta]);
 
   useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
   const handleCopy = async (provider: OAuthProvider) => {
     if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
-      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      onErrorRef.current?.("Realtor Beta supports only OpenAI Codex sign-in.");
       return;
     }
     try {
       await navigator.clipboard.writeText(provider.cli_command);
       setCopiedId(provider.id);
-      onSuccess?.(`Copied: ${provider.cli_command}`);
+      onSuccessRef.current?.(`Copied: ${provider.cli_command}`);
       setTimeout(() => setCopiedId((v) => (v === provider.id ? null : v)), 1500);
     } catch {
-      onError?.("Clipboard write failed — copy the command manually");
+      onErrorRef.current?.("Clipboard write failed — copy the command manually");
     }
   };
 
   const handleDisconnect = async (provider: OAuthProvider) => {
     if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
-      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      onErrorRef.current?.("Realtor Beta supports only OpenAI Codex sign-in.");
       return;
     }
     setBusyId(provider.id);
     try {
       await api.disconnectOAuthProvider(provider.id);
-      onSuccess?.(`${provider.name} ${t.oauth.disconnect.toLowerCase()}ed`);
-      refresh();
+      onSuccessRef.current?.(`${provider.name} ${t.oauth.disconnect.toLowerCase()}ed`);
+      await refresh();
       setDisconnectTarget(null);
     } catch (e) {
-      onError?.(`${t.oauth.disconnect} failed: ${e}`);
+      onErrorRef.current?.(`${t.oauth.disconnect} failed: ${e}`);
     } finally {
       setBusyId(null);
     }
   };
 
-  const connectedCount = providers?.filter((p) => p.status.logged_in).length ?? 0;
-  const totalCount = providers?.length ?? 0;
+  const providerRows = useMemo(
+    () => oauthProviderRowsForOnboarding(providers ?? [], realtorBeta),
+    [providers, realtorBeta],
+  );
+  const connectedCount = providerRows.filter((row) => row.provider.status.logged_in).length;
+  const totalCount = providerRows.length;
 
   const beginLogin = (provider: OAuthProvider) => {
     if (!isOAuthProviderAllowedInOnboarding(provider.id, realtorBeta)) {
-      onError?.("Realtor Beta supports only OpenAI Codex sign-in.");
+      onErrorRef.current?.("Realtor Beta supports only OpenAI Codex sign-in.");
       return;
     }
     setLoginFor(provider);
@@ -148,13 +174,19 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
         {loading && providers === null && (
           <ListSkeleton rows={3} />
         )}
+        {loadError && (
+          <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+            {loadError}
+          </p>
+        )}
         {providers && providers.length === 0 && (
           <p className="px-1 py-1 text-xs text-muted-foreground/80">
             {t.oauth.noProviders}
           </p>
         )}
         <div className="flex flex-col divide-y divide-border">
-          {providers?.map((p) => {
+          {providerRows.map((row) => {
+            const p = row.provider;
             const expiresLabel = formatExpiresAt(p.status.expires_at, t.oauth.expiresIn);
             const isBusy = busyId === p.id;
             const isExpired = expiresLabel === "expired";
@@ -162,7 +194,6 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
             // accounts or refresh credentials without first disconnecting.
             // External-CLI providers (Qwen) still can't take a Login click
             // (they need the third-party tool to run), so they stay hidden.
-            const showLoginButton = p.flow !== "external";
             const loginLabel = !p.status.logged_in
               ? t.oauth.login
               : isExpired
@@ -236,7 +267,7 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
                 </div>
                 {/* Right: action buttons */}
                 <div className="flex items-center gap-1.5 shrink-0">
-                  {p.docs_url && !realtorBeta && (
+                  {row.showDocs && p.docs_url && (
                     <a
                       href={p.docs_url}
                       target="_blank"
@@ -248,7 +279,7 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
                       <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
                     </a>
                   )}
-                  {showLoginButton && (
+                  {row.canStartLogin && (
                     <Button
                       variant="default"
                       size="sm"
@@ -259,7 +290,7 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
                       {loginLabel}
                     </Button>
                   )}
-                  {!p.status.logged_in && !realtorBeta && (
+                  {row.showCopyCommand && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -277,7 +308,7 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
                       )}
                     </Button>
                   )}
-                  {p.status.logged_in && p.flow !== "external" && (
+                  {row.canDisconnect && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -310,10 +341,12 @@ export function OAuthProvidersCard({ onError, onSuccess, realtorBeta = false }: 
           provider={loginFor}
           onClose={() => {
             setLoginFor(null);
-            refresh();
           }}
-          onSuccess={(msg) => onSuccess?.(msg)}
-          onError={(msg) => onError?.(msg)}
+          onSuccess={(msg) => {
+            onSuccessRef.current?.(msg);
+            void refresh();
+          }}
+          onError={(msg) => onErrorRef.current?.(msg)}
         />
       )}
       <ConfirmDialog
