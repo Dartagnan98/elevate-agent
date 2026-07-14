@@ -200,6 +200,13 @@ const backendRunner = createBackendRunner({
   markStartup,
   path,
   resolveElevateLauncher,
+  runtimeMetadata: {
+    appVersion: app.getVersion(),
+    architecture: process.arch,
+    appBundleName: RELEASE_PROFILE.appBundleName,
+    releaseChannel: RELEASE_PROFILE.channel,
+    sourceReceiptId: packageMetadata.elevateSourceReceiptId || "",
+  },
   setBackendProcess: (proc) => {
     backendProcess = proc;
   },

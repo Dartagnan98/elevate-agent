@@ -11,6 +11,7 @@ function createBackendRunner({
   markStartup,
   path,
   resolveElevateLauncher,
+  runtimeMetadata = {},
   setBackendProcess,
   setOwnsBackend,
   setTimeout,
@@ -45,6 +46,12 @@ function createBackendRunner({
       ELEVATE_DESKTOP_APP: "1",
       // Foreground desktop drains the SMS spool; headless backend cannot drive Messages.
       ELEVATE_SMS_VIA_APP: "1",
+      ELEVATE_DASHBOARD_PORT: String(getBackendPort()),
+      ...(runtimeMetadata.appVersion ? { ELEVATE_APP_VERSION: String(runtimeMetadata.appVersion) } : {}),
+      ...(runtimeMetadata.architecture ? { ELEVATE_APP_ARCHITECTURE: String(runtimeMetadata.architecture) } : {}),
+      ...(runtimeMetadata.appBundleName ? { ELEVATE_APP_BUNDLE_NAME: String(runtimeMetadata.appBundleName) } : {}),
+      ...(runtimeMetadata.releaseChannel ? { ELEVATE_RELEASE_CHANNEL: String(runtimeMetadata.releaseChannel) } : {}),
+      ...(runtimeMetadata.sourceReceiptId ? { ELEVATE_SOURCE_RECEIPT_ID: String(runtimeMetadata.sourceReceiptId) } : {}),
       ...(embeddedChat ? { ELEVATE_DASHBOARD_TUI: "1" } : {}),
     };
 

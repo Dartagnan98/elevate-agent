@@ -823,6 +823,10 @@ def run_debug(args):
     subcmd = getattr(args, "debug_command", None)
     if subcmd == "share":
         run_debug_share(args)
+    elif subcmd == "bundle":
+        from elevate_cli.debug_bundle import run_debug_bundle
+
+        run_debug_bundle(args)
     elif subcmd == "delete":
         run_debug_delete(args)
     else:
@@ -831,6 +835,7 @@ def run_debug(args):
         print()
         print("Commands:")
         print("  share    Upload debug report to a paste service and print URL")
+        print("  bundle   Write a local correlation-scoped privacy-safe bundle")
         print("  delete   Delete a previously uploaded paste")
         print()
         print("Options (share):")

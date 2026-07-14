@@ -30,6 +30,13 @@ function makeRunner(overrides = {}) {
     },
     path,
     resolveElevateLauncher: () => overrides.launcher === null ? null : launcher,
+    runtimeMetadata: overrides.runtimeMetadata || {
+      appVersion: "1.2.68",
+      architecture: "arm64",
+      appBundleName: "Elevate Beta.app",
+      releaseChannel: "beta",
+      sourceReceiptId: "a".repeat(64),
+    },
     setBackendProcess: (proc) => {
       state.backendProcess = proc;
     },
@@ -76,9 +83,15 @@ test("backend runner spawns dashboard and clears owned process on exit", async (
   assert.equal(state.ownsBackend, true);
   assert.equal(state.spawnCall.command, "/bin/elevate");
   assert.deepEqual(state.spawnCall.options.env, {
+    ELEVATE_APP_ARCHITECTURE: "arm64",
+    ELEVATE_APP_BUNDLE_NAME: "Elevate Beta.app",
+    ELEVATE_APP_VERSION: "1.2.68",
     ELEVATE_DASHBOARD_TUI: "1",
+    ELEVATE_DASHBOARD_PORT: "9119",
     ELEVATE_DESKTOP_APP: "1",
+    ELEVATE_RELEASE_CHANNEL: "beta",
     ELEVATE_SMS_VIA_APP: "1",
+    ELEVATE_SOURCE_RECEIPT_ID: "a".repeat(64),
     EXTRA: "1",
     PATH: "/bin",
   });

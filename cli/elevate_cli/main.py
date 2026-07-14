@@ -8408,6 +8408,8 @@ Examples:
     elevate debug share --local      Print report locally (no upload)
     elevate debug share --session ID Include redacted recorder events for ID
     elevate debug share --last 30m   Limit recorder events to recent window
+    elevate debug bundle --correlation ID
+                                    Write a local structured support bundle
     elevate debug delete <url>       Delete a previously uploaded paste
 """,
     )
@@ -8449,6 +8451,28 @@ Examples:
         action="store_true",
         dest="no_redact",
         help="Disable credential redaction for --local output only (default: redact)",
+    )
+    bundle_parser = debug_sub.add_parser(
+        "bundle",
+        help="Write a local correlation-scoped privacy-safe support bundle",
+    )
+    bundle_parser.add_argument(
+        "--correlation",
+        required=True,
+        help="Accepted turn correlation ID (the durable user message ID)",
+    )
+    bundle_parser.add_argument(
+        "--last",
+        default="30m",
+        help="Recorder lookback window, e.g. 600, 30m, 2h, all (default: 30m)",
+    )
+    bundle_parser.add_argument(
+        "--candidate-receipt",
+        help="Optional finalized candidate receipt used to bind candidate/source identity",
+    )
+    bundle_parser.add_argument(
+        "--output",
+        help="Optional output .zip path (default: the active Elevate profile support directory)",
     )
     delete_parser = debug_sub.add_parser(
         "delete",
