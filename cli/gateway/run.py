@@ -5209,6 +5209,44 @@ class GatewayRunner:
         4. Global allow-all (GATEWAY_ALLOW_ALL_USERS=true)
         5. Default: deny
         """
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active():
+            # Exact Beta supports one remote entry lane: a real numeric
+            # Telegram caller who is explicitly allowlisted or paired.  This
+            # branch intentionally precedes system-platform, bot, role,
+            # wildcard, group, and global allow-all compatibility escapes so
+            # stale pre-Beta environment state cannot reopen another lane.
+            if source.platform != Platform.TELEGRAM:
+                return False
+            user_id = str(source.user_id or "").strip()
+            if not re.fullmatch(r"[1-9][0-9]*", user_id):
+                return False
+            allowed_ids = {
+                uid
+                for uid in (
+                    part.strip()
+                    for part in os.getenv("TELEGRAM_ALLOWED_USERS", "").split(",")
+                )
+                if re.fullmatch(r"[1-9][0-9]*", uid)
+            }
+            if user_id in allowed_ids:
+                return True
+            try:
+                if self.pairing_store.is_approved(
+                    Platform.TELEGRAM.value,
+                    user_id,
+                    getattr(source, "agent_id", "") or "",
+                ):
+                    return True
+            except Exception:
+                logger.warning(
+                    "Beta Telegram pairing authorization failed closed",
+                    exc_info=True,
+                )
+                return False
+            return False
+
         # Home Assistant events are system-generated (state changes), not
         # user-initiated messages.  The HASS_TOKEN already authenticates the
         # connection, so HA events are always authorized.
@@ -10312,6 +10350,14 @@ class GatewayRunner:
 
     async def _handle_yolo_command(self, event: MessageEvent) -> str:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active():
+            return (
+                "🔒 YOLO mode is unavailable in Realtor Beta. Dangerous "
+                "commands always require explicit review."
+            )
+
         from tools.approval import (
             disable_session_yolo,
             enable_session_yolo,
@@ -13909,6 +13955,11 @@ class GatewayRunner:
 
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                request_id = str(
+                    approval_data.get("request_id")
+                    or approval_data.get("requestId")
+                    or ""
+                ).strip()
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -13922,6 +13973,7 @@ class GatewayRunner:
                                 session_key=_approval_session_key,
                                 description=desc,
                                 metadata=_status_thread_metadata,
+                                request_id=request_id,
                             ),
                             _loop_for_step,
                         ).result(timeout=15)

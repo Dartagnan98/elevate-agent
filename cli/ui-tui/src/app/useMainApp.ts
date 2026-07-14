@@ -9,6 +9,7 @@ import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
 import { fmtCwdBranch, shortCwd } from '../domain/paths.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
+  ApprovalRespondResponse,
   ClarifyRespondResponse,
   ClipboardPasteResponse,
   GatewayEvent,
@@ -24,7 +25,12 @@ import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
-import { $overlayState, advanceApprovalQueue, patchOverlayState } from './overlayStore.js'
+import {
+  $overlayState,
+  advanceApprovalQueue,
+  isStaleApprovalResponseError,
+  patchOverlayState
+} from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { $turnState, patchTurnState } from './turnStore.js'
 import { $uiState, getUiState, patchUiState } from './uiStore.js'
@@ -592,15 +598,38 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      return respondWith('approval.respond', { choice, request_id: overlay.approval.requestId, session_id: ui.sid }, () => {
-        const hasNextApproval = advanceApprovalQueue()
+      const requestId = overlay.approval.requestId
 
-        patchTurnState({ outcome: choice === 'deny' ? 'denied' : `approved (${choice})` })
-        patchUiState({ status: hasNextApproval ? 'approval needed' : 'running…' })
-      })
+      const advanceMatching = (expired = false) => {
+        const { advanced, hasNext } = advanceApprovalQueue(requestId)
+
+        if (!advanced) {
+          return
+        }
+
+        patchTurnState({ outcome: expired ? 'approval expired' : choice === 'deny' ? 'denied' : `approved (${choice})` })
+        patchUiState({ status: hasNext ? 'approval needed' : expired ? 'approval expired' : 'running…' })
+      }
+
+      return gateway.gw
+        .request<ApprovalRespondResponse>('approval.respond', {
+          choice,
+          request_id: requestId,
+          session_id: ui.sid
+        })
+        .then(() => advanceMatching())
+        .catch(error => {
+          if (isStaleApprovalResponseError(error)) {
+            advanceMatching(true)
+
+            return
+          }
+
+          sys(`error: ${rpcErrorMessage(error)}`)
+        })
     },
 
-    [overlay.approval, respondWith, ui.sid]
+    [gateway.gw, overlay.approval, sys, ui.sid]
   )
 
   const answerSudo = useCallback(

@@ -395,7 +395,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
-        self._approval_state: Dict[int, str] = {}
+        self._approval_state: Dict[int, Dict[str, str]] = {}
 
     def _agent_bot_configs(self) -> List[Dict[str, str]]:
         raw = self.config.extra.get("agent_bots", {}) if isinstance(self.config.extra, dict) else {}
@@ -584,20 +584,61 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _refresh_agent_bots(self) -> None:
         """Start any newly-paired agent bots (config extras + env re-scan)."""
+        from gateway.config import (
+            _beta_active_telegram_agent_token_envs,
+            _gateway_env_values,
+            _telegram_agent_token_env,
+        )
+
         primary_token = str(self.config.token or "").strip()
+        allowed_beta_envs = _beta_active_telegram_agent_token_envs()
         configs: Dict[str, Dict[str, str]] = {
-            c["agent_id"]: c for c in self._agent_bot_configs()
+            c["agent_id"]: c
+            for c in self._agent_bot_configs()
+            if (
+                allowed_beta_envs is None
+                or _telegram_agent_token_env(c["agent_id"]) in allowed_beta_envs
+            )
         }
+
+        # An entitlement can lock while the desktop remains open. Stop any
+        # paid-pack bot that is no longer in the active signed contract before
+        # considering hot additions.
+        if allowed_beta_envs is not None:
+            for agent_id, app in list(self._agent_apps.items()):
+                if _telegram_agent_token_env(agent_id) in allowed_beta_envs:
+                    continue
+                self._agent_apps.pop(agent_id, None)
+                self._agent_bots.pop(agent_id, None)
+                try:
+                    if app.updater and app.updater.running:
+                        await app.updater.stop()
+                    if app.running:
+                        await app.stop()
+                    await app.shutdown()
+                    logger.info(
+                        "[%s] Stopped Telegram agent bot for locked Beta pack: %s",
+                        self.name,
+                        agent_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[%s] Failed to stop Telegram agent bot for locked Beta pack: %s",
+                        self.name,
+                        agent_id,
+                        exc_info=True,
+                    )
+
         # Env re-scan: new agents pair via env without a config rewrite.
         try:
-            from gateway.config import _gateway_env_values
-
             env_values = _gateway_env_values()
             for env_name, value in env_values.items():
                 m = re.match(
                     r"^ELEVATE_AGENT_([A-Z0-9_]+)_TELEGRAM_BOT_TOKEN$", env_name
                 )
                 if not m:
+                    continue
+                if allowed_beta_envs is not None and env_name not in allowed_beta_envs:
                     continue
                 agent_id = m.group(1).lower().replace("_", "-")
                 token = str(value or "").strip()
@@ -641,13 +682,45 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
 
     @staticmethod
-    def _is_callback_user_authorized(user_id: str) -> bool:
+    def _is_callback_user_authorized(user_id: str, agent_id: str = "") -> bool:
         """Return whether a Telegram inline-button caller may perform gated actions."""
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        candidate = str(user_id or "").strip()
         allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+        if beta_provider_policy_active():
+            # Exact Beta is a realtor desktop, not an open remote-agent lane.
+            # Ignore stale wildcards/allow-all state and accept only an actual
+            # numeric Telegram caller explicitly allowed or paired.
+            if not re.fullmatch(r"[1-9][0-9]*", candidate):
+                return False
+            allowed_ids = {
+                uid
+                for uid in (part.strip() for part in allowed_csv.split(","))
+                if re.fullmatch(r"[1-9][0-9]*", uid)
+            }
+            if candidate in allowed_ids:
+                return True
+            try:
+                from gateway.pairing import PairingStore
+
+                return PairingStore().is_approved(
+                    "telegram",
+                    candidate,
+                    str(agent_id or "").strip(),
+                )
+            except Exception:
+                logger.warning(
+                    "[%s] Beta Telegram callback pairing check failed closed",
+                    "telegram",
+                    exc_info=True,
+                )
+                return False
+
         if not allowed_csv:
             return True
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-        return "*" in allowed_ids or user_id in allowed_ids
+        return "*" in allowed_ids or candidate in allowed_ids
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -1726,6 +1799,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
+        request_id: str = "",
     ) -> SendResult:
         """Send an inline-keyboard approval prompt with interactive buttons.
 
@@ -1735,6 +1809,8 @@ class TelegramAdapter(BasePlatformAdapter):
         bot = self._bot_for_metadata(metadata)
         if not bot:
             return SendResult(success=False, error="Not connected")
+        if not request_id:
+            return SendResult(success=False, error="Approval request identity missing")
 
         try:
             cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
@@ -1779,8 +1855,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
             msg = await bot.send_message(**kwargs)
 
-            # Store session_key keyed by approval_id for the callback handler
-            self._approval_state[approval_id] = session_key
+            # Bind this platform interaction to the exact central queue entry.
+            self._approval_state[approval_id] = {
+                "request_id": request_id,
+                "session_key": session_key,
+            }
 
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
@@ -2136,12 +2215,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 # Only authorized users may click approval buttons.
                 caller_id = str(getattr(query.from_user, "id", ""))
-                if not self._is_callback_user_authorized(caller_id):
+                callback_agent_id, _ = self._context_agent(context)
+                if not self._is_callback_user_authorized(
+                    caller_id,
+                    callback_agent_id or "",
+                ):
                     await query.answer(text="⛔ You are not authorized to approve commands.")
                     return
 
-                session_key = self._approval_state.pop(approval_id, None)
-                if not session_key:
+                approval_state = self._approval_state.pop(approval_id, None)
+                if not approval_state:
                     await query.answer(text="This approval has already been resolved.")
                     return
 
@@ -2170,7 +2253,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 # Resolve the approval — unblocks the agent thread
                 try:
                     from tools.approval import resolve_gateway_approval
-                    count = resolve_gateway_approval(session_key, choice)
+                    session_key = approval_state["session_key"]
+                    request_id = approval_state.get("request_id", "")
+                    if not request_id:
+                        logger.error("Telegram approval state missing request identity")
+                        return
+                    count = resolve_gateway_approval(
+                        session_key,
+                        choice,
+                        request_id=request_id,
+                    )
                     logger.info(
                         "Telegram button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                         count, session_key, choice, user_display,
@@ -2184,7 +2276,11 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         answer = data.split(":", 1)[1]  # "y" or "n"
         caller_id = str(getattr(query.from_user, "id", ""))
-        if not self._is_callback_user_authorized(caller_id):
+        callback_agent_id, _ = self._context_agent(context)
+        if not self._is_callback_user_authorized(
+            caller_id,
+            callback_agent_id or "",
+        ):
             await query.answer(text="⛔ You are not authorized to answer update prompts.")
             return
         await query.answer(text=f"Sent '{answer}' to the update process.")

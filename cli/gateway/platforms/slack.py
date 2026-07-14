@@ -303,9 +303,9 @@ class SlackAdapter(BasePlatformAdapter):
         # Dedup cache: prevents duplicate bot responses when Socket Mode
         # reconnects redeliver events.
         self._dedup = MessageDeduplicator()
-        # Track pending approval message_ts → resolved flag to prevent
-        # double-clicks on approval buttons.
-        self._approval_resolved: Dict[str, bool] = {}
+        # Track pending approval message_ts → exact central queue identity.
+        # Atomic pop prevents a double click from resolving a later command.
+        self._approval_state: Dict[str, Dict[str, str]] = {}
         # Track timestamps of messages sent by the bot so we can respond
         # to thread replies even without an explicit @mention.
         self._bot_message_ts: set = set()
@@ -1525,6 +1525,7 @@ class SlackAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
+        request_id: str = "",
     ) -> SendResult:
         """Send a Block Kit approval prompt with interactive buttons.
 
@@ -1533,6 +1534,8 @@ class SlackAdapter(BasePlatformAdapter):
         """
         if not self._app:
             return SendResult(success=False, error="Not connected")
+        if not request_id:
+            return SendResult(success=False, error="Approval request identity missing")
 
         try:
             cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
@@ -1594,7 +1597,10 @@ class SlackAdapter(BasePlatformAdapter):
             result = await self._get_client(chat_id).chat_postMessage(**kwargs)
             msg_ts = result.get("ts", "")
             if msg_ts:
-                self._approval_resolved[msg_ts] = False
+                self._approval_state[msg_ts] = {
+                    "request_id": request_id,
+                    "session_key": session_key,
+                }
 
             return SendResult(success=True, message_id=msg_ts, raw_response=result)
         except Exception as e:
@@ -1606,7 +1612,6 @@ class SlackAdapter(BasePlatformAdapter):
         await ack()
 
         action_id = action.get("action_id", "")
-        session_key = action.get("value", "")
         message = body.get("message", {})
         msg_ts = message.get("ts", "")
         channel_id = body.get("channel", {}).get("id", "")
@@ -1635,8 +1640,10 @@ class SlackAdapter(BasePlatformAdapter):
         }
         choice = choice_map.get(action_id, "deny")
 
-        # Prevent double-clicks — atomic pop; first caller gets False, others get True (default)
-        if self._approval_resolved.pop(msg_ts, True):
+        # Prevent double-clicks and ignore caller-supplied button values.  The
+        # server-side state is the authority for both identities.
+        approval_state = self._approval_state.pop(msg_ts, None)
+        if not approval_state:
             return
 
         # Update the message to show the decision and remove buttons
@@ -1684,7 +1691,16 @@ class SlackAdapter(BasePlatformAdapter):
         # Resolve the approval — this unblocks the agent thread
         try:
             from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(session_key, choice)
+            session_key = approval_state["session_key"]
+            request_id = approval_state.get("request_id", "")
+            if not request_id:
+                logger.error("Slack approval state missing request identity")
+                return
+            count = resolve_gateway_approval(
+                session_key,
+                choice,
+                request_id=request_id,
+            )
             logger.info(
                 "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, session_key, choice, user_name,

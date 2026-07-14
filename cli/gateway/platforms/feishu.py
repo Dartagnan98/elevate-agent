@@ -1818,6 +1818,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
+        request_id: str = "",
     ) -> SendResult:
         """Send an interactive card with approval buttons.
 
@@ -1827,6 +1828,8 @@ class FeishuAdapter(BasePlatformAdapter):
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        if not request_id:
+            return SendResult(success=False, error="Approval request identity missing")
 
         try:
             approval_id = next(self._approval_counter)
@@ -1876,6 +1879,7 @@ class FeishuAdapter(BasePlatformAdapter):
             if result.success:
                 self._approval_state[approval_id] = {
                     "session_key": session_key,
+                    "request_id": request_id,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
                 }
@@ -2450,7 +2454,15 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         try:
             from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(state["session_key"], choice)
+            request_id = state.get("request_id", "")
+            if not request_id:
+                logger.error("Feishu approval state missing request identity")
+                return
+            count = resolve_gateway_approval(
+                state["session_key"],
+                choice,
+                request_id=request_id,
+            )
             logger.info(
                 "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, state["session_key"], choice, user_name,

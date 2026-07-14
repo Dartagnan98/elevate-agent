@@ -7090,6 +7090,14 @@ def _(rid, params: dict) -> dict:
 
     if key == "yolo":
         try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            if beta_provider_policy_active():
+                return _err(
+                    rid,
+                    4008,
+                    "YOLO mode is unavailable in Realtor Beta; dangerous commands require explicit review",
+                )
             if session:
                 from tools.approval import (
                     disable_session_yolo,

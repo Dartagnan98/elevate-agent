@@ -7015,6 +7015,14 @@ class ElevateCLI:
         """Toggle YOLO mode — skip all dangerous command approval prompts."""
         import os
         from elevate_cli.colors import Colors as _Colors
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if beta_provider_policy_active():
+            _cprint(
+                "  🔒 YOLO mode is unavailable in Realtor Beta. Dangerous "
+                "commands always require explicit review."
+            )
+            return
 
         current = bool(os.environ.get("ELEVATE_YOLO_MODE"))
         if current:

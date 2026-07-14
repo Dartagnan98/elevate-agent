@@ -909,6 +909,85 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
                 pconfig.enabled = False
 
 
+def _beta_active_telegram_agent_token_envs() -> Optional[frozenset[str]]:
+    """Return active token contracts in exact Beta, or ``None`` in Stable."""
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        if not beta_provider_policy_active():
+            return None
+        from elevate_cli.beta_env_policy import beta_active_pack_env_metadata
+
+        return frozenset(
+            key
+            for key in beta_active_pack_env_metadata()
+            if re.fullmatch(
+                r"ELEVATE_AGENT_[A-Z0-9_]+_TELEGRAM_BOT_TOKEN",
+                key,
+            )
+        )
+    except Exception:
+        if os.getenv("ELEVATE_RELEASE_CHANNEL") != "beta":
+            return None
+        # Pack discovery participates in authorization, so a partially
+        # installed or unreadable exact-Beta policy fails closed.
+        return frozenset()
+
+
+def _telegram_agent_token_env(agent_id: str) -> str:
+    """Return the canonical per-agent Telegram token variable."""
+    return f"ELEVATE_AGENT_{agent_id.upper().replace('-', '_')}_TELEGRAM_BOT_TOKEN"
+
+
+def _filter_beta_telegram_agent_bots(config: GatewayConfig) -> None:
+    """Drop agent-specific Telegram bots outside active Beta pack contracts.
+
+    Old installs can retain paid-pack token values after an entitlement locks.
+    UI hiding is not authorization: the gateway must filter the merged runtime
+    config itself before the adapter can construct a bot for that token.
+    """
+    allowed_env_keys = _beta_active_telegram_agent_token_envs()
+    if allowed_env_keys is None:
+        return
+
+    telegram = config.platforms.get(Platform.TELEGRAM)
+    if telegram is None or not isinstance(telegram.extra, dict):
+        return
+    raw_bots = telegram.extra.get("agent_bots")
+    if not isinstance(raw_bots, dict):
+        return
+
+    filtered: dict[str, dict] = {}
+    for raw_agent_id, raw_bot in raw_bots.items():
+        if not isinstance(raw_bot, dict):
+            continue
+        agent_id = str(raw_agent_id or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", agent_id):
+            continue
+        declared_agent_id = str(raw_bot.get("agent_id") or agent_id).strip().lower()
+        if declared_agent_id != agent_id:
+            continue
+        expected_env = _telegram_agent_token_env(agent_id)
+        declared_env = str(raw_bot.get("token_env") or expected_env).strip()
+        token = str(raw_bot.get("token") or "").strip()
+        if declared_env != expected_env or expected_env not in allowed_env_keys or not token:
+            logger.warning(
+                "Ignoring Telegram bot for agent %s because its Realtor Beta pack is not active",
+                agent_id,
+            )
+            continue
+        filtered[agent_id] = {
+            **raw_bot,
+            "agent_id": agent_id,
+            "token": token,
+            "token_env": expected_env,
+        }
+
+    telegram.extra["agent_bots"] = filtered
+    if not filtered and not str(telegram.token or "").strip():
+        telegram.enabled = False
+
+
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config."""
     env_values = _gateway_env_values()
@@ -950,6 +1029,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.platforms[Platform.TELEGRAM] = PlatformConfig()
         config.platforms[Platform.TELEGRAM].enabled = True
         config.platforms[Platform.TELEGRAM].token = telegram_token
+
+    _filter_beta_telegram_agent_bots(config)
     
     # Reply threading mode for Telegram (off/first/all)
     telegram_reply_mode = os.getenv("TELEGRAM_REPLY_TO_MODE", "").lower()

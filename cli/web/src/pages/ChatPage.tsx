@@ -34,6 +34,13 @@ import {
   type ConnectionState,
   type GatewayEvent,
 } from "@/lib/gatewayClient";
+import {
+  advanceBlockingPrompt,
+  blockingPromptIdentity,
+  emptyBlockingPromptQueue,
+  enqueueBlockingPrompt,
+  type BlockingPromptQueueState,
+} from "@/lib/blockingPromptQueue";
 import { executeSlash } from "@/lib/slashExec";
 import { tailWindow } from "@/lib/tailWindow";
 import { pruneTranscriptIndex } from "@/lib/transcriptCacheIndex";
@@ -480,6 +487,13 @@ type PendingPrompt =
       requestId: string;
       type: "secret";
     };
+
+function pendingPromptStatus(prompt: PendingPrompt): string {
+  if (prompt.type === "approval") return "Approval needed";
+  if (prompt.type === "sudo") return "Password needed";
+  if (prompt.type === "secret") return "Secret needed";
+  return "Waiting for input";
+}
 
 function useCopyToClipboard() {
   const [copied, setCopied] = useState(false);
@@ -3775,11 +3789,49 @@ export default function ChatPage() {
       ? "Session token unavailable. Open this page through `elevate dashboard`, not directly."
       : null,
   );
-  const [pendingPrompt, setPendingPrompt] = useState<PendingPrompt | null>(null);
-  const pendingApprovalQueueRef = useRef<
-    Extract<PendingPrompt, { type: "approval" }>[]
-  >([]);
+  const [pendingPromptQueue, setPendingPromptQueue] = useState<
+    BlockingPromptQueueState<PendingPrompt>
+  >(() => emptyBlockingPromptQueue());
+  const pendingPromptQueueRef = useRef(pendingPromptQueue);
+  const updatePendingPromptQueue = useCallback(
+    (
+      update: (
+        current: BlockingPromptQueueState<PendingPrompt>,
+      ) => BlockingPromptQueueState<PendingPrompt>,
+    ): BlockingPromptQueueState<PendingPrompt> => {
+      const current = pendingPromptQueueRef.current;
+      const next = update(current);
+      if (next !== current) {
+        pendingPromptQueueRef.current = next;
+        setPendingPromptQueue(next);
+      }
+      return next;
+    },
+    [],
+  );
+  const pendingPrompt = pendingPromptQueue.active;
+  const promptResponseInFlightRef = useRef<string | null>(null);
+  const [promptResponseInFlight, setPromptResponseInFlight] = useState<
+    string | null
+  >(null);
   const [promptValue, setPromptValue] = useState("");
+  const queuePendingPrompt = useCallback(
+    (prompt: PendingPrompt) => {
+      const before = pendingPromptQueueRef.current;
+      const next = updatePendingPromptQueue((current) =>
+        enqueueBlockingPrompt(current, prompt),
+      );
+      if (
+        next !== before &&
+        next.active &&
+        blockingPromptIdentity(next.active) === blockingPromptIdentity(prompt)
+      ) {
+        setPromptValue("");
+        setStatusText(pendingPromptStatus(next.active));
+      }
+    },
+    [setPromptValue, setStatusText, updatePendingPromptQueue],
+  );
   const [modelOpen, setModelOpen] = useState(false);
   const [composerAgents, setComposerAgents] = useState<ComposerAgent[]>(
     DEFAULT_COMPOSER_AGENTS,
@@ -4989,8 +5041,9 @@ export default function ChatPage() {
           reconnectRunRef.current,
         ),
       );
-      pendingApprovalQueueRef.current = [];
-      setPendingPrompt(null);
+      updatePendingPromptQueue(() => emptyBlockingPromptQueue());
+      promptResponseInFlightRef.current = null;
+      setPromptResponseInFlight(null);
       setPromptValue("");
       setBusy(false);
       setBanner(null);
@@ -6175,7 +6228,7 @@ export default function ChatPage() {
       gw.on("clarify.request", (ev) => {
         if (!accepts(ev)) return;
         const payload = compactToolPayload(ev.payload);
-        setPendingPrompt({
+        queuePendingPrompt({
           choices: Array.isArray(payload.choices)
             ? payload.choices.map(String)
             : null,
@@ -6183,8 +6236,6 @@ export default function ChatPage() {
           requestId: String(payload.request_id ?? ""),
           type: "clarify",
         });
-        setPromptValue("");
-        setStatusText("Waiting for input");
       }),
     );
     unsubs.push(
@@ -6197,51 +6248,27 @@ export default function ChatPage() {
           requestId: String(payload.requestId ?? payload.request_id ?? ""),
           type: "approval",
         };
-        setPendingPrompt((current) => {
-          if (
-            current?.type === "approval" &&
-            current.requestId === approvalPrompt.requestId
-          ) {
-            return current;
-          }
-          if (
-            pendingApprovalQueueRef.current.some(
-              (queued) => queued.requestId === approvalPrompt.requestId,
-            )
-          ) {
-            return current;
-          }
-          if (current) {
-            pendingApprovalQueueRef.current.push(approvalPrompt);
-            return current;
-          }
-          return approvalPrompt;
-        });
-        setStatusText("Approval needed");
+        queuePendingPrompt(approvalPrompt);
       }),
     );
     unsubs.push(
       gw.on("sudo.request", (ev) => {
         if (!accepts(ev)) return;
-        setPendingPrompt({
+        queuePendingPrompt({
           requestId: eventString(ev, "request_id"),
           type: "sudo",
         });
-        setPromptValue("");
-        setStatusText("Password needed");
       }),
     );
     unsubs.push(
       gw.on("secret.request", (ev) => {
         if (!accepts(ev)) return;
-        setPendingPrompt({
+        queuePendingPrompt({
           envVar: eventString(ev, "env_var"),
           prompt: eventString(ev, "prompt"),
           requestId: eventString(ev, "request_id"),
           type: "secret",
         });
-        setPromptValue("");
-        setStatusText("Secret needed");
       }),
     );
     unsubs.push(
@@ -6739,8 +6766,10 @@ export default function ChatPage() {
     hydrateArtifactsFromMessages,
     newChatId,
     draftChat,
+    queuePendingPrompt,
     resumeId,
     updateAssistant,
+    updatePendingPromptQueue,
   ]);
 
   useEffect(() => {
@@ -8294,36 +8323,44 @@ export default function ChatPage() {
 
   const respondToPrompt = async (value: string) => {
     if (!pendingPrompt) return;
+    const respondingPrompt = pendingPrompt;
+    const identity = blockingPromptIdentity(respondingPrompt);
+    if (promptResponseInFlightRef.current === identity) return;
+    // Close the same-tick double-click window before React can paint disabled
+    // controls. The visible state mirrors this ref for accessible feedback.
+    promptResponseInFlightRef.current = identity;
+    setPromptResponseInFlight(identity);
 
     try {
-      if (pendingPrompt.type === "approval") {
+      if (respondingPrompt.type === "approval") {
         await gw.request("approval.respond", {
           choice: value,
-          request_id: pendingPrompt.requestId,
+          request_id: respondingPrompt.requestId,
           session_id: sessionId,
         });
       } else {
         const method =
-          pendingPrompt.type === "clarify"
+          respondingPrompt.type === "clarify"
             ? "clarify.respond"
-            : pendingPrompt.type === "sudo"
+            : respondingPrompt.type === "sudo"
               ? "sudo.respond"
               : "secret.respond";
         const key =
-          pendingPrompt.type === "clarify"
+          respondingPrompt.type === "clarify"
             ? "answer"
-            : pendingPrompt.type === "sudo"
+            : respondingPrompt.type === "sudo"
               ? "password"
               : "value";
         await gw.request(method, {
           [key]: value,
-          request_id: pendingPrompt.requestId,
+          request_id: respondingPrompt.requestId,
         });
       }
-      const nextApproval = pendingApprovalQueueRef.current.shift() ?? null;
-      setPendingPrompt(nextApproval);
+      const next = updatePendingPromptQueue((current) =>
+        advanceBlockingPrompt(current, identity),
+      );
       setPromptValue("");
-      setStatusText(nextApproval ? "Approval needed" : "Running...");
+      setStatusText(next.active ? pendingPromptStatus(next.active) : "Running...");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // "no pending ... request" (gateway error 4009) means the request the
@@ -8332,13 +8369,21 @@ export default function ChatPage() {
       // box can never be answered, so dismiss it instead of leaving a dead
       // form on screen that re-errors on every Send.
       if (/no pending .* request/i.test(message)) {
-        const nextApproval = pendingApprovalQueueRef.current.shift() ?? null;
-        setPendingPrompt(nextApproval);
+        const next = updatePendingPromptQueue((current) =>
+          advanceBlockingPrompt(current, identity),
+        );
         setPromptValue("");
-        setStatusText(nextApproval ? "Approval needed" : "Question expired");
+        setStatusText(
+          next.active ? pendingPromptStatus(next.active) : "Question expired",
+        );
         return;
       }
       appendMessage("system", message, { status: "error" });
+    } finally {
+      if (promptResponseInFlightRef.current === identity) {
+        promptResponseInFlightRef.current = null;
+        setPromptResponseInFlight(null);
+      }
     }
   };
 
@@ -9415,14 +9460,14 @@ export default function ChatPage() {
                     internal file chips pinned for the whole session). */}
                 {pendingPrompt && (
                   <PendingPromptCard
+                    inFlight={
+                      promptResponseInFlight ===
+                      blockingPromptIdentity(pendingPrompt)
+                    }
                     pendingPrompt={pendingPrompt}
                     promptValue={promptValue}
                     setPromptValue={setPromptValue}
                     onRespond={(value) => void respondToPrompt(value)}
-                    onDismiss={() => {
-                      setPendingPrompt(null);
-                      setPromptValue("");
-                    }}
                   />
                 )}
                 <div ref={endRef} />
@@ -11866,14 +11911,14 @@ function ChatActivityDigest({
 }
 
 function PendingPromptCard({
+  inFlight,
   onRespond,
-  onDismiss,
   pendingPrompt,
   promptValue,
   setPromptValue,
 }: {
+  inFlight: boolean;
   onRespond(value: string): void;
-  onDismiss(): void;
   pendingPrompt: PendingPrompt;
   promptValue: string;
   setPromptValue(value: string): void;
@@ -11894,12 +11939,17 @@ function PendingPromptCard({
               </pre>
             )}
             <div className="mt-3 flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => onRespond("once")}>
+              <Button
+                disabled={inFlight}
+                size="sm"
+                onClick={() => onRespond("once")}
+              >
                 Allow Once
               </Button>
               <Button
                 size="sm"
                 variant="outline"
+                disabled={inFlight}
                 onClick={() => onRespond("session")}
               >
                 Allow Session
@@ -11907,6 +11957,7 @@ function PendingPromptCard({
               <Button
                 size="sm"
                 variant="outline"
+                disabled={inFlight}
                 onClick={() => onRespond("always")}
               >
                 Always
@@ -11914,6 +11965,7 @@ function PendingPromptCard({
               <Button
                 size="sm"
                 variant="destructive"
+                disabled={inFlight}
                 onClick={() => onRespond("deny")}
               >
                 Deny
@@ -11937,19 +11989,16 @@ function PendingPromptCard({
     <Card className="rounded-[10px] border-[var(--chat-border-strong)] bg-[var(--chat-surface)] p-3 text-[var(--chat-text)] shadow-[0_1px_0_rgba(255,255,255,0.025)_inset]">
       <div className="mb-2 flex items-start justify-between gap-2">
         <div className="text-sm font-semibold">{title}</div>
-        <button
-          type="button"
-          aria-label="Dismiss question"
-          className="shrink-0 text-xs text-[var(--chat-text-muted)] hover:text-[var(--chat-text)]"
-          onClick={onDismiss}
-        >
-          Dismiss
-        </button>
       </div>
       {choices?.length ? (
         <div className="flex flex-wrap gap-2">
           {choices.map((choice) => (
-            <Button key={choice} size="sm" onClick={() => onRespond(choice)}>
+            <Button
+              disabled={inFlight}
+              key={choice}
+              size="sm"
+              onClick={() => onRespond(choice)}
+            >
               {choice}
             </Button>
           ))}
@@ -11964,12 +12013,15 @@ function PendingPromptCard({
         >
           <input
             autoFocus
+            disabled={inFlight}
             className="min-w-0 flex-1 rounded-[8px] border border-[var(--chat-border-strong)] bg-[var(--chat-surface-soft)] px-3 py-2 text-sm text-[var(--chat-text)] outline-none focus:ring-1 focus:ring-[var(--chat-accent)]"
             onChange={(event) => setPromptValue(event.target.value)}
             type={pendingPrompt.type === "sudo" ? "password" : "text"}
             value={promptValue}
           />
-          <Button type="submit">Send</Button>
+          <Button disabled={inFlight} type="submit">
+            {inFlight ? "Sending..." : "Send"}
+          </Button>
         </form>
       )}
     </Card>

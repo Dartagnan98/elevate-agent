@@ -181,16 +181,36 @@ class TestBlockingGatewayApproval:
             }
         )
         assert semantic.correlation_id == ""
-        assert semantic.session_id == ""
         assert "correlation_id" not in semantic.data
         assert "session_id" not in semantic.data
 
-    def test_entry_reads_opaque_tui_root_from_bound_message_context(self):
+    @pytest.mark.parametrize(
+        "unsafe",
+        [
+            "0123456789abcdef0123456789abcdef",
+            "01234567-89ab-cdef-0123-456789abcdef",
+            "request.0123456789abcdef0123456789abcdef",
+            "wake.0123456789abcdef0123456789abcdef",
+        ],
+    )
+    def test_entry_rejects_noncanonical_lineage(self, unsafe):
+        from tools.approval import _ApprovalEntry
+
+        entry = _ApprovalEntry({"command": "danger", "correlation_id": unsafe})
+
+        assert entry.correlation_id == ""
+        assert "correlation_id" not in entry.data
+
+    @pytest.mark.parametrize("prefix", ["corr_", "attempt_"])
+    def test_entry_reads_only_central_lineage_from_bound_context(self, prefix):
         from gateway.session_context import clear_session_vars, set_session_vars
         from tools.approval import _ApprovalEntry
 
-        root = "0123456789abcdef0123456789abcdef"
-        tokens = set_session_vars(message_id=root)
+        root = f"{prefix}0123456789abcdef0123456789abcdef"
+        tokens = set_session_vars(
+            correlation_id=root,
+            message_id="0123456789abcdef0123456789abcdef",
+        )
         try:
             entry = _ApprovalEntry({"command": "danger"})
         finally:
@@ -198,6 +218,52 @@ class TestBlockingGatewayApproval:
 
         assert entry.correlation_id == root
         assert entry.data["correlation_id"] == root
+
+    def test_failed_receipt_write_is_retried_under_concurrency(self):
+        from tools.approval import _ApprovalEntry, _record_approval_receipt
+
+        entry = _ApprovalEntry({"command": "danger"})
+        first_write_started = threading.Event()
+        release_first_write = threading.Event()
+        calls = []
+
+        def record_event(*args, **kwargs):
+            calls.append((args, kwargs))
+            if len(calls) == 1:
+                first_write_started.set()
+                assert release_first_write.wait(timeout=5)
+                return False
+            return True
+
+        def write_receipt():
+            _record_approval_receipt(
+                entry,
+                "semantic-session-key",
+                outcome="deny",
+                reason="user_response",
+            )
+
+        with patch(
+            "elevate_cli.diagnostics.session_recorder.record_session_event",
+            side_effect=record_event,
+        ):
+            first = threading.Thread(target=write_receipt)
+            second = threading.Thread(target=write_receipt)
+            first.start()
+            assert first_write_started.wait(timeout=5)
+            second.start()
+            release_first_write.set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+            deadline = time.monotonic() + 5
+            while entry.receipt_outcome is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert len(calls) == 2
+        assert entry.receipt_outcome == "deny"
 
     def test_receipt_never_persists_raw_session_or_semantic_lineage(self):
         from tools.approval import (

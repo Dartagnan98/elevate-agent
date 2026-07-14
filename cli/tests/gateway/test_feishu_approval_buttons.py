@@ -104,6 +104,7 @@ class TestFeishuExecApproval:
                 command="rm -rf /important",
                 session_key="agent:main:feishu:group:oc_12345",
                 description="dangerous deletion",
+                request_id="request-send",
             )
 
         assert result.success is True
@@ -144,12 +145,14 @@ class TestFeishuExecApproval:
                 chat_id="oc_12345",
                 command="echo test",
                 session_key="my-session-key",
+                request_id="request-feishu",
             )
 
         assert len(adapter._approval_state) == 1
         approval_id = list(adapter._approval_state.keys())[0]
         state = adapter._approval_state[approval_id]
         assert state["session_key"] == "my-session-key"
+        assert state["request_id"] == "request-feishu"
         assert state["message_id"] == "msg_002"
         assert state["chat_id"] == "oc_12345"
 
@@ -176,7 +179,7 @@ class TestFeishuExecApproval:
         ) as mock_send:
             long_cmd = "x" * 5000
             await adapter.send_exec_approval(
-                chat_id="oc_12345", command=long_cmd, session_key="s"
+                chat_id="oc_12345", command=long_cmd, session_key="s", request_id="request-long"
             )
 
         card = json.loads(mock_send.call_args[1]["payload"])
@@ -197,15 +200,26 @@ class TestFeishuExecApproval:
             return_value=mock_response,
         ):
             await adapter.send_exec_approval(
-                chat_id="oc_1", command="cmd1", session_key="s1"
+                chat_id="oc_1", command="cmd1", session_key="s1", request_id="request-one"
             )
             await adapter.send_exec_approval(
-                chat_id="oc_2", command="cmd2", session_key="s2"
+                chat_id="oc_2", command="cmd2", session_key="s2", request_id="request-two"
             )
 
         assert len(adapter._approval_state) == 2
         ids = list(adapter._approval_state.keys())
         assert ids[0] != ids[1]
+
+    @pytest.mark.asyncio
+    async def test_interactive_prompt_without_identity_fails_closed(self):
+        adapter = _make_adapter()
+
+        result = await adapter.send_exec_approval(
+            chat_id="oc_12345", command="ls", session_key="s"
+        )
+
+        assert result.success is False
+        assert "identity" in (result.error or "").lower()
 
 
 # ===========================================================================
@@ -220,6 +234,7 @@ class TestResolveApproval:
         adapter = _make_adapter()
         adapter._approval_state[1] = {
             "session_key": "agent:main:feishu:group:oc_12345",
+            "request_id": "request-once",
             "message_id": "msg_001",
             "chat_id": "oc_12345",
         }
@@ -227,7 +242,11 @@ class TestResolveApproval:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._resolve_approval(1, "once", "Norbert")
 
-        mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
+        mock_resolve.assert_called_once_with(
+            "agent:main:feishu:group:oc_12345",
+            "once",
+            request_id="request-once",
+        )
         assert 1 not in adapter._approval_state
 
     @pytest.mark.asyncio
@@ -235,6 +254,7 @@ class TestResolveApproval:
         adapter = _make_adapter()
         adapter._approval_state[2] = {
             "session_key": "some-session",
+            "request_id": "request-deny",
             "message_id": "msg_002",
             "chat_id": "oc_12345",
         }
@@ -242,13 +262,18 @@ class TestResolveApproval:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._resolve_approval(2, "deny", "Alice")
 
-        mock_resolve.assert_called_once_with("some-session", "deny")
+        mock_resolve.assert_called_once_with(
+            "some-session",
+            "deny",
+            request_id="request-deny",
+        )
 
     @pytest.mark.asyncio
     async def test_resolves_session(self):
         adapter = _make_adapter()
         adapter._approval_state[3] = {
             "session_key": "sess-3",
+            "request_id": "request-session",
             "message_id": "msg_003",
             "chat_id": "oc_99",
         }
@@ -256,13 +281,18 @@ class TestResolveApproval:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._resolve_approval(3, "session", "Bob")
 
-        mock_resolve.assert_called_once_with("sess-3", "session")
+        mock_resolve.assert_called_once_with(
+            "sess-3",
+            "session",
+            request_id="request-session",
+        )
 
     @pytest.mark.asyncio
     async def test_resolves_always(self):
         adapter = _make_adapter()
         adapter._approval_state[4] = {
             "session_key": "sess-4",
+            "request_id": "request-always",
             "message_id": "msg_004",
             "chat_id": "oc_55",
         }
@@ -270,7 +300,11 @@ class TestResolveApproval:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._resolve_approval(4, "always", "Carol")
 
-        mock_resolve.assert_called_once_with("sess-4", "always")
+        mock_resolve.assert_called_once_with(
+            "sess-4",
+            "always",
+            request_id="request-always",
+        )
 
     @pytest.mark.asyncio
     async def test_already_resolved_drops_silently(self):

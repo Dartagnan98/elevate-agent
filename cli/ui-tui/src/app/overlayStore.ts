@@ -30,13 +30,18 @@ export const getOverlayState = () => $overlayState.get()
 export const patchOverlayState = (next: Partial<OverlayState> | ((state: OverlayState) => OverlayState)) =>
   $overlayState.set(typeof next === 'function' ? next($overlayState.get()) : { ...$overlayState.get(), ...next })
 
-export const advanceApprovalQueue = () => {
+export const advanceApprovalQueue = (requestId: string) => {
   const state = $overlayState.get()
+
+  if (!state.approval || state.approval.requestId !== requestId) {
+    return { advanced: false, hasNext: Boolean(state.approval) }
+  }
+
   const [approval = null, ...approvalQueue] = state.approvalQueue
 
   $overlayState.set({ ...state, approval, approvalQueue })
 
-  return Boolean(approval)
+  return { advanced: true, hasNext: Boolean(approval) }
 }
 
 /** Full reset — used by session/turn teardown and tests. */
@@ -50,12 +55,39 @@ export const resetOverlayState = () => $overlayState.set(buildOverlayState())
  * every turn completion / interrupt; the old "reset everything" behaviour
  * silently closed /agents the moment delegation finished.
  */
-export const resetFlowOverlays = () =>
+export const resetFlowOverlays = (terminalApprovalRequestId = '') => {
+  const current = $overlayState.get()
+  let approval: OverlayState['approval'] = null
+  let approvalQueue = [] as OverlayState['approvalQueue']
+
+  // A terminal frame makes the currently visible approval stale, but later
+  // concurrent approvals are still real work. Advance only when the terminal
+  // identity matches; a mismatched late frame cannot consume anything.
+  if (terminalApprovalRequestId) {
+    if (current.approval?.requestId === terminalApprovalRequestId) {
+      const [nextApproval = null, ...remainingApprovals] = current.approvalQueue
+      approval = nextApproval
+      approvalQueue = remainingApprovals
+    } else {
+      approval = current.approval
+      approvalQueue = current.approvalQueue
+    }
+  }
+
   $overlayState.set({
     ...buildOverlayState(),
-    agents: $overlayState.get().agents,
-    agentsInitialHistoryIndex: $overlayState.get().agentsInitialHistoryIndex,
-    modelPicker: $overlayState.get().modelPicker,
-    picker: $overlayState.get().picker,
-    skillsHub: $overlayState.get().skillsHub
+    agents: current.agents,
+    agentsInitialHistoryIndex: current.agentsInitialHistoryIndex,
+    approval,
+    approvalQueue,
+    modelPicker: current.modelPicker,
+    picker: current.picker,
+    skillsHub: current.skillsHub
   })
+}
+
+export const isStaleApprovalResponseError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+
+  return /(?:no pending approval request|approval request id is required)/i.test(message)
+}

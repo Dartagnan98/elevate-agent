@@ -10,7 +10,7 @@ import {
 } from '../lib/text.js'
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress } from '../types.js'
 
-import { resetFlowOverlays } from './overlayStore.js'
+import { getOverlayState, resetFlowOverlays } from './overlayStore.js'
 import { pushSnapshot } from './spawnHistoryStore.js'
 import { getTurnState, patchTurnState, resetTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -87,7 +87,7 @@ class TurnController {
     patchTurnState({ reasoningActive: false, reasoningStreaming: false })
   }
 
-  idle() {
+  idle(terminalApprovalRequestId = '') {
     this.endReasoningPhase()
     this.activeTools = []
     this.streamTimer = clear(this.streamTimer)
@@ -104,7 +104,7 @@ class TurnController {
       turnTrail: []
     })
     patchUiState({ busy: false })
-    resetFlowOverlays()
+    resetFlowOverlays(terminalApprovalRequestId)
   }
 
   interruptTurn({ appendMessage, gw, sid, sys }: InterruptDeps) {
@@ -260,7 +260,7 @@ class TurnController {
   }
 
   recordError() {
-    this.idle()
+    this.idle(getOverlayState().approval?.requestId ?? '')
     this.clearReasoning()
     this.clearStatusTimer()
     this.pendingSegmentTools = []
@@ -345,7 +345,7 @@ class TurnController {
       void this.persistSpawnTree?.(finishedSubagents, sessionId)
     }
 
-    this.idle()
+    this.idle(getOverlayState().approval?.requestId ?? '')
     this.clearReasoning()
     this.turnTools = []
     this.persistedToolLabels.clear()

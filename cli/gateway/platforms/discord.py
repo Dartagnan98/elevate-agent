@@ -4028,6 +4028,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
+        request_id: str = "",
     ) -> SendResult:
         """
         Send a button-based exec approval prompt for a dangerous command.
@@ -4037,6 +4038,8 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         if not self._client or not DISCORD_AVAILABLE:
             return SendResult(success=False, error="Not connected")
+        if not request_id:
+            return SendResult(success=False, error="Approval request identity missing")
 
         try:
             # Resolve channel — use thread_id from metadata if present
@@ -4060,6 +4063,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             view = ExecApprovalView(
                 session_key=session_key,
+                request_id=request_id,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
@@ -5014,11 +5018,13 @@ def _define_discord_view_classes() -> None:
         def __init__(
             self,
             session_key: str,
+            request_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
         ):
             super().__init__(timeout=300)  # 5-minute timeout
             self.session_key = session_key
+            self.request_id = request_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
@@ -5063,7 +5069,14 @@ def _define_discord_view_classes() -> None:
             # Unblock the waiting agent thread via the gateway approval queue
             try:
                 from tools.approval import resolve_gateway_approval
-                count = resolve_gateway_approval(self.session_key, choice)
+                if not self.request_id:
+                    logger.error("Discord approval state missing request identity")
+                    return
+                count = resolve_gateway_approval(
+                    self.session_key,
+                    choice,
+                    request_id=self.request_id,
+                )
                 logger.info(
                     "Discord button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                     count, self.session_key, choice, interaction.user.display_name,

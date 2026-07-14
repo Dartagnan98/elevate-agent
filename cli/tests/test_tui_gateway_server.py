@@ -892,6 +892,28 @@ def test_config_set_yolo_toggles_session_scope():
         server._sessions.clear()
 
 
+def test_config_set_yolo_is_rejected_in_exact_beta(monkeypatch):
+    from tools.approval import clear_session, is_session_yolo_enabled
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    server._sessions["sid"] = _session()
+    try:
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "config.set",
+                "params": {"session_id": "sid", "key": "yolo"},
+            }
+        )
+
+        assert response["error"]["code"] == 4008
+        assert "unavailable" in response["error"]["message"].lower()
+        assert is_session_yolo_enabled("session-key") is False
+    finally:
+        clear_session("session-key")
+        server._sessions.clear()
+
+
 def test_config_get_statusbar_survives_non_dict_display(monkeypatch):
     monkeypatch.setattr(server, "_load_cfg", lambda: {"display": "broken"})
 

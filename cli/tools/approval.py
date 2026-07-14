@@ -28,6 +28,22 @@ from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+
+def _beta_approval_policy_active() -> bool:
+    """Return whether the exact Realtor Beta safety profile is active.
+
+    Keep this import lazy because ``tools.approval`` is imported during early
+    CLI and gateway startup.  The environment fallback preserves the
+    fail-closed decision if the policy module cannot be imported from a
+    partially installed Beta bundle.
+    """
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        return beta_provider_policy_active()
+    except Exception:
+        return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
 # Per-thread/per-task gateway session identity.
 # Gateway runs agent turns concurrently in executor threads, so reading a
 # process-global env var for session identity is racy. Keep env fallback for
@@ -511,11 +527,12 @@ class _ApprovalEntry:
         "correlation_id",
         "data",
         "event",
+        "receipt_lock",
         "receipt_outcome",
+        "receipt_retry_scheduled",
         "request_id",
         "resolution_reason",
         "result",
-        "session_id",
     )
 
     def __init__(self, data: dict):
@@ -533,27 +550,22 @@ class _ApprovalEntry:
         self.data.pop("correlation_id", None)
         if self.correlation_id:
             self.data["correlation_id"] = self.correlation_id
-        self.session_id = _opaque_approval_lineage_id(
-            self.data.get("session_id") or _current_approval_session_id()
-        )
+        # Session/message/request identifiers are intentionally not receipt
+        # lineage.  Only the central correlation layer may mint a joinable
+        # ``corr_``/``attempt_`` value.
         self.data.pop("session_id", None)
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         self.resolution_reason = ""
+        self.receipt_lock = threading.Lock()
         self.receipt_outcome: Optional[str] = None
+        self.receipt_retry_scheduled = False
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
 
 _VALID_GATEWAY_APPROVAL_CHOICES = frozenset({"once", "session", "always", "deny"})
-_OPAQUE_APPROVAL_LINEAGE_RE = re.compile(
-    r"^(?:"
-    r"[0-9a-f]{32}|"
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
-    r"(?:corr_|attempt_)[0-9a-f]{32}|"
-    r"(?:request|wake)\.[0-9a-f]{32}"
-    r")$"
-)
+_OPAQUE_APPROVAL_LINEAGE_RE = re.compile(r"^(?:corr_|attempt_)[0-9a-f]{32}$")
 
 
 def _opaque_approval_lineage_id(value: object) -> str:
@@ -563,31 +575,13 @@ def _opaque_approval_lineage_id(value: object) -> str:
 
 
 def _current_approval_correlation_id() -> str:
-    """Return the immutable accepted-turn root when the gateway bound one."""
+    """Return central canonical lineage when the gateway bound one."""
     try:
         from gateway.session_context import get_session_env
 
-        return (
-            get_session_env("ELEVATE_SESSION_CORRELATION_ID", "")
-            or get_session_env("ELEVATE_SESSION_MESSAGE_ID", "")
-            or ""
-        )
+        return get_session_env("ELEVATE_SESSION_CORRELATION_ID", "") or ""
     except Exception:
-        return (
-            os.getenv("ELEVATE_SESSION_CORRELATION_ID", "")
-            or os.getenv("ELEVATE_SESSION_MESSAGE_ID", "")
-            or ""
-        )
-
-
-def _current_approval_session_id() -> str:
-    """Return a durable session identifier when one exists in local context."""
-    try:
-        from gateway.session_context import get_session_env
-
-        return get_session_env("ELEVATE_SESSION_ID", "") or ""
-    except Exception:
-        return os.getenv("ELEVATE_SESSION_ID", "") or ""
+        return os.getenv("ELEVATE_SESSION_CORRELATION_ID", "") or ""
 
 
 def _record_approval_event(
@@ -607,7 +601,7 @@ def _record_approval_event(
                 event_type,
                 # Never write a raw gateway session/chat/user key. Opaque
                 # correlation + request IDs are enough to join the receipt.
-                session_id=entry.session_id or None,
+                session_id=None,
                 correlation_id=entry.correlation_id or None,
                 payload={
                     "request_id": entry.request_id,
@@ -633,22 +627,51 @@ def _record_approval_receipt(
     reason: str,
 ) -> None:
     """Record one durable terminal receipt for a pending approval entry."""
-    with _lock:
-        if entry.receipt_outcome is not None:
+    # Serialize the claim and write per entry.  The prior claim-write-reset
+    # sequence released its lock during I/O: a waiter could see the provisional
+    # claim, skip its retry, and then the failed writer reset it to ``None`` —
+    # permanently losing the receipt.  A per-entry lock makes success
+    # exactly-once and failed writes retryable without blocking queue traffic.
+    with entry.receipt_lock:
+        if entry.receipt_outcome is not None or entry.receipt_retry_scheduled:
             return
-        entry.receipt_outcome = outcome
-    if not _record_approval_event(
-        "approval.decision",
-        entry,
-        session_key,
-        outcome=outcome,
-        reason=reason,
-    ):
-        # The recorder is best-effort and must never turn an explicit deny
-        # into an approval.  Allow the waiting path to retry the receipt once.
-        with _lock:
-            if entry.receipt_outcome == outcome:
-                entry.receipt_outcome = None
+        if _record_approval_event(
+            "approval.decision",
+            entry,
+            session_key,
+            outcome=outcome,
+            reason=reason,
+        ):
+            entry.receipt_outcome = outcome
+            return
+
+        # A recorder can be temporarily unavailable while a session file is
+        # rotating. Retry once off the approval's critical return path: the
+        # command decision must not sit behind another disk attempt, and a
+        # daemon retry remains single-flight under ``receipt_lock``.
+        entry.receipt_retry_scheduled = True
+
+    def _retry() -> None:
+        with entry.receipt_lock:
+            try:
+                if entry.receipt_outcome is not None:
+                    return
+                if _record_approval_event(
+                    "approval.decision",
+                    entry,
+                    session_key,
+                    outcome=outcome,
+                    reason=reason,
+                ):
+                    entry.receipt_outcome = outcome
+            finally:
+                entry.receipt_retry_scheduled = False
+
+    threading.Thread(
+        target=_retry,
+        name=f"approval-receipt-{entry.request_id[:8]}",
+        daemon=True,
+    ).start()
 
 
 def register_gateway_notify(session_key: str, cb) -> None:
@@ -672,10 +695,14 @@ def unregister_gateway_notify(session_key: str) -> None:
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
+        # Queue removal, terminal result, and waiter publication are one
+        # state transition.  A timeout cannot interleave and misreport these
+        # cleanup denials as timeouts.
+        for entry in entries:
+            entry.result = "deny"
+            entry.resolution_reason = "gateway_unregistered"
+            entry.event.set()
     for entry in entries:
-        entry.result = "deny"
-        entry.resolution_reason = "gateway_unregistered"
-        entry.event.set()
         _record_approval_receipt(
             entry,
             session_key,
@@ -768,7 +795,7 @@ def approve_session(session_key: str, pattern_key: str):
 
 def enable_session_yolo(session_key: str) -> None:
     """Enable YOLO bypass for a single session key."""
-    if not session_key:
+    if not session_key or _beta_approval_policy_active():
         return
     with _lock:
         _session_yolo.add(session_key)
@@ -792,12 +819,13 @@ def clear_session(session_key: str) -> None:
         _session_permission_mode.pop(session_key, None)
         _pending.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
+        # Session-boundary cleanup should cancel blocked waits immediately,
+        # with the result visible before the event wakes any waiter.
+        for entry in entries:
+            entry.result = "deny"
+            entry.resolution_reason = "session_cleared"
+            entry.event.set()
     for entry in entries:
-        # Session-boundary cleanup should cancel any blocked approval waits
-        # immediately so the old run can unwind instead of idling until timeout.
-        entry.result = "deny"
-        entry.resolution_reason = "session_cleared"
-        entry.event.set()
         _record_approval_receipt(
             entry,
             session_key,
@@ -808,7 +836,7 @@ def clear_session(session_key: str) -> None:
 
 def is_session_yolo_enabled(session_key: str) -> bool:
     """Return True when YOLO bypass is enabled for a specific session."""
-    if not session_key:
+    if not session_key or _beta_approval_policy_active():
         return False
     with _lock:
         return session_key in _session_yolo
@@ -1137,7 +1165,7 @@ def execution_policy_for_permission_mode(
     except KeyError as exc:
         raise ValueError(f"Unknown permission mode: {permission_mode!r}") from exc
 
-    if os.getenv("ELEVATE_RELEASE_CHANNEL", "").strip().lower() == "beta":
+    if _beta_approval_policy_active():
         policy_mode = _BETA_PERMISSION_MODE_POLICY_MODES[normalized]
     return ExecutionPolicy.for_mode(accepted_turn_id, policy_mode)
 
@@ -1670,7 +1698,12 @@ def _get_approval_config() -> dict:
 def _get_approval_mode() -> str:
     """Read the approval mode from config. Returns 'manual', 'smart', or 'off'."""
     mode = _get_approval_config().get("mode", "manual")
-    return _normalize_approval_mode(mode)
+    normalized = _normalize_approval_mode(mode)
+    # Exact Beta never treats stale ``approvals.mode=off`` state as an
+    # authorization decision.  Stable keeps its long-standing compatibility.
+    if _beta_approval_policy_active() and normalized == "off":
+        return "manual"
+    return normalized
 
 
 def _get_approval_timeout() -> int:
@@ -1683,6 +1716,10 @@ def _get_approval_timeout() -> int:
 
 def _get_cron_approval_mode() -> str:
     """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    # There is no human present to approve a dangerous unattended action.
+    # Exact Beta therefore ignores every legacy allow alias.
+    if _beta_approval_policy_active():
+        return "deny"
     try:
         from elevate_cli.config import load_config
         config = load_config()
@@ -1692,6 +1729,49 @@ def _get_cron_approval_mode() -> str:
         return "deny"
     except Exception:
         return "deny"
+
+
+def _approval_bypass_enabled(approval_mode: Optional[str] = None) -> bool:
+    """Return whether a legacy approval bypass is active for this call.
+
+    Exact Realtor Beta has no approval bypass surface.  Reading all inputs
+    behind this single policy gate prevents an old environment variable,
+    session flag, config file, or permission-mode selection from silently
+    re-enabling dangerous command execution.
+    """
+    if _beta_approval_policy_active():
+        return False
+    return bool(
+        is_truthy_value(os.getenv("ELEVATE_YOLO_MODE"))
+        or is_current_session_yolo_enabled()
+        or approval_mode == "off"
+        or (
+            approval_mode is not None
+            and get_permission_mode() == "bypassPermissions"
+        )
+    )
+
+
+def _cron_dangerous_block_result(description: str) -> dict:
+    """Build the fail-closed result for an unattended dangerous command."""
+    if _beta_approval_policy_active():
+        guidance = (
+            "Realtor Beta does not allow dangerous commands in unattended "
+            "cron jobs. Run the action interactively so a person can review it."
+        )
+    else:
+        guidance = (
+            "Find an alternative approach that avoids this command. To allow "
+            "dangerous commands in cron jobs, set approvals.cron_mode: approve "
+            "in config.yaml."
+        )
+    return {
+        "approved": False,
+        "message": (
+            f"BLOCKED: Command flagged as dangerous ({description}) but cron "
+            f"jobs run without a user present to approve it. {guidance}"
+        ),
+    }
 
 
 def _smart_approve(command: str, description: str) -> str:
@@ -1777,9 +1857,9 @@ def check_dangerous_command(command: str, env_type: str,
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc)
 
-    # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
-    # CLI --yolo remains process-scoped via the env var for local use.
-    if is_truthy_value(os.getenv("ELEVATE_YOLO_MODE")) or is_current_session_yolo_enabled():
+    # Stable supports process- and session-scoped YOLO. Exact Beta ignores
+    # both through the central bypass policy gate.
+    if _approval_bypass_enabled():
         return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -1797,16 +1877,7 @@ def check_dangerous_command(command: str, env_type: str,
         # Cron sessions: respect cron_mode config
         if env_var_enabled("ELEVATE_CRON_SESSION"):
             if _get_cron_approval_mode() == "deny":
-                return {
-                    "approved": False,
-                    "message": (
-                        f"BLOCKED: Command flagged as dangerous ({description}) "
-                        "but cron jobs run without a user present to approve it. "
-                        "Find an alternative approach that avoids this command. "
-                        "To allow dangerous commands in cron jobs, set "
-                        "approvals.cron_mode: approve in config.yaml."
-                    ),
-                }
+                return _cron_dangerous_block_result(description)
         return {"approved": True, "message": None}
 
     if is_gateway or env_var_enabled("ELEVATE_EXEC_ASK"):
@@ -1912,18 +1983,11 @@ def check_all_command_guards(command: str, env_type: str,
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
 
-    # --yolo or approvals.mode=off: bypass all approval prompts.
-    # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
-    # `bypassPermissions` permission mode is the Claude-style equivalent of
-    # yolo and bypasses approvals the same way (the hardline + sudo-stdin
-    # floors above still apply — they run before this).
+    # Stable supports process/session YOLO, approvals.mode=off, and
+    # bypassPermissions. Exact Beta ignores all four behind one policy gate.
+    # The hardline + sudo-stdin floors above still run before this.
     approval_mode = _get_approval_mode()
-    if (
-        is_truthy_value(os.getenv("ELEVATE_YOLO_MODE"))
-        or is_current_session_yolo_enabled()
-        or approval_mode == "off"
-        or get_permission_mode() == "bypassPermissions"
-    ):
+    if _approval_bypass_enabled(approval_mode):
         return {"approved": True, "message": None}
 
     is_cli = env_var_enabled("ELEVATE_INTERACTIVE")
@@ -1939,16 +2003,7 @@ def check_all_command_guards(command: str, env_type: str,
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
                 if is_dangerous:
-                    return {
-                        "approved": False,
-                        "message": (
-                            f"BLOCKED: Command flagged as dangerous ({description}) "
-                            "but cron jobs run without a user present to approve it. "
-                            "Find an alternative approach that avoids this command. "
-                            "To allow dangerous commands in cron jobs, set "
-                            "approvals.cron_mode: approve in config.yaml."
-                        ),
-                    }
+                    return _cron_dangerous_block_result(description)
         return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
@@ -2045,7 +2100,6 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
                 "correlation_id": _current_approval_correlation_id(),
-                "session_id": _current_approval_session_id(),
             }
             entry = _ApprovalEntry(approval_data)
             with _lock:
@@ -2077,8 +2131,9 @@ def check_all_command_guards(command: str, env_type: str,
                         queue.remove(entry)
                     if not queue:
                         _gateway_queues.pop(session_key, None)
-                entry.result = "deny"
-                entry.resolution_reason = "notify_failed"
+                    entry.result = "deny"
+                    entry.resolution_reason = "notify_failed"
+                    entry.event.set()
                 _record_approval_receipt(
                     entry,
                     session_key,
@@ -2145,6 +2200,7 @@ def check_all_command_guards(command: str, env_type: str,
                 queue = _gateway_queues.get(session_key, [])
                 if entry in queue:
                     queue.remove(entry)
+                    entry.resolution_reason = "wait_timeout"
                 if not queue:
                     _gateway_queues.pop(session_key, None)
 
@@ -2159,7 +2215,10 @@ def check_all_command_guards(command: str, env_type: str,
                 else (choice if choice else "timeout")
             )
             if _outcome == "timeout":
-                entry.resolution_reason = "wait_timeout"
+                # A concurrent resolver/cleanup publishes its reason while
+                # holding the same lock.  Only supply the timeout fallback
+                # when this waiter won removal at the deadline.
+                entry.resolution_reason = entry.resolution_reason or "wait_timeout"
             _record_approval_receipt(
                 entry,
                 session_key,

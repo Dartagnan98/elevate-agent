@@ -409,7 +409,7 @@ describe('createGatewayEventHandler', () => {
     expect(getOverlayState().approvalQueue).toMatchObject([
       { description: 'second command', requestId: 'approval-456' }
     ])
-    expect(advanceApprovalQueue()).toBe(true)
+    expect(advanceApprovalQueue('approval-123')).toEqual({ advanced: true, hasNext: true })
     expect(getOverlayState().approval).toMatchObject({
       description: 'second command',
       requestId: 'approval-456'
@@ -421,6 +421,41 @@ describe('createGatewayEventHandler', () => {
       { text: 'protocol noise: bad framing', tone: 'info' },
       { text: 'command catalog unavailable: cold start', tone: 'info' }
     ])
+  })
+
+  it('terminal frames expire only the visible approval and preserve its queue', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: { command: 'first', description: 'first', request_id: 'approval-first' },
+      type: 'approval.request'
+    } as any)
+    onEvent({
+      payload: { command: 'second', description: 'second', request_id: 'approval-second' },
+      type: 'approval.request'
+    } as any)
+
+    onEvent({ payload: { status: 'error', text: 'first run ended' }, type: 'message.complete' } as any)
+
+    expect(getOverlayState().approval).toMatchObject({ requestId: 'approval-second' })
+    expect(getOverlayState().approvalQueue).toEqual([])
+  })
+
+  it('stale approval identities cannot consume the visible or queued request', () => {
+    const onEvent = createGatewayEventHandler(buildCtx([]))
+
+    onEvent({
+      payload: { command: 'first', description: 'first', request_id: 'approval-first' },
+      type: 'approval.request'
+    } as any)
+    onEvent({
+      payload: { command: 'second', description: 'second', request_id: 'approval-second' },
+      type: 'approval.request'
+    } as any)
+
+    expect(advanceApprovalQueue('approval-stale')).toEqual({ advanced: false, hasNext: true })
+    expect(getOverlayState().approval).toMatchObject({ requestId: 'approval-first' })
+    expect(getOverlayState().approvalQueue).toMatchObject([{ requestId: 'approval-second' }])
   })
 
   it('still surfaces terminal turn failures as errors', () => {

@@ -77,6 +77,7 @@ class TestSlackExecApproval:
             command="rm -rf /important",
             session_key="agent:main:slack:group:C1:1111",
             description="dangerous deletion",
+            request_id="request-slack",
         )
 
         assert result.success is True
@@ -102,6 +103,10 @@ class TestSlackExecApproval:
         # Each button carries the session key as value
         for e in elements:
             assert e["value"] == "agent:main:slack:group:C1:1111"
+        assert adapter._approval_state["1234.5678"] == {
+            "request_id": "request-slack",
+            "session_key": "agent:main:slack:group:C1:1111",
+        }
 
     @pytest.mark.asyncio
     async def test_sends_in_thread(self):
@@ -114,6 +119,7 @@ class TestSlackExecApproval:
             command="echo test",
             session_key="test-session",
             metadata={"thread_id": "9999.0000"},
+            request_id="request-thread",
         )
 
         kwargs = mock_client.chat_postMessage.call_args[1]
@@ -136,13 +142,24 @@ class TestSlackExecApproval:
 
         long_cmd = "x" * 5000
         await adapter.send_exec_approval(
-            chat_id="C1", command=long_cmd, session_key="s"
+            chat_id="C1", command=long_cmd, session_key="s", request_id="request-long"
         )
 
         kwargs = mock_client.chat_postMessage.call_args[1]
         section_text = kwargs["blocks"][0]["text"]["text"]
         assert "..." in section_text
         assert len(section_text) < 5000
+
+    @pytest.mark.asyncio
+    async def test_interactive_prompt_without_identity_fails_closed(self):
+        adapter = _make_adapter()
+
+        result = await adapter.send_exec_approval(
+            chat_id="C1", command="ls", session_key="s"
+        )
+
+        assert result.success is False
+        assert "identity" in (result.error or "").lower()
 
 
 # ===========================================================================
@@ -155,7 +172,10 @@ class TestSlackApprovalAction:
     @pytest.mark.asyncio
     async def test_resolves_approval(self):
         adapter = _make_adapter()
-        adapter._approval_resolved["1234.5678"] = False
+        adapter._approval_state["1234.5678"] = {
+            "request_id": "request-once",
+            "session_key": "agent:main:slack:group:C1:1111",
+        }
 
         ack = AsyncMock()
         body = {
@@ -171,7 +191,7 @@ class TestSlackApprovalAction:
         }
         action = {
             "action_id": "elevate_approve_once",
-            "value": "agent:main:slack:group:C1:1111",
+            "value": "attacker-supplied-different-session",
         }
 
         mock_client = adapter._team_clients["T1"]
@@ -181,7 +201,11 @@ class TestSlackApprovalAction:
             await adapter._handle_approval_action(ack, body, action)
 
         ack.assert_called_once()
-        mock_resolve.assert_called_once_with("agent:main:slack:group:C1:1111", "once")
+        mock_resolve.assert_called_once_with(
+            "agent:main:slack:group:C1:1111",
+            "once",
+            request_id="request-once",
+        )
 
         # Message should be updated with decision
         mock_client.chat_update.assert_called_once()
@@ -191,7 +215,6 @@ class TestSlackApprovalAction:
     @pytest.mark.asyncio
     async def test_prevents_double_click(self):
         adapter = _make_adapter()
-        adapter._approval_resolved["1234.5678"] = True  # Already resolved
 
         ack = AsyncMock()
         body = {
@@ -214,7 +237,10 @@ class TestSlackApprovalAction:
     @pytest.mark.asyncio
     async def test_deny_action(self):
         adapter = _make_adapter()
-        adapter._approval_resolved["1.2"] = False
+        adapter._approval_state["1.2"] = {
+            "request_id": "request-deny",
+            "session_key": "session-key",
+        }
 
         ack = AsyncMock()
         body = {
@@ -232,7 +258,11 @@ class TestSlackApprovalAction:
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
             await adapter._handle_approval_action(ack, body, action)
 
-        mock_resolve.assert_called_once_with("session-key", "deny")
+        mock_resolve.assert_called_once_with(
+            "session-key",
+            "deny",
+            request_id="request-deny",
+        )
         update_kwargs = mock_client.chat_update.call_args[1]
         assert "Denied by alice" in update_kwargs["text"]
 

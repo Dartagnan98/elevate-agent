@@ -112,10 +112,18 @@ logger = logging.getLogger(__name__)
 class _MatrixApprovalPrompt:
     """Tracks a pending Matrix reaction-based exec approval prompt."""
 
-    def __init__(self, session_key: str, chat_id: str, message_id: str, resolved: bool = False):
+    def __init__(
+        self,
+        session_key: str,
+        chat_id: str,
+        message_id: str,
+        request_id: str = "",
+        resolved: bool = False,
+    ):
         self.session_key = session_key
         self.chat_id = chat_id
         self.message_id = message_id
+        self.request_id = request_id
         self.resolved = resolved
         self.bot_reaction_events: dict[str, str] = {}  # emoji -> event_id
 
@@ -1235,10 +1243,13 @@ class MatrixAdapter(BasePlatformAdapter):
         session_key: str,
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
+        request_id: str = "",
     ) -> SendResult:
         """Send a reaction-based exec approval prompt for Matrix."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        if not request_id:
+            return SendResult(success=False, error="Approval request identity missing")
 
         cmd_preview = command[:2000] + "..." if len(command) > 2000 else command
         text = (
@@ -1260,6 +1271,7 @@ class MatrixAdapter(BasePlatformAdapter):
             session_key=session_key,
             chat_id=chat_id,
             message_id=result.message_id,
+            request_id=request_id,
         )
         old_event = self._approval_prompt_by_session.get(session_key)
         if old_event:
@@ -2214,7 +2226,14 @@ class MatrixAdapter(BasePlatformAdapter):
                 try:
                     from tools.approval import resolve_gateway_approval
 
-                    count = resolve_gateway_approval(prompt.session_key, choice)
+                    if not prompt.request_id:
+                        logger.error("Matrix approval state missing request identity")
+                        return
+                    count = resolve_gateway_approval(
+                        prompt.session_key,
+                        choice,
+                        request_id=prompt.request_id,
+                    )
                     if count:
                         prompt.resolved = True
                         self._approval_prompts_by_event.pop(reacts_to, None)

@@ -9,10 +9,17 @@ import type {
   VoiceRecordResponse
 } from '../gatewayTypes.js'
 import { isAction, isMac, isVoiceToggleKey } from '../lib/platform.js'
+import { rpcErrorMessage } from '../lib/rpc.js'
 
 import { getInputSelection } from './inputSelectionStore.js'
 import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
-import { $isBlocked, $overlayState, advanceApprovalQueue, patchOverlayState } from './overlayStore.js'
+import {
+  $isBlocked,
+  $overlayState,
+  advanceApprovalQueue,
+  isStaleApprovalResponseError,
+  patchOverlayState
+} from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -47,19 +54,32 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     }
 
     if (overlay.approval) {
-      return gateway
-        .rpc<ApprovalRespondResponse>('approval.respond', {
+      const requestId = overlay.approval.requestId
+
+      const advanceMatching = (expired = false) => {
+        const { advanced, hasNext } = advanceApprovalQueue(requestId)
+
+        if (advanced) {
+          patchTurnState({ outcome: expired ? 'approval expired' : 'denied' })
+          patchUiState({ status: hasNext ? 'approval needed' : expired ? 'approval expired' : 'running…' })
+        }
+      }
+
+      return gateway.gw
+        .request<ApprovalRespondResponse>('approval.respond', {
           choice: 'deny',
-          request_id: overlay.approval.requestId,
+          request_id: requestId,
           session_id: getUiState().sid
         })
-        .then(r => {
-          if (!r) {
+        .then(() => advanceMatching())
+        .catch(error => {
+          if (isStaleApprovalResponseError(error)) {
+            advanceMatching(true)
+
             return
           }
 
-          advanceApprovalQueue()
-          patchTurnState({ outcome: 'denied' })
+          actions.sys(`error: ${rpcErrorMessage(error)}`)
         })
     }
 

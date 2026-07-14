@@ -1,6 +1,7 @@
 """Tests for gateway /yolo session scoping."""
 
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -13,6 +14,7 @@ from tools.approval import disable_session_yolo, is_session_yolo_enabled
 
 @pytest.fixture(autouse=True)
 def _clean_yolo_state(monkeypatch):
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
     monkeypatch.delenv("ELEVATE_YOLO_MODE", raising=False)
     disable_session_yolo("agent:main:telegram:dm:chat-a")
     disable_session_yolo("agent:main:telegram:dm:chat-b")
@@ -60,3 +62,20 @@ async def test_yolo_command_toggles_only_current_session(monkeypatch):
     assert "OFF" in result_off
     assert is_session_yolo_enabled(session_a) is False
     assert os.environ.get("ELEVATE_YOLO_MODE") is None
+
+
+@pytest.mark.asyncio
+async def test_exact_beta_rejects_yolo_without_mutating_session(monkeypatch):
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    runner = _make_runner()
+    event = _make_event("chat-a")
+
+    with patch("tools.approval.enable_session_yolo") as enable_yolo, patch(
+        "tools.approval.disable_session_yolo"
+    ) as disable_yolo:
+        result = await runner._handle_yolo_command(event)
+
+    assert "unavailable" in result.lower()
+    assert "Realtor Beta" in result
+    enable_yolo.assert_not_called()
+    disable_yolo.assert_not_called()

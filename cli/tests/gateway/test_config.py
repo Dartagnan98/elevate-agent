@@ -99,6 +99,73 @@ class TestGetConnectedPlatforms:
         assert telegram.extra["agent_bots"]["admin"]["token"] == "saved-agent-token"
         assert telegram.extra["agent_bots"]["admin"]["token_env"] == "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN"
 
+    def test_exact_beta_filters_locked_marketing_and_arbitrary_agent_bots(
+        self,
+        monkeypatch,
+    ):
+        from elevate_cli import beta_env_policy
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setattr(
+            "gateway.config._gateway_env_values",
+            lambda: {
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN": "ea-token",
+                "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN": "locked-token",
+                "ELEVATE_AGENT_ADS_TELEGRAM_BOT_TOKEN": "arbitrary-token",
+            },
+        )
+        monkeypatch.setattr(
+            beta_env_policy,
+            "beta_active_pack_env_metadata",
+            lambda: {
+                "ELEVATE_AGENT_EXECUTIVE_ASSISTANT_TELEGRAM_BOT_TOKEN": {},
+            },
+        )
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        telegram = config.platforms[Platform.TELEGRAM]
+        assert set(telegram.extra["agent_bots"]) == {"executive-assistant"}
+        assert telegram.extra["agent_bots"]["executive-assistant"]["token"] == "ea-token"
+        assert "marketing" not in telegram.extra["agent_bots"]
+        assert "ads" not in telegram.extra["agent_bots"]
+
+    def test_exact_beta_keeps_agent_bots_for_active_pack_contracts(self, monkeypatch):
+        from elevate_cli import beta_env_policy
+
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        monkeypatch.setattr(
+            "gateway.config._gateway_env_values",
+            lambda: {
+                "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN": "admin-token",
+                "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN": "outreach-token",
+                "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN": "marketing-token",
+                "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN": "social-token",
+            },
+        )
+        allowed = {
+            "ELEVATE_AGENT_ADMIN_TELEGRAM_BOT_TOKEN",
+            "ELEVATE_AGENT_OUTREACH_TELEGRAM_BOT_TOKEN",
+            "ELEVATE_AGENT_MARKETING_TELEGRAM_BOT_TOKEN",
+            "ELEVATE_AGENT_SOCIAL_MEDIA_TELEGRAM_BOT_TOKEN",
+        }
+        monkeypatch.setattr(
+            beta_env_policy,
+            "beta_active_pack_env_metadata",
+            lambda: {key: {} for key in allowed},
+        )
+        config = GatewayConfig()
+
+        _apply_env_overrides(config)
+
+        assert set(config.platforms[Platform.TELEGRAM].extra["agent_bots"]) == {
+            "admin",
+            "outreach",
+            "marketing",
+            "social-media",
+        }
+
     def test_dingtalk_recognised_via_extras(self):
         config = GatewayConfig(
             platforms={
