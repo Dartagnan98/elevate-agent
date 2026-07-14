@@ -4410,6 +4410,8 @@ def get_auxiliary_extra_body() -> dict:
     Includes Nous Portal product tags when the auxiliary client is backed
     by Nous Portal. Returns empty dict otherwise.
     """
+    if _beta_auxiliary_policy_active():
+        return {}
     return _nous_extra_body() if auxiliary_is_nous else {}
 
 
@@ -4421,6 +4423,8 @@ def auxiliary_max_tokens_param(value: int) -> dict:
     The Codex adapter translates max_tokens internally, so we use max_tokens
     for it as well.
     """
+    if _beta_auxiliary_policy_active():
+        return {"max_tokens": value}
     custom_base = _current_custom_base_url()
     or_key = os.getenv("OPENROUTER_API_KEY")
     # Use max_completion_tokens for direct OpenAI-compatible providers that reject

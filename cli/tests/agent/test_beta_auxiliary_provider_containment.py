@@ -427,6 +427,30 @@ def test_beta_vision_routes_directly_to_codex_and_availability_is_local_only(
     forbidden.assert_not_called()
 
 
+def test_beta_public_auxiliary_metadata_ignores_stale_nous_and_custom_state(
+    monkeypatch, beta_home
+):
+    monkeypatch.setattr(auxiliary, "auxiliary_is_nous", True)
+    monkeypatch.setattr(
+        auxiliary,
+        "_nous_extra_body",
+        MagicMock(side_effect=AssertionError("Beta must not read Nous state")),
+    )
+    monkeypatch.setattr(
+        auxiliary,
+        "_current_custom_base_url",
+        MagicMock(side_effect=AssertionError("Beta must not read custom state")),
+    )
+    monkeypatch.setattr(
+        auxiliary,
+        "_read_nous_auth",
+        MagicMock(side_effect=AssertionError("Beta must not read Nous auth")),
+    )
+
+    assert auxiliary.get_auxiliary_extra_body() == {}
+    assert auxiliary.auxiliary_max_tokens_param(512) == {"max_tokens": 512}
+
+
 def test_non_exact_beta_channel_keeps_stable_auto_router(monkeypatch):
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "Beta")
     stable_client = object()
