@@ -7,7 +7,11 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+from elevate_cli.beta_provider_policy import (
+    BetaProviderPolicyError,
+    beta_provider_policy_active,
+    canonical_beta_provider,
+)
 from elevate_cli.config import (
     get_config_path,
     load_config,
@@ -202,6 +206,8 @@ def create_config_router(
             from elevate_cli.tier_resolver import list_available_models
 
             return list_available_models()
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
         except Exception:
             _log.exception("GET /api/models/available failed")
             return {"models": [], "default": ""}
@@ -209,6 +215,29 @@ def create_config_router(
     @router.get("/api/models/by-provider")
     def get_models_by_provider(provider: str = ""):
         prov = str(provider or "").strip()
+        if beta_provider_policy_active():
+            try:
+                normalized = canonical_beta_provider(
+                    prov,
+                    source="model catalog provider",
+                )
+                from elevate_cli.tier_resolver import list_available_models
+
+                catalog = list_available_models()
+                return {
+                    "provider": normalized,
+                    "models": [entry["id"] for entry in catalog["models"]],
+                    "default": catalog["default"],
+                    "authenticated": catalog["authenticated"],
+                    "ready": catalog["ready"],
+                    "authReason": catalog["authReason"],
+                    "policyBlocked": catalog["policyBlocked"],
+                    "blockedReason": catalog["blockedReason"],
+                    "policyVersion": catalog["policyVersion"],
+                    "allowedModelsVersion": catalog["allowedModelsVersion"],
+                }
+            except BetaProviderPolicyError as exc:
+                raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
         if not prov:
             return {"provider": "", "models": []}
         try:
@@ -240,6 +269,8 @@ def create_config_router(
                 "mapping": mapping,
                 "resolved": resolved,
             }
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
         except Exception:
             _log.exception("GET /api/config/tiers failed")
             return {"tiers": [], "mapping": {}, "resolved": {}}
@@ -251,6 +282,8 @@ def create_config_router(
 
             save_tier_config(body.mapping or {})
             return {"ok": True, "mapping": load_tier_config()}
+        except BetaProviderPolicyError as exc:
+            raise HTTPException(status_code=409, detail=exc.as_detail()) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except Exception as exc:

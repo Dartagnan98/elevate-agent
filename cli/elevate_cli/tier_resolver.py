@@ -11,10 +11,10 @@ Resolution order (first hit wins):
     most-capable for ``orchestrator``, mid for ``draft``).
 3. The current ``model.default`` from ``~/.elevate/config.yaml``.
 
-The resolver never reads provider API keys, never calls a provider directly,
-and never hardcodes a model name. New providers and new model families surface
-automatically through the harness's standard model discovery (see
-``elevate_cli.models.provider_model_ids`` + ``list_available_providers``).
+The resolver never reads provider API keys or calls a provider directly.
+Stable channels discover providers and models through the standard harness
+catalog. Exact Realtor Beta deliberately bypasses that generic discovery and
+uses its versioned Codex-only policy catalog.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -56,37 +56,206 @@ def _tier_config_path() -> Path:
     return get_elevate_home() / TIER_CONFIG_FILENAME
 
 
-def load_tier_config() -> Dict[str, Any]:
-    """Read the persisted tier->model mapping. Returns ``{}`` if missing."""
-    path = _tier_config_path()
-    if not path.exists():
-        return {}
+def _beta_policy_active() -> bool:
+    """Keep Stable imports and behavior untouched outside exact Beta."""
+    from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+    return beta_provider_policy_active()
+
+
+def _beta_model_catalog() -> Dict[str, Any]:
+    """Build the versioned current-profile Beta catalog without discovery."""
+    from elevate_constants import get_elevate_home
+    from elevate_cli.beta_provider_policy import (
+        BETA_ALLOWED_MODELS,
+        BETA_ALLOWED_MODELS_VERSION,
+        BETA_ALLOWED_PROVIDER,
+        BETA_PROVIDER_POLICY_VERSION,
+        BetaProviderPolicyError,
+        build_beta_primary_overlay,
+        read_beta_codex_auth_status,
+        validate_beta_config_for_persistence,
+    )
+    from elevate_cli.config import load_config
+
+    auth_status = read_beta_codex_auth_status(get_elevate_home())
     try:
-        return json.loads(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        _log.warning("tier_resolver: failed to read %s: %s", path, exc)
-        return {}
+        config = load_config() or {}
+    except Exception:
+        config = {}
+    policy_error = None
+    try:
+        validate_beta_config_for_persistence(config, auth_status)
+    except BetaProviderPolicyError as exc:
+        policy_error = exc
+    primary = build_beta_primary_overlay(config, auth_status)
+    value = primary["value"]
+    authenticated = bool(value.get("authReady"))
+    ready = primary.get("status") == "configured" and policy_error is None
+    policy_blocked = bool(value.get("policyBlocked"))
+    blocked_reason = value.get("blockedReason")
+    if policy_error is not None and policy_error.code != "beta_codex_auth_required":
+        policy_blocked = True
+        blocked_reason = policy_error.code
+    models = [
+        {
+            "id": model_id,
+            "provider": BETA_ALLOWED_PROVIDER,
+            "source": "beta_policy",
+            "tier_hint": _model_bucket(model_id),
+            "authenticated": authenticated,
+            "ready": ready,
+        }
+        for model_id in BETA_ALLOWED_MODELS
+    ]
+    return {
+        "models": models,
+        "default": value["model"],
+        "provider": BETA_ALLOWED_PROVIDER,
+        "authenticated": authenticated,
+        "ready": ready,
+        "authReason": value.get("authReason"),
+        "policyBlocked": policy_blocked,
+        "blockedReason": blocked_reason,
+        "policyVersion": BETA_PROVIDER_POLICY_VERSION,
+        "allowedModelsVersion": BETA_ALLOWED_MODELS_VERSION,
+    }
 
 
-def save_tier_config(mapping: Dict[str, Any]) -> Path:
-    """Atomically write the tier->model mapping. Validates tier names."""
+def _sanitize_beta_tier_mapping(
+    mapping: Mapping[str, Any],
+    *,
+    require_auth: bool,
+) -> Dict[str, Any]:
+    """Validate and canonicalize a Beta tier mapping without provider lookup."""
+    from elevate_cli.beta_provider_policy import (
+        BetaProviderPolicyError,
+        beta_model_or_default,
+        canonical_beta_provider,
+        require_beta_codex_auth,
+    )
+
+    if not isinstance(mapping, Mapping):
+        raise BetaProviderPolicyError(
+            "Realtor Beta tier configuration must be a mapping.",
+            code="beta_tier_mapping_invalid",
+        )
+
     sanitized: Dict[str, Any] = {}
     for tier_id, value in mapping.items():
         if tier_id not in VALID_TIERS:
             raise ValueError(f"unknown tier: {tier_id!r}")
         if value is None or value == "":
             continue
-        if isinstance(value, dict):
-            model_id = value.get("model") or value.get("default") or ""
+        if isinstance(value, Mapping):
+            for fallback_key in (
+                "fallback",
+                "fallback_model",
+                "fallback_provider",
+                "fallback_providers",
+            ):
+                if value.get(fallback_key) not in (None, "", (), [], {}):
+                    raise BetaProviderPolicyError(
+                        "Realtor Beta tier mappings do not allow model fallback.",
+                        code="beta_fallback_not_allowed",
+                    )
+            unexpected = {
+                key
+                for key, item in value.items()
+                if key not in {"model", "default", "provider"}
+                and item not in (None, "", (), [], {})
+            }
+            if unexpected:
+                rendered = ", ".join(sorted(map(str, unexpected)))
+                raise BetaProviderPolicyError(
+                    f"Realtor Beta tier mapping contains unsupported fields: {rendered}.",
+                    code="beta_tier_mapping_invalid",
+                )
+            model_id = str(value.get("model") or value.get("default") or "").strip()
             provider = value.get("provider", "")
         else:
-            model_id = str(value)
+            model_id = str(value).strip()
             provider = ""
         if not model_id:
             continue
-        sanitized[tier_id] = {"model": model_id}
-        if provider:
-            sanitized[tier_id]["provider"] = provider
+        model_id = beta_model_or_default(
+            model_id,
+            source=f"{tier_id} tier model",
+        )
+        provider = canonical_beta_provider(
+            provider,
+            source=f"{tier_id} tier provider",
+        )
+        sanitized[tier_id] = {
+            "model": model_id,
+            "provider": provider,
+        }
+
+    if require_auth:
+        from elevate_constants import get_elevate_home
+
+        require_beta_codex_auth(get_elevate_home())
+    return sanitized
+
+
+def _validate_beta_resolution_config() -> None:
+    """Reject configured provider/fallback escape hatches before resolution."""
+    from elevate_cli.beta_provider_policy import validate_beta_config_for_persistence
+    from elevate_cli.config import load_config
+
+    try:
+        config = load_config() or {}
+    except Exception:
+        config = {}
+    # Resolution itself does not prove authentication, but it must reject every
+    # provider/model/fallback escape hatch before selecting a model.
+    validate_beta_config_for_persistence(config, {"logged_in": True})
+
+
+def load_tier_config() -> Dict[str, Any]:
+    """Read the persisted tier->model mapping. Returns ``{}`` if missing."""
+    path = _tier_config_path()
+    if not path.exists():
+        return {}
+    try:
+        mapping = json.loads(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        if _beta_policy_active():
+            from elevate_cli.beta_provider_policy import BetaProviderPolicyError
+
+            raise BetaProviderPolicyError(
+                "Realtor Beta tier configuration is unreadable or invalid.",
+                code="beta_tier_mapping_invalid",
+            ) from exc
+        _log.warning("tier_resolver: failed to read %s: %s", path, exc)
+        return {}
+    if _beta_policy_active():
+        return _sanitize_beta_tier_mapping(mapping, require_auth=False)
+    return mapping
+
+
+def save_tier_config(mapping: Dict[str, Any]) -> Path:
+    """Atomically write the tier->model mapping. Validates tier names."""
+    if _beta_policy_active():
+        sanitized = _sanitize_beta_tier_mapping(mapping, require_auth=True)
+    else:
+        sanitized: Dict[str, Any] = {}
+        for tier_id, value in mapping.items():
+            if tier_id not in VALID_TIERS:
+                raise ValueError(f"unknown tier: {tier_id!r}")
+            if value is None or value == "":
+                continue
+            if isinstance(value, dict):
+                model_id = value.get("model") or value.get("default") or ""
+                provider = value.get("provider", "")
+            else:
+                model_id = str(value)
+                provider = ""
+            if not model_id:
+                continue
+            sanitized[tier_id] = {"model": model_id}
+            if provider:
+                sanitized[tier_id]["provider"] = provider
 
     path = _tier_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,6 +321,9 @@ def _enumerate_available_models() -> List[Dict[str, Any]]:
     Each entry: ``{id, provider, source, tier_hint, authenticated}``.
     Failures are swallowed so resolution still returns the harness default.
     """
+    if _beta_policy_active():
+        return list(_beta_model_catalog()["models"])
+
     out: List[Dict[str, Any]] = []
     try:
         from elevate_cli.models import (
@@ -206,6 +378,9 @@ def _enumerate_available_models() -> List[Dict[str, Any]]:
 
 def list_available_models() -> Dict[str, Any]:
     """Return ``{models: [...], default: <id>}`` for ``/api/models/available``."""
+    if _beta_policy_active():
+        return _beta_model_catalog()
+
     models = _enumerate_available_models()
     default_id, _ = _harness_default_model()
     # De-dup by id while preserving first-seen order.
@@ -227,6 +402,9 @@ def resolve_tier(tier_id: str) -> str:
     """
     if tier_id not in VALID_TIERS:
         raise ValueError(f"unknown tier: {tier_id!r}")
+
+    if _beta_policy_active():
+        _validate_beta_resolution_config()
 
     mapping = load_tier_config()
     explicit = mapping.get(tier_id)
@@ -265,6 +443,9 @@ def resolve_tier_with_provider(tier_id: str) -> tuple[str, str]:
 
     Returns ``("", "")`` if nothing resolves.
     """
+    if _beta_policy_active():
+        _validate_beta_resolution_config()
+
     mapping = load_tier_config()
     explicit = mapping.get(tier_id)
     if isinstance(explicit, dict) and explicit.get("model"):
