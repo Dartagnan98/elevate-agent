@@ -1,16 +1,15 @@
 // "Didn't Send" tab — surfaces send_queue rows that did NOT get delivered
-// (failed / skipped / stuck), so an approved or queued message that silently
+// (failed / stuck retry), so an approved or queued message that silently
 // dropped (e.g. a contact with no phone) doesn't just vanish off the board.
 // Each row shows who, the message, the reason, and a Retry that re-resolves
 // the contact's current phone and re-queues it.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../../../../lib/api";
-import type { SourceInboxSentItem } from "../../../../lib/api-types";
+import type { SourceInboxSentItem, SourceInboxSentResponse } from "../../../../lib/api-types";
+import { retrySendOutcomeLabel } from "../draft-send-lifecycle";
 
 type Row = SourceInboxSentItem & { payload?: AnyObj };
 type AnyObj = Record<string, unknown>;
-
-const NAVY = "#182848", MUTED = "#7b869c", LINE = "#e3e7ef", RED = "#c0392b", AMBER = "#b0894d", GREEN = "#2f7a4d";
 
 const rcpt = (r: Row): string => {
   const rec = (r.payload?.recipient as AnyObj) || {};
@@ -21,32 +20,58 @@ const body = (r: Row): string =>
 const why = (r: Row): string => {
   if (r.lastError) return String(r.lastError);
   const st = (r.status || "").toLowerCase();
-  if (st === "skipped") return "Skipped — no phone on the contact, or held for review / safety hold";
   if (st === "failed") return "Failed to send";
-  if (st === "retrying") return "Still retrying";
+  if (st === "retrying") return "Automatic retry pending";
   return "Did not send";
 };
 
 export function NotSentView() {
-  const [rows, setRows] = useState<Row[]>([]);
+  const [rows, setRows] = useState<Row[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [partial, setPartial] = useState(false);
   const [busy, setBusy] = useState<string>("");
   const [done, setDone] = useState<Record<string, string>>({});
 
-  const load = () =>
-    api.getSourceInboxNotSent(100)
-      .then((r) => setRows((((r as unknown as { items?: Row[] }).items) || [])))
-      .catch(() => setRows([]))
-      .finally(() => setLoading(false));
-  useEffect(() => { void load(); }, []);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setDone({});
+    try {
+      const response = await api.getSourceInboxNotSent(100) as SourceInboxSentResponse;
+      const items = (response.items ?? []) as Row[];
+      const effectiveLimit = Math.max(1, Math.min(Number(response.limit) || 100, 100));
+      setRows(items);
+      setPartial(items.length >= effectiveLimit);
+    } catch (nextError) {
+      setRows(null);
+      setPartial(false);
+      setError(nextError instanceof Error ? nextError.message : "Didn't-send history did not load.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    const initialLoad = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(initialLoad);
+  }, [load]);
 
   const retry = async (id: string) => {
     setBusy(id);
+    setDone((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     try {
       const r = await api.retrySourceInboxSend(id);
-      setDone((d) => ({ ...d, [id]: r.phone ? `Re-queued → ${r.phone}` : "Re-queued" }));
-    } catch {
-      setDone((d) => ({ ...d, [id]: "Retry failed" }));
+      const outcome = retrySendOutcomeLabel(r);
+      setDone((d) => ({ ...d, [id]: outcome }));
+    } catch (nextError) {
+      setDone((d) => ({
+        ...d,
+        [id]: nextError instanceof Error ? `Retry failed — ${nextError.message}` : "Retry failed",
+      }));
     } finally {
       setBusy("");
     }
@@ -58,8 +83,8 @@ export function NotSentView() {
         <div>
           <h2 className="lb-profiles-title">Didn't send</h2>
           <p className="lb-profiles-desc">
-            Approved or queued messages that didn't actually go out — so nothing drops silently.
-            Most are a missing phone on the contact; Retry re-resolves the number and re-queues it.
+            Failed or automatically retrying messages returned from the latest 100 queue records.
+            Retry is available only after a send reaches a failed state; it re-resolves the current number and dispatches only that selected record.
           </p>
         </div>
         <button className="lb-btn" onClick={() => { setLoading(true); void load(); }} disabled={loading}>
@@ -67,41 +92,59 @@ export function NotSentView() {
         </button>
       </header>
 
-      {loading && <div style={{ padding: 18, color: MUTED, fontSize: 13 }}>Loading…</div>}
-      {!loading && rows.length === 0 && (
-        <div style={{ padding: "22px 18px", color: GREEN, fontSize: 13.5, fontWeight: 600 }}>
-          ✓ Nothing stuck — every recent message went out.
+      {loading && <div className="lb-replies-empty" role="status">Loading didn't-send history…</div>}
+      {!loading && error && (
+        <div className="lb-replies-empty lb-crm-error" role="alert">
+          Didn't-send history is unavailable. {error}
+        </div>
+      )}
+      {!loading && !error && partial && (
+        <div className="lb-history-coverage" role="note">
+          Showing at least 100 affected queue records. Older failures may not be included.
+        </div>
+      )}
+      {!loading && !error && rows?.length === 0 && (
+        <div className="lb-replies-empty" role="status">
+          No failed or retrying messages were returned in this recent queue window.
         </div>
       )}
 
-      <div>
+      {!loading && !error && rows && rows.length > 0 && <div className="lb-not-sent-list">
         {rows.map((r) => {
           const st = (r.status || "").toLowerCase();
-          const color = st === "failed" ? RED : AMBER;
           return (
-            <div key={r.id} style={{ display: "flex", alignItems: "flex-start", gap: 14, padding: "13px 16px", borderTop: `1px solid ${LINE}` }}>
-              <span style={{ fontSize: 10.5, fontWeight: 800, color: "#fff", background: color, borderRadius: 6, padding: "3px 8px", marginTop: 2, whiteSpace: "nowrap" }}>
+            <div key={r.id} className="lb-not-sent-row">
+              <span className={`lb-not-sent-status ${st === "failed" ? "failed" : "pending"}`}>
                 {(r.status || "?").toUpperCase()}
               </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
-                  <span style={{ fontWeight: 700, fontSize: 13.5, color: NAVY }}>{rcpt(r)}</span>
-                  <span style={{ fontSize: 11, color: MUTED }}>{(r.channel || "").toUpperCase()}{r.attempts ? ` · ${r.attempts} tries` : ""}</span>
+              <div className="lb-not-sent-copy">
+                <div className="lb-not-sent-meta">
+                  <strong>{rcpt(r)}</strong>
+                  <span>{(r.channel || "").toUpperCase()}{r.attempts ? ` · ${r.attempts} tries` : ""}</span>
                 </div>
-                <div style={{ fontSize: 12.5, color: "#384256", marginTop: 3, maxHeight: 36, overflow: "hidden" }}>
-                  {body(r) || <em style={{ color: MUTED }}>(no message body saved)</em>}
+                <div className="lb-not-sent-body">
+                  {body(r) || <em>(no message body saved)</em>}
                 </div>
-                <div style={{ fontSize: 11.5, color, marginTop: 4, fontWeight: 600 }}>⚠ {why(r)}</div>
+                <div className={`lb-not-sent-reason ${st === "failed" ? "failed" : "pending"}`}>⚠ {why(r)}</div>
               </div>
-              <div style={{ flexShrink: 0 }}>
-                {done[r.id]
-                  ? <span style={{ fontSize: 12, fontWeight: 700, color: done[r.id].includes("failed") ? RED : GREEN }}>{done[r.id]}</span>
-                  : <button className="lb-btn" onClick={() => retry(r.id)} disabled={!!busy}>{busy === r.id ? "Retrying…" : "Retry"}</button>}
+              <div className="lb-not-sent-action">
+                {done[r.id] && (
+                  <span className={done[r.id].toLowerCase().includes("failed") ? "is-error" : done[r.id] === "Dispatch accepted" ? "is-success" : ""}>
+                    {done[r.id]}
+                  </span>
+                )}
+                {st === "retrying"
+                  ? <span>Automatic retry pending</span>
+                  : (!done[r.id] || done[r.id].toLowerCase().includes("failed")) && (
+                    <button type="button" className="lb-btn" onClick={() => void retry(r.id)} disabled={!!busy}>
+                      {busy === r.id ? "Retrying…" : "Retry"}
+                    </button>
+                  )}
               </div>
             </div>
           );
         })}
-      </div>
+      </div>}
     </section>
   );
 }

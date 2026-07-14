@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import os
+import tempfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +45,26 @@ def _read_json(path: Path) -> JsonRecord | None:
 
 def _write_json(path: Path, value: JsonRecord) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(json.dumps(value, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            with contextlib.suppress(FileNotFoundError):
+                temp_path.unlink()
 
 
 def _count_jsonl(path: Path) -> int:

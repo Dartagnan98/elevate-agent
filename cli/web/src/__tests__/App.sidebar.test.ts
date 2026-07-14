@@ -44,3 +44,28 @@ describe("sidebar session loading", () => {
     expect(status.label).not.toBe("Done");
   });
 });
+
+describe("Realtor reporting route", () => {
+  const lockedPacks = {
+    realEstateSales: false,
+    realEstateMarketing: false,
+    realEstateAdmin: false,
+    realEstateCma: false,
+    realEstateAny: false,
+  };
+
+  it("preloads the reporting bundle and gates it with the sales pack", () => {
+    expect(__appTestables.routePreloaders["/reporting"]).toBeTypeOf("function");
+
+    const locked = __appTestables.buildAccessControlledBuiltinRoutes(false, lockedPacks);
+    expect(locked["/reporting"]).toBe(locked["/leads"]);
+
+    const enabled = __appTestables.buildAccessControlledBuiltinRoutes(false, {
+      ...lockedPacks,
+      realEstateSales: true,
+      realEstateAny: true,
+    });
+    expect(enabled["/reporting"]).not.toBe(enabled["/leads"]);
+    expect(enabled["/reporting"]).not.toBe(locked["/reporting"]);
+  });
+});

@@ -77,7 +77,6 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectOption } from "@/components/ui/select";
-import { RouteSkeleton } from "@/components/route-skeletons";
 import { ListSkeleton, PageSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, isoTimeAgo } from "@/lib/utils";
@@ -4115,37 +4114,6 @@ function RealEstateLeadsPageLegacy() {
 void RealEstateLeadsPageLegacy;
 
 export function RealEstateLeadsPage() {
-  const leadsSetup = useLeadsSetup();
-  const [forceOnboarding, setForceOnboarding] = useState(false);
-  const showOnboarding =
-    !leadsSetup.loading && !!leadsSetup.setup && (!leadsSetup.setup.complete || forceOnboarding);
-  const setupSnapshot = leadsSetup.setup;
-
-  if (leadsSetup.loading) {
-    return <RouteSkeleton path="/leads" />;
-  }
-  if (leadsSetup.error) {
-    return (
-      <div className="m-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
-        <span className="min-w-0">Could not load leads setup: {leadsSetup.error}</span>
-        <Button variant="outline" size="sm" onClick={() => void leadsSetup.refresh()}>
-          Retry
-        </Button>
-      </div>
-    );
-  }
-  if (showOnboarding && setupSnapshot) {
-    return (
-      <div className="m-5">
-        <LeadsSetupLaunch
-          setup={setupSnapshot}
-          onSetupUpdated={(next) => leadsSetup.setSetup(next)}
-          forceOnboarding={forceOnboarding}
-          onForceOnboardingDone={() => setForceOnboarding(false)}
-        />
-      </div>
-    );
-  }
   return <LeadsDesignShell />;
 }
 

@@ -6,6 +6,7 @@ import { introMsg, toTranscriptMessages } from '../domain/messages.js'
 import { ZERO } from '../domain/usage.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
+  GatewayTranscriptMessage,
   SessionCloseResponse,
   SessionCreateResponse,
   SessionResumeResponse,
@@ -21,6 +22,16 @@ import { patchTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
 const usageFrom = (info: null | SessionInfo): Usage => (info?.usage ? { ...ZERO, ...info.usage } : ZERO)
+
+export const resumedSessionStatus = (messages: GatewayTranscriptMessage[]): string => {
+  const lastAssistant = [...messages].reverse().find(message => message.role === 'assistant')
+
+  return lastAssistant?.status === 'needs_input'
+    ? 'waiting for your input'
+    : lastAssistant?.status === 'pending'
+      ? 'work still pending'
+      : 'ready'
+}
 
 const trimTail = (items: Msg[]) => {
   const q = [...items]
@@ -188,7 +199,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
                 info: r.info ?? null,
                 liveSubagent: r.live_subagent ?? null,
                 sid: r.session_id,
-                status: 'ready',
+                status: resumedSessionStatus(r.messages),
                 usage: usageFrom(r.info ?? null)
               })
               setTimeout(() => scrollRef.current?.scrollToBottom(), 0)

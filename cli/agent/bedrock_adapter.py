@@ -623,7 +623,7 @@ def _converse_stop_reason_to_openai(stop_reason: str) -> str:
         "content_filtered": "content_filter",
         "guardrail_intervened": "content_filter",
     }
-    return mapping.get(stop_reason, "stop")
+    return mapping.get(stop_reason, "error")
 
 
 def normalize_converse_response(response: Dict) -> SimpleNamespace:
@@ -641,11 +641,17 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
     output = response.get("output", {})
     message = output.get("message", {})
     content_blocks = message.get("content", [])
-    stop_reason = response.get("stopReason", "end_turn")
+    # Absence is not equivalent to a provider-confirmed end_turn.  Preserve it
+    # as an error so tool-shaped output cannot be executed from a truncated or
+    # malformed envelope.  Explicit end_turn/stop_sequence remain accepted
+    # terminal states for Bedrock implementations that pair them with toolUse.
+    stop_reason = response.get("stopReason")
 
     text_parts = []
     reasoning_parts = []
     tool_calls = []
+    invalid_tool_batch = False
+    had_tool_intent = False
 
     for block in content_blocks:
         if "text" in block:
@@ -657,15 +663,25 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
                 if thinking_text:
                     reasoning_parts.append(str(thinking_text))
         elif "toolUse" in block:
+            had_tool_intent = True
             tu = block["toolUse"]
+            tool_input = tu.get("input", {}) if isinstance(tu, dict) else None
+            if not isinstance(tu, dict) or not isinstance(tool_input, dict):
+                invalid_tool_batch = True
+                continue
             tool_calls.append(SimpleNamespace(
                 id=tu.get("toolUseId", ""),
                 type="function",
                 function=SimpleNamespace(
                     name=tu.get("name", ""),
-                    arguments=json.dumps(tu.get("input", {})),
+                    arguments=json.dumps(tool_input),
                 ),
             ))
+
+    if invalid_tool_batch:
+        # Parallel tool batches are atomic: never execute a valid sibling when
+        # another tool block is malformed.
+        tool_calls = []
 
     # Build the message object
     msg = SimpleNamespace(
@@ -686,8 +702,15 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)
-    if tool_calls and finish_reason == "stop":
+    if invalid_tool_batch:
+        finish_reason = "error"
+    elif tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
+    elif finish_reason == "tool_calls" and not tool_calls:
+        finish_reason = "error"
+    if tool_calls and finish_reason != "tool_calls":
+        tool_calls = []
+        msg.tool_calls = None
 
     choice = SimpleNamespace(
         index=0,
@@ -699,6 +722,7 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
         choices=[choice],
         usage=usage,
         model=response.get("modelId", ""),
+        _elevate_had_tool_intent=had_tool_intent,
     )
 
 
@@ -758,13 +782,28 @@ def stream_converse_with_callbacks(
     current_tool: Optional[Dict] = None
     current_text_buffer: List[str] = []
     has_tool_use = False
-    stop_reason = "end_turn"
+    # A stream is not terminal until messageStop is observed.
+    stop_reason = None
     usage_data: Dict[str, int] = {}
+    invalid_tool_batch = False
+    saw_message_stop = False
+    invalid_event_order = False
 
     for event in event_stream.get("stream", []):
         # Check for interrupt
         if on_interrupt_check and on_interrupt_check():
             break
+
+        if saw_message_stop:
+            if "metadata" in event:
+                meta_usage = event["metadata"].get("usage", {})
+                usage_data = {
+                    "inputTokens": meta_usage.get("inputTokens", 0),
+                    "outputTokens": meta_usage.get("outputTokens", 0),
+                }
+                continue
+            invalid_event_order = True
+            continue
 
         if "contentBlockStart" in event:
             start = event["contentBlockStart"].get("start", {})
@@ -809,22 +848,26 @@ def stream_converse_with_callbacks(
                 try:
                     input_dict = json.loads(current_tool["input_json"]) if current_tool["input_json"] else {}
                 except (json.JSONDecodeError, TypeError):
-                    input_dict = {}
-                tool_calls.append(SimpleNamespace(
-                    id=current_tool["toolUseId"],
-                    type="function",
-                    function=SimpleNamespace(
-                        name=current_tool["name"],
-                        arguments=json.dumps(input_dict),
-                    ),
-                ))
+                    input_dict = None
+                if not isinstance(input_dict, dict):
+                    invalid_tool_batch = True
+                else:
+                    tool_calls.append(SimpleNamespace(
+                        id=current_tool["toolUseId"],
+                        type="function",
+                        function=SimpleNamespace(
+                            name=current_tool["name"],
+                            arguments=json.dumps(input_dict),
+                        ),
+                    ))
                 current_tool = None
             elif current_text_buffer:
                 text_parts.append("".join(current_text_buffer))
                 current_text_buffer = []
 
         elif "messageStop" in event:
-            stop_reason = event["messageStop"].get("stopReason", "end_turn")
+            stop_reason = event["messageStop"].get("stopReason")
+            saw_message_stop = True
 
         elif "metadata" in event:
             meta_usage = event["metadata"].get("usage", {})
@@ -836,6 +879,10 @@ def stream_converse_with_callbacks(
     # Flush remaining text
     if current_text_buffer:
         text_parts.append("".join(current_text_buffer))
+    if current_tool is not None:
+        invalid_tool_batch = True
+    if invalid_tool_batch or invalid_event_order:
+        tool_calls = []
 
     msg = SimpleNamespace(
         role="assistant",
@@ -853,8 +900,15 @@ def stream_converse_with_callbacks(
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)
-    if tool_calls and finish_reason == "stop":
+    if invalid_tool_batch or invalid_event_order:
+        finish_reason = "error"
+    elif tool_calls and finish_reason == "stop":
         finish_reason = "tool_calls"
+    elif finish_reason == "tool_calls" and not tool_calls:
+        finish_reason = "error"
+    if tool_calls and finish_reason != "tool_calls":
+        tool_calls = []
+        msg.tool_calls = None
 
     choice = SimpleNamespace(
         index=0,
@@ -866,6 +920,7 @@ def stream_converse_with_callbacks(
         choices=[choice],
         usage=usage,
         model="",
+        _elevate_had_tool_intent=has_tool_use,
     )
 
 

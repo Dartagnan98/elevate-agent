@@ -36,19 +36,15 @@ _ONBOARDING_CHAT_SYSTEM = (
     "(1) Always lead with current state: name the province and what's already "
     "connected (with provider names). Don't ask questions about anything the "
     "snapshot shows as connected/configured. "
-    "IMPORTANT: 'Still missing' has two sub-buckets — items that the user "
-    "set up but Elevate hasn't yet captured a runtime verification ping for "
-    "(status=connected/configured AND key in missingRequiredKeys, listed under "
-    "'Pending verification'), and items the user hasn't picked a provider for "
-    "(status=missing, listed under 'Not picked yet'). NEVER tell the user a "
-    "Pending-verification item is 'missing' or that they need to reconnect "
-    "it — say 'health-check pending, will clear on next sync' instead. Only "
-    "items in 'Not picked yet' need user action. "
-    "(2) After the state line, name the next concrete 'Not picked yet' gap "
-    "and tell the user how to close it — not 'do you have a calendar', but "
-    "'Next: Calendar — click Connect on the Calendar card in the connectors "
-    "panel'. If everything is either connected or pending verification, say "
-    "so; do not invent action items. "
+    "IMPORTANT: 'Still missing' has two sub-buckets — configured items that "
+    "still require live verification (state=needs_runtime_verification) and "
+    "items whose provider/details have not been entered. Every unresolved "
+    "readiness item includes the authoritative next action. Repeat that action "
+    "accurately; never tell the user to wait for an automatic sync when the "
+    "snapshot says to connect or verify and run Verify connections. "
+    "(2) After the state line, name the next unresolved readiness gap and tell "
+    "the user exactly how to close it, using its snapshot action. If every "
+    "readiness item is ready, say so; do not invent action items. "
     "(3) Never say you're 'making' or 'creating' something that already exists. "
     "(4) Never offer to import 'any spreadsheets of contacts, deals, listings, "
     "or past clients' unless the user brings them up first. The CRM already "
@@ -105,29 +101,61 @@ def _onboarding_chat_context(setup: Dict[str, Any]) -> str:
     """Compact snapshot context appended to the system prompt."""
     profile = setup.get("profile") or {}
     items = setup.get("items") or []
-    missing = setup.get("missingRequiredKeys") or []
+    readiness = setup.get("readiness") or []
+    missing = [
+        str(item.get("key"))
+        for item in readiness
+        if isinstance(item, dict)
+        and item.get("key")
+        and item.get("ready") is not True
+    ]
+    required_count = len(readiness)
+    completed_required_count = sum(
+        1
+        for item in readiness
+        if isinstance(item, dict) and item.get("ready") is True
+    )
+    completion_pct = (
+        round((completed_required_count / required_count) * 100)
+        if required_count
+        else 0
+    )
     by_key = {it["key"]: it for it in items if isinstance(it, dict) and it.get("key")}
+    readiness_by_key = {
+        it["key"]: it
+        for it in readiness
+        if isinstance(it, dict) and it.get("key")
+    }
     lines = [
         "--- CURRENT SETUP SNAPSHOT ---",
         f"Realtor: {profile.get('realtorLegalName') or '(unset)'} @ {profile.get('brokerageName') or '(unset)'}",
         f"Province: {profile.get('province') or '(unset)'} · Market: {profile.get('market') or '(unset)'}",
-        f"Completion: {setup.get('completionPct') or 0}% ({setup.get('completedRequiredCount') or 0}/{setup.get('requiredCount') or 0})",
+        f"Completion: {completion_pct}% ({completed_required_count}/{required_count})",
     ]
     if missing:
         pending_verify: List[str] = []
         not_picked: List[str] = []
         for k in missing:
             it = by_key.get(k) or {}
+            readiness_item = readiness_by_key.get(k) or {}
             label = it.get("label") or k
             status = (it.get("status") or "").strip()
             if status in ("connected", "configured"):
-                pending_verify.append(label)
+                action = readiness_item.get("action") or "Run Verify connections."
+                pending_verify.append(f"{label} — {action}")
             else:
-                not_picked.append(label)
+                action = readiness_item.get("action")
+                not_picked.append(f"{label} — {action}" if action else label)
         if pending_verify:
-            lines.append(f"Pending verification (provider set, health-check not yet captured): {', '.join(pending_verify)}")
+            lines.append(
+                "Needs live verification (user action required): "
+                + "; ".join(pending_verify)
+            )
         if not_picked:
-            lines.append(f"Not picked yet (user action required): {', '.join(not_picked)}")
+            lines.append(
+                "Setup details missing (user action required): "
+                + "; ".join(not_picked)
+            )
         if not pending_verify and not not_picked:
             lines.append("All required items present.")
     else:
@@ -191,9 +219,35 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
     profile = setup.get("profile") or {}
     items = setup.get("items") or []
     by_key: Dict[str, Dict[str, Any]] = {it["key"]: it for it in items if isinstance(it, dict) and it.get("key")}
-    missing = list(setup.get("missingRequiredKeys") or [])
+    readiness = setup.get("readiness") or []
+    missing = [
+        str(item.get("key"))
+        for item in readiness
+        if isinstance(item, dict)
+        and item.get("key")
+        and item.get("ready") is not True
+    ]
+    readiness_by_key: Dict[str, Dict[str, Any]] = {
+        it["key"]: it
+        for it in readiness
+        if isinstance(it, dict) and it.get("key")
+    }
     province = (profile.get("province") or "").strip().upper()
-    pct = setup.get("completionPct") or 0
+    pct = (
+        round(
+            (
+                sum(
+                    1
+                    for item in readiness
+                    if isinstance(item, dict) and item.get("ready") is True
+                )
+                / len(readiness)
+            )
+            * 100
+        )
+        if readiness
+        else 0
+    )
     last = (messages[-1].get("content") if messages else "") or ""
     last_lower = last.lower()
 
@@ -239,6 +293,7 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
         connected_bits.append(f"{label} ({provider})" if provider else label)
 
     pending_verify_labels: List[str] = []
+    pending_verify_actions: List[str] = []
     not_picked_labels: List[str] = []
     not_picked_keys: List[str] = []
     for k in missing:
@@ -247,6 +302,10 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
         status = (it.get("status") or "").strip()
         if status in ("connected", "configured"):
             pending_verify_labels.append(label)
+            readiness_item = readiness_by_key.get(k) or {}
+            pending_verify_actions.append(
+                readiness_item.get("action") or "Run Verify connections."
+            )
         else:
             not_picked_labels.append(label)
             not_picked_keys.append(k)
@@ -262,7 +321,7 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
         head = f"{province + ', ' if province else ''}{pct}% wired up."
         connected_line = f" Connected: {', '.join(connected_bits)}." if connected_bits else ""
         pending_line = (
-            f" Health-check pending (will clear on next sync): {', '.join(pending_verify_labels)}."
+            f" Needs live verification: {', '.join(pending_verify_labels)}."
             if pending_verify_labels else ""
         )
         if not_picked_labels:
@@ -271,7 +330,10 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
                 if next_action else f" Not picked yet: {', '.join(not_picked_labels)}."
             )
         elif pending_verify_labels:
-            tail = " No user action needed — pending items will clear automatically."
+            tail = (
+                f" Next: {pending_verify_labels[0]} — "
+                f"{pending_verify_actions[0]}"
+            )
         else:
             tail = " Everything required is in. Anything else to tighten?"
         return head + connected_line + pending_line + tail
@@ -288,8 +350,8 @@ def _onboarding_fallback_reply(messages: List[Dict[str, str]], setup: Dict[str, 
         return f"Still need to pick: {', '.join(not_picked_labels)}. Knock them out in the connectors panel."
     if pending_verify_labels:
         return (
-            f"Pending health-check on {', '.join(pending_verify_labels)} — these are wired up, "
-            f"verification ping just hasn't landed. Will clear on next sync."
+            f"{pending_verify_labels[0]} still needs live verification — "
+            f"{pending_verify_actions[0]}"
         )
     return "Everything required is in. Anything else to tighten before we go live?"
 
@@ -314,14 +376,55 @@ def create_admin_onboarding_router(
                 setup = get_admin_setup(conn)
         except Exception as exc:
             _log.exception("onboarding chat: failed to read admin_setup snapshot")
-            setup = {}
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Onboarding setup snapshot is unavailable; completion "
+                    "cannot be verified."
+                ),
+            ) from exc
 
-        messages = [m.dict() for m in body.messages if m.content.strip()]
+        if not (
+            isinstance(setup, dict)
+            and isinstance(setup.get("items"), list)
+            and isinstance(setup.get("readiness"), list)
+            and isinstance(setup.get("missingRequiredKeys"), list)
+            and isinstance(setup.get("complete"), bool)
+        ):
+            _log.error("onboarding chat: admin_setup snapshot is malformed")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Onboarding setup snapshot is unavailable; completion "
+                    "cannot be verified."
+                ),
+            )
+
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("key"), str)
+            or not item.get("key", "").strip()
+            or type(item.get("ready")) is not bool
+            for item in setup["readiness"]
+        ) or not setup["readiness"]:
+            _log.error("onboarding chat: readiness snapshot is malformed")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Onboarding setup snapshot is unavailable; completion "
+                    "cannot be verified."
+                ),
+            )
+
+        messages = [m.model_dump() for m in body.messages if m.content.strip()]
         context = _onboarding_chat_context(setup)
         system_prompt = _ONBOARDING_CHAT_SYSTEM + "\n\n" + context
 
         try:
-            from agent.auxiliary_client import get_text_auxiliary_client
+            from agent.auxiliary_client import (
+                _validate_llm_response,
+                get_text_auxiliary_client,
+            )
 
             client, model = get_text_auxiliary_client("onboarding_chat")
         except Exception as exc:
@@ -333,14 +436,54 @@ def create_admin_onboarding_router(
 
         payload_messages = [{"role": "system", "content": system_prompt}, *messages]
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=payload_messages,
-                temperature=0.4,
-                max_tokens=400,
-                timeout=20,
+            resp = _validate_llm_response(
+                client.chat.completions.create(
+                    model=model,
+                    messages=payload_messages,
+                    temperature=0.4,
+                    max_tokens=400,
+                    timeout=20,
+                ),
+                "onboarding_chat",
             )
-            text = (resp.choices[0].message.content or "").strip()
+            choice = resp.choices[0]
+            message = choice.message
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason != "stop" or getattr(message, "tool_calls", None):
+                raise ValueError(
+                    "onboarding chat response did not end with an exact "
+                    "text-only stop"
+                )
+            text = (message.content or "").strip()
+            readiness_incomplete = any(
+                item.get("ready") is False for item in setup["readiness"]
+            )
+            latest_user_text = (
+                messages[-1].get("content", "").lower() if messages else ""
+            )
+            status_question = any(
+                token in latest_user_text
+                for token in (
+                    "where are we",
+                    "status",
+                    "where we at",
+                    "what's left",
+                    "where do we",
+                    "what do we need",
+                )
+            )
+            completion_claim = any(
+                phrase in text.lower()
+                for phrase in (
+                    "fully set up",
+                    "everything required is in",
+                    "everything is connected",
+                    "ready to go",
+                    "100%",
+                )
+            )
+            if readiness_incomplete and (status_question or completion_claim):
+                text = _onboarding_fallback_reply(messages, setup)
         except Exception as exc:
             _log.info("onboarding chat: LLM call failed (%s) — falling back", exc)
             return {"ok": True, "reply": _onboarding_fallback_reply(messages, setup), "model": model, "warning": str(exc)}

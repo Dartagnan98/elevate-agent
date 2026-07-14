@@ -173,6 +173,28 @@ describe("terminal failure truth", () => {
   });
 });
 
+describe("delegate completion truth", () => {
+  it("accepts only an explicit verified completion", () => {
+    expect(
+      __chatPageTestables.delegateCompletionIsVerified({
+        status: "complete",
+        task_id: "dt-1",
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    undefined,
+    {},
+    { status: "complete" },
+    { status: "error", task_id: "dt-1" },
+    { error: "malformed result", status: "complete", task_id: "dt-1" },
+    { status: "pending", task_id: "dt-1" },
+  ])("rejects malformed or unresolved completion payload %#", (payload) => {
+    expect(__chatPageTestables.delegateCompletionIsVerified(payload)).toBe(false);
+  });
+});
+
 describe("ChatActivityDigest reasoning persistence", () => {
   it("keeps completed work expanded by default", () => {
     expect(
@@ -909,6 +931,21 @@ describe("terminal truth containment", () => {
     expect(
       __chatPageTestables.turnCompletionPresentation("interrupted"),
     ).toMatchObject({ messageStatus: "interrupted", statusText: "Interrupted" });
+    expect(
+      __chatPageTestables.turnCompletionPresentation("pending"),
+    ).toMatchObject({
+      messageStatus: "pending",
+      statusText: "Waiting for completion",
+    });
+    expect(
+      __chatPageTestables.turnCompletionPresentation("incomplete"),
+    ).toMatchObject({ messageStatus: "pending" });
+    expect(
+      __chatPageTestables.turnCompletionPresentation("needs_input"),
+    ).toMatchObject({
+      messageStatus: "needs_input",
+      statusText: "Waiting for your input",
+    });
   });
 });
 

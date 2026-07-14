@@ -1065,11 +1065,19 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
             max_tokens=16,
         )
 
-        answer = (response.choices[0].message.content or "").strip().upper()
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        if not (
+            isinstance(finish_reason, str)
+            and finish_reason.strip().lower() == "stop"
+        ):
+            return "escalate"
 
-        if "APPROVE" in answer:
+        answer = (choice.message.content or "").strip().upper()
+
+        if answer == "APPROVE":
             return "approve"
-        elif "DENY" in answer:
+        elif answer == "DENY":
             return "deny"
         else:
             return "escalate"

@@ -2267,7 +2267,10 @@ class SessionDB:
     def _decode_prompt_receipt(row: sqlite3.Row) -> Dict[str, Any]:
         receipt = dict(row)
         try:
-            receipt["payload"] = json.loads(receipt.pop("payload_json"))
+            payload = json.loads(receipt.pop("payload_json"))
+            if isinstance(payload, dict):
+                payload.pop("__elevate_transcript_content", None)
+            receipt["payload"] = payload
         except (json.JSONDecodeError, TypeError):
             receipt["payload"] = {}
             receipt.pop("payload_json", None)
@@ -2293,7 +2296,14 @@ class SessionDB:
             raise ValueError("client and assistant message ids are required")
 
         stored_content = self._encode_content(transcript_content)
-        payload_json = json.dumps(payload, ensure_ascii=False)
+        # Keep the exact visible prompt alongside the canonical execution
+        # payload. Context-overflow recovery deliberately clears the oversized
+        # transcript while retaining the terminal receipt for idempotency; the
+        # embedded copy lets a duplicate request still prove it is the same
+        # prompt after its message row is gone.
+        receipt_payload = dict(payload)
+        receipt_payload["__elevate_transcript_content"] = stored_content
+        payload_json = json.dumps(receipt_payload, ensure_ascii=False)
         now = time.time()
 
         def _do(conn):
@@ -2309,10 +2319,27 @@ class SessionDB:
                     "ORDER BY id LIMIT 1",
                     (session_id, client_message_id),
                 ).fetchone()
+                preserved_content = None
+                try:
+                    preserved_payload = json.loads(existing["payload_json"])
+                    if isinstance(preserved_payload, dict):
+                        preserved_content = preserved_payload.get(
+                            "__elevate_transcript_content"
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
                 if (
-                    existing_message is None
-                    or existing_message["role"] != "user"
-                    or existing_message["content"] != stored_content
+                    (
+                        existing_message is not None
+                        and (
+                            existing_message["role"] != "user"
+                            or existing_message["content"] != stored_content
+                        )
+                    )
+                    or (
+                        existing_message is None
+                        and preserved_content != stored_content
+                    )
                 ):
                     raise ValueError(
                         "client_message_id already belongs to a different prompt"
@@ -2441,7 +2468,13 @@ class SessionDB:
         status: str,
     ) -> bool:
         """Terminalize a claimed prompt without letting another owner overwrite it."""
-        if status not in {"complete", "error", "interrupted"}:
+        if status not in {
+            "complete",
+            "deferred",
+            "error",
+            "interrupted",
+            "waiting_input",
+        }:
             raise ValueError(f"invalid prompt receipt status: {status}")
 
         def _do(conn):
@@ -2450,6 +2483,32 @@ class SessionDB:
                 "WHERE session_id = ? AND client_message_id = ? "
                 "AND status = 'running' AND owner_id = ?",
                 (status, time.time(), session_id, client_message_id, owner_id),
+            )
+            return cursor.rowcount == 1
+
+        return bool(self._execute_write(_do))
+
+    def update_message_finish_reason(
+        self,
+        session_id: str,
+        client_message_id: str,
+        finish_reason: str,
+    ) -> bool:
+        """Update terminal truth for a message already persisted by the agent."""
+        if finish_reason not in {
+            "complete",
+            "error",
+            "interrupted",
+            "needs_input",
+            "pending",
+        }:
+            raise ValueError(f"invalid message finish reason: {finish_reason}")
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE messages SET finish_reason = ? "
+                "WHERE session_id = ? AND client_message_id = ?",
+                (finish_reason, session_id, client_message_id),
             )
             return cursor.rowcount == 1
 
@@ -2550,7 +2609,13 @@ class SessionDB:
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+    def replace_messages(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        *,
+        preserve_prompt_receipts: bool = False,
+    ) -> None:
         """Atomically replace every message for a session.
 
         Used by transcript-rewrite flows such as /retry, /undo, and /compress.
@@ -2600,11 +2665,15 @@ class SessionDB:
             })
 
         def _do(conn):
-            # A transcript rewrite invalidates execution/idempotency state from
-            # the prior history, including pending receipts left by a crash.
-            conn.execute(
-                "DELETE FROM prompt_receipts WHERE session_id = ?", (session_id,)
-            )
+            # A normal transcript rewrite invalidates execution/idempotency
+            # state from the prior history. Context-overflow recovery is the
+            # exception: it clears the replay payload after terminalizing the
+            # current receipt, and must preserve that receipt so a duplicate
+            # client request cannot rerun the oversized prompt.
+            if not preserve_prompt_receipts:
+                conn.execute(
+                    "DELETE FROM prompt_receipts WHERE session_id = ?", (session_id,)
+                )
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
             )

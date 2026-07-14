@@ -11,6 +11,13 @@ import type {
   TodayDashboardResponse,
 } from "@/lib/api-types";
 import { HubDataErrorBanner, useRealEstateHubData } from "@/pages/real-estate-hub/_shared";
+import {
+  draftApprovalBlockedReason,
+  initialDraftSendLifecycleState,
+  pollExactDraftSendStatus,
+  type DraftSendLifecycleNotice,
+  type DraftSendLifecycleState,
+} from "../leads/draft-send-lifecycle";
 import { TodayBoard } from "./components/today-board";
 import type {
   TodayAgentRun,
@@ -328,6 +335,7 @@ function mapDrafts(drafts: SourceInboxDraft[]): TodayDraft[] {
       confidence: typeof d.score === "number" ? Math.round(d.score * 100) : null,
       intent: d.scoreReason || d.title || "Reply ready",
       heat: heatScore(d),
+      approvalBlockedReason: draftApprovalBlockedReason(d) ?? undefined,
     }));
 }
 
@@ -506,6 +514,7 @@ export function TodayDesignShell() {
   const [todayLoading, setTodayLoading] = useState(false);
   const [todayError, setTodayError] = useState<string | null>(null);
   const [todayActionError, setTodayActionError] = useState<string | null>(null);
+  const [draftSendLifecycleById, setDraftSendLifecycleById] = useState<Record<string, DraftSendLifecycleNotice>>({});
   const [deals, setDeals] = useState<AdminDeal[]>([]);
   const [events, setEvents] = useState<AdminUpcomingEvent[]>([]);
   const [greetingName, setGreetingName] = useState<string>("there");
@@ -611,6 +620,24 @@ export function TodayDesignShell() {
   const adminDealsById = useMemo(() => new Map(deals.map((d) => [d.id, d])), [deals]);
   const wins = useMemo(() => mapWins(pulse, drafts, events, deals), [pulse, drafts, events, deals]);
   const sourceBreakdown = useMemo(() => mapSourceBreakdown(threads), [threads]);
+  const draftSendNotices = useMemo(
+    () => Object.values(draftSendLifecycleById)
+      .sort((left, right) => left.updatedAt - right.updatedAt)
+      .slice(-4),
+    [draftSendLifecycleById],
+  );
+
+  const updateDraftSendLifecycle = useCallback((draft: SourceInboxDraft, state: DraftSendLifecycleState) => {
+    setDraftSendLifecycleById((current) => ({
+      ...current,
+      [draft.id]: {
+        ...state,
+        draftId: draft.id,
+        draftName: draft.personName || "Unknown",
+        updatedAt: Date.now(),
+      },
+    }));
+  }, []);
 
   const handleRefresh = useCallback(async () => {
     setTodayActionError(null);
@@ -635,18 +662,44 @@ export function TodayDesignShell() {
         setTodayActionError(message);
         throw new Error(message);
       }
+      const approvalBlockedReason = action === "approve" ? draftApprovalBlockedReason(draft) : null;
+      if (approvalBlockedReason) {
+        const message = approvalBlockedReason;
+        setTodayActionError(message);
+        throw new Error(message);
+      }
+      if (action === "approve") updateDraftSendLifecycle(draft, initialDraftSendLifecycleState());
       try {
         const res = await api.updateSourceInboxDraft(draft.sourceId, draft.taskId, action);
         data.setSourceInbox(res);
+        if (action === "approve") {
+          const terminal = await pollExactDraftSendStatus(
+            (remainingMs) => api.getSourceInboxDraftSendStatus(
+              draft.sourceId,
+              draft.threadId,
+              draft.taskId,
+              { timeoutMs: remainingMs },
+            ),
+            { onProgress: (state) => updateDraftSendLifecycle(draft, state) },
+          );
+          updateDraftSendLifecycle(draft, terminal);
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
+        if (action === "approve") {
+          updateDraftSendLifecycle(draft, {
+            phase: "unknown",
+            status: null,
+            message: `Approval/send outcome is unknown — ${detail}`,
+          });
+        }
         const verb = action === "approve" ? "approve and send" : "skip";
         setTodayActionError(`Could not ${verb} draft: ${detail}`);
         console.error("today draft action failed", err);
         throw err instanceof Error ? err : new Error(detail);
       }
     },
-    [drafts, data],
+    [drafts, data, updateDraftSendLifecycle],
   );
 
   const isLoading = todayLoading || data.loading;
@@ -683,6 +736,7 @@ export function TodayDesignShell() {
         live={live}
         pipeline={pipeline}
         drafts={draftCards}
+        draftSendNotices={draftSendNotices}
         calendar={calendar}
         sources={sources}
         runs={runs}

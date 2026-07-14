@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from types import SimpleNamespace
@@ -38,6 +39,12 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from agent import google_oauth
+from agent.gemini_native_adapter import (
+    _build_gemini_diagnostic as _build_native_gemini_diagnostic,
+    _gemini_diagnostic_count,
+    _map_gemini_finish_reason,
+    _parse_gemini_function_call,
+)
 from agent.gemini_schema import sanitize_gemini_tool_parameters
 from agent.google_code_assist import (
     CODE_ASSIST_ENDPOINT,
@@ -49,6 +56,75 @@ from agent.google_code_assist import (
 logger = logging.getLogger(__name__)
 
 
+_GEMINI_DIAGNOSTIC_ENUM = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_GEMINI_UNSPECIFIED_ENUMS = {
+    "UNSPECIFIED",
+    "BLOCK_REASON_UNSPECIFIED",
+    "FINISH_REASON_UNSPECIFIED",
+}
+_STREAM_TOOL_BATCH_VALID = 0
+_STREAM_TOOL_BATCH_INVALID = 1
+_STREAM_TOOL_BATCH_ERROR_EMITTED = 2
+
+
+def _stream_tool_batch_state(tool_call_counter: List[int]) -> int:
+    if len(tool_call_counter) < 2:
+        return _STREAM_TOOL_BATCH_VALID
+    return tool_call_counter[1]
+
+
+def _poison_stream_tool_batch(tool_call_counter: List[int]) -> None:
+    """Clear the call count and persist a poisoned parallel-batch marker."""
+    tool_call_counter[0] = 0
+    if len(tool_call_counter) < 2:
+        tool_call_counter.append(_STREAM_TOOL_BATCH_INVALID)
+    else:
+        tool_call_counter[1] = _STREAM_TOOL_BATCH_INVALID
+
+
+def _cloudcode_diagnostic_enum(value: Any, *, present: bool) -> str:
+    """Normalize a provider enum without treating malformed values as absent."""
+    if not present:
+        return "UNSPECIFIED"
+    if not isinstance(value, str):
+        return "INVALID"
+    normalized = value.strip().upper()
+    if normalized in _GEMINI_UNSPECIFIED_ENUMS:
+        return "UNSPECIFIED"
+    if normalized.endswith("_UNSPECIFIED"):
+        return "INVALID"
+    if _GEMINI_DIAGNOSTIC_ENUM.fullmatch(normalized):
+        return normalized
+    return "INVALID"
+
+
+def _build_gemini_diagnostic(
+    payload: Dict[str, Any],
+    candidate: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build native-parity diagnostics with fail-closed CloudCode enums."""
+    diagnostic = _build_native_gemini_diagnostic(payload, candidate)
+    candidate = candidate if isinstance(candidate, dict) else {}
+    diagnostic["finish_reason"] = _cloudcode_diagnostic_enum(
+        candidate.get("finishReason"),
+        present="finishReason" in candidate,
+    )
+
+    prompt_feedback_present = "promptFeedback" in payload
+    prompt_feedback = payload.get("promptFeedback")
+    if not prompt_feedback_present:
+        prompt_block_reason = "UNSPECIFIED"
+    elif not isinstance(prompt_feedback, dict):
+        prompt_block_reason = "INVALID"
+    else:
+        prompt_block_reason = _cloudcode_diagnostic_enum(
+            prompt_feedback.get("blockReason"),
+            present="blockReason" in prompt_feedback,
+        )
+    diagnostic["prompt_block_reason"] = prompt_block_reason
+    return diagnostic
+
+
 # =============================================================================
 # Request translation: OpenAI → Gemini
 # =============================================================================
@@ -56,8 +132,8 @@ logger = logging.getLogger(__name__)
 _ROLE_MAP_OPENAI_TO_GEMINI = {
     "user": "user",
     "assistant": "model",
-    "system": "user",   # handled separately via systemInstruction
-    "tool": "user",     # functionResponse is wrapped in a user-role turn
+    "system": "user",  # handled separately via systemInstruction
+    "tool": "user",  # functionResponse is wrapped in a user-role turn
     "function": "user",
 }
 
@@ -78,7 +154,10 @@ def _coerce_content_to_text(content: Any) -> str:
                     pieces.append(p["text"])
                 # Multimodal (image_url, etc.) — stub for now; log and skip
                 elif p.get("type") in {"image_url", "input_audio"}:
-                    logger.debug("Dropping multimodal part (not yet supported): %s", p.get("type"))
+                    logger.debug(
+                        "Dropping multimodal part (not yet supported): %s",
+                        p.get("type"),
+                    )
         return "\n".join(pieces)
     return str(content)
 
@@ -148,10 +227,12 @@ def _build_gemini_contents(
 
         # Tool result message — emit a user-role turn with functionResponse
         if role == "tool" or role == "function":
-            contents.append({
-                "role": "user",
-                "parts": [_translate_tool_result_to_gemini(msg)],
-            })
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [_translate_tool_result_to_gemini(msg)],
+                }
+            )
             continue
 
         gemini_role = _ROLE_MAP_OPENAI_TO_GEMINI.get(role, "user")
@@ -317,6 +398,7 @@ def wrap_code_assist_request(
 # Response translation: Gemini → OpenAI
 # =============================================================================
 
+
 def _translate_gemini_response(
     resp: Dict[str, Any],
     model: str,
@@ -330,44 +412,69 @@ def _translate_gemini_response(
 
     candidates = inner.get("candidates") or []
     if not isinstance(candidates, list) or not candidates:
-        return _empty_response(model)
+        return _empty_response(
+            model,
+            diagnostic=_build_gemini_diagnostic(inner, None),
+        )
 
-    cand = candidates[0]
+    cand = candidates[0] if isinstance(candidates[0], dict) else {}
+    diagnostic = _build_gemini_diagnostic(inner, cand)
     content_obj = cand.get("content") if isinstance(cand, dict) else {}
     parts = content_obj.get("parts") if isinstance(content_obj, dict) else []
 
     text_pieces: List[str] = []
     reasoning_pieces: List[str] = []
     tool_calls: List[SimpleNamespace] = []
+    invalid_tool_batch = False
 
     for i, part in enumerate(parts or []):
         if not isinstance(part, dict):
             continue
+        parsed_call, malformed_call = _parse_gemini_function_call(part)
+        if malformed_call:
+            invalid_tool_batch = True
         # Thought parts are model's internal reasoning — surface as reasoning,
         # don't mix into content.
         if part.get("thought") is True:
             if isinstance(part.get("text"), str):
                 reasoning_pieces.append(part["text"])
-            continue
-        if isinstance(part.get("text"), str):
+        elif isinstance(part.get("text"), str):
             text_pieces.append(part["text"])
-            continue
-        fc = part.get("functionCall")
-        if isinstance(fc, dict) and fc.get("name"):
-            try:
-                args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False)
-            except (TypeError, ValueError):
-                args_str = "{}"
-            tool_calls.append(SimpleNamespace(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                type="function",
-                index=i,
-                function=SimpleNamespace(name=str(fc["name"]), arguments=args_str),
-            ))
+        if parsed_call is not None:
+            name, args_str = parsed_call
+            tool_calls.append(
+                SimpleNamespace(
+                    id=f"call_{uuid.uuid4().hex[:12]}",
+                    type="function",
+                    index=i,
+                    function=SimpleNamespace(name=name, arguments=args_str),
+                )
+            )
 
-    finish_reason = "tool_calls" if tool_calls else _map_gemini_finish_reason(
+    mapped_finish_reason = _map_gemini_finish_reason(
         str(cand.get("finishReason") or "")
     )
+    if invalid_tool_batch:
+        mapped_finish_reason = "error"
+        diagnostic = dict(diagnostic)
+        diagnostic["finish_reason"] = "INVALID"
+    accepted_content = (
+        not invalid_tool_batch
+        and diagnostic["prompt_block_reason"] == "UNSPECIFIED"
+        and diagnostic["finish_reason"] in {"STOP", "MAX_TOKENS"}
+    )
+    if not accepted_content:
+        # Google may include partial content alongside a filtered or otherwise
+        # abnormal terminal reason. Nothing from a rejected candidate is safe
+        # to display or execute.
+        text_pieces = []
+        reasoning_pieces = []
+        tool_calls = []
+    elif mapped_finish_reason != "stop":
+        # A truncated response is text-only; an incomplete function call must
+        # never be dispatched as though it were complete.
+        tool_calls = []
+    finish_reason = "tool_calls" if tool_calls else mapped_finish_reason
 
     usage_meta = inner.get("usageMetadata") or {}
     usage = SimpleNamespace(
@@ -399,18 +506,32 @@ def _translate_gemini_response(
         model=model,
         choices=[choice],
         usage=usage,
+        _elevate_gemini_diagnostic=diagnostic,
     )
 
 
-def _empty_response(model: str) -> SimpleNamespace:
+def _empty_response(
+    model: str,
+    *,
+    diagnostic: Optional[Dict[str, Any]] = None,
+) -> SimpleNamespace:
     message = SimpleNamespace(
-        role="assistant", content="", tool_calls=None,
-        reasoning=None, reasoning_content=None, reasoning_details=None,
+        role="assistant",
+        content="",
+        tool_calls=None,
+        reasoning=None,
+        reasoning_content=None,
+        reasoning_details=None,
     )
     choice = SimpleNamespace(index=0, message=message, finish_reason="stop")
+    diagnostic = diagnostic or {}
     usage = SimpleNamespace(
-        prompt_tokens=0, completion_tokens=0, total_tokens=0,
-        prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+        prompt_tokens=_gemini_diagnostic_count(diagnostic.get("prompt_tokens")),
+        completion_tokens=_gemini_diagnostic_count(diagnostic.get("candidate_tokens")),
+        total_tokens=_gemini_diagnostic_count(diagnostic.get("total_tokens")),
+        prompt_tokens_details=SimpleNamespace(
+            cached_tokens=_gemini_diagnostic_count(diagnostic.get("cached_tokens"))
+        ),
     )
     return SimpleNamespace(
         id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
@@ -419,26 +540,18 @@ def _empty_response(model: str) -> SimpleNamespace:
         model=model,
         choices=[choice],
         usage=usage,
+        _elevate_gemini_diagnostic=diagnostic,
     )
-
-
-def _map_gemini_finish_reason(reason: str) -> str:
-    mapping = {
-        "STOP": "stop",
-        "MAX_TOKENS": "length",
-        "SAFETY": "content_filter",
-        "RECITATION": "content_filter",
-        "OTHER": "stop",
-    }
-    return mapping.get(reason.upper(), "stop")
 
 
 # =============================================================================
 # Streaming SSE iterator
 # =============================================================================
 
+
 class _GeminiStreamChunk(SimpleNamespace):
     """Mimics an OpenAI ChatCompletionChunk with .choices[0].delta."""
+
     pass
 
 
@@ -460,15 +573,17 @@ def _make_stream_chunk(
     if content:
         delta_kwargs["content"] = content
     if tool_call_delta is not None:
-        delta_kwargs["tool_calls"] = [SimpleNamespace(
-            index=tool_call_delta.get("index", 0),
-            id=tool_call_delta.get("id") or f"call_{uuid.uuid4().hex[:12]}",
-            type="function",
-            function=SimpleNamespace(
-                name=tool_call_delta.get("name") or "",
-                arguments=tool_call_delta.get("arguments") or "",
-            ),
-        )]
+        delta_kwargs["tool_calls"] = [
+            SimpleNamespace(
+                index=tool_call_delta.get("index", 0),
+                id=tool_call_delta.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+                type="function",
+                function=SimpleNamespace(
+                    name=tool_call_delta.get("name") or "",
+                    arguments=tool_call_delta.get("arguments") or "",
+                ),
+            )
+        ]
     if reasoning:
         delta_kwargs["reasoning"] = reasoning
         delta_kwargs["reasoning_content"] = reasoning
@@ -501,9 +616,16 @@ def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
                 if data == "[DONE]":
                     return
                 try:
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON SSE line: %s", data[:200])
+                    payload = json.loads(data)
+                except json.JSONDecodeError as exc:
+                    logger.debug(
+                        "Non-JSON Gemini SSE line (chars=%d, error=%s)",
+                        len(data),
+                        type(exc).__name__,
+                    )
+                    continue
+                if isinstance(payload, dict):
+                    yield payload
 
 
 def _translate_stream_event(
@@ -513,58 +635,168 @@ def _translate_stream_event(
 ) -> List[_GeminiStreamChunk]:
     """Unwrap Code Assist envelope and emit OpenAI-shaped chunk(s).
 
-    ``tool_call_counter`` is a single-element list used as a mutable counter
-    across events in the same stream. Each ``functionCall`` part gets a
-    fresh, unique OpenAI ``index`` — keying by function name would collide
-    whenever the model issues parallel calls to the same tool (e.g. reading
-    three files in one turn).
+    ``tool_call_counter`` is mutable stream state. Its first element is the
+    next call index; an optional second element records whether a malformed
+    call poisoned the parallel batch and whether its terminal error was
+    emitted. Each valid ``functionCall`` part gets a fresh, unique OpenAI
+    ``index`` — keying by function name would collide whenever the model
+    issues parallel calls to the same tool (e.g. reading three files in one
+    turn).
     """
+    if _stream_tool_batch_state(tool_call_counter) == (
+        _STREAM_TOOL_BATCH_ERROR_EMITTED
+    ):
+        return []
+
     inner = event.get("response") if isinstance(event.get("response"), dict) else event
     candidates = inner.get("candidates") or []
     if not candidates:
-        return []
-    cand = candidates[0]
-    if not isinstance(cand, dict):
-        return []
+        diagnostic = _build_gemini_diagnostic(inner, None)
+        usage_meta = inner.get("usageMetadata") or {}
+        prompt_blocked = diagnostic["prompt_block_reason"] != "UNSPECIFIED"
+        if not prompt_blocked and not usage_meta:
+            return []
+        diagnostic_chunk = _GeminiStreamChunk(
+            id=f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            object="chat.completion.chunk",
+            created=int(time.time()),
+            model=model,
+            choices=[],
+            usage=None,
+        )
+        if prompt_blocked:
+            diagnostic_chunk._elevate_gemini_diagnostic = diagnostic
+        if isinstance(usage_meta, dict) and usage_meta:
+            diagnostic_chunk.usage = SimpleNamespace(
+                prompt_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("promptTokenCount")
+                ),
+                completion_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("candidatesTokenCount")
+                ),
+                total_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("totalTokenCount")
+                ),
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=_gemini_diagnostic_count(
+                        usage_meta.get("cachedContentTokenCount")
+                    ),
+                ),
+            )
+        return [diagnostic_chunk]
+    cand = candidates[0] if isinstance(candidates[0], dict) else {}
 
     chunks: List[_GeminiStreamChunk] = []
 
     content = cand.get("content") or {}
     parts = content.get("parts") if isinstance(content, dict) else []
-    for part in parts or []:
+    if not isinstance(parts, list):
+        parts = []
+    finish_reason_value = cand.get("finishReason")
+    finish_reason_present = "finishReason" in cand
+    finish_reason_raw = str(finish_reason_value) if finish_reason_present else ""
+    mapped_finish_reason = (
+        _map_gemini_finish_reason(finish_reason_raw) if finish_reason_present else None
+    )
+    event_diagnostic = _build_gemini_diagnostic(inner, cand)
+
+    parsed_calls: Dict[int, tuple[str, str]] = {}
+    invalid_tool_batch = (
+        _stream_tool_batch_state(tool_call_counter) == _STREAM_TOOL_BATCH_INVALID
+    )
+    if not invalid_tool_batch:
+        for part_index, part in enumerate(parts):
+            if not isinstance(part, dict):
+                continue
+            parsed_call, malformed_call = _parse_gemini_function_call(part)
+            if malformed_call:
+                _poison_stream_tool_batch(tool_call_counter)
+                invalid_tool_batch = True
+                break
+            if parsed_call is not None:
+                parsed_calls[part_index] = parsed_call
+    if invalid_tool_batch:
+        # Reject the complete batch before emitting any sibling. The error is
+        # terminal even when the malformed part arrives before Gemini's normal
+        # finish event; later events are suppressed by the persisted marker.
+        finish_reason_present = True
+        mapped_finish_reason = "error"
+        event_diagnostic = dict(event_diagnostic)
+        event_diagnostic["finish_reason"] = "INVALID"
+
+    event_content_accepted = (
+        not invalid_tool_batch
+        and event_diagnostic["prompt_block_reason"] == "UNSPECIFIED"
+        and (
+            not finish_reason_present
+            or event_diagnostic["finish_reason"] in {"STOP", "MAX_TOKENS"}
+        )
+    )
+    for part_index, part in enumerate(parts if event_content_accepted else []):
         if not isinstance(part, dict):
             continue
         if part.get("thought") is True and isinstance(part.get("text"), str):
-            chunks.append(_make_stream_chunk(
-                model=model, reasoning=part["text"],
-            ))
+            chunks.append(
+                _make_stream_chunk(
+                    model=model,
+                    reasoning=part["text"],
+                )
+            )
             continue
         if isinstance(part.get("text"), str) and part["text"]:
             chunks.append(_make_stream_chunk(model=model, content=part["text"]))
-        fc = part.get("functionCall")
-        if isinstance(fc, dict) and fc.get("name"):
-            name = str(fc["name"])
+        parsed_call = parsed_calls.get(part_index)
+        if parsed_call is not None and mapped_finish_reason in {None, "stop"}:
+            name, args_str = parsed_call
             idx = tool_call_counter[0]
             tool_call_counter[0] += 1
-            try:
-                args_str = json.dumps(fc.get("args") or {}, ensure_ascii=False)
-            except (TypeError, ValueError):
-                args_str = "{}"
-            chunks.append(_make_stream_chunk(
-                model=model,
-                tool_call_delta={
-                    "index": idx,
-                    "name": name,
-                    "arguments": args_str,
-                },
-            ))
+            chunks.append(
+                _make_stream_chunk(
+                    model=model,
+                    tool_call_delta={
+                        "index": idx,
+                        "name": name,
+                        "arguments": args_str,
+                    },
+                )
+            )
 
-    finish_reason_raw = str(cand.get("finishReason") or "")
-    if finish_reason_raw:
-        mapped = _map_gemini_finish_reason(finish_reason_raw)
-        if tool_call_counter[0] > 0:
-            mapped = "tool_calls"
-        chunks.append(_make_stream_chunk(model=model, finish_reason=mapped))
+    if finish_reason_present:
+        mapped = (
+            "tool_calls"
+            if (
+                not invalid_tool_batch
+                and tool_call_counter[0] > 0
+                and mapped_finish_reason == "stop"
+            )
+            else mapped_finish_reason
+        )
+        finish_chunk = _make_stream_chunk(
+            model=model,
+            finish_reason=mapped,
+        )
+        finish_chunk._elevate_gemini_diagnostic = event_diagnostic
+        usage_meta = inner.get("usageMetadata") or {}
+        if isinstance(usage_meta, dict) and usage_meta:
+            finish_chunk.usage = SimpleNamespace(
+                prompt_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("promptTokenCount")
+                ),
+                completion_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("candidatesTokenCount")
+                ),
+                total_tokens=_gemini_diagnostic_count(
+                    usage_meta.get("totalTokenCount")
+                ),
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=_gemini_diagnostic_count(
+                        usage_meta.get("cachedContentTokenCount")
+                    ),
+                ),
+            )
+        chunks.append(finish_chunk)
+        if invalid_tool_batch:
+            tool_call_counter[1] = _STREAM_TOOL_BATCH_ERROR_EMITTED
     return chunks
 
 
@@ -598,6 +830,7 @@ class GeminiCloudCodeClient:
         base_url: Optional[str] = None,
         default_headers: Optional[Dict[str, str]] = None,
         project_id: str = "",
+        timeout: Any = None,
         **_: Any,
     ):
         # `api_key` here is a dummy — real auth is the OAuth access token
@@ -611,7 +844,13 @@ class GeminiCloudCodeClient:
         self._project_context_lock = False  # simple single-thread guard
         self.chat = _GeminiChatNamespace(self)
         self.is_closed = False
-        self._http = httpx.Client(timeout=httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0))
+        default_timeout = httpx.Timeout(
+            connect=15.0,
+            read=600.0,
+            write=30.0,
+            pool=30.0,
+        )
+        self._http = httpx.Client(timeout=timeout or default_timeout)
 
     def close(self) -> None:
         self.is_closed = True
@@ -683,7 +922,9 @@ class GeminiCloudCodeClient:
 
         thinking_config = None
         if isinstance(extra_body, dict):
-            thinking_config = extra_body.get("thinking_config") or extra_body.get("thinkingConfig")
+            thinking_config = extra_body.get("thinking_config") or extra_body.get(
+                "thinkingConfig"
+            )
 
         inner = build_gemini_request(
             messages=messages or [],
@@ -712,10 +953,21 @@ class GeminiCloudCodeClient:
         headers.update(self._default_headers)
 
         if stream:
-            return self._stream_completion(model=model, wrapped=wrapped, headers=headers)
+            return self._stream_completion(
+                model=model,
+                wrapped=wrapped,
+                headers=headers,
+                timeout=timeout,
+            )
 
         url = f"{CODE_ASSIST_ENDPOINT}/v1internal:generateContent"
-        response = self._http.post(url, json=wrapped, headers=headers)
+        request_kwargs: Dict[str, Any] = {
+            "json": wrapped,
+            "headers": headers,
+        }
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        response = self._http.post(url, **request_kwargs)
         if response.status_code != 200:
             raise _gemini_http_error(response)
         try:
@@ -733,6 +985,7 @@ class GeminiCloudCodeClient:
         model: str,
         wrapped: Dict[str, Any],
         headers: Dict[str, str],
+        timeout: Any = None,
     ) -> Iterator[_GeminiStreamChunk]:
         """Generator that yields OpenAI-shaped streaming chunks."""
         url = f"{CODE_ASSIST_ENDPOINT}/v1internal:streamGenerateContent?alt=sse"
@@ -741,14 +994,26 @@ class GeminiCloudCodeClient:
 
         def _generator() -> Iterator[_GeminiStreamChunk]:
             try:
-                with self._http.stream("POST", url, json=wrapped, headers=stream_headers) as response:
+                request_kwargs: Dict[str, Any] = {
+                    "json": wrapped,
+                    "headers": stream_headers,
+                }
+                if timeout is not None:
+                    request_kwargs["timeout"] = timeout
+                with self._http.stream(
+                    "POST",
+                    url,
+                    **request_kwargs,
+                ) as response:
                     if response.status_code != 200:
                         # Materialize error body for better diagnostics
                         response.read()
                         raise _gemini_http_error(response)
                     tool_call_counter: List[int] = [0]
                     for event in _iter_sse_events(response):
-                        for chunk in _translate_stream_event(event, model, tool_call_counter):
+                        for chunk in _translate_stream_event(
+                            event, model, tool_call_counter
+                        ):
                             yield chunk
             except httpx.HTTPError as exc:
                 raise CodeAssistError(
@@ -836,7 +1101,9 @@ def _gemini_http_error(response: httpx.Response) -> CodeAssistError:
     # Fall back to the Retry-After header if the body didn't include RetryInfo.
     if retry_delay_seconds is None:
         try:
-            header_val = response.headers.get("Retry-After") or response.headers.get("retry-after")
+            header_val = response.headers.get("Retry-After") or response.headers.get(
+                "retry-after"
+            )
         except Exception:
             header_val = None
         if header_val:
@@ -861,7 +1128,9 @@ def _gemini_http_error(response: httpx.Response) -> CodeAssistError:
     # Google signal.
     model_hint = ""
     if isinstance(error_metadata, dict):
-        model_hint = str(error_metadata.get("model") or error_metadata.get("modelId") or "").strip()
+        model_hint = str(
+            error_metadata.get("model") or error_metadata.get("modelId") or ""
+        ).strip()
 
     if status == 429 and error_reason == "MODEL_CAPACITY_EXHAUSTED":
         target = model_hint or "this Gemini model"

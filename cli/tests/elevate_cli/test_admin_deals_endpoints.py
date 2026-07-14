@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import io
 from pathlib import Path
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -103,6 +104,51 @@ def _complete_admin_setup():
             ],
         )
         complete_admin_setup(conn)
+
+
+def _write_valid_pdf(path: Path, text: str = "Verified test artifact") -> Path:
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    document.save(path)
+    document.close()
+    return path
+
+
+def _valid_png_bytes() -> bytes:
+    import base64
+
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+        "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+
+
+def _write_valid_png(path: Path) -> Path:
+    path.write_bytes(_valid_png_bytes())
+    return path
+
+
+def _write_valid_zip(path: Path) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("listing-photo.png", _valid_png_bytes())
+    return path
+
+
+def _write_valid_docx(path: Path, text: str = "Verified contract") -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(
+            "word/document.xml",
+            (
+                "<w:document xmlns:w='urn:test'><w:body><w:p><w:r><w:t>"
+                f"{text}"
+                "</w:t></w:r></w:p></w:body></w:document>"
+            ),
+        )
+    return path
 
 
 def test_admin_setup_gate_blocks_deal_creation_until_ready():
@@ -375,6 +421,7 @@ def _create(title="Deal", side="listing", current_stage=0, dispatch_initial_stag
             conn,
             title=title,
             side=side,
+            province="BC",
             current_stage=current_stage,
             actor="human:test",
             dispatch_initial_stage=dispatch_initial_stage,
@@ -526,7 +573,11 @@ def test_admin_jurisdiction_defaults_to_generic_and_deals_can_stamp_package_valu
     context = client.get(f"/api/deals/{body['id']}/context")
     assert context.status_code == 200, context.text
     assert context.json()["dealFlow"]["packageKey"] == "ca.ab"
+    assert context.json()["dealFlow"]["available"] is False
     assert context.json()["dealFlow"]["localOverrides"]["provinceLabel"] == "Alberta"
+    assert context.json()["dealFlow"]["requiredForms"] == []
+    assert context.json()["dealFlow"]["backgroundAutomations"] == []
+    assert "British Columbia" not in str(context.json()["dealFlow"])
 
 
 def test_admin_jurisdiction_update_sets_default_flow_for_new_deals(client):
@@ -540,20 +591,137 @@ def test_admin_jurisdiction_update_sets_default_flow_for_new_deals(client):
     }
 
     created = client.post("/api/admin/deals", json={"title": "Toronto seller", "side": "listing"})
-    assert created.status_code == 200, created.text
-    body = created.json()
-    assert body["province"] == "ON"
-    assert body["market"] == "Toronto"
-
-    context = client.get(f"/api/deals/{body['id']}/context")
-    assert context.status_code == 200, context.text
-    assert context.json()["dealFlow"]["packageKey"] == "ca.on"
-    assert context.json()["dealFlow"]["localOverrides"]["provinceLabel"] == "Ontario"
+    assert created.status_code == 409, created.text
+    setup = client.get("/api/admin/setup")
+    assert setup.status_code == 200, setup.text
+    assert setup.json()["complete"] is False
+    assert setup.json()["profile"]["completedAt"] is None
 
     pei = client.put("/api/admin/jurisdiction", json={"province": "PEI", "market": ""})
     assert pei.status_code == 200, pei.text
     assert pei.json()["packageKey"] == "ca.pei"
     assert pei.json()["province"] == "PEI"
+
+
+def test_admin_setup_province_change_replaces_stale_implicit_package(client):
+    from elevate_cli.config import load_config, save_config
+
+    config = load_config()
+    config["real_estate"] = {
+        "country": "CA",
+        "province": "BC",
+        "market": "Kamloops",
+        "package_key": "ca.bc",
+    }
+    save_config(config)
+
+    updated = client.put(
+        "/api/admin/setup",
+        json={"profile": {"country": "CA", "province": "AB", "market": "Calgary"}},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["profile"]["province"] == "AB"
+    assert updated.json()["complete"] is False
+    assert updated.json()["profile"]["completedAt"] is None
+    assert {"jurisdiction", "forms_provider", "regional_memory"}.issubset(
+        updated.json()["missingRequiredKeys"]
+    )
+
+    jurisdiction = client.get("/api/admin/jurisdiction")
+    assert jurisdiction.status_code == 200, jurisdiction.text
+    assert jurisdiction.json() == {
+        "country": "CA",
+        "province": "AB",
+        "market": "Calgary",
+        "packageKey": "ca.ab",
+    }
+    assert load_config()["real_estate"]["package_key"] == "ca.ab"
+
+
+def test_unverified_province_package_exposes_no_bc_workflow_or_forms():
+    from elevate_cli.admin_deal_flow import resolve_admin_deal_flow
+
+    flow = resolve_admin_deal_flow(
+        package_key="ca.on",
+        side="buyer",
+        stage=2,
+    )
+
+    assert flow["packageKey"] == "ca.on"
+    assert flow["available"] is False
+    assert flow["stageName"] == "Province workflow unavailable"
+    assert flow["checklistItems"] == []
+    assert flow["requiredFields"] == []
+    assert flow["requiredForms"] == []
+    assert flow["requiredDocs"] == []
+    assert flow["automationTriggers"] == []
+    assert flow["backgroundAutomations"] == []
+    assert "Ontario" in flow["unavailableReason"]
+    assert "BCFSA" not in str(flow)
+    assert "CPS" not in str(flow)
+
+
+def test_province_change_invalidates_only_province_derived_setup_and_playbook(
+    monkeypatch,
+    tmp_path,
+):
+    from elevate_cli.data import get_deal
+
+    monkeypatch.setenv("ELEVATE_HOME", str(tmp_path / "elevate-home"))
+    _complete_admin_setup()
+    evidence_file = _write_valid_pdf(
+        tmp_path / "signed-existing-deal.pdf",
+        "Signed historical deal evidence",
+    )
+
+    with connect() as conn:
+        before = get_admin_setup(conn)
+        email_before = next(item for item in before["items"] if item["key"] == "email")
+        deal = create_deal(
+            conn,
+            title="Historical BC evidence",
+            side="buyer",
+            province="BC",
+            actor="human:test",
+            dispatch_initial_stage=False,
+        )
+        attachment = add_deal_attachment(
+            conn,
+            deal["id"],
+            kind="cps_signed",
+            file_path=str(evidence_file),
+            actor="human:test",
+        )
+        playbook_path = Path(before["memory"]["path"]).with_name(
+            "ADMIN_PROVINCE_PLAYBOOK.md"
+        )
+        assert playbook_path.exists()
+
+        switched = update_admin_setup(
+            conn,
+            profile={"province": "AB", "market": "Calgary"},
+        )
+
+        assert switched["profile"]["province"] == "AB"
+        assert switched["profile"]["completedAt"] is None
+        assert switched["profile"]["regionalMemory"] == {}
+        assert switched["complete"] is False
+        assert switched["canStartAdmin"] is False
+        scoped = {
+            item["key"]: item
+            for item in switched["items"]
+            if item["key"] in {"jurisdiction", "forms_provider", "regional_memory"}
+        }
+        assert set(scoped) == {"jurisdiction", "forms_provider", "regional_memory"}
+        assert all(item["status"] == "missing" for item in scoped.values())
+        assert all(item["provider"] is None for item in scoped.values())
+        assert all(item["value"] is None for item in scoped.values())
+        email_after = next(item for item in switched["items"] if item["key"] == "email")
+        assert email_after["status"] == email_before["status"]
+        assert get_deal(conn, deal["id"])["province"] == "BC"
+        assert list_deal_attachments(conn, deal["id"])[0]["id"] == attachment["id"]
+
+    assert not playbook_path.exists()
 
 
 def test_get_deals_filters_by_side(client):
@@ -585,12 +753,14 @@ def test_move_deal_endpoint_blocks_incomplete_forward_stage_move(client):
     assert any(item["field"] == "listPrice" for item in detail["gate"]["missingFields"])
 
 
-def test_move_deal_endpoint_reports_clear_gate_skip_as_wrong_target(client):
+def test_move_deal_endpoint_reports_clear_gate_skip_as_wrong_target(client, tmp_path):
+    cma_path = _write_valid_pdf(tmp_path / "cma.pdf", "CMA ready")
     with connect() as conn:
         deal = create_deal(
             conn,
             title="Skip me",
             side="listing",
+            province="BC",
             current_stage=1,
             actor="human:test",
             fields={
@@ -605,7 +775,7 @@ def test_move_deal_endpoint_reports_clear_gate_skip_as_wrong_target(client):
             conn,
             deal["id"],
             kind="cma_report",
-            file_path="/tmp/cma.pdf",
+            file_path=str(cma_path),
             summary="CMA ready",
             actor="human:test",
         )
@@ -666,7 +836,7 @@ def test_current_workflow_stage_complete_toggle_does_not_bypass_gate(client):
     assert not any(event["kind"] == "stage_transition" for event in events)
 
 
-def _clear_stage_four_gate(client, deal_id: str):
+def _clear_stage_four_gate(client, deal_id: str, photo_archive: Path):
     # Marketing Go (stage 4): every checklist item + AI/photo fields + photos doc.
     for item_id in (
         "marketing_go_started",
@@ -696,14 +866,15 @@ def _clear_stage_four_gate(client, deal_id: str):
         assert ok.status_code == 200, ok.text
     attached = client.post(
         f"/api/deals/{deal_id}/attachments",
-        json={"kind": "listing_photos", "filePath": "/tmp/listing-photos.zip"},
+        json={"kind": "listing_photos", "filePath": str(photo_archive)},
     )
     assert attached.status_code == 200, attached.text
 
 
-def test_current_workflow_stage_complete_advances_when_gate_is_clear(client):
+def test_current_workflow_stage_complete_advances_when_gate_is_clear(client, tmp_path):
     deal = _create(title="Gate clear stage four", current_stage=4)
-    _clear_stage_four_gate(client, deal["id"])
+    photo_archive = _write_valid_zip(tmp_path / "listing-photos.zip")
+    _clear_stage_four_gate(client, deal["id"], photo_archive)
 
     resp = client.post(
         f"/api/admin/deals/{deal['id']}/toggle",
@@ -978,7 +1149,7 @@ def test_profile_promotion_matches_existing_deal_by_verifier(client):
     assert body["deal"]["extraToggles"]["sourceProfileIds"] == ["profile-old", "profile-merged"]
 
 
-def test_deal_context_endpoint_returns_source_of_truth_blob(client):
+def test_deal_context_endpoint_returns_source_of_truth_blob(client, tmp_path):
     with connect() as conn:
         primary = upsert_contact(
             conn,
@@ -1019,9 +1190,10 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     assert linked.status_code == 200, linked.text
     assert linked.json()["role"] == "lawyer"
 
+    cma_path = _write_valid_pdf(tmp_path / "context-cma.pdf", "CMA ready")
     attached = client.post(
         f"/api/deals/{deal['id']}/attachments",
-        json={"kind": "cma_report", "filePath": "/tmp/cma.pdf", "summary": "CMA ready"},
+        json={"kind": "cma_report", "filePath": str(cma_path), "summary": "CMA ready"},
     )
     assert attached.status_code == 200, attached.text
 
@@ -1042,6 +1214,439 @@ def test_deal_context_endpoint_returns_source_of_truth_blob(client):
     }
     assert body["coContacts"][0]["role"] == "lawyer"
     assert body["attachments"][0]["kind"] == "cma_report"
+
+
+def test_deal_attachment_rejects_missing_and_invalid_files_without_ghost_rows(
+    client,
+    tmp_path,
+):
+    deal = _create(title="No ghost attachments", dispatch_initial_stage=False)
+    missing = tmp_path / "missing-contract.pdf"
+    invalid = tmp_path / "invalid-contract.pdf"
+    invalid.write_bytes(b"not a PDF")
+    blank = tmp_path / "blank-contract.pdf"
+    import fitz
+
+    blank_document = fitz.open()
+    blank_document.new_page()
+    blank_document.save(blank)
+    blank_document.close()
+    empty_docx = tmp_path / "empty-contract.docx"
+    with zipfile.ZipFile(empty_docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(
+            "word/document.xml",
+            "<w:document xmlns:w='urn:test'><w:body><w:p/></w:body></w:document>",
+        )
+    fake_media_docx = tmp_path / "fake-media-contract.docx"
+    with zipfile.ZipFile(fake_media_docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(
+            "word/document.xml",
+            "<w:document xmlns:w='urn:test'><w:body><w:p/></w:body></w:document>",
+        )
+        archive.writestr("word/media/photo.jpg", b"not actually a jpeg")
+    malformed_docx = tmp_path / "malformed-contract.docx"
+    with zipfile.ZipFile(malformed_docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(
+            "word/document.xml",
+            "<w:document xmlns:w='urn:test'><w:body><w:p>broken",
+        )
+    unsupported = tmp_path / "contract.bin"
+    unsupported.write_bytes(b"not a supported attachment")
+
+    for path in (
+        missing,
+        invalid,
+        blank,
+        empty_docx,
+        fake_media_docx,
+        malformed_docx,
+        unsupported,
+    ):
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "contract", "filePath": str(path)},
+        )
+        assert response.status_code == 400, response.text
+
+    manifest_only = tmp_path / "manifest-only.zip"
+    with zipfile.ZipFile(manifest_only, "w") as archive:
+        archive.writestr("photo-manifest.txt", "no actual listing photo")
+    no_photos = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "listing_photos", "filePath": str(manifest_only)},
+    )
+    assert no_photos.status_code == 400, no_photos.text
+
+    with connect() as conn:
+        assert list_deal_attachments(conn, deal["id"]) == []
+        events = list_deal_events(conn, deal["id"])
+    assert not any(event["kind"] == "attachment_added" for event in events)
+
+
+def test_listing_photo_zip_requires_image_magic_not_just_extension(client, tmp_path):
+    deal = _create(title="Photo ZIP truth", dispatch_initial_stage=False)
+    disguised = tmp_path / "disguised-photos.zip"
+    with zipfile.ZipFile(disguised, "w") as archive:
+        archive.writestr("listing-photo.jpg", b"plain text with a jpg name")
+
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "listing_photos", "filePath": str(disguised)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    header_only = tmp_path / "header-only-photos.zip"
+    with zipfile.ZipFile(header_only, "w") as archive:
+        archive.writestr("listing-photo.jpg", b"\xff\xd8\xffnot a decodable jpeg")
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "listing_photos", "filePath": str(header_only)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    valid = _write_valid_zip(tmp_path / "physical-photos.zip")
+    accepted = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "listing_photos", "filePath": str(valid)},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_required_document_kinds_enforce_compatible_substantive_formats(
+    client,
+    tmp_path,
+):
+    deal = _create(title="Required document contracts", dispatch_initial_stage=False)
+    fake_cma = tmp_path / "cma-report.txt"
+    fake_cma.write_text("This text is not a CMA PDF", encoding="utf-8")
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "cma_report", "filePath": str(fake_cma)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    fake_sales_doc = tmp_path / "sales-report.doc"
+    fake_sales_doc.write_text("not an Office binary", encoding="utf-8")
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "sales_report", "filePath": str(fake_sales_doc)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    fake_signed_docs = tmp_path / "signed-documents.txt"
+    fake_signed_docs.write_text("These are not signed PDF documents", encoding="utf-8")
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "signed_docs", "filePath": str(fake_signed_docs)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    fake_contract = tmp_path / "contract.jpg"
+    fake_contract.write_bytes(_valid_png_bytes())
+    rejected = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "contract", "filePath": str(fake_contract)},
+    )
+    assert rejected.status_code == 400, rejected.text
+
+    receipt = _write_valid_png(tmp_path / "deposit-receipt.png")
+    accepted = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "deposit_receipt", "filePath": str(receipt)},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    lawyer_email = tmp_path / "order-to-lawyer.eml"
+    lawyer_email.write_text(
+        "From: realtor@example.com\n"
+        "To: lawyer@example.com\n"
+        "Subject: Order to lawyer\n\n"
+        "Please open the conveyance file.",
+        encoding="utf-8",
+    )
+    accepted = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "order_to_lawyer", "filePath": str(lawyer_email)},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    lawyer_docx = _write_valid_docx(
+        tmp_path / "order-to-lawyer.docx",
+        "Please open the conveyance file",
+    )
+    accepted = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "order_to_lawyer", "filePath": str(lawyer_docx)},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_attachment_archive_and_file_validation_is_bounded(
+    client,
+    monkeypatch,
+    tmp_path,
+):
+    import elevate_cli.data.deals as deals_data
+
+    deal = _create(title="Bounded attachments", dispatch_initial_stage=False)
+    text_file = tmp_path / "large.txt"
+    text_file.write_bytes(b"12345")
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_ATTACHMENT_FILE_BYTES", 4)
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "supporting_document", "filePath": str(text_file)},
+        )
+    assert response.status_code == 400, response.text
+
+    too_many = tmp_path / "too-many.zip"
+    with zipfile.ZipFile(too_many, "w") as archive:
+        archive.writestr("one.png", _valid_png_bytes())
+        archive.writestr("two.png", _valid_png_bytes())
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_ARCHIVE_FILE_COUNT", 1)
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "listing_photos", "filePath": str(too_many)},
+        )
+    assert response.status_code == 400, response.text
+
+    too_expanded = tmp_path / "too-expanded.zip"
+    with zipfile.ZipFile(too_expanded, "w") as archive:
+        archive.writestr("photo.png", _valid_png_bytes())
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 4)
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "listing_photos", "filePath": str(too_expanded)},
+        )
+    assert response.status_code == 400, response.text
+
+    valid_docx = _write_valid_docx(tmp_path / "valid-contract.docx")
+    accepted = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "contract", "filePath": str(valid_docx)},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    bounded_docx = _write_valid_docx(tmp_path / "bounded-contract.docx")
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_DOCX_FILE_COUNT", 1)
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "contract", "filePath": str(bounded_docx)},
+        )
+    assert response.status_code == 400, response.text
+
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_DOCX_UNCOMPRESSED_BYTES", 8)
+        response = client.post(
+            f"/api/deals/{deal['id']}/attachments",
+            json={"kind": "contract", "filePath": str(bounded_docx)},
+        )
+    assert response.status_code == 400, response.text
+
+
+def test_bounded_archive_metadata_counts_directories_and_rejects_ambiguity():
+    import elevate_cli.data.deals as deals_data
+
+    directory = zipfile.ZipInfo("photos/")
+    member = zipfile.ZipInfo("photos/listing.png")
+
+    class ArchiveMetadata:
+        def __init__(self, infos):
+            self._infos = infos
+
+        def infolist(self):
+            return self._infos
+
+    with pytest.raises(ValueError, match="too many files"):
+        deals_data._bounded_archive_infos(
+            ArchiveMetadata([directory, member]),
+            label="test ZIP",
+            max_files=1,
+            max_uncompressed_bytes=1024,
+        )
+
+    duplicate_a = zipfile.ZipInfo("same-name.png")
+    duplicate_b = zipfile.ZipInfo("same-name.png")
+    with pytest.raises(ValueError, match="duplicate member names"):
+        deals_data._bounded_archive_infos(
+            ArchiveMetadata([duplicate_a, duplicate_b]),
+            label="test ZIP",
+            max_files=2,
+            max_uncompressed_bytes=1024,
+        )
+
+    encrypted = zipfile.ZipInfo("encrypted.png")
+    encrypted.flag_bits |= 0x1
+    with pytest.raises(ValueError, match="encrypted members"):
+        deals_data._bounded_archive_infos(
+            ArchiveMetadata([encrypted]),
+            label="test ZIP",
+            max_files=1,
+            max_uncompressed_bytes=1024,
+        )
+
+
+def test_attachment_format_helpers_reject_disguised_and_malformed_artifacts(
+    tmp_path,
+):
+    import elevate_cli.data.deals as deals_data
+
+    signed_text = tmp_path / "signed-documents.txt"
+    signed_text.write_text("not a signed PDF", encoding="utf-8")
+    signed_path = Path(deals_data._validated_deal_attachment_path(str(signed_text)))
+    with pytest.raises(ValueError, match="incompatible with kind signed_docs"):
+        deals_data._validate_deal_attachment_kind("signed_docs", signed_path)
+
+    fake_contract = tmp_path / "contract.jpg"
+    fake_contract.write_bytes(_valid_png_bytes())
+    contract_path = Path(
+        deals_data._validated_deal_attachment_path(str(fake_contract))
+    )
+    with pytest.raises(ValueError, match="incompatible with kind contract"):
+        deals_data._validate_deal_attachment_kind("contract", contract_path)
+
+    malformed_docx = tmp_path / "malformed-contract.docx"
+    with zipfile.ZipFile(malformed_docx, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr(
+            "word/document.xml",
+            "<w:document xmlns:w='urn:test'><w:body><w:p>broken",
+        )
+    with pytest.raises(ValueError, match="document XML is malformed"):
+        deals_data._validated_deal_attachment_path(str(malformed_docx))
+
+    valid_docx = _write_valid_docx(tmp_path / "valid-contract.docx")
+    validated_docx = Path(
+        deals_data._validated_deal_attachment_path(str(valid_docx))
+    )
+    deals_data._validate_deal_attachment_kind("contract", validated_docx)
+
+    receipt = _write_valid_png(tmp_path / "receipt.png")
+    receipt_path = Path(deals_data._validated_deal_attachment_path(str(receipt)))
+    deals_data._validate_deal_attachment_kind("deposit_receipt", receipt_path)
+
+
+def test_listing_photo_zip_decode_work_is_bounded(monkeypatch, tmp_path):
+    import elevate_cli.data.deals as deals_data
+
+    assert deals_data._MAX_LISTING_PHOTO_DECODE_ATTEMPTS == 8
+    assert deals_data._MAX_LISTING_PHOTO_MEMBER_BYTES == 25 * 1024 * 1024
+
+    attempt_limited = tmp_path / "attempt-limited.zip"
+    with zipfile.ZipFile(attempt_limited, "w") as archive:
+        archive.writestr("first.png", b"not an image")
+        archive.writestr("second.png", _valid_png_bytes())
+    with monkeypatch.context() as bounded:
+        bounded.setattr(deals_data, "_MAX_LISTING_PHOTO_DECODE_ATTEMPTS", 1)
+        with pytest.raises(ValueError, match="no physically valid"):
+            deals_data._validate_deal_attachment_kind(
+                "listing_photos",
+                attempt_limited,
+            )
+
+    member_limited = tmp_path / "member-limited.zip"
+    valid_png = _valid_png_bytes()
+    with zipfile.ZipFile(member_limited, "w") as archive:
+        archive.writestr("listing.png", valid_png)
+    with monkeypatch.context() as bounded:
+        bounded.setattr(
+            deals_data,
+            "_MAX_LISTING_PHOTO_MEMBER_BYTES",
+            len(valid_png) - 1,
+        )
+        with pytest.raises(ValueError, match="no physically valid"):
+            deals_data._validate_deal_attachment_kind(
+                "listing_photos",
+                member_limited,
+            )
+
+
+def test_deleted_attachment_remains_history_but_no_longer_satisfies_gate(
+    client,
+    tmp_path,
+):
+    deal = _create(
+        title="Deleted CMA evidence",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    cma_path = _write_valid_pdf(tmp_path / "deleted-cma.pdf", "Current CMA")
+    attached = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "cma_report", "filePath": str(cma_path)},
+    )
+    assert attached.status_code == 200, attached.text
+    before = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert not any(
+        item["kind"] == "cma_report"
+        for item in before["dealFlow"]["gate"]["missingDocs"]
+    )
+
+    with connect() as conn:
+        from elevate_cli.data import get_deal
+        from elevate_cli.data.deals import deal_card_gate
+
+        deal_row = get_deal(conn, deal["id"])
+        before_card = deal_card_gate(conn, deal_row)
+
+    cma_path.unlink()
+    after = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert after["attachments"][0]["physicalAvailable"] is False
+    assert any(
+        item["kind"] == "cma_report"
+        for item in after["dealFlow"]["gate"]["missingDocs"]
+    )
+    with connect() as conn:
+        from elevate_cli.data import get_deal
+        from elevate_cli.data.deals import deal_card_gate, deal_open_stage_cells
+        from elevate_cli.admin_deal_flow import resolve_deal_phase
+        from unittest.mock import patch
+
+        deal_row = get_deal(conn, deal["id"])
+        after_card = deal_card_gate(conn, deal_row)
+        assert after_card["missingCount"] == before_card["missingCount"] + 1
+        with patch(
+            "elevate_cli.admin_deal_flow.resolve_deal_phase",
+            wraps=resolve_deal_phase,
+        ) as resolver:
+            deal_open_stage_cells(conn, deal_row)
+        assert resolver.call_args.kwargs["attachments"] == []
+
+
+def test_legacy_remote_attachment_row_is_auditable_but_not_gate_evidence(
+    client,
+    tmp_path,
+):
+    deal = _create(
+        title="Legacy remote reference",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    local = _write_valid_pdf(tmp_path / "legacy-cma.pdf", "Imported CMA")
+    attached = client.post(
+        f"/api/deals/{deal['id']}/attachments",
+        json={"kind": "cma_report", "filePath": str(local)},
+    )
+    assert attached.status_code == 200, attached.text
+    with connect() as conn:
+        conn.execute(
+            "UPDATE deal_attachments SET file_path=? WHERE id=?",
+            ("https://legacy.example/cma.pdf", attached.json()["id"]),
+        )
+
+    context = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert context["attachments"][0]["filePath"] == "https://legacy.example/cma.pdf"
+    assert context["attachments"][0]["physicalAvailable"] is False
+    assert any(
+        item["kind"] == "cma_report"
+        for item in context["dealFlow"]["gate"]["missingDocs"]
+    )
 
 
 def test_province_guide_import_feeds_deal_context_and_conditional_docs(client, tmp_path):
@@ -1210,7 +1815,7 @@ def test_admin_tasks_endpoint_projects_phase_gate_and_ai_actions(client):
     assert any(item["type"] == "ai_action" and item["skill"] == "cma" for item in tasks)
     assert any(item["type"] == "checklist" and item["status"] == "open" for item in tasks)
     assert any(item["type"] == "document" and item["kind"] == "cma_report" for item in tasks)
-    assert {item["packageKey"] for item in tasks} == {"generic.real-estate"}
+    assert {item["packageKey"] for item in tasks} == {"ca.bc"}
     assert {item["stageName"] for item in tasks} == {"CMA / Evaluation"}
 
     ai_task = next(item for item in tasks if item["type"] == "ai_action")
@@ -1369,7 +1974,7 @@ def test_workflow_import_stage_update_uses_audited_stage_transition(client):
     assert any(run["registryId"] == action["id"] for run in runs)
 
 
-def test_run_result_callback_updates_run_and_attaches_artifacts(client):
+def test_run_result_callback_updates_run_and_attaches_artifacts(client, tmp_path):
     deal = _create(title="Run result deal", current_stage=1)
     with connect() as conn:
         action = create_action(
@@ -1389,6 +1994,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
         )
     assert runs and runs[0]["registryId"] == action["id"]
     run_id = runs[0]["id"]
+    cma_path = _write_valid_pdf(tmp_path / "context-cma.pdf", "Generated CMA")
 
     resp = client.post(
         f"/api/deals/{deal['id']}/runs/{run_id}/result",
@@ -1396,7 +2002,7 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
             "status": "completed",
             "idempotencyKey": "run-result-test",
             "artifacts": [
-                {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
+                {"kind": "cma_report", "filePath": str(cma_path), "summary": "PDF generated"}
             ],
             "next_tasks": [{"skill": "cma:pdf", "args": {"deal_id": deal["id"]}}],
             "checklist_updates": [{"id": "pricing-recap", "completed": True}],
@@ -1405,15 +2011,27 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["status"] == "succeeded"
-    assert body["outputPath"] == "/tmp/context-cma.pdf"
+    assert body["outputPath"] == str(cma_path.resolve())
+    context = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert context["attachments"][0]["sourceRunId"] == run_id
+    assert context["checklist"]["draft-cma-followup"] is True
+    assert context["checklist"]["pricing-recap"] is True
+    assert any(
+        run["payload"].get("result", {}).get("nextTasks")
+        for run in context["priorRuns"]
+    )
 
+    # An idempotent callback is a receipt for the terminal result already
+    # recorded. Cleanup after that result must not make the replay fail by
+    # revalidating a path that no longer exists.
+    cma_path.unlink()
     replay = client.post(
         f"/api/deals/{deal['id']}/runs/{run_id}/result",
         json={
             "status": "completed",
             "idempotencyKey": "run-result-test",
             "artifacts": [
-                {"kind": "cma_report", "filePath": "/tmp/context-cma.pdf", "summary": "PDF generated"}
+                {"kind": "cma_report", "filePath": str(cma_path), "summary": "PDF generated"}
             ],
             "next_tasks": [{"skill": "cma:pdf", "args": {"deal_id": deal["id"]}}],
             "checklist_updates": [{"id": "pricing-recap", "completed": True}],
@@ -1421,16 +2039,126 @@ def test_run_result_callback_updates_run_and_attaches_artifacts(client):
     )
     assert replay.status_code == 200, replay.text
 
-    context = client.get(f"/api/deals/{deal['id']}/context").json()
-    assert context["attachments"][0]["sourceRunId"] == run_id
-    assert context["checklist"]["draft-cma-followup"] is True
-    assert context["checklist"]["pricing-recap"] is True
-    assert any(run["payload"].get("result", {}).get("nextTasks") for run in context["priorRuns"])
+    after_cleanup = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert after_cleanup["attachments"][0]["physicalAvailable"] is False
+    assert after_cleanup["checklist"]["pricing-recap"] is True
     with connect() as conn:
         queued = list_action_runs(conn, deal_id=deal["id"])
         attachments = list_deal_attachments(conn, deal["id"])
     assert any(run["payload"].get("trigger") == "next_task" for run in queued)
     assert len([item for item in attachments if item["sourceRunId"] == run_id]) == 1
+
+
+def test_run_result_rejects_missing_artifact_without_closing_run_or_gate(
+    client,
+    tmp_path,
+):
+    deal = _create(
+        title="Run result physical truth",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="Physical artifact callback",
+            trigger="stage_entry",
+            skill="cma:physical-proof",
+            side="listing",
+            to_stage=1,
+        )
+        runs = evaluate_dispatch(
+            conn,
+            deal_id=deal["id"],
+            trigger="stage_entry",
+            actor="human:test",
+            to_stage=1,
+        )
+    run = next(item for item in runs if item["registryId"] == action["id"])
+    valid_first = _write_valid_pdf(
+        tmp_path / "valid-first.pdf",
+        "Must roll back when the second artifact is missing",
+    )
+
+    response = client.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/result",
+        json={
+            "status": "completed",
+            "idempotencyKey": "missing-artifact-must-rollback",
+            "artifacts": [
+                {
+                    "kind": "supporting_document",
+                    "filePath": str(valid_first),
+                },
+                {
+                    "kind": "cma_report",
+                    "filePath": str(tmp_path / "never-created.pdf"),
+                }
+            ],
+            "checklist_updates": [
+                {"id": "pricing-recap", "completed": True}
+            ],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    with connect() as conn:
+        persisted = next(
+            item
+            for item in list_action_runs(conn, deal_id=deal["id"])
+            if item["id"] == run["id"]
+        )
+        attachments = list_deal_attachments(conn, deal["id"])
+    assert persisted["status"] not in {"succeeded", "completed"}
+    assert not persisted.get("result")
+    assert attachments == []
+    context = client.get(f"/api/deals/{deal['id']}/context").json()
+    assert context["checklist"].get("pricing-recap") is not True
+
+
+def test_failed_run_cannot_attach_success_evidence(client, tmp_path):
+    deal = _create(
+        title="Failed run artifact",
+        current_stage=1,
+        dispatch_initial_stage=False,
+    )
+    with connect() as conn:
+        action = create_action(
+            conn,
+            name="Failed artifact callback",
+            trigger="stage_entry",
+            skill="cma:failed-proof",
+            side="listing",
+            to_stage=1,
+        )
+        run = next(
+            item
+            for item in evaluate_dispatch(
+                conn,
+                deal_id=deal["id"],
+                trigger="stage_entry",
+                actor="human:test",
+                to_stage=1,
+            )
+            if item["registryId"] == action["id"]
+        )
+    artifact = _write_valid_pdf(tmp_path / "failed-run.pdf", "Failure evidence")
+
+    response = client.post(
+        f"/api/deals/{deal['id']}/runs/{run['id']}/result",
+        json={
+            "status": "failed",
+            "idempotencyKey": "failed-run-cannot-attach",
+            "artifacts": [
+                {"kind": "cma_report", "filePath": str(artifact)}
+            ],
+            "error": "generation failed",
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    with connect() as conn:
+        assert list_deal_attachments(conn, deal["id"]) == []
 
 
 def test_run_result_stage_complete_update_requires_human_not_skill_callback(client):
@@ -1471,7 +2199,7 @@ def test_run_result_stage_complete_update_requires_human_not_skill_callback(clie
     assert "workflow_stage_1_complete" not in context.json()["checklist"]
 
 
-def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(client):
+def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(client, tmp_path):
     # A CMA run that clears the CMA / Evaluation gate (stage 1) advances the deal
     # to Listing Intake (stage 2) without any explicit stage-complete toggle.
     deal = _create(title="Gate clear auto move", current_stage=1)
@@ -1497,6 +2225,7 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
             to_stage=1,
         )
     run_id = runs[0]["id"]
+    cma_path = _write_valid_pdf(tmp_path / "gate-clear-cma.pdf", "Gate clear CMA")
 
     resp = client.post(
         f"/api/deals/{deal['id']}/runs/{run_id}/result",
@@ -1504,7 +2233,7 @@ def test_run_result_clearing_phase_gate_advances_without_stage_complete_flag(cli
             "status": "completed",
             "idempotencyKey": "gate-clear-auto-move",
             "artifacts": [
-                {"kind": "cma_report", "filePath": "/tmp/gate-clear-cma.pdf", "summary": "CMA report"}
+                {"kind": "cma_report", "filePath": str(cma_path), "summary": "CMA report"}
             ],
             "checklist_updates": [
                 {"id": "cma_pdf_ready", "completed": True},

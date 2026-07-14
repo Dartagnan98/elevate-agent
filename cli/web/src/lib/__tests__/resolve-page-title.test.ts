@@ -8,6 +8,7 @@ describe("resolvePageTitle", () => {
     const expected: Record<string, string> = {
       "/today": "Today",
       "/leads": "Leads",
+      "/reporting": "Reporting",
       "/admin": "Admin",
       "/social-media": "Social Media",
       "/cron": "Automations",

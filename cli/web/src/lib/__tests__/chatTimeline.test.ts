@@ -40,6 +40,15 @@ describe("chat timeline merge", () => {
 
     expect(mergeServerWithCache(server, cached)[0].status).toBe("error");
   });
+
+  it("does not let a stale successful hydrate erase a cached pending turn", () => {
+    const server = [message({ content: "Work is still running.", id: "server-a1" })];
+    const cached = [
+      message({ content: "Work is still running.", id: "cached-a1", status: "pending" }),
+    ];
+
+    expect(mergeServerWithCache(server, cached)[0].status).toBe("pending");
+  });
 });
 
 describe("settled chat status", () => {
@@ -53,5 +62,11 @@ describe("settled chat status", () => {
         message({ content: "Please finish this", role: "user", status: "complete" }),
       ]),
     ).toBe("Interrupted");
+    expect(settledChatStatusText([message({ status: "pending" })])).toBe(
+      "Waiting for completion",
+    );
+    expect(settledChatStatusText([message({ status: "needs_input" })])).toBe(
+      "Waiting for your input",
+    );
   });
 });

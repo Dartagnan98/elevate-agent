@@ -5,7 +5,7 @@ import threading
 import time
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,9 +15,17 @@ from tui_gateway import server
 @pytest.fixture(autouse=True)
 def _allow_prompt_submit_without_license(monkeypatch):
     """Unit tests in this file exercise gateway RPC behavior behind the gate."""
-    from gateway import usage_ledger
+    from elevate_cli import agent_hub
+    from gateway import guardrails, usage_ledger
 
     monkeypatch.setattr(server, "_license_signed_in", lambda: True)
+    monkeypatch.setattr(
+        guardrails,
+        "check_gateway_guardrails",
+        lambda **_kwargs: types.SimpleNamespace(allowed=True),
+    )
+    monkeypatch.setattr(guardrails, "record_guardrail_block", lambda **_kwargs: None)
+    monkeypatch.setattr(agent_hub, "agent_recent_activity_digest", lambda *_args: "")
     monkeypatch.setattr(usage_ledger, "record_gateway_turn", lambda **_kwargs: None)
     server._active_prompt_claims.clear()
     yield
@@ -143,6 +151,68 @@ def test_background_terminal_payload_marks_nonempty_failure_as_error():
         "text": "The provider failed after retries.",
         "error": "The provider failed after retries.",
     }
+
+
+def test_background_terminal_payload_marks_async_obligation_pending():
+    obligations = [
+        {
+            "tool": "terminal",
+            "session_id": "proc-1",
+            "status": "pending",
+        }
+    ]
+    payload = server._agent_terminal_payload(
+        {
+            "completed": False,
+            "failed": False,
+            "final_response": "The terminal process is still running.",
+            "partial": True,
+            "pending": True,
+            "pending_tool_obligations": obligations,
+        },
+        task_id="bg-1",
+    )
+
+    assert payload == {
+        "task_id": "bg-1",
+        "status": "pending",
+        "text": "The terminal process is still running.",
+        "warning": server._PENDING_WORK_WARNING,
+        "pending_tool_obligations": obligations,
+    }
+
+
+def test_background_terminal_payload_marks_clarification_needs_input():
+    payload = server._agent_terminal_payload(
+        {
+            "completed": False,
+            "failed": False,
+            "final_response": "Which province is the property in?",
+            "needs_input": True,
+            "partial": True,
+            "pending": False,
+        },
+        task_id="bg-2",
+    )
+
+    assert payload == {
+        "task_id": "bg-2",
+        "status": "needs_input",
+        "text": "Which province is the property in?",
+        "warning": server._NEEDS_INPUT_WARNING,
+    }
+
+
+def test_tui_session_context_is_explicit_and_session_keyed():
+    from gateway.session_context import get_session_env
+
+    tokens = server._set_session_context("session-key-1")
+    try:
+        assert get_session_env("ELEVATE_SESSION_PLATFORM") == "tui"
+        assert get_session_env("ELEVATE_SESSION_CHAT_ID") == "session-key-1"
+        assert get_session_env("ELEVATE_SESSION_KEY") == "session-key-1"
+    finally:
+        server._clear_session_context(tokens)
 
 
 def test_emit_records_content_free_session_breadcrumb(monkeypatch):
@@ -396,6 +466,7 @@ def _session(agent=None, **extra):
 class _PromptReceiptDB:
     def __init__(self):
         self.rows = {}
+        self.finish_reason_updates = []
 
     def prepare_prompt_receipt(
         self,
@@ -443,6 +514,14 @@ class _PromptReceiptDB:
         if row["status"] != "running" or row["owner_id"] != owner_id:
             return False
         row["status"] = status
+        return True
+
+    def update_message_finish_reason(
+        self, session_id, client_message_id, finish_reason
+    ):
+        self.finish_reason_updates.append(
+            (session_id, client_message_id, finish_reason)
+        )
         return True
 
 
@@ -1205,6 +1284,270 @@ def test_prompt_submit_empty_model_result_is_visible_error(monkeypatch):
         ]
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_pending_turn_is_neither_success_nor_error(monkeypatch):
+    db = _install_prompt_receipt_db(monkeypatch)
+    obligations = [
+        {
+            "tool": "delegate_task",
+            "task_id": "child-1",
+            "status": "pending",
+        }
+    ]
+
+    class _Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            return {
+                "completed": False,
+                "failed": False,
+                "final_response": "The delegated task is still running.",
+                "partial": True,
+                "pending": True,
+                "pending_tool_obligations": obligations,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "The delegated task is still running.",
+                        "finish_reason": "incomplete",
+                    }
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+        monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "Prepare the package",
+                    "user_message_id": "user-pending",
+                },
+            }
+        )
+
+        assert response["result"]["status"] == "streaming"
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert len(complete) == 1
+        payload = complete[0][2]
+        assert payload["status"] == "pending"
+        assert payload["text"] == "The delegated task is still running."
+        assert payload["warning"] == server._PENDING_WORK_WARNING
+        assert payload["pending_tool_obligations"] == obligations
+        assert "error" not in payload
+        assert db.rows[("session-key", "user-pending")]["status"] == "deferred"
+        assert server._sessions["sid"]["running"] is False
+
+        duplicate = server.handle_request(
+            {
+                "id": "2",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "Prepare the package",
+                    "user_message_id": "user-pending",
+                },
+            }
+        )
+        assert duplicate["result"]["status"] == "duplicate"
+        assert duplicate["result"]["terminal_status"] == "pending"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_needs_input_releases_turn_and_is_durable(monkeypatch):
+    db = _install_prompt_receipt_db(monkeypatch)
+    question = "Which province is the property in?"
+
+    class _Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            return {
+                "completed": False,
+                "failed": False,
+                "final_response": question,
+                "needs_input": True,
+                "partial": True,
+                "pending": False,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": question,
+                        "finish_reason": "incomplete",
+                    }
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None, **_kwargs):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    emitted = []
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _agent: {})
+        monkeypatch.setattr(server, "render_message", lambda _text, _cols: "")
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "Prepare the package",
+                    "user_message_id": "user-needs-input",
+                },
+            }
+        )
+
+        assert response["result"]["status"] == "streaming"
+        complete = [args for args in emitted if args[0] == "message.complete"]
+        assert len(complete) == 1
+        assert complete[0][2] == {
+            "text": question,
+            "usage": {},
+            "status": "needs_input",
+            "message_id": complete[0][2]["message_id"],
+            "warning": server._NEEDS_INPUT_WARNING,
+        }
+        row = db.rows[("session-key", "user-needs-input")]
+        assert row["status"] == "waiting_input"
+        assert server._sessions["sid"]["running"] is False
+        assert server._sessions["sid"]["history"][-1]["finish_reason"] == "needs_input"
+        assert db.finish_reason_updates == [
+            ("session-key", complete[0][2]["message_id"], "needs_input")
+        ]
+
+        duplicate = server.handle_request(
+            {
+                "id": "2",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "text": "Prepare the package",
+                    "user_message_id": "user-needs-input",
+                },
+            }
+        )
+        assert duplicate["result"]["status"] == "duplicate"
+        assert duplicate["result"]["terminal_status"] == "needs_input"
+    finally:
+        server._sessions.pop("sid", None)
+
+
+def test_history_resume_preserves_incomplete_as_pending():
+    messages = server._history_to_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "Work is still running.",
+                "finish_reason": "incomplete",
+                "client_message_id": "assistant-pending",
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "text": "Work is still running.",
+            "status": "pending",
+            "message_id": "assistant-pending",
+        }
+    ]
+
+
+def test_history_resume_preserves_clarification_as_needs_input():
+    messages = server._history_to_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "Which province is the property in?",
+                "finish_reason": "needs_input",
+                "client_message_id": "assistant-question",
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "text": "Which province is the property in?",
+            "status": "needs_input",
+            "message_id": "assistant-question",
+        }
+    ]
+
+
+def test_context_overflow_reset_clears_replay_but_preserves_terminal_receipt(
+    monkeypatch, tmp_path
+):
+    from elevate_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    session_key = "tui-overflow-session"
+    db.create_session(session_key, source="tui")
+    db.append_message(session_key, "user", content="x" * 10_000)
+    db.append_message(
+        session_key,
+        "assistant",
+        content="maximum context length exceeded",
+        finish_reason="error",
+    )
+    db.prepare_prompt_receipt(
+        session_key,
+        "continue",
+        assistant_message_id="assistant-overflow",
+        client_message_id="user-overflow",
+        payload={"text": "continue"},
+    )
+    assert db.claim_prompt_receipt(
+        session_key, "user-overflow", owner_id="owner"
+    )
+    assert db.finish_prompt_receipt(
+        session_key,
+        "user-overflow",
+        owner_id="owner",
+        status="error",
+    )
+
+    session = _session(session_key=session_key, history=[{"role": "user", "content": "old"}])
+    reset = MagicMock()
+    monkeypatch.setattr(server, "_reset_session_agent", reset)
+
+    server._reset_tui_context_overflow_session("sid", session, db)
+
+    assert db.get_messages_as_conversation(session_key) == []
+    duplicate = db.prepare_prompt_receipt(
+        session_key,
+        "continue",
+        assistant_message_id="ignored",
+        client_message_id="user-overflow",
+        payload={"text": "continue"},
+    )
+    assert duplicate["inserted"] is False
+    assert duplicate["status"] == "error"
+    reset.assert_called_once_with("sid", session)
+    db.close()
 
 
 @pytest.mark.parametrize("agent_result", [None, "", "legacy string result"])
@@ -3096,6 +3439,7 @@ def test_async_delegate_sink_rewakes_main_agent():
     # delegate.complete is now a lightweight ping — no dumped result text.
     dc = next(p for (ev, _s, p) in emitted if ev == "delegate.complete")
     assert dc["task_id"] == "dt_abc123"
+    assert dc["status"] == "complete"
     assert "text" not in dc
     # The raw result is NOT threaded as a fake user message.
     assert session["history"] == []
@@ -3244,15 +3588,26 @@ def test_wake_reparks_when_submit_loses_latch_race():
     assert parked and "Found 7 leads" in parked[0]["summary"]
 
 
-def test_async_delegate_sink_never_raises():
-    """A malformed payload must not bubble out of the sink (it runs on a
-    daemon thread; an exception there is silent and would drop the ping)."""
+def test_async_delegate_sink_rejects_malformed_payload_without_signaling():
+    """Malformed results cannot park work, wake the agent, or signal success."""
     session = _session()
-    with patch("tui_gateway.server._emit"), patch("tui_gateway.server._get_db", return_value=None):
+    with patch("tui_gateway.server._emit") as emit, patch(
+        "tui_gateway.server.threading.Thread"
+    ) as thread:
         sink = server._make_async_delegate_sink("sid", session)
-        sink(None)            # no payload
-        sink({"results": "not a list"})  # wrong shape
-    # No assertion needed beyond "did not raise".
+        for payload in (
+            None,
+            {"task_id": "dt-string", "results": "not a list"},
+            {"task_id": "dt-empty", "results": []},
+            {"task_id": "dt-mixed", "results": [{"status": "completed"}, "bad"]},
+            {"task_id": "dt-status", "results": [{}]},
+            {"results": [{"status": "completed"}]},
+        ):
+            sink(payload)
+
+    emit.assert_not_called()
+    thread.assert_not_called()
+    assert session.get("pending_delegate_results") in (None, [])
 
 
 def test_slash_exec_compact_routes_to_compaction_handler(monkeypatch):

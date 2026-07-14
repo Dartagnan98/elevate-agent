@@ -100,6 +100,876 @@ class TestStreamingAccumulator:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_diagnostic_survives_stream_accumulation(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        finish_chunk = _make_stream_chunk(finish_reason="stop")
+        finish_chunk._elevate_gemini_diagnostic = {
+            "finish_reason": "STOP",
+            "prompt_block_reason": "UNSPECIFIED",
+            "candidate_count": 1,
+            "part_counts": {
+                "text": 0,
+                "thought_text": 0,
+                "function_call": 0,
+                "thought_signature": 1,
+                "other": 0,
+                "SECRET_PART_KIND": 99,
+            },
+            "usable_part_count": 0,
+            "prompt_tokens": 31,
+            "candidate_tokens": 0,
+            "thought_tokens": 0,
+            "total_tokens": 31,
+            "SECRET_FIELD": "SECRET_VALUE",
+        }
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([finish_chunk])
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        diagnostic = response._elevate_gemini_diagnostic
+        assert diagnostic["finish_reason"] == "STOP"
+        assert diagnostic["usable_part_count"] == 0
+        assert diagnostic["part_counts"]["thought_signature"] == 1
+        serialized = json.dumps(diagnostic, sort_keys=True)
+        assert "SECRET_FIELD" not in serialized
+        assert "SECRET_PART_KIND" not in serialized
+        assert "SECRET_VALUE" not in serialized
+
+    @pytest.mark.parametrize(
+        "malformed_reason",
+        [None, False, "", "future-safety-v2", "bad-value_UNSPECIFIED"],
+    )
+    def test_diagnostic_sanitizer_maps_malformed_present_enum_to_invalid(
+        self, malformed_reason
+    ):
+        from run_agent import _allowlisted_gemini_diagnostic
+
+        sanitized = _allowlisted_gemini_diagnostic({
+            "finish_reason": "STOP",
+            "prompt_block_reason": malformed_reason,
+        })
+
+        assert sanitized["finish_reason"] == "STOP"
+        assert sanitized["prompt_block_reason"] == "INVALID"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_usage_only_event_does_not_overwrite_gemini_finish_diagnostic(
+        self, mock_close, mock_create
+    ):
+        from agent.gemini_native_adapter import translate_stream_event
+        from run_agent import AIAgent
+
+        tool_call_indices = {}
+        chunks = translate_stream_event(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": []},
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+            tool_call_indices=tool_call_indices,
+        )
+        chunks.extend(
+            translate_stream_event(
+                {
+                    "usageMetadata": {
+                        "promptTokenCount": 31,
+                        "candidatesTokenCount": 0,
+                        "totalTokenCount": 31,
+                    }
+                },
+                model="gemini-2.5-flash",
+                tool_call_indices=tool_call_indices,
+            )
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.usage.prompt_tokens == 31
+        assert response._elevate_gemini_diagnostic["finish_reason"] == "STOP"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_no_candidate_gemini_block_is_terminal_content_filter(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        diagnostic_chunk = _make_empty_chunk(
+            usage=SimpleNamespace(prompt_tokens=13, completion_tokens=0)
+        )
+        diagnostic_chunk._elevate_gemini_diagnostic = {
+            "finish_reason": "UNSPECIFIED",
+            "prompt_block_reason": "PROHIBITED_CONTENT",
+            "candidate_count": 0,
+            "part_counts": {
+                "text": 0,
+                "thought_text": 0,
+                "function_call": 0,
+                "thought_signature": 0,
+                "other": 0,
+            },
+            "usable_part_count": 0,
+            "prompt_tokens": 13,
+            "candidate_tokens": 0,
+            "thought_tokens": 0,
+            "total_tokens": 13,
+        }
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(
+            [diagnostic_chunk]
+        )
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response._elevate_stream_incomplete_error is None
+        assert response._elevate_gemini_diagnostic[
+            "prompt_block_reason"
+        ] == "PROHIBITED_CONTENT"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_rejection_is_sticky_across_later_text_and_stop(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        blocked = _make_empty_chunk()
+        blocked._elevate_gemini_diagnostic = {
+            "finish_reason": "UNSPECIFIED",
+            "prompt_block_reason": "PROHIBITED_CONTENT",
+        }
+        accepted_stop = _make_stream_chunk(finish_reason="stop")
+        accepted_stop._elevate_gemini_diagnostic = {
+            "finish_reason": "STOP",
+            "prompt_block_reason": "UNSPECIFIED",
+        }
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(
+            [
+                blocked,
+                _make_stream_chunk(content="LEAKED_AFTER_BLOCK"),
+                accepted_stop,
+            ]
+        )
+        mock_create.return_value = mock_client
+        text_deltas = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.content is None
+        assert response.choices[0].message.tool_calls is None
+        assert text_deltas == []
+        assert response._elevate_gemini_diagnostic[
+            "prompt_block_reason"
+        ] == "PROHIBITED_CONTENT"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_stream_freezes_candidate_output_after_first_terminal_stop(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        accepted_stop = _make_stream_chunk(finish_reason="stop")
+        accepted_stop._elevate_gemini_diagnostic = {
+            "finish_reason": "STOP",
+            "prompt_block_reason": "UNSPECIFIED",
+        }
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(
+            [
+                _make_stream_chunk(content="SAFE"),
+                accepted_stop,
+                _make_stream_chunk(content="POST_TERMINAL_INJECTION"),
+            ]
+        )
+        mock_create.return_value = mock_client
+        text_deltas = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "stop"
+        assert response.choices[0].message.content == "SAFE"
+        assert text_deltas == ["SAFE"]
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_max_tokens_never_replays_tool_started_callback(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        max_tokens = _make_stream_chunk(finish_reason="length")
+        max_tokens._elevate_gemini_diagnostic = {
+            "finish_reason": "MAX_TOKENS",
+            "prompt_block_reason": "UNSPECIFIED",
+        }
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(
+            [
+                _make_stream_chunk(
+                    content="accepted partial",
+                    tool_calls=[
+                        _make_tool_call_delta(
+                            index=0,
+                            tc_id="call_partial",
+                            name="deals_overview",
+                            arguments='{"status":"active"}',
+                        )
+                    ],
+                ),
+                max_tokens,
+            ]
+        )
+        mock_create.return_value = mock_client
+        text_deltas = []
+        tool_starts = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "length"
+        assert response.choices[0].message.tool_calls is None
+        assert text_deltas == ["accepted partial"]
+        assert tool_starts == []
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_gemini_filtered_finish_discards_prior_tool_call(
+        self, mock_close, mock_create
+    ):
+        from agent.gemini_native_adapter import translate_stream_event
+        from run_agent import AIAgent
+
+        tool_call_indices = {}
+        chunks = translate_stream_event(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "deals_overview",
+                                        "args": {"status": "active"},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+            tool_call_indices=tool_call_indices,
+        )
+        chunks.extend(
+            translate_stream_event(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": []},
+                            "finishReason": "SAFETY",
+                        }
+                    ]
+                },
+                model="gemini-2.5-flash",
+                tool_call_indices=tool_call_indices,
+            )
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.tool_calls is None
+        assert response._elevate_gemini_diagnostic["finish_reason"] == "SAFETY"
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_native_gemini_filtered_finish_discards_all_buffered_callbacks(
+        self, mock_close, mock_create
+    ):
+        from agent.gemini_native_adapter import translate_stream_event
+        from run_agent import AIAgent
+
+        tool_call_indices = {}
+        chunks = translate_stream_event(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"thought": True, "text": "private reasoning"},
+                                {"text": "filtered partial text"},
+                                {
+                                    "functionCall": {
+                                        "name": "deals_overview",
+                                        "args": {"status": "active"},
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+            tool_call_indices=tool_call_indices,
+        )
+        chunks.extend(
+            translate_stream_event(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": []},
+                            "finishReason": "SAFETY",
+                        }
+                    ]
+                },
+                model="gemini-2.5-flash",
+                tool_call_indices=tool_call_indices,
+            )
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        first_delta = MagicMock()
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call(
+            {}, on_first_delta=first_delta
+        )
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.tool_calls is None
+        assert text_deltas == []
+        assert reasoning_deltas == []
+        assert tool_starts == []
+        first_delta.assert_not_called()
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_native_gemini_stop_replays_buffered_callbacks_once(
+        self, mock_close, mock_create
+    ):
+        from agent.gemini_native_adapter import translate_stream_event
+        from run_agent import AIAgent
+
+        tool_call_indices = {}
+        chunks = translate_stream_event(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"thought": True, "text": "accepted reasoning"},
+                                {"text": "accepted text"},
+                                {
+                                    "functionCall": {
+                                        "name": "deals_overview",
+                                        "args": {"status": "active"},
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+            tool_call_indices=tool_call_indices,
+        )
+        chunks.extend(
+            translate_stream_event(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": []},
+                            "finishReason": "STOP",
+                        }
+                    ]
+                },
+                model="gemini-2.5-flash",
+                tool_call_indices=tool_call_indices,
+            )
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        first_delta = MagicMock()
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call(
+            {}, on_first_delta=first_delta
+        )
+
+        assert response.choices[0].finish_reason == "tool_calls"
+        assert text_deltas == ["accepted text"]
+        assert reasoning_deltas == ["accepted reasoning"]
+        assert tool_starts == ["deals_overview"]
+        first_delta.assert_called_once_with()
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_native_gemini_max_tokens_replays_accepted_partial_text(
+        self, mock_close, mock_create
+    ):
+        from agent.gemini_native_adapter import translate_stream_event
+        from run_agent import AIAgent
+
+        tool_call_indices = {}
+        chunks = translate_stream_event(
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "accepted partial"}]}}
+                ]
+            },
+            model="gemini-2.5-flash",
+            tool_call_indices=tool_call_indices,
+        )
+        chunks.extend(
+            translate_stream_event(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": []},
+                            "finishReason": "MAX_TOKENS",
+                        }
+                    ]
+                },
+                model="gemini-2.5-flash",
+                tool_call_indices=tool_call_indices,
+            )
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "length"
+        assert text_deltas == ["accepted partial"]
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_openai_compatible_gemini_content_filter_discards_callbacks(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="filtered partial text"),
+            _make_stream_chunk(reasoning_content="filtered reasoning"),
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=0,
+                        tc_id="call_filtered",
+                        name="deals_overview",
+                        arguments='{"status":"active"}',
+                    )
+                ]
+            ),
+            _make_stream_chunk(finish_reason="content_filter"),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        first_delta = MagicMock()
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="google/gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call(
+            {}, on_first_delta=first_delta
+        )
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.tool_calls is None
+        assert text_deltas == []
+        assert reasoning_deltas == []
+        assert tool_starts == []
+        first_delta.assert_not_called()
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_non_gemini_content_filter_discards_all_callbacks(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="SECRET_TEXT"),
+            _make_stream_chunk(reasoning_content="SECRET_REASONING"),
+            _make_stream_chunk(tool_calls=[
+                _make_tool_call_delta(
+                    index=0,
+                    tc_id="call_rejected",
+                    name="terminal",
+                    arguments='{"command":"false"}',
+                )
+            ]),
+            _make_stream_chunk(finish_reason="content_filter"),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        first_delta = MagicMock()
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="anthropic/claude-sonnet-4.6",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call(
+            {}, on_first_delta=first_delta
+        )
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert response.choices[0].message.content is None
+        assert response.choices[0].message.tool_calls is None
+        assert text_deltas == []
+        assert reasoning_deltas == []
+        assert tool_starts == []
+        first_delta.assert_not_called()
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_dynamic_route_gemini_model_discards_filtered_callbacks(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(
+                content="filtered dynamic partial",
+                model="google/gemini-2.5-flash",
+            ),
+            _make_stream_chunk(
+                finish_reason="content_filter",
+                model="google/gemini-2.5-flash",
+            ),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="openrouter/auto",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert text_deltas == []
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_dynamic_route_non_gemini_buffers_callbacks_until_terminal(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        text_deltas = []
+        observed_after_first_chunk = []
+
+        def _claude_chunks():
+            yield _make_stream_chunk(
+                content="hello ",
+                model="anthropic/claude-sonnet-4.6",
+            )
+            observed_after_first_chunk.append(list(text_deltas))
+            yield _make_stream_chunk(
+                content="world",
+                finish_reason="stop",
+                model="anthropic/claude-sonnet-4.6",
+            )
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _claude_chunks()
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="openrouter/auto",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "stop"
+        assert observed_after_first_chunk == [[]]
+        assert text_deltas == ["hello ", "world"]
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_dynamic_route_echoed_auto_stays_buffered_until_terminal(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(
+                content="filtered partial",
+                model="openrouter/auto",
+            ),
+            _make_stream_chunk(
+                finish_reason="content_filter",
+                model="openrouter/auto",
+            ),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+        text_deltas = []
+
+        agent = AIAgent(
+            api_key="test-key",
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            model="openrouter/auto",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        assert response.choices[0].finish_reason == "content_filter"
+        assert text_deltas == []
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_interrupted_gemini_stream_never_emits_buffered_output(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        text_deltas = []
+        agent = AIAgent(
+            api_key="test-key",
+            provider="gemini",
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            model="gemini-2.5-flash",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        def _interrupted_chunks():
+            yield _make_stream_chunk(content="withheld partial")
+            agent._interrupt_requested = True
+            yield _make_stream_chunk(content="never processed")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _interrupted_chunks()
+        mock_create.return_value = mock_client
+
+        with pytest.raises(InterruptedError):
+            agent._interruptible_streaming_api_call({})
+
+        assert text_deltas == []
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
     def test_tool_call_response(self, mock_close, mock_create):
         """Tool call stream accumulates ID, name, and arguments."""
         from run_agent import AIAgent
@@ -140,6 +1010,50 @@ class TestStreamingAccumulator:
         assert tc[0].id == "call_123"
         assert tc[0].function.name == "terminal"
         assert tc[0].function.arguments == '{"command": "ls"}'
+
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_complete_tool_call_with_stop_finish_is_preserved(
+        self, mock_close, mock_create
+    ):
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(
+                tool_calls=[
+                    _make_tool_call_delta(
+                        index=0,
+                        tc_id="call_stop",
+                        name="deals_overview",
+                        arguments='{"status":"active"}',
+                    )
+                ]
+            ),
+            _make_stream_chunk(finish_reason="stop"),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="provider/tool-model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        response = agent._interruptible_streaming_api_call({})
+
+        tool_calls = response.choices[0].message.tool_calls
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "deals_overview"
+        assert json.loads(tool_calls[0].function.arguments) == {
+            "status": "active"
+        }
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
@@ -430,7 +1344,12 @@ class TestStreamingCallbacks:
         chunks = [
             _make_stream_chunk(content="thinking..."),
             _make_stream_chunk(tool_calls=[
-                _make_tool_call_delta(index=0, tc_id="call_abc", name="read_file")
+                _make_tool_call_delta(
+                    index=0,
+                    tc_id="call_abc",
+                    name="read_file",
+                    arguments="{}",
+                )
             ]),
             _make_stream_chunk(content=" more text"),
             _make_stream_chunk(finish_reason="tool_calls"),
@@ -456,7 +1375,7 @@ class TestStreamingCallbacks:
 
         response = agent._interruptible_streaming_api_call({})
 
-        # Text before tool call IS fired (we don't know yet it will have tools)
+        # Accepted callbacks replay in order only after the terminal frame.
         assert "thinking..." in deltas
         # Text after tool call IS still routed to stream_delta_callback so that
         # reasoning tag extraction can fire (PR #3566).  Display-level suppression
@@ -788,28 +1707,79 @@ class TestCodexStreamCallbacks:
             type="response.output_text.delta",
             delta="Hello from Codex!",
         )
+        final_response = SimpleNamespace(
+            output=[SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="Hello from Codex!")],
+            )],
+            status="completed",
+        )
         mock_event_done = SimpleNamespace(
             type="response.completed",
             delta="",
+            response=final_response,
         )
 
         mock_stream = MagicMock()
         mock_stream.__enter__ = MagicMock(return_value=mock_stream)
         mock_stream.__exit__ = MagicMock(return_value=False)
         mock_stream.__iter__ = MagicMock(return_value=iter([mock_event_text, mock_event_done]))
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello from Codex!")],
-            )],
-            status="completed",
-        )
+        mock_stream.get_final_response.return_value = final_response
 
         mock_client = MagicMock()
         mock_client.responses.stream.return_value = mock_stream
 
         response = agent._run_codex_stream({}, client=mock_client)
         assert "Hello from Codex!" in deltas
+
+    def test_codex_failed_terminal_discards_all_callbacks(self):
+        from run_agent import AIAgent
+
+        text_deltas = []
+        reasoning_deltas = []
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://api.openai.com/v1",
+            model="gpt-5-codex",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+        )
+        agent.api_mode = "codex_responses"
+        agent._interrupt_requested = False
+
+        failed_response = SimpleNamespace(
+            status="failed",
+            output=[],
+            usage=None,
+        )
+        events = [
+            SimpleNamespace(
+                type="response.output_text.delta", delta="SECRET_TEXT"
+            ),
+            SimpleNamespace(
+                type="response.reasoning.delta", delta="SECRET_REASONING"
+            ),
+            SimpleNamespace(
+                type="response.failed", response=failed_response
+            ),
+        ]
+        mock_stream = MagicMock()
+        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+        mock_stream.__exit__ = MagicMock(return_value=False)
+        mock_stream.__iter__ = MagicMock(return_value=iter(events))
+        mock_stream.get_final_response.return_value = failed_response
+        mock_client = MagicMock()
+        mock_client.responses.stream.return_value = mock_stream
+
+        with pytest.raises(RuntimeError, match="exact response.completed"):
+            agent._run_codex_stream({}, client=mock_client)
+
+        assert text_deltas == []
+        assert reasoning_deltas == []
 
     def test_codex_stream_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
@@ -836,9 +1806,18 @@ class TestCodexStreamCallbacks:
             type="response.output_text.delta",
             delta=" world",
         )
+        final_response = SimpleNamespace(
+            output=[SimpleNamespace(
+                type="message",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text="Hello world")],
+            )],
+            status="completed",
+        )
         mock_event_done = SimpleNamespace(
             type="response.completed",
             delta="",
+            response=final_response,
         )
 
         mock_stream = MagicMock()
@@ -847,13 +1826,7 @@ class TestCodexStreamCallbacks:
         mock_stream.__iter__ = MagicMock(
             return_value=iter([mock_event_text_1, mock_event_text_2, mock_event_done])
         )
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello world")],
-            )],
-            status="completed",
-        )
+        mock_stream.get_final_response.return_value = final_response
 
         mock_client = MagicMock()
         mock_client.responses.stream.return_value = mock_stream
@@ -918,8 +1891,10 @@ class TestCodexStreamCallbacks:
             SimpleNamespace(
                 type="response.completed",
                 response=SimpleNamespace(
+                    status="completed",
                     output=[SimpleNamespace(
                         type="message",
+                        status="completed",
                         content=[SimpleNamespace(type="output_text", text="Hello")],
                     )]
                 ),
@@ -944,6 +1919,82 @@ class TestCodexStreamCallbacks:
         )
 
         assert touch_calls.count("receiving stream response") == len(events)
+
+
+class TestBedrockStreamCallbacks:
+    @pytest.mark.parametrize(
+        ("stop_reason", "accepted"),
+        [("tool_use", True), ("guardrail_intervened", False)],
+    )
+    def test_callbacks_require_accepted_terminal(self, stop_reason, accepted):
+        from run_agent import AIAgent
+
+        raw_response = {
+            "stream": [
+                {"contentBlockDelta": {"delta": {"text": "BEDROCK_TEXT"}}},
+                {
+                    "contentBlockDelta": {
+                        "delta": {
+                            "reasoningContent": {"text": "BEDROCK_REASONING"}
+                        }
+                    }
+                },
+                {
+                    "contentBlockStart": {
+                        "start": {
+                            "toolUse": {
+                                "toolUseId": "tool-1",
+                                "name": "terminal",
+                            }
+                        }
+                    }
+                },
+                {
+                    "contentBlockDelta": {
+                        "delta": {"toolUse": {"input": '{"command":"pwd"}'}}
+                    }
+                },
+                {"contentBlockStop": {}},
+                {"messageStop": {"stopReason": stop_reason}},
+            ]
+        }
+        runtime_client = MagicMock()
+        runtime_client.converse_stream.return_value = raw_response
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        agent = AIAgent(
+            api_key="test-key",
+            provider="bedrock",
+            model="anthropic.claude-test",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "bedrock_converse"
+        agent._interrupt_requested = False
+
+        with patch(
+            "agent.bedrock_adapter._get_bedrock_runtime_client",
+            return_value=runtime_client,
+        ):
+            response = agent._interruptible_streaming_api_call(
+                {"__bedrock_region__": "us-east-1"}
+            )
+
+        if accepted:
+            assert response.choices[0].finish_reason == "tool_calls"
+            assert text_deltas == ["BEDROCK_TEXT"]
+            assert reasoning_deltas == ["BEDROCK_REASONING"]
+            assert tool_starts == ["terminal"]
+        else:
+            assert response.choices[0].finish_reason == "content_filter"
+            assert text_deltas == []
+            assert reasoning_deltas == []
+            assert tool_starts == []
 
 
 class TestAnthropicStreamCallbacks:
@@ -999,6 +2050,80 @@ class TestAnthropicStreamCallbacks:
 
         assert touch_calls.count("receiving stream response") == len(events)
 
+    @pytest.mark.parametrize(
+        ("stop_reason", "accepted"),
+        [("tool_use", True), ("refusal", False)],
+    )
+    def test_callbacks_require_accepted_terminal(self, stop_reason, accepted):
+        from run_agent import AIAgent
+
+        text_deltas = []
+        reasoning_deltas = []
+        tool_starts = []
+        agent = AIAgent(
+            api_key="test-key",
+            provider="anthropic",
+            model="claude-test",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=text_deltas.append,
+            reasoning_callback=reasoning_deltas.append,
+            tool_gen_callback=tool_starts.append,
+        )
+        agent.api_mode = "anthropic_messages"
+        agent._interrupt_requested = False
+
+        events = [
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text="ANTHROPIC_TEXT"),
+            ),
+            SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(
+                    type="thinking_delta", thinking="ANTHROPIC_REASONING"
+                ),
+            ),
+            SimpleNamespace(
+                type="content_block_start",
+                content_block=SimpleNamespace(type="tool_use", name="terminal"),
+            ),
+        ]
+        final_message = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="text", text="ANTHROPIC_TEXT"),
+                SimpleNamespace(type="thinking", thinking="ANTHROPIC_REASONING"),
+                SimpleNamespace(
+                    type="tool_use",
+                    id="tool-1",
+                    name="terminal",
+                    input={"command": "pwd"},
+                ),
+            ],
+            stop_reason=stop_reason,
+        )
+        mock_stream = MagicMock()
+        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+        mock_stream.__exit__ = MagicMock(return_value=False)
+        mock_stream.__iter__ = MagicMock(return_value=iter(events))
+        mock_stream.get_final_message.return_value = final_message
+        agent._anthropic_client = MagicMock()
+        agent._anthropic_client.messages.stream.return_value = mock_stream
+
+        response = agent._interruptible_streaming_api_call({})
+
+        if accepted:
+            assert response.stop_reason == "tool_use"
+            assert text_deltas == ["ANTHROPIC_TEXT"]
+            assert reasoning_deltas == ["ANTHROPIC_REASONING"]
+            assert tool_starts == ["terminal"]
+        else:
+            assert response.stop_reason == "refusal"
+            assert text_deltas == []
+            assert reasoning_deltas == []
+            assert tool_starts == []
+
 
 class TestPartialToolCallWarning:
     """Regression: when a stream dies mid tool-call argument generation after
@@ -1018,10 +2143,9 @@ class TestPartialToolCallWarning:
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_partial_tool_call_surfaces_warning(self, mock_close, mock_create):
-        """Stream with text + partial tool-call name + mid-stream error
-        produces a stub whose content contains the user-visible warning
-        and whose tool_calls is None."""
+    def test_partial_tool_call_is_withheld_and_structured_incomplete(
+        self, mock_close, mock_create
+    ):
         from run_agent import AIAgent
 
         class _StallError(RuntimeError):
@@ -1054,7 +2178,6 @@ class TestPartialToolCallWarning:
 
         fired_deltas: list = []
         agent._fire_stream_delta = lambda text: fired_deltas.append(text)
-        agent._current_streamed_assistant_text = "Let me write the audit: "
 
         import os as _os
         _prev = _os.environ.get("ELEVATE_STREAM_RETRIES")
@@ -1067,28 +2190,18 @@ class TestPartialToolCallWarning:
             else:
                 _os.environ["ELEVATE_STREAM_RETRIES"] = _prev
 
-        content = response.choices[0].message.content or ""
-        assert "Let me write the audit:" in content, (
-            f"Partial text not preserved in stub: {content!r}"
-        )
-        assert "Stream stalled mid tool-call" in content, (
-            f"Stub content is missing the dropped-tool-call warning; users "
-            f"get silent failure.  Got content={content!r}"
-        )
-        assert "write_file" in content, (
-            f"Warning should name the dropped tool. Got: {content!r}"
-        )
+        assert response.choices[0].finish_reason == "incomplete"
+        assert response.choices[0].message.content is None
         assert response.choices[0].message.tool_calls is None
-        assert any("Stream stalled mid tool-call" in d for d in fired_deltas), (
-            f"Warning was not surfaced as a live stream delta. "
-            f"fired_deltas={fired_deltas}"
-        )
+        assert response._elevate_stream_output_withheld is True
+        assert "write_file" in response._elevate_stream_incomplete_error
+        assert fired_deltas == []
 
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_partial_text_only_no_warning(self, mock_close, mock_create):
-        """Text-only partial stream (no tool call mid-flight) keeps the
-        pre-fix behaviour: bare recovered text, no warning noise."""
+    def test_partial_text_only_is_withheld_without_terminal(
+        self, mock_close, mock_create
+    ):
         from run_agent import AIAgent
 
         class _StallError(RuntimeError):
@@ -1112,7 +2225,6 @@ class TestPartialToolCallWarning:
         )
         agent.api_mode = "chat_completions"
         agent._interrupt_requested = False
-        agent._current_streamed_assistant_text = "Here's my answer so far"
 
         import os as _os
         _prev = _os.environ.get("ELEVATE_STREAM_RETRIES")
@@ -1125,24 +2237,13 @@ class TestPartialToolCallWarning:
             else:
                 _os.environ["ELEVATE_STREAM_RETRIES"] = _prev
 
-        content = response.choices[0].message.content or ""
-        assert content == "Here's my answer so far", (
-            f"Pre-fix behaviour regressed for text-only partial streams: {content!r}"
-        )
-        assert "Stream stalled" not in content, (
-            f"Unexpected warning on text-only partial stream: {content!r}"
-        )
+        assert response.choices[0].finish_reason == "incomplete"
+        assert response.choices[0].message.content is None
+        assert response._elevate_stream_output_withheld is True
 
 
 class TestSilentRetryMidToolCall:
-    """Regression: when the stream dies mid tool-call JSON after text was
-    already delivered, we previously stubbed the turn with a "retry manually"
-    warning.  Now: if the error is a transient connection error AND a tool
-    call was in flight, silently retry the stream (the user sees a brief
-    reconnect marker + duplicated preamble, which is strictly better than
-    a lost action).  If no tool call was in flight, or the error isn't
-    transient, the existing stub-with-warning behaviour is preserved.
-    """
+    """Unaccepted stream output is private, so transient retries are safe."""
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
@@ -1229,11 +2330,8 @@ class TestSilentRetryMidToolCall:
             else _tc0.function.name
         )
         assert _name == "write_file"
-        # User saw a reconnect marker between attempts.
-        assert any("reconnecting" in d.lower() for d in fired_deltas), (
-            f"Expected a reconnect marker delta, fired_deltas={fired_deltas}"
-        )
-        # Stub-path warning must NOT appear (this was the whole point).
+        # The failed attempt was never published; only accepted output appears.
+        assert fired_deltas == ["Let me write the audit: "]
         joined = "".join(fired_deltas)
         assert "Stream stalled" not in joined, (
             f"Stub-path warning leaked into silent-retry path: {joined!r}"
@@ -1242,12 +2340,10 @@ class TestSilentRetryMidToolCall:
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_silent_retry_exhausted_falls_back_to_stub(
+    def test_silent_retry_exhausted_returns_withheld_incomplete(
         self, mock_close, mock_create, mock_replace,
     ):
-        """When all retry attempts fail with connection errors, fall back
-        to the original stub-with-warning behaviour so the user isn't left
-        with zero signal."""
+        """Exhausted retries stay structured without publishing ghost output."""
         from run_agent import AIAgent
         import httpx as _httpx
 
@@ -1287,22 +2383,19 @@ class TestSilentRetryMidToolCall:
             else:
                 _os.environ["ELEVATE_STREAM_RETRIES"] = _prev
 
-        # After retries exhaust, the stub-with-warning path must engage.
-        content = response.choices[0].message.content or ""
-        assert "Stream stalled mid tool-call" in content, (
-            f"Exhausted-retry fallback dropped the user-visible warning: {content!r}"
-        )
+        assert response.choices[0].finish_reason == "incomplete"
+        assert response.choices[0].message.content is None
         assert response.choices[0].message.tool_calls is None
+        assert "write_file" in response._elevate_stream_incomplete_error
+        assert fired_deltas == []
 
     @patch("run_agent.AIAgent._replace_primary_openai_client")
     @patch("run_agent.AIAgent._create_request_openai_client")
     @patch("run_agent.AIAgent._close_request_openai_client")
-    def test_no_silent_retry_for_text_only_stall(
+    def test_text_only_stall_retries_while_output_is_unpublished(
         self, mock_close, mock_create, mock_replace,
     ):
-        """Text-only stall (no tool call in flight) must NOT trigger silent
-        retry — that's the case where the user saw the model's text reply
-        and retrying would duplicate it with no benefit."""
+        """Text-only provisional output can retry without duplication."""
         from run_agent import AIAgent
         import httpx as _httpx
 
@@ -1330,7 +2423,6 @@ class TestSilentRetryMidToolCall:
         )
         agent.api_mode = "chat_completions"
         agent._interrupt_requested = False
-        agent._current_streamed_assistant_text = "Here's my answer so far"
 
         import os as _os
         _prev = _os.environ.get("ELEVATE_STREAM_RETRIES")
@@ -1343,15 +2435,7 @@ class TestSilentRetryMidToolCall:
             else:
                 _os.environ["ELEVATE_STREAM_RETRIES"] = _prev
 
-        # Only one attempt: text-only stall short-circuits retry.
-        assert attempts["n"] == 1, (
-            f"Text-only stall should not silent-retry, got {attempts['n']} attempts"
-        )
-        content = response.choices[0].message.content or ""
-        assert content == "Here's my answer so far", (
-            f"Text-only stall regressed: {content!r}"
-        )
-        assert "Stream stalled" not in content, (
-            f"Text-only stall should not emit tool-call warning: {content!r}"
-        )
-
+        assert attempts["n"] == 3
+        assert response.choices[0].finish_reason == "incomplete"
+        assert response.choices[0].message.content is None
+        assert response._elevate_stream_output_withheld is True

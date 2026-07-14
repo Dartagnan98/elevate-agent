@@ -69,6 +69,7 @@ export function LeadsOnboardingWizard({
   updateField,
   onAdvanceSave,
   onFinish,
+  onClose,
   saving,
   completing,
   error,
@@ -83,6 +84,7 @@ export function LeadsOnboardingWizard({
   updateField: <K extends keyof LeadsSetupDraft>(key: K, value: LeadsSetupDraft[K]) => void;
   onAdvanceSave: () => Promise<void>;
   onFinish: () => Promise<void>;
+  onClose: () => void;
   saving: boolean;
   completing: boolean;
   error: string | null;
@@ -163,6 +165,14 @@ export function LeadsOnboardingWizard({
     setShowMissing(false);
   }, [stepIdx]);
 
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
+
   const handleNext = useCallback(async () => {
     if (busy) return;
     if (!canAdvance) {
@@ -195,17 +205,22 @@ export function LeadsOnboardingWizard({
       <div className="onboarding-aurora-bg pointer-events-none fixed inset-0" aria-hidden />
       <div className="relative flex min-h-full items-center justify-center px-6 py-10">
        <div className="relative flex w-full max-w-3xl flex-col">
-        <div className="mb-7 flex items-center gap-1.5">
-          {LEADS_WIZARD_STEPS.map((s, idx) => (
-            <span
-              key={s.id}
-              aria-hidden
-              className={cn(
-                "h-1 flex-1 rounded-sm transition-colors duration-300",
-                idx <= stepIdx ? "bg-primary" : "bg-border/60",
-              )}
-            />
-          ))}
+        <div className="mb-7 flex items-center gap-4">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+            Back to CRM
+          </Button>
+          <div className="flex flex-1 items-center gap-1.5">
+            {LEADS_WIZARD_STEPS.map((s, idx) => (
+              <span
+                key={s.id}
+                aria-hidden
+                className={cn(
+                  "h-1 flex-1 rounded-sm transition-colors duration-300",
+                  idx <= stepIdx ? "bg-primary" : "bg-border/60",
+                )}
+              />
+            ))}
+          </div>
         </div>
 
         <div key={stepIdx} className="flex flex-col">

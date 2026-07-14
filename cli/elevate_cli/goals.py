@@ -100,9 +100,9 @@ JUDGE_SYSTEM_PROMPT = (
     "the goal is fully satisfied based on that response.\n\n"
     "A goal is DONE only when:\n"
     "- The response explicitly confirms the goal was completed, OR\n"
-    "- The response clearly shows the final deliverable was produced, OR\n"
-    "- The response explains the goal is unachievable / blocked / needs "
-    "user input (treat this as DONE with reason describing the block).\n\n"
+    "- The response clearly shows the final deliverable was produced.\n\n"
+    "A goal that is unachievable, blocked, or needs user input is NOT DONE. "
+    "Return done=false and describe the blocker in reason.\n\n"
     "Otherwise the goal is NOT done — CONTINUE.\n\n"
     "Reply ONLY with a single JSON object on one line:\n"
     '{\"done\": <true|false>, \"reason\": \"<one-sentence rationale>\"}'
@@ -150,7 +150,7 @@ class GoalState:
     max_turns: int = DEFAULT_MAX_TURNS
     created_at: float = 0.0
     last_turn_at: float = 0.0
-    last_verdict: Optional[str] = None        # "done" | "continue" | "skipped"
+    last_verdict: Optional[str] = None  # done | continue | blocked | skipped
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
@@ -311,7 +311,25 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "… [truncated]"
 
 
-_JSON_OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
+_UNACHIEVED_REASON_RE = re.compile(
+    r"\bblocked\b"
+    r"|\bunachievable\b"
+    r"|\bneeds[-_]user[-_]input\b"
+    r"|\b(?:cannot|can't|unable to)\s+(?:continue|proceed|complete)\b"
+    r"|\b(?:needs?|requires?|awaiting|waiting for)\s+"
+    r"(?:(?:additional|the)\s+)?(?:user(?:'s)?\s+)?"
+    r"(?:input|confirmation|approval|clarification|action)\b"
+    r"|\b(?:needs?|requires?|awaiting|waiting for)\s+"
+    r"(?:input|confirmation|approval|clarification|action)\s+from\s+"
+    r"(?:the\s+)?user\b"
+    r"|\bwaiting\s+(?:on|for)\s+(?:the\s+)?user\b",
+    re.IGNORECASE,
+)
+
+
+def _reason_indicates_unachieved(reason: str) -> bool:
+    """Return true for judge rationales that explicitly describe a blocker."""
+    return bool(_UNACHIEVED_REASON_RE.search(reason or ""))
 
 
 def _goal_judge_max_tokens() -> int:
@@ -352,38 +370,51 @@ def _parse_judge_response(raw: str) -> Tuple[bool, str, bool]:
 
     text = raw.strip()
 
-    # Strip markdown code fences the model may wrap JSON in.
+    # Accept one complete JSON code fence, but never hunt for an object inside
+    # prose. A refusal or caveat followed by example JSON is not a verdict.
     if text.startswith("```"):
-        text = text.strip("`")
-        # Peel off leading json/JSON/etc tag
-        nl = text.find("\n")
-        if nl != -1:
-            text = text[nl + 1:]
+        lines = text.splitlines()
+        opening = lines[0].strip().lower() if lines else ""
+        if (
+            len(lines) < 3
+            or opening not in {"```", "```json"}
+            or lines[-1].strip() != "```"
+        ):
+            return (
+                False,
+                f"judge reply was not JSON: {_truncate(raw, 200)!r}",
+                True,
+            )
+        text = "\n".join(lines[1:-1]).strip()
 
-    # First try: parse the whole blob.
-    data: Optional[Dict[str, Any]] = None
     try:
         data = json.loads(text)
     except Exception:
-        # Second try: pull the first JSON object out.
-        match = _JSON_OBJECT_RE.search(text)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:
-                data = None
+        data = None
 
     if not isinstance(data, dict):
         return False, f"judge reply was not JSON: {_truncate(raw, 200)!r}", True
 
     done_val = data.get("done")
-    if isinstance(done_val, str):
-        done = done_val.strip().lower() in {"true", "yes", "1", "done"}
-    else:
-        done = bool(done_val)
-    reason = str(data.get("reason") or "").strip()
-    if not reason:
-        reason = "no reason provided"
+    if type(done_val) is not bool:
+        return (
+            False,
+            "judge reply field 'done' must be a boolean, got "
+            f"{type(done_val).__name__}",
+            True,
+        )
+    reason_val = data.get("reason")
+    if type(reason_val) is not str or not reason_val.strip():
+        return (
+            False,
+            "judge reply field 'reason' must be a nonempty string, got "
+            f"{type(reason_val).__name__}",
+            True,
+        )
+    reason = reason_val.strip()
+    done = done_val
+    if done and _reason_indicates_unachieved(reason):
+        done = False
     return done, reason, False
 
 
@@ -397,7 +428,8 @@ def judge_goal(
     """Ask the auxiliary model whether the goal is satisfied.
 
     Returns ``(verdict, reason, parse_failed)`` where verdict is ``"done"``,
-    ``"continue"``, or ``"skipped"`` (when the judge couldn't be reached).
+    ``"continue"``, ``"blocked"``, or ``"skipped"`` (when the judge
+    couldn't be reached).
 
     ``parse_failed`` is True only when the judge call succeeded but its output
     was unusable (empty or non-JSON). API/transport errors return False — they
@@ -421,7 +453,11 @@ def judge_goal(
         return "continue", "empty response (nothing to evaluate)", False
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            _validate_llm_response,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
         return "continue", "auxiliary client unavailable", False
@@ -456,7 +492,7 @@ def judge_goal(
         )
 
     try:
-        resp = client.chat.completions.create(
+        raw_resp = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
@@ -467,17 +503,63 @@ def judge_goal(
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
         )
+
+        # This judge has no tools. Inspect terminal state and reject any tool
+        # calls before generic response normalization can accept their content
+        # or turn the violation into an opaque transport error.
+        raw_choice = raw_resp.choices[0]
+        finish_reason = getattr(raw_choice, "finish_reason", None)
+        if not (
+            isinstance(finish_reason, str)
+            and finish_reason.strip().lower() == "stop"
+        ):
+            normalized_reason = (
+                finish_reason.strip().lower()
+                if isinstance(finish_reason, str) and finish_reason.strip()
+                else "missing"
+            )
+            logger.info(
+                "goal judge: non-terminal response (%s) — continuing",
+                normalized_reason,
+            )
+            return (
+                "continue",
+                f"judge response incomplete ({normalized_reason})",
+                True,
+            )
+
+        raw_message = raw_choice.message
+        if getattr(raw_message, "tool_calls", None):
+            logger.info(
+                "goal judge: rejected unexpected tool calls from no-tool judge"
+            )
+            return (
+                "continue",
+                "judge response rejected unexpected tool calls",
+                True,
+            )
+
+        resp = _validate_llm_response(raw_resp, "goal_judge")
     except Exception as exc:
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
         return "continue", f"judge error: {type(exc).__name__}", False
 
+    choice = resp.choices[0]
     try:
-        raw = resp.choices[0].message.content or ""
+        message = choice.message
+    except Exception:
+        message = None
+
+    try:
+        raw = (message.content or "") if message is not None else ""
     except Exception:
         raw = ""
 
     done, reason, parse_failed = _parse_judge_response(raw)
-    verdict = "done" if done else "continue"
+    if _reason_indicates_unachieved(reason):
+        verdict = "blocked"
+    else:
+        verdict = "done" if done else "continue"
     logger.info("goal judge: verdict=%s reason=%s", verdict, _truncate(reason, 120))
     return verdict, reason, parse_failed
 
@@ -652,7 +734,7 @@ class GoalManager:
           - ``status``: current goal status after update
           - ``should_continue``: bool — caller should fire another turn
           - ``continuation_prompt``: str or None
-          - ``verdict``: "done" | "continue" | "skipped" | "inactive"
+          - ``verdict``: done | continue | blocked | skipped | inactive
           - ``reason``: str
           - ``message``: user-visible one-liner to print/send
         """
@@ -674,6 +756,13 @@ class GoalManager:
         verdict, reason, parse_failed = judge_goal(
             state.goal, last_response, subgoals=state.subgoals or None
         )
+        if (
+            verdict in {"done", "continue"}
+            and _reason_indicates_unachieved(reason)
+        ):
+            # Defense in depth: malformed/custom judges must never turn a
+            # blocker into durable success or a user-visible Goal achieved.
+            verdict = "blocked"
         state.last_verdict = verdict
         state.last_reason = reason
 
@@ -684,6 +773,22 @@ class GoalManager:
             state.consecutive_parse_failures += 1
         else:
             state.consecutive_parse_failures = 0
+
+        if verdict == "blocked":
+            state.status = "paused"
+            state.paused_reason = reason
+            save_goal(self.session_id, state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "blocked",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — blocked or needs user input: {reason}. "
+                    "Use /goal resume after the blocker is resolved."
+                ),
+            }
 
         if verdict == "done":
             state.status = "done"

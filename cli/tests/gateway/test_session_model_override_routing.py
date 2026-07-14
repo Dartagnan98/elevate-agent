@@ -56,6 +56,10 @@ def _make_runner():
     runner._session_model_overrides = {}
     runner._pending_model_notes = {}
     runner._pending_approvals = {}
+    runner._pending_platform_delegates = {}
+    runner._pending_platform_delegates_lock = threading.Lock()
+    runner._pending_cron_context = {}
+    runner._pending_cron_context_lock = threading.Lock()
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)
@@ -121,6 +125,46 @@ def test_run_agent_prefers_session_override_over_global_runtime(monkeypatch):
     assert _CapturingAgent.last_init["api_mode"] == "codex_responses"
     assert _CapturingAgent.last_init["base_url"] == "https://chatgpt.com/backend-api/codex"
     assert _CapturingAgent.last_init["api_key"] == "***"
+
+
+def test_run_agent_runtime_auth_failure_is_explicit_and_not_success(monkeypatch):
+    """Credential/runtime resolution failures must survive every truth predicate."""
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+
+    runner = _make_runner()
+    runner._resolve_session_agent_runtime = MagicMock(
+        side_effect=RuntimeError("bad credentials")
+    )
+    source = SessionSource(
+        platform=Platform.LOCAL,
+        chat_id="cli",
+        chat_name="CLI",
+        chat_type="dm",
+        user_id="user-1",
+    )
+
+    result = asyncio.run(
+        runner._run_agent(
+            message="ping",
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-1",
+            session_key="agent:main:local:dm",
+        )
+    )
+
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert result["interrupted"] is False
+    assert result["needs_input"] is False
+    assert result["partial"] is False
+    assert result["pending"] is False
+    assert result["pending_tool_obligations"] == []
+    assert "bad credentials" in result["error"]
+    assert gateway_run.agent_result_succeeded(result) is False
+    assert gateway_run._should_suppress_transcript_growth(result) is False
 
 
 @pytest.mark.asyncio

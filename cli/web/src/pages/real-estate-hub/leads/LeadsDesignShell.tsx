@@ -14,8 +14,10 @@ export function LeadsDesignShell() {
   const leadsSetup = useLeadsSetup();
   const [forceOnboarding, setForceOnboarding] = useState(false);
   const setupSnapshot = leadsSetup.setup;
-  const showOnboarding =
-    !leadsSetup.loading && !!setupSnapshot && (!setupSnapshot.complete || forceOnboarding);
+  // Setup belongs inside the CRM, but it must not become a full-screen gate.
+  // Realtors can inspect the live/empty board first and open setup deliberately.
+  const showOnboarding = !leadsSetup.loading && !!setupSnapshot && forceOnboarding;
+  const setupIncomplete = !leadsSetup.loading && Boolean(setupSnapshot && !setupSnapshot.complete);
 
   const rootAttrs = {
     "data-accent": "graphite" as const,
@@ -29,6 +31,30 @@ export function LeadsDesignShell() {
   return (
     <div className="app leads-design-embedded" {...rootAttrs}>
       <HubDataErrorBanner className="mb-3" data={data} />
+      {leadsSetup.error && !setupSnapshot && (
+        <div className="lb-replies-empty lb-crm-error leads-setup-load-error" role="alert">
+          <span>Source setup is unavailable. {leadsSetup.error}</span>
+          <button
+            type="button"
+            className="lb-btn"
+            disabled={leadsSetup.loading}
+            onClick={() => void leadsSetup.refresh()}
+          >
+            {leadsSetup.loading ? "Retrying…" : "Retry source setup"}
+          </button>
+        </div>
+      )}
+      {setupIncomplete && !showOnboarding && (
+        <div className="leads-setup-inline" role="status">
+          <div>
+            <strong>Lead source setup is incomplete</strong>
+            <span>The CRM remains available. Connect a source before expecting live conversation profiles or outreach drafts.</span>
+          </div>
+          <button type="button" className="lb-btn" onClick={() => setForceOnboarding(true)}>
+            Open source setup
+          </button>
+        </div>
+      )}
       {showOnboarding && setupSnapshot ? (
         <div className="leads-onboarding-wrap">
           <LeadsSetupLaunch
@@ -46,13 +72,22 @@ export function LeadsDesignShell() {
           pipeline={boardData.pipeline}
           kpis={boardData.kpis}
           templates={boardData.templates}
+          templatesState={boardData.templatesState}
           sent={boardData.sent}
+          sentState={boardData.sentState}
+          draftSendNotices={boardData.draftSendNotices}
+          loading={data.loading || data.refreshing}
+          error={data.error}
           debugNote={boardData.debugNote}
           onDraftAction={boardData.handleDraftAction}
           onDraftActionComplete={boardData.handleDraftActionComplete}
           onProfileFavoriteChange={boardData.handleProfileFavoriteChange}
           onProfileStatusChange={boardData.handleProfileStatusChange}
-          onReRunOnboarding={() => setForceOnboarding(true)}
+          onReRunOnboarding={leadsSetup.loading
+            ? undefined
+            : setupSnapshot
+              ? () => setForceOnboarding(true)
+              : () => void leadsSetup.refresh()}
           onRefresh={() => void data.refresh({ force: true })}
           templateMutations={boardData.templateMutations}
           onSentRefresh={boardData.refreshSent}

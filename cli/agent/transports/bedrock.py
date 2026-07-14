@@ -83,7 +83,9 @@ class BedrockTransport(ProviderTransport):
 
         choice = ns.choices[0]
         msg = choice.message
-        finish_reason = choice.finish_reason or "stop"
+        # The adapter preserves whether Bedrock actually emitted a known
+        # stopReason.  Do not promote a missing normalized reason to success.
+        finish_reason = choice.finish_reason or "error"
 
         tool_calls = None
         if msg.tool_calls:
@@ -113,6 +115,11 @@ class BedrockTransport(ProviderTransport):
             finish_reason=finish_reason,
             reasoning=reasoning,
             usage=usage,
+            provider_data=(
+                {"had_tool_intent": True}
+                if getattr(ns, "_elevate_had_tool_intent", False)
+                else None
+            ),
         )
 
     def validate_response(self, response: Any) -> bool:
@@ -145,7 +152,7 @@ class BedrockTransport(ProviderTransport):
             "guardrail_intervened": "content_filter",
             "content_filtered": "content_filter",
         }
-        return _MAP.get(raw_reason, "stop")
+        return _MAP.get(raw_reason, "error")
 
 
 # Auto-register on import

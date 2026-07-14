@@ -107,6 +107,14 @@ from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_
 logger = logging.getLogger(__name__)
 
 
+class AuxiliaryResponseRejectedError(Exception):
+    """The provider returned a terminal response that must not be consumed."""
+
+
+class AuxiliaryResponseValidationError(Exception):
+    """The provider returned a malformed response object."""
+
+
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
     """Return False instead of raising when a patched symbol is not a type."""
     try:
@@ -852,6 +860,30 @@ class _CodexCompletionsAdapter:
             collected_output_items: List[Any] = []
             collected_text_deltas: List[str] = []
             has_function_calls = False
+            terminal_event_type: Optional[str] = None
+            terminal_event_response: Any = None
+            terminal_event_conflict = False
+            post_terminal_output = False
+
+            def _item_get(obj: Any, key: str, default: Any = None) -> Any:
+                val = getattr(obj, key, None)
+                if val is None and isinstance(obj, dict):
+                    val = obj.get(key, default)
+                return val if val is not None else default
+
+            def _response_status(obj: Any) -> str:
+                status = _item_get(obj, "status", "")
+                return status.strip().lower() if isinstance(status, str) else ""
+
+            def _has_confirmed_completed_terminal() -> bool:
+                return (
+                    terminal_event_type == "response.completed"
+                    and terminal_event_response is not None
+                    and not terminal_event_conflict
+                    and not post_terminal_output
+                    and _response_status(terminal_event_response) == "completed"
+                )
+
             if total_timeout:
                 timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
                 timeout_timer.daemon = True
@@ -865,9 +897,26 @@ class _CodexCompletionsAdapter:
                         # the inactivity window so a slow-but-working summary is
                         # never killed. Only true silence trips the guard.
                         last_activity[0] = time.monotonic()
-                        _etype = getattr(_event, "type", "")
+                        _etype = _item_get(_event, "type", "")
+                        _is_terminal_event = _etype in {
+                            "response.completed",
+                            "response.incomplete",
+                            "response.failed",
+                        }
+                        if terminal_event_type is not None:
+                            if _is_terminal_event:
+                                terminal_event_conflict = True
+                                continue
+                            if (
+                                _etype.startswith("response.output")
+                                or _etype.startswith("response.content_part")
+                                or _etype.startswith("response.reasoning")
+                                or "function_call" in _etype
+                            ):
+                                post_terminal_output = True
+                                continue
                         if _etype == "response.output_item.done":
-                            _done = getattr(_event, "item", None)
+                            _done = _item_get(_event, "item")
                             if _done is not None:
                                 collected_output_items.append(_done)
                         elif "output_text.delta" in _etype:
@@ -876,8 +925,17 @@ class _CodexCompletionsAdapter:
                                 collected_text_deltas.append(_delta)
                         elif "function_call" in _etype:
                             has_function_calls = True
+                        if _is_terminal_event:
+                            terminal_event_type = _etype
+                            terminal_event_response = _item_get(_event, "response")
+                    if terminal_event_conflict or post_terminal_output:
+                        raise AuxiliaryResponseRejectedError(
+                            "Codex auxiliary stream emitted output or a second "
+                            "terminal event after completion"
+                        )
                     _check_cancelled()
-                    final = stream.get_final_response()
+                    sdk_final = stream.get_final_response()
+                    final = sdk_final
                 except TypeError as stream_exc:
                     # Some Codex Responses streams finish with response.output
                     # set to None, which the SDK parser cannot iterate. If we
@@ -886,6 +944,7 @@ class _CodexCompletionsAdapter:
                     # chat-completions-shaped response.
                     if (
                         "'NoneType' object is not iterable" in str(stream_exc)
+                        and _has_confirmed_completed_terminal()
                         and (
                             collected_output_items
                             or (collected_text_deltas and not has_function_calls)
@@ -895,13 +954,36 @@ class _CodexCompletionsAdapter:
                             "Codex auxiliary: recovering from empty final response.output "
                             "using streamed events",
                         )
-                        final = SimpleNamespace(output=[], usage=None)
+                        final = terminal_event_response
+                        if isinstance(final, dict):
+                            final = SimpleNamespace(**final)
                     else:
                         raise
 
+            if _has_confirmed_completed_terminal():
+                if _response_status(final) != "completed":
+                    raise AuxiliaryResponseRejectedError(
+                        "Codex auxiliary SDK final response disagreed with "
+                        "the completed terminal event"
+                    )
+                # The completed event is the authoritative response. Never let
+                # the SDK accumulator inject output that was not accepted by
+                # that terminal envelope.
+                final = terminal_event_response
+                if isinstance(final, dict):
+                    final = SimpleNamespace(**final)
+
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
+            if _output is None and _has_confirmed_completed_terminal():
+                final.output = []
+                _output = final.output
+            if (
+                isinstance(_output, list)
+                and not _output
+                and _has_confirmed_completed_terminal()
+                and _response_status(final) == "completed"
+            ):
                 if collected_output_items:
                     final.output = list(collected_output_items)
                     logger.debug(
@@ -922,31 +1004,73 @@ class _CodexCompletionsAdapter:
                         len(collected_text_deltas), len(assembled),
                     )
 
-            # Extract text and tool calls from the Responses output.
-            # Items may be SDK objects (attrs) or dicts (raw/fallback paths),
-            # so use a helper that handles both shapes.
-            def _item_get(obj: Any, key: str, default: Any = None) -> Any:
-                val = getattr(obj, key, None)
-                if val is None and isinstance(obj, dict):
-                    val = obj.get(key, default)
-                return val if val is not None else default
-
+            # Extract output only after retaining the provider's top-level and
+            # per-item terminal proof.  Tool batches are atomic: one malformed,
+            # incomplete, or unconfirmed item suppresses every sibling call.
+            final_status = _response_status(final)
+            raw_tool_item_seen = False
+            invalid_tool_batch = False
+            incomplete_output_item = False
             for item in getattr(final, "output", []):
                 item_type = _item_get(item, "type")
+                item_status = _response_status(item)
+                if item_status in {"queued", "in_progress", "incomplete"}:
+                    incomplete_output_item = True
                 if item_type == "message":
+                    if item_status != "completed":
+                        incomplete_output_item = True
+                        continue
                     for part in (_item_get(item, "content") or []):
                         ptype = _item_get(part, "type")
                         if ptype in {"output_text", "text"}:
                             text_parts.append(_item_get(part, "text", ""))
-                elif item_type == "function_call":
+                elif item_type in {"function_call", "custom_tool_call"}:
+                    raw_tool_item_seen = True
+                    if item_status != "completed":
+                        invalid_tool_batch = True
+                        continue
+                    arguments_key = (
+                        "arguments" if item_type == "function_call" else "input"
+                    )
                     tool_calls_raw.append(SimpleNamespace(
                         id=_item_get(item, "call_id", ""),
                         type="function",
                         function=SimpleNamespace(
                             name=_item_get(item, "name", ""),
-                            arguments=_item_get(item, "arguments", "{}"),
+                            arguments=_item_get(item, arguments_key, "{}"),
                         ),
                     ))
+
+            confirmed_completed_terminal = _has_confirmed_completed_terminal()
+            if not confirmed_completed_terminal:
+                tool_calls_raw = []
+                auxiliary_finish_reason = (
+                    "error"
+                    if terminal_event_conflict
+                    or post_terminal_output
+                    or terminal_event_type == "response.failed"
+                    else "incomplete"
+                )
+            elif incomplete_output_item:
+                tool_calls_raw = []
+                auxiliary_finish_reason = "incomplete"
+            elif raw_tool_item_seen and (
+                invalid_tool_batch
+                or final_status != "completed"
+            ):
+                tool_calls_raw = []
+                auxiliary_finish_reason = "error"
+            elif tool_calls_raw:
+                auxiliary_finish_reason = "tool_calls"
+            elif final_status == "completed":
+                auxiliary_finish_reason = "stop"
+            elif final_status in {"failed", "cancelled"}:
+                auxiliary_finish_reason = "error"
+            else:
+                auxiliary_finish_reason = "incomplete"
+
+            if auxiliary_finish_reason in {"error", "incomplete"}:
+                text_parts = []
 
             resp_usage = getattr(final, "usage", None)
             if resp_usage:
@@ -975,7 +1099,7 @@ class _CodexCompletionsAdapter:
         choice = SimpleNamespace(
             index=0,
             message=message,
-            finish_reason="stop" if not tool_calls_raw else "tool_calls",
+            finish_reason=auxiliary_finish_reason,
         )
         return SimpleNamespace(
             choices=[choice],
@@ -4671,7 +4795,7 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     See #7264.
     """
     if response is None:
-        raise RuntimeError(
+        raise AuxiliaryResponseValidationError(
             f"Auxiliary {task or 'call'}: LLM returned None response"
         )
     # Allow SimpleNamespace responses from adapters (CodexAuxiliaryClient,
@@ -4682,13 +4806,112 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
             raise AttributeError("missing choices[0].message")
     except (AttributeError, TypeError, IndexError) as exc:
         response_type = type(response).__name__
-        response_preview = str(response)[:120]
-        raise RuntimeError(
+        raise AuxiliaryResponseValidationError(
             f"Auxiliary {task or 'call'}: LLM returned invalid response "
-            f"(type={response_type}): {response_preview!r}. "
+            f"(type={response_type}). "
             f"Expected object with .choices[0].message — check provider "
             f"adapter or custom endpoint compatibility."
         ) from exc
+
+    diagnostic = getattr(response, "_elevate_gemini_diagnostic", None)
+    if isinstance(diagnostic, dict):
+        def _safe_diagnostic_enum(field: str) -> str:
+            if field not in diagnostic:
+                return "UNSPECIFIED"
+            value = diagnostic.get(field)
+            if not isinstance(value, str):
+                return "INVALID"
+            normalized = value.strip().upper()
+            if not normalized:
+                return "INVALID"
+            if normalized in {
+                "UNSPECIFIED",
+                "BLOCK_REASON_UNSPECIFIED",
+                "FINISH_REASON_UNSPECIFIED",
+            }:
+                return "UNSPECIFIED"
+            if (
+                1 <= len(normalized) <= 64
+                and normalized[0] in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                and all(
+                    char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                    for char in normalized
+                )
+            ):
+                return normalized
+            return "INVALID"
+
+        prompt_block_reason = _safe_diagnostic_enum("prompt_block_reason")
+        candidate_finish_reason = _safe_diagnostic_enum("finish_reason")
+        if prompt_block_reason != "UNSPECIFIED":
+            raise AuxiliaryResponseRejectedError(
+                f"Auxiliary {task or 'call'}: Gemini request blocked "
+                f"({prompt_block_reason})"
+            )
+        if candidate_finish_reason not in {
+            "STOP",
+            "MAX_TOKENS",
+        }:
+            raise AuxiliaryResponseRejectedError(
+                f"Auxiliary {task or 'call'}: Gemini response rejected "
+                f"({candidate_finish_reason})"
+            )
+
+    raw_finish_reason = getattr(choices[0], "finish_reason", None)
+    normalized_finish_reason = (
+        raw_finish_reason.strip().lower()
+        if isinstance(raw_finish_reason, str)
+        else ""
+    )
+    accepted_finish_reasons = {"stop", "tool_calls", "length"}
+    if normalized_finish_reason not in accepted_finish_reasons:
+        reason_label = normalized_finish_reason or "missing"
+        raise AuxiliaryResponseRejectedError(
+            f"Auxiliary {task or 'call'}: provider response rejected "
+            f"({reason_label})"
+        )
+    message_tool_calls = getattr(choices[0].message, "tool_calls", None)
+    if normalized_finish_reason == "tool_calls" and not message_tool_calls:
+        raise AuxiliaryResponseRejectedError(
+            f"Auxiliary {task or 'call'}: provider reported tool completion "
+            "without a tool call"
+        )
+    if (
+        message_tool_calls
+        and normalized_finish_reason not in {"stop", "tool_calls"}
+    ):
+        reason_label = normalized_finish_reason or "missing"
+        raise AuxiliaryResponseRejectedError(
+            f"Auxiliary {task or 'call'}: incomplete provider tool call "
+            f"rejected ({reason_label})"
+        )
+    if message_tool_calls:
+        for tool_call in message_tool_calls:
+            function = getattr(tool_call, "function", None)
+            name = getattr(function, "name", None)
+            if not isinstance(name, str) or not name.strip():
+                raise AuxiliaryResponseRejectedError(
+                    f"Auxiliary {task or 'call'}: malformed provider tool "
+                    "call rejected (missing name)"
+                )
+            arguments = getattr(function, "arguments", None)
+            if isinstance(arguments, dict):
+                parsed_arguments = arguments
+            elif isinstance(arguments, str):
+                try:
+                    parsed_arguments = json.loads(arguments)
+                except (json.JSONDecodeError, ValueError) as exc:
+                    raise AuxiliaryResponseRejectedError(
+                        f"Auxiliary {task or 'call'}: malformed provider "
+                        f"tool call rejected ({name})"
+                    ) from exc
+            else:
+                parsed_arguments = None
+            if not isinstance(parsed_arguments, dict):
+                raise AuxiliaryResponseRejectedError(
+                    f"Auxiliary {task or 'call'}: malformed provider tool "
+                    f"call rejected ({name}: arguments must be an object)"
+                )
     return response
 
 
@@ -5121,6 +5344,8 @@ def extract_content_or_reasoning(response) -> str:
     Returns the best available text, or ``""`` if nothing found.
     """
     import re
+
+    _validate_llm_response(response, "content extraction")
 
     msg = response.choices[0].message
     content = (msg.content or "").strip()

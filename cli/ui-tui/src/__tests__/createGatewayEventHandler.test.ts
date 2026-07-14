@@ -103,11 +103,98 @@ describe('createGatewayEventHandler', () => {
 
     onEvent({ payload: { status: 'error', text: 'failed' }, type: 'message.complete' } as any)
     onEvent({ payload: { status: 'interrupted', text: 'stopped' }, type: 'message.complete' } as any)
+    onEvent({ payload: { status: 'pending', text: 'still running' }, type: 'message.complete' } as any)
+    onEvent({ payload: { status: 'needs_input', text: 'Which province?' }, type: 'message.complete' } as any)
     onEvent({ payload: { text: 'legacy terminal frame' }, type: 'message.complete' } as any)
     onEvent({ payload: { status: 'complete', text: 'done' }, type: 'message.complete' } as any)
 
     expect(write).toHaveBeenCalledTimes(1)
     expect(write).toHaveBeenCalledWith('\x07')
+  })
+
+  it('settles a pending turn without presenting it as complete', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    patchUiState({ busy: true })
+    onEvent({
+      payload: {
+        status: 'pending',
+        text: 'Work is still pending. Completion has not been verified.'
+      },
+      type: 'message.complete'
+    } as any)
+
+    expect(appended).toMatchObject([
+      {
+        role: 'assistant',
+        status: 'pending',
+        text: 'Work is still pending. Completion has not been verified.'
+      }
+    ])
+    expect(getUiState()).toMatchObject({ busy: false, status: 'work still pending' })
+  })
+
+  it('settles a clarification turn as waiting for user input', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    patchUiState({ busy: true })
+    onEvent({
+      payload: { status: 'needs_input', text: 'Which province is the property in?' },
+      type: 'message.complete'
+    } as any)
+
+    expect(appended).toMatchObject([
+      {
+        role: 'assistant',
+        status: 'needs_input',
+        text: 'Which province is the property in?'
+      }
+    ])
+    expect(getUiState()).toMatchObject({ busy: false, status: 'waiting for your input' })
+  })
+
+  it.each([
+    ['error', 'error'],
+    ['interrupted', 'interrupted']
+  ] as const)('keeps terminal %s truth instead of presenting ready', (terminalStatus, visibleStatus) => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    patchUiState({ busy: true })
+    onEvent({
+      payload: { status: terminalStatus, text: `Turn ended: ${terminalStatus}` },
+      type: 'message.complete'
+    } as any)
+
+    expect(appended).toMatchObject([
+      {
+        role: 'assistant',
+        status: terminalStatus,
+        text: `Turn ended: ${terminalStatus}`
+      }
+    ])
+    expect(getUiState()).toMatchObject({ busy: false, status: visibleStatus })
+  })
+
+  it('keeps unresolved truth when a terminal frame closes a flushed segment', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({ payload: { text: 'Still working.' }, type: 'message.delta' } as any)
+    turnController.flushStreamingSegment()
+    onEvent({ payload: { status: 'pending', text: '' }, type: 'message.complete' } as any)
+
+    expect(appended).toMatchObject([
+      {
+        role: 'assistant',
+        status: 'pending',
+        text: 'Still working.'
+      }
+    ])
+    expect(getUiState()).toMatchObject({ busy: false, status: 'work still pending' })
   })
 
   it('keeps tool tokens across handler recreation mid-turn', () => {
@@ -348,5 +435,22 @@ describe('createGatewayEventHandler', () => {
     expect(ctx.system.sys).toHaveBeenCalledWith(
       '[bg bg-1] error: The model failed after retries.'
     )
+  })
+
+  it('labels unresolved background work as pending', () => {
+    const ctx = buildCtx([])
+    patchUiState({ bgTasks: new Set(['bg-2']) })
+
+    createGatewayEventHandler(ctx)({
+      payload: {
+        status: 'pending',
+        task_id: 'bg-2',
+        text: 'A delegated obligation is still running.'
+      },
+      type: 'background.complete'
+    } as any)
+
+    expect(getUiState().bgTasks.has('bg-2')).toBe(false)
+    expect(ctx.system.sys).toHaveBeenCalledWith('[bg bg-2] pending: A delegated obligation is still running.')
   })
 })

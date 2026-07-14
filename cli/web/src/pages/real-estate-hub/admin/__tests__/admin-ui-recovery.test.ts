@@ -39,4 +39,23 @@ describe("admin deal UI recovery wiring", () => {
     expect(board).toContain('disabled={loading}');
     expect(board).toContain('loading ? "Retrying..." : "Retry"');
   });
+
+  it("does not claim offer or listing kit success after a failed HTTP response", () => {
+    const offerKit = source("../components/offer-kit-wizard.tsx");
+    const listingKit = source("../components/listing-kit-wizard.tsx");
+
+    for (const wizard of [offerKit, listingKit]) {
+      expect(wizard).toContain("await runKitRequests");
+      expect(wizard).toContain("await requireKitResponse");
+      expect(wizard).toContain('role="alert"');
+      expect(wizard).toContain('aria-live="polite"');
+      expect(wizard).toContain("setBuiltMsg(\"\")");
+    }
+    expect(listingKit).toContain(
+      "Listing package generation is not available yet",
+    );
+    expect(listingKit).not.toContain(
+      'setSendMsg(r.ok ? "Listing package dispatched',
+    );
+  });
 });

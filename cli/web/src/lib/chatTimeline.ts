@@ -7,7 +7,7 @@ export interface ChatTimelineMessage {
   createdAt: number;
   id: string;
   role: ChatTimelineRole;
-  status?: "streaming" | "complete" | "error" | "interrupted";
+  status?: "streaming" | "complete" | "needs_input" | "pending" | "error" | "interrupted";
   tools?: unknown[];
   traces?: unknown[];
   tokenCount?: number;
@@ -167,6 +167,12 @@ function isFailureStatus(
   return status === "error" || status === "interrupted";
 }
 
+function isUnresolvedStatus(
+  status: ChatTimelineMessage["status"],
+): status is "needs_input" | "pending" | "error" | "interrupted" {
+  return status === "needs_input" || status === "pending" || isFailureStatus(status);
+}
+
 function hasCompletedAssistantBeforeNextUser<T extends ChatTimelineMessage>(
   messages: T[],
   afterIndex: number,
@@ -238,8 +244,8 @@ export function mergeServerWithCache<T extends ChatTimelineMessage>(
     }
     if (
       match &&
-      isFailureStatus(match.status) &&
-      !isFailureStatus(next.status) &&
+      isUnresolvedStatus(match.status) &&
+      !isUnresolvedStatus(next.status) &&
       next.status !== "streaming"
     ) {
       next = { ...next, status: match.status } as T;
@@ -429,11 +435,13 @@ export function hasPendingTurn(messages: ChatTimelineMessage[]): boolean {
 
 export function settledChatStatusText(
   messages: ChatTimelineMessage[],
-): "Error" | "Interrupted" | "Ready" {
+): "Error" | "Interrupted" | "Ready" | "Waiting for completion" | "Waiting for your input" {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.status === "error") return "Error";
     if (message.status === "interrupted") return "Interrupted";
+    if (message.status === "needs_input") return "Waiting for your input";
+    if (message.status === "pending") return "Waiting for completion";
     if (message.role === "assistant") return "Ready";
     if (message.role === "user") return "Interrupted";
   }

@@ -31,7 +31,12 @@ class TestApprovalModeParsing:
 class TestSmartApproval:
     def test_smart_approval_uses_call_llm(self):
         response = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="APPROVE"))]
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content="APPROVE"),
+                )
+            ]
         )
         with mock_patch("agent.auxiliary_client.call_llm", return_value=response) as mock_call:
             result = _smart_approve("python -c \"print('hello')\"", "script execution via -c flag")
@@ -41,6 +46,54 @@ class TestSmartApproval:
         assert mock_call.call_args.kwargs["task"] == "approval"
         assert mock_call.call_args.kwargs["temperature"] == 0
         assert mock_call.call_args.kwargs["max_tokens"] == 16
+
+    def test_filtered_provider_response_escalates(self):
+        from agent.auxiliary_client import AuxiliaryResponseRejectedError
+
+        with mock_patch(
+            "agent.auxiliary_client.call_llm",
+            side_effect=AuxiliaryResponseRejectedError(
+                "provider response rejected (content_filter)"
+            ),
+        ):
+            result = _smart_approve(
+                "rm -rf /",
+                "recursive delete",
+            )
+
+        assert result == "escalate"
+
+    def test_truncated_or_unconfirmed_approve_escalates(self):
+        for finish_reason in ("length", None):
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason=finish_reason,
+                        message=SimpleNamespace(content="APPROVE"),
+                    )
+                ]
+            )
+            with mock_patch(
+                "agent.auxiliary_client.call_llm",
+                return_value=response,
+            ):
+                assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
+
+    def test_ambiguous_approval_text_escalates(self):
+        for content in ("DO NOT APPROVE", "APPROVE? UNCERTAIN"):
+            response = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(content=content),
+                    )
+                ]
+            )
+            with mock_patch(
+                "agent.auxiliary_client.call_llm",
+                return_value=response,
+            ):
+                assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
 
 
 class TestDetectDangerousRm:

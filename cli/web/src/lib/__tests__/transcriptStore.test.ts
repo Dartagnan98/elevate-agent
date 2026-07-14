@@ -99,6 +99,37 @@ describe("streaming basics", () => {
     expect(snap).toHaveLength(1);
     expect(snap[0].status).toBe("streaming");
   });
+
+  it("finalizes pending without accepting later output as a success", () => {
+    beginAssistant(KEY, "a-pending");
+    appendDelta(KEY, "a-pending", "Work is still running.");
+    finalize(KEY, "a-pending", {
+      content: "Work is still running.",
+      status: "pending",
+      completedAt: Date.now(),
+    });
+    appendDelta(KEY, "a-pending", " falsely done");
+
+    expect(getSnapshot(KEY)[0]).toMatchObject({
+      content: "Work is still running.",
+      status: "pending",
+    });
+  });
+
+  it("finalizes needs-input without accepting later output as a success", () => {
+    beginAssistant(KEY, "a-question");
+    finalize(KEY, "a-question", {
+      content: "Which province is the property in?",
+      status: "needs_input",
+      completedAt: Date.now(),
+    });
+    appendDelta(KEY, "a-question", " falsely complete");
+
+    expect(getSnapshot(KEY)[0]).toMatchObject({
+      content: "Which province is the property in?",
+      status: "needs_input",
+    });
+  });
 });
 
 describe("the headline bug: hydrate can never remove or shrink", () => {
@@ -199,6 +230,58 @@ describe("remount mid-turn (cache restore + replay)", () => {
       "persisted question",
       "persisted answer",
     ]);
+  });
+
+  it("localStorage round-trip preserves a pending terminal status", () => {
+    beginAssistant(KEY, "a-pending");
+    finalize(KEY, "a-pending", {
+      content: "The delegated task is still running.",
+      status: "pending",
+      completedAt: Date.now(),
+    });
+    _flushWritesForTests();
+    _resetForTests();
+
+    expect(getSnapshot(KEY)[0]).toMatchObject({
+      content: "The delegated task is still running.",
+      status: "pending",
+    });
+  });
+
+  it("server pending truth overrides a stale complete cache status", () => {
+    streamTurn("a1", ["Work is still running."]);
+    unionHydrate(
+      KEY,
+      [
+        {
+          message_id: "a1",
+          role: "assistant",
+          content: "Work is still running.",
+          status: "pending",
+        },
+      ],
+      "rest",
+    );
+
+    expect(getSnapshot(KEY)[0].status).toBe("pending");
+  });
+
+  it("server needs-input truth overrides a stale complete cache status", () => {
+    streamTurn("a-question", ["Which province?"]);
+    unionHydrate(
+      KEY,
+      [
+        {
+          message_id: "a-question",
+          role: "assistant",
+          content: "Which province?",
+          status: "needs_input",
+        },
+      ],
+      "rest",
+    );
+
+    expect(getSnapshot(KEY)[0].status).toBe("needs_input");
   });
 
   it("zombie streaming message older than 12h restores as interrupted", () => {

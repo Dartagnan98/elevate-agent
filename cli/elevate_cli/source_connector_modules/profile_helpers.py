@@ -239,6 +239,12 @@ def _merge_profile(profile: JsonRecord, source: JsonRecord, thread: JsonRecord) 
     if latest and (not current_latest or latest >= current_latest):
         profile["latestAt"] = thread.get("latestAt")
         profile["latestText"] = thread.get("latestText")
+        # Keep the displayed latest message paired with the exact source thread
+        # that produced it. The aggregate sourceIds/threadIds arrays are sorted
+        # independently and must never be treated as positional pairs.
+        profile["latestSourceId"] = source_id
+        profile["latestSourceLabel"] = str(thread.get("sourceLabel") or source.get("label") or source_id)
+        profile["latestThreadId"] = str(thread.get("threadId") or "")
     if not profile.get("displayName") or str(profile.get("displayName")) == "Client conversation":
         profile["displayName"] = thread.get("personName") or profile.get("displayName")
     tags = _string_values(record.get("tags"))
@@ -272,6 +278,9 @@ def _profiles_from_threads(threads: list[JsonRecord], source_by_id: dict[str, Js
                 "threadCount": 0,
                 "latestText": thread.get("latestText"),
                 "latestAt": thread.get("latestAt"),
+                "latestSourceId": str(thread.get("sourceId") or source.get("id") or ""),
+                "latestSourceLabel": str(thread.get("sourceLabel") or source.get("label") or ""),
+                "latestThreadId": str(thread.get("threadId") or ""),
                 "heatScore": thread.get("heatScore") or 0,
                 "heatLabel": thread.get("heatLabel") or "normal",
                 "hasCrm": False,

@@ -32,7 +32,7 @@ export function LeadsSetupLaunch({
   setup: LeadsSetupSnapshot;
   onSetupUpdated: (next: LeadsSetupSnapshot) => void;
   forceOnboarding?: boolean;
-  onForceOnboardingDone?: () => void;
+  onForceOnboardingDone: () => void;
 }) {
   const [draft, setDraft] = useState<LeadsSetupDraft>(() => leadsDraftFromSnapshot(setup));
   const [saving, setSaving] = useState(false);
@@ -99,12 +99,6 @@ export function LeadsSetupLaunch({
   }, []);
 
   useEffect(() => {
-    if (forceOnboarding && phase === "form") {
-      onForceOnboardingDone?.();
-    }
-  }, [forceOnboarding, phase, onForceOnboardingDone]);
-
-  useEffect(() => {
     setDraft(leadsDraftFromSnapshot(setup));
   }, [setup]);
 
@@ -142,7 +136,7 @@ export function LeadsSetupLaunch({
       await api.updateLeadsSetup(buildItemUpdates(draft));
       const completed = await api.completeLeadsSetup();
       onSetupUpdated(completed);
-      onForceOnboardingDone?.();
+      onForceOnboardingDone();
     } catch (err) {
       setError(errorMessage(err, "Could not complete setup"));
     } finally {
@@ -170,8 +164,8 @@ export function LeadsSetupLaunch({
       return;
     }
     playOnboardingChime();
-    setPhase("form");
-  }, [draft]);
+    onForceOnboardingDone();
+  }, [draft, onForceOnboardingDone]);
 
   if (phase === "gate") {
     return (
@@ -183,7 +177,12 @@ export function LeadsSetupLaunch({
   }
 
   if (phase === "welcome") {
-    return <LeadsOnboardingWelcome onContinue={() => setPhase("wizard")} />;
+    return (
+      <LeadsOnboardingWelcome
+        onContinue={() => setPhase("wizard")}
+        onClose={onForceOnboardingDone}
+      />
+    );
   }
 
   if (phase === "wizard") {
@@ -193,6 +192,7 @@ export function LeadsSetupLaunch({
         updateField={updateField}
         onAdvanceSave={save}
         onFinish={handleWizardFinish}
+        onClose={onForceOnboardingDone}
         saving={saving}
         completing={completing}
         error={error}

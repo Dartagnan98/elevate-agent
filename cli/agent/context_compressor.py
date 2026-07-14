@@ -1425,6 +1425,21 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
             response = call_llm(**call_kwargs)
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+            if not (
+                isinstance(finish_reason, str)
+                and finish_reason.strip().lower() == "stop"
+            ):
+                normalized_reason = (
+                    finish_reason.strip().lower()
+                    if isinstance(finish_reason, str)
+                    and finish_reason.strip()
+                    else "missing"
+                )
+                raise ValueError(
+                    "Auxiliary summarizer returned an incomplete response "
+                    f"({normalized_reason})"
+                )
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
@@ -1432,6 +1447,10 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
             summary = redact_sensitive_text(content.strip())
+            if not summary:
+                raise ValueError(
+                    "Auxiliary summarizer returned an empty response"
+                )
             # Hard-enforce the token budget. max_tokens above caps generation
             # at 1.3x the budget, but some providers ignore it or count
             # differently — an oversized summary can push the conversation

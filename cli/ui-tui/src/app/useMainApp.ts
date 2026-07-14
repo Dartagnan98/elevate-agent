@@ -56,7 +56,7 @@ const statusColorOf = (status: string, t: { dim: string; error: string; ok: stri
     return t.error
   }
 
-  if (status === 'interrupted') {
+  if (status === 'interrupted' || status.includes('pending') || status.includes('your input')) {
     return t.warn
   }
 

@@ -111,6 +111,7 @@ export interface Msg {
   kind?: 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
   panelData?: PanelData
   role: Role
+  status?: 'complete' | 'error' | 'interrupted' | 'needs_input' | 'pending'
   text: string
   thinking?: string
   thinkingTokens?: number

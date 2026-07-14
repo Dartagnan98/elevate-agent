@@ -45,7 +45,10 @@ def test_generate_summary_kimi_omits_temperature():
     compressor._use_call_llm = False
     compressor.client = MagicMock()
     compressor.client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"))]
+        choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"),
+        )]
     )
 
     metrics = TrajectoryMetrics()
@@ -70,7 +73,10 @@ def test_generate_summary_public_moonshot_kimi_k2_5_omits_temperature():
     compressor._use_call_llm = False
     compressor.client = MagicMock()
     compressor.client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"))]
+        choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"),
+        )]
     )
 
     metrics = TrajectoryMetrics()
@@ -95,7 +101,10 @@ def test_generate_summary_public_moonshot_cn_kimi_k2_5_omits_temperature():
     compressor._use_call_llm = False
     compressor.client = MagicMock()
     compressor.client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"))]
+        choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(content="[CONTEXT SUMMARY]: summary"),
+        )]
     )
 
     metrics = TrajectoryMetrics()
@@ -481,6 +490,52 @@ class TestTokenCounting:
 
 
 class TestGenerateSummary:
+    def test_length_summary_is_retried_then_falls_back_without_partial(self):
+        tc = _make_compressor()
+        tc.client = MagicMock()
+        tc.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="length",
+                    message=SimpleNamespace(
+                        content="CUT_SUMMARY_MUST_NOT_REPLACE_TURNS"
+                    ),
+                )
+            ]
+        )
+        metrics = TrajectoryMetrics()
+
+        summary = tc._generate_summary("Turn content", metrics)
+
+        assert "CUT_SUMMARY_MUST_NOT_REPLACE_TURNS" not in summary
+        assert "Summary generation failed" in summary
+        assert metrics.summarization_errors == tc.config.max_retries
+
+    @pytest.mark.asyncio
+    async def test_async_length_summary_never_replaces_turns(self):
+        tc = _make_compressor()
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="length",
+                        message=SimpleNamespace(
+                            content="ASYNC_CUT_SUMMARY_MUST_NOT_REPLACE_TURNS"
+                        ),
+                    )
+                ]
+            )
+        )
+        tc._get_async_client = MagicMock(return_value=mock_client)
+        metrics = TrajectoryMetrics()
+
+        summary = await tc._generate_summary_async("Turn content", metrics)
+
+        assert "ASYNC_CUT_SUMMARY_MUST_NOT_REPLACE_TURNS" not in summary
+        assert "Summary generation failed" in summary
+        assert metrics.summarization_errors == tc.config.max_retries
+
     def test_generate_summary_handles_none_content(self):
         tc = _make_compressor()
         tc.client = MagicMock()
@@ -491,7 +546,9 @@ class TestGenerateSummary:
 
         summary = tc._generate_summary("Turn content", metrics)
 
-        assert summary == "[CONTEXT SUMMARY]:"
+        assert summary != "[CONTEXT SUMMARY]:"
+        assert "Summary generation failed" in summary
+        assert metrics.summarization_errors == tc.config.max_retries
 
     @pytest.mark.asyncio
     async def test_generate_summary_async_handles_none_content(self):
@@ -507,4 +564,6 @@ class TestGenerateSummary:
 
         summary = await tc._generate_summary_async("Turn content", metrics)
 
-        assert summary == "[CONTEXT SUMMARY]:"
+        assert summary != "[CONTEXT SUMMARY]:"
+        assert "Summary generation failed" in summary
+        assert metrics.summarization_errors == tc.config.max_retries

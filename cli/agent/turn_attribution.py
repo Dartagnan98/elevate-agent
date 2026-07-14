@@ -539,6 +539,16 @@ def _run_micro_resolver(
             max_tokens=200,
             timeout=20,
         )
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        if not (
+            isinstance(finish_reason, str)
+            and finish_reason.strip().lower() == "stop"
+        ):
+            logger.info(
+                "micro-resolver ignored incomplete auxiliary response (%s)",
+                finish_reason if isinstance(finish_reason, str) else "missing",
+            )
+            return
         content = (resp.choices[0].message.content or "").strip()
         m = re.search(r"\{.*\}", content, re.DOTALL)
         if not m:
@@ -635,6 +645,16 @@ def _infer_satisfied_cells(
         max_tokens=200,
         timeout=20,
     )
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if not (
+        isinstance(finish_reason, str)
+        and finish_reason.strip().lower() == "stop"
+    ):
+        logger.info(
+            "scorecard inference ignored incomplete auxiliary response (%s)",
+            finish_reason if isinstance(finish_reason, str) else "missing",
+        )
+        return set()
     content = (resp.choices[0].message.content or "").strip()
     m = re.search(r"\{.*\}", content, re.DOTALL)
     if not m:

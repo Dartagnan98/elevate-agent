@@ -48,6 +48,9 @@ export interface LeadsDraft {
   heat: LeadsHeat | "warm" | "hot" | "cold";
   sourceId?: string;
   taskId?: string;
+  contactId?: string;
+  threadId?: string;
+  templateName?: string;
 }
 
 export type LeadsDraftAction = "approve" | "skip" | "restore" | "edit";

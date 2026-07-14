@@ -95,6 +95,9 @@ export function mapLeadsDrafts(drafts: SourceInboxDraft[]): LeadsDraft[] {
     heat: heatFromScore(d.score ?? null, d.leadLabel ?? undefined),
     sourceId: d.sourceId,
     taskId: d.taskId,
+    contactId: d.contactId || undefined,
+    threadId: d.threadId || undefined,
+    templateName: d.templateName || undefined,
   }));
 }
 
@@ -109,24 +112,39 @@ function statusLabel(profile: SourceInboxProfile): string {
   return profile.heatLabel === "hot" ? "Hot" : "Open";
 }
 
+function latestProfileThreadRef(p: SourceInboxProfile): {
+  sourceId?: string;
+  sourceLabel?: string;
+  threadId?: string;
+} {
+  if (p.latestSourceId && p.latestThreadId) {
+    return {
+      sourceId: p.latestSourceId,
+      sourceLabel: p.latestSourceLabel || p.latestSourceId,
+      threadId: p.latestThreadId,
+    };
+  }
+
+  // Older backends do not expose the explicit latest pair. A single aggregate
+  // source/thread is safe; multiple independently sorted arrays are not.
+  if (p.sourceIds?.length !== 1 || p.threadIds?.length !== 1) return {};
+  const sourceId = p.sourceIds[0];
+  const threadKey = p.threadIds[0];
+  const prefix = `${sourceId}:`;
+  if (!threadKey.startsWith(prefix)) return {};
+  return {
+    sourceId,
+    sourceLabel: p.sources?.length === 1 ? p.sources[0] : sourceId,
+    threadId: threadKey.slice(prefix.length),
+  };
+}
+
 export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[] {
   return profiles.map((p) => {
     const verified = p.verifiers.length > 0 || p.hasCrm;
     const heatLabel = p.heatLabel === "hot" ? "hot" : p.heatLabel === "warm" ? "warm" : "watch";
     const group: LeadsProfile["group"] = heatLabel === "hot" ? "active" : verified ? "verified" : "unverified";
-    const firstThreadKey = (p.threadIds && p.threadIds[0]) || "";
-    const firstSourceId = (p.sourceIds && p.sourceIds[0]) || "";
-    let sourceId = firstSourceId;
-    let threadId = firstThreadKey;
-    if (firstThreadKey.includes(":") && firstSourceId) {
-      const prefix = firstSourceId + ":";
-      if (firstThreadKey.startsWith(prefix)) {
-        threadId = firstThreadKey.slice(prefix.length);
-      }
-    }
-    if (!sourceId && firstThreadKey.includes(":")) {
-      sourceId = firstThreadKey.split(":", 1)[0];
-    }
+    const latestThread = latestProfileThreadRef(p);
     return {
       id: p.id,
       name: p.displayName || "Unknown",
@@ -134,7 +152,7 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       group,
       verified,
       status: statusLabel(p),
-      source: (p.sources && p.sources[0]) || (p.sourceIds && p.sourceIds[0]) || "—",
+      source: latestThread.sourceLabel || "Multiple sources",
       email: p.emails[0] || "",
       phone: p.phones[0] || "",
       contact: p.emails[0] || p.phones[0] || "",
@@ -144,8 +162,8 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
       sub: p.crmStage || (p.leadSource ? `Source: ${p.leadSource}` : ""),
       lastMsg: p.latestText || "",
       lastTouch: ageLabel(p.statusUpdatedAt || p.latestAt),
-      sourceId,
-      threadId,
+      sourceId: latestThread.sourceId,
+      threadId: latestThread.threadId,
       contactIds: p.contactIds || [],
       favorite: Boolean(p.favorite),
       favoritedAt: p.favoritedAt ?? null,
@@ -154,16 +172,8 @@ export function mapLeadsProfiles(profiles: SourceInboxProfile[]): LeadsProfile[]
 }
 
 function profileThreadRef(p: SourceInboxProfile): { sourceId?: string; threadId?: string } {
-  const firstThreadKey = (p.threadIds && p.threadIds[0]) || "";
-  const firstSourceId = (p.sourceIds && p.sourceIds[0]) || "";
-  let sourceId = firstSourceId;
-  let threadId = firstThreadKey;
-  if (firstThreadKey.includes(":") && firstSourceId) {
-    const prefix = firstSourceId + ":";
-    if (firstThreadKey.startsWith(prefix)) threadId = firstThreadKey.slice(prefix.length);
-  }
-  if (!sourceId && firstThreadKey.includes(":")) sourceId = firstThreadKey.split(":", 1)[0];
-  return { sourceId, threadId };
+  const latest = latestProfileThreadRef(p);
+  return { sourceId: latest.sourceId, threadId: latest.threadId };
 }
 
 function draftQueueEntry(d: SourceInboxDraft, signal: string): LeadsHotEntry {
@@ -401,15 +411,23 @@ export function mapLeadsSent(items: SourceInboxSentItem[]): LeadsSentMessage[] {
     const source = it.payload?.channel_meta?.toolkit
       ? String(it.payload.channel_meta.toolkit)
       : it.sourceId;
+    const providerMessageId = it.providerMessageId || "";
+    const simulated = providerMessageId.startsWith("stub-");
     return {
       id: it.id,
       when: ageLabel(it.updatedAt || it.createdAt),
       recipient,
       source,
-      transport: transportFromChannel(it.channel),
+      transport: simulated ? "STUB" : transportFromChannel(it.channel),
       message: it.payload?.draft_text || "",
       msgId: it.providerMessageId || it.idempotencyKey || it.id,
-      status: it.status === "sent" ? "sent" : it.status === "failed" ? "failed" : it.status,
+      status: simulated
+        ? "simulated — not sent"
+        : it.status === "sent"
+          ? "dispatch accepted"
+          : it.status === "failed"
+            ? "failed"
+            : it.status,
     };
   });
 }

@@ -428,7 +428,15 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'background.complete':
         dropBgTask(ev.payload.task_id)
         sys(
-          `[bg ${ev.payload.task_id}] ${ev.payload.status === 'error' ? 'error: ' : ''}${
+          `[bg ${ev.payload.task_id}] ${
+            ev.payload.status === 'error'
+              ? 'error: '
+              : ev.payload.status === 'needs_input'
+                ? 'needs input: '
+                : ev.payload.status === 'pending'
+                  ? 'pending: '
+                  : ''
+          }${
             ev.payload.text || ev.payload.error || 'background task did not complete'
           }`
         )
@@ -438,7 +446,15 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'btw.complete':
         dropBgTask('btw:x')
         sys(
-          `[btw] ${ev.payload.status === 'error' ? 'error: ' : ''}${
+          `[btw] ${
+            ev.payload.status === 'error'
+              ? 'error: '
+              : ev.payload.status === 'needs_input'
+                ? 'needs input: '
+                : ev.payload.status === 'pending'
+                  ? 'pending: '
+                  : ''
+          }${
             ev.payload.text || ev.payload.error || 'background task did not complete'
           }`
         )
@@ -566,7 +582,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         const { finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete(ev.payload ?? {})
 
         if (!wasInterrupted) {
-          const msgs: Msg[] = finalMessages.length ? finalMessages : [{ role: 'assistant', text: finalText }]
+          const msgs: Msg[] = finalMessages.length
+            ? finalMessages
+            : [
+                { role: 'assistant', text: finalText, ...(ev.payload?.status && { status: ev.payload.status }) }
+              ]
           msgs.forEach(appendMessage)
 
           if (ev.payload?.status === 'complete' && bellOnComplete && stdout?.isTTY) {
@@ -574,7 +594,17 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           }
         }
 
-        setStatus('ready')
+        setStatus(
+          ev.payload?.status === 'needs_input'
+            ? 'waiting for your input'
+            : ev.payload?.status === 'pending'
+              ? 'work still pending'
+              : ev.payload?.status === 'error'
+                ? 'error'
+                : ev.payload?.status === 'interrupted'
+                  ? 'interrupted'
+                  : 'ready'
+        )
 
         if (ev.payload?.usage) {
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))

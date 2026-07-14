@@ -110,6 +110,45 @@ def run_codex_app_server_turn(
     if turn.projected_messages:
         messages.extend(turn.projected_messages)
 
+    # Preserve the terminal proof from the app-server. Absence of an error is
+    # not success: only an exact turn/completed status plus a non-empty final
+    # response can complete the wrapper result.
+    terminal_status = getattr(turn, "terminal_status", None)
+    has_final_text = (
+        isinstance(turn.final_text, str) and bool(turn.final_text.strip())
+    )
+    outcome_error = turn.error
+    if isinstance(outcome_error, str) and not outcome_error.strip():
+        outcome_error = None
+    was_interrupted = bool(
+        turn.interrupted or terminal_status == "interrupted"
+    )
+    if outcome_error is None:
+        if terminal_status == "completed" and was_interrupted:
+            outcome_error = (
+                "codex app-server turn reported contradictory completed and "
+                "interrupted states"
+            )
+        elif terminal_status == "completed" and not has_final_text:
+            outcome_error = (
+                "codex app-server turn reported completed without a "
+                "non-empty final response"
+            )
+        elif terminal_status != "completed" and not (
+            terminal_status == "interrupted"
+            or (terminal_status is None and turn.interrupted)
+        ):
+            outcome_error = (
+                "codex app-server turn ended without a verified completed "
+                f"status (status={terminal_status!r})"
+            )
+    verified_completion = (
+        terminal_status == "completed"
+        and not was_interrupted
+        and outcome_error is None
+        and has_final_text
+    )
+
     # Counter ticks for the agent-improvement loop.
     # _turns_since_memory and _user_turn_count are ALREADY incremented
     # in the run_conversation() pre-loop block (lines ~11793-11817) so we
@@ -134,7 +173,7 @@ def run_codex_app_server_turn(
 
     # External memory provider sync (mirrors line ~15439). Skipped on
     # interrupt/error to avoid feeding partial transcripts to memory.
-    if not turn.interrupted and turn.error is None:
+    if verified_completion:
         try:
             agent._sync_external_memory_for_turn(
                 original_user_message=original_user_message,
@@ -149,7 +188,7 @@ def run_codex_app_server_turn(
     # we have a real final response.
     if (
         turn.final_text
-        and not turn.interrupted
+        and verified_completion
         and (should_review_memory or should_review_skills)
     ):
         try:
@@ -165,9 +204,9 @@ def run_codex_app_server_turn(
         "final_response": turn.final_text,
         "messages": messages,
         "api_calls": 1,  # one app-server "turn" maps to one logical API call
-        "completed": not turn.interrupted and turn.error is None,
-        "partial": turn.interrupted or turn.error is not None,
-        "error": turn.error,
+        "completed": verified_completion,
+        "partial": not verified_completion,
+        "error": outcome_error,
         "codex_thread_id": turn.thread_id,
         "codex_turn_id": turn.turn_id,
     }

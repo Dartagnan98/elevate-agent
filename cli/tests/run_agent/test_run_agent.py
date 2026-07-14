@@ -8,6 +8,7 @@ are made.
 import io
 import json
 import logging
+import os
 import re
 import uuid
 from logging.handlers import RotatingFileHandler
@@ -50,6 +51,333 @@ def test_is_destructive_command_treats_cp_as_mutating():
 
 def test_is_destructive_command_treats_install_as_mutating():
     assert run_agent._is_destructive_command("install template.env .env") is True
+
+
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "Prepare offer paperwork",
+        "Get the contract ready",
+        "Do the documents",
+        "Finish the forms",
+        "Put together the signing package",
+        "Make me an offer",
+        "Create the CPS",
+        "Fill out the CPS",
+        "Complete the transaction docs",
+        "Build the offer kit",
+        "Run the buyer CPS workflow",
+        "Start the documents",
+    ],
+)
+def test_realtor_document_imperatives_require_action_evidence(user_request):
+    assert run_agent._classify_action_obligation(user_request) == "create_document"
+
+
+def test_close_out_admin_run_requires_deal_update_evidence():
+    assert run_agent._classify_action_obligation("Close out the admin run") == "deal_update"
+
+
+def test_contract_needs_sending_requires_delivery_evidence():
+    assert run_agent._classify_action_obligation("The contract needs sending") == "send"
+
+
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "How do I prepare offer paperwork?",
+        "Should I get the contract ready?",
+        "Do documents need signatures?",
+        "What forms do I need?",
+        "Draft an offer",
+        "Can you draft an offer for me?",
+        "Preview the offer kit",
+        "Can you preview the CPS?",
+    ],
+)
+def test_realtor_advice_questions_drafts_and_previews_stay_conversational(user_request):
+    assert run_agent._classify_action_obligation(user_request) is None
+
+
+def test_compound_realtor_request_builds_one_entry_per_physical_side_effect():
+    request = "Create MLC and FINTRAC PDFs, attach them, and email the package"
+
+    ledger = run_agent._classify_action_obligations(request)
+
+    assert run_agent._classify_action_obligation(request) == "create_document"
+    assert [entry["kind"] for entry in ledger] == [
+        "create_document",
+        "create_document",
+        "upload",
+        "upload",
+        "send",
+    ]
+    assert [entry["target"] for entry in ledger[:2]] == ["mlc", "fintrac"]
+    assert [entry["target"] for entry in ledger[2:4]] == ["mlc", "fintrac"]
+
+
+def test_ambiguous_plural_documents_fail_closed_at_two_entries():
+    ledger = run_agent._classify_action_obligations("Create the transaction PDFs")
+
+    assert [entry["kind"] for entry in ledger] == [
+        "create_document",
+        "create_document",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user_request", "expected_kinds"),
+    [
+        (
+            "Create and send two PDFs",
+            ["create_document", "create_document", "send"],
+        ),
+        (
+            "Create and send MLC and FINTRAC PDFs",
+            ["create_document", "create_document", "send"],
+        ),
+        (
+            "Attach three listing photos",
+            ["upload", "upload", "upload"],
+        ),
+        ("Send two emails", ["send", "send"]),
+    ],
+)
+def test_compound_counts_apply_to_the_requested_side_effect(
+    user_request,
+    expected_kinds,
+):
+    ledger = run_agent._classify_action_obligations(user_request)
+
+    assert [entry["kind"] for entry in ledger] == expected_kinds
+
+
+def test_distinct_explicit_output_paths_are_independent_entries(tmp_path):
+    first = tmp_path / "mlc form.pdf"
+    second = tmp_path / "fintrac form.pdf"
+    ledger = run_agent._classify_action_obligations(
+        f'Create PDFs at "{first}" and "{second}"'
+    )
+
+    assert [entry["path"] for entry in ledger] == [str(first), str(second)]
+
+    shared_object_ledger = run_agent._classify_action_obligations(
+        f'Create and send two PDFs at "{first}" and "{second}"'
+    )
+    assert [entry["kind"] for entry in shared_object_ledger] == [
+        "create_document",
+        "create_document",
+        "send",
+    ]
+    assert [entry["path"] for entry in shared_object_ledger[:2]] == [
+        str(first),
+        str(second),
+    ]
+
+
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "Prepare the offer PDF for 123 MAIN ST",
+        "Create a BC contract PDF",
+    ],
+)
+def test_uppercase_address_and_province_are_not_phantom_form_targets(user_request):
+    ledger = run_agent._classify_action_obligations(user_request)
+
+    assert len(ledger) == 1
+    assert ledger[0]["kind"] == "create_document"
+    assert ledger[0]["target"] is None
+
+
+@pytest.mark.parametrize(
+    "user_request",
+    [
+        "How do I create two PDFs, attach them, and send the package?",
+        "Draft an email to the buyer",
+        "Preview the forms and attachments",
+    ],
+)
+def test_compound_advice_questions_and_drafts_remain_conversational(user_request):
+    assert run_agent._classify_action_obligations(user_request) == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "payload", "expected_key", "expected_status"),
+    [
+        (
+            "admin_deal",
+            {"action": "complete_run", "run_id": "run-1", "status": "waiting_human"},
+            {"success": True, "completedRun": "run-1", "status": "waiting_human"},
+            "admin-run:run-1",
+            "waiting_human",
+        ),
+        (
+            "cronjob",
+            {"action": "run_now", "job_id": "job-1"},
+            {"success": True, "job": {"job_id": "job-1", "state": "scheduled"}},
+            "cronjob:job-1",
+            "scheduled",
+        ),
+        (
+            "agent_handoff",
+            {"action": "create", "to_agent_id": "admin"},
+            {"success": True, "handoff": {"id": "handoff-1", "status": "running"}},
+            "handoff:handoff-1",
+            "running",
+        ),
+        (
+            "agent_bus",
+            {"action": "wake_agent", "target_agent_id": "admin"},
+            {"success": True, "worker": {"wake": {"pending": True}}},
+            "agent-worker:admin",
+            "pending",
+        ),
+        (
+            "agent_bus",
+            {"action": "run_queued_work", "target_agent_id": "admin"},
+            {
+                "success": True,
+                "worker": {
+                    "state": "ok",
+                    "drained": {"handoffs": 2, "adminRuns": 1},
+                    "wake": {"pending": False},
+                },
+            },
+            "agent-work:admin",
+            "running",
+        ),
+        (
+            "agent_bus",
+            {"action": "run_experiment", "experiment_id": "exp-1"},
+            {"success": True, "experiment": {"id": "exp-1", "status": "running"}},
+            "experiment:exp-1",
+            "running",
+        ),
+    ],
+)
+def test_async_dispatch_surfaces_remain_pending(
+    tool_name,
+    arguments,
+    payload,
+    expected_key,
+    expected_status,
+):
+    transition = run_agent._pending_tool_transition(
+        tool_name,
+        arguments,
+        json.dumps(payload),
+    )
+
+    assert transition is not None
+    state, key, obligation = transition
+    assert state == "pending"
+    assert key == expected_key
+    assert obligation["status"] == expected_status
+
+
+@pytest.mark.parametrize(
+    (
+        "tool_name",
+        "pending_arguments",
+        "pending_payload",
+        "terminal_arguments",
+        "success_payload",
+        "failed_payload",
+        "cancelled_payload",
+    ),
+    [
+        (
+            "admin_deal",
+            {"action": "complete_run", "run_id": "run-1", "status": "waiting_human"},
+            {"success": True, "completedRun": "run-1", "status": "waiting_human"},
+            {"action": "complete_run", "run_id": "run-1"},
+            {"success": True, "completedRun": "run-1", "status": "succeeded"},
+            {"success": True, "completedRun": "run-1", "status": "failed"},
+            {"success": True, "completedRun": "run-1", "status": "cancelled"},
+        ),
+        (
+            "cronjob",
+            {"action": "run_now", "job_id": "job-1"},
+            {"success": True, "job": {"job_id": "job-1", "state": "scheduled"}},
+            {"action": "list", "job_id": "job-1"},
+            {
+                "success": True,
+                "jobs": [{"job_id": "job-1", "last_run_at": "2026-07-13T12:00:00Z", "last_status": "ok"}],
+            },
+            {
+                "success": True,
+                "jobs": [{"job_id": "job-1", "last_run_at": "2026-07-13T12:00:00Z", "last_status": "error"}],
+            },
+            {
+                "success": True,
+                "jobs": [{"job_id": "job-1", "last_run_at": "2026-07-13T12:00:00Z", "last_status": "cancelled"}],
+            },
+        ),
+        (
+            "agent_handoff",
+            {"action": "create", "to_agent_id": "admin"},
+            {"success": True, "handoff": {"id": "handoff-1", "status": "running"}},
+            {"action": "get", "handoff_id": "handoff-1"},
+            {"success": True, "handoff": {"id": "handoff-1", "status": "completed"}},
+            {"success": True, "handoff": {"id": "handoff-1", "status": "failed"}},
+            {"success": True, "handoff": {"id": "handoff-1", "status": "cancelled"}},
+        ),
+        (
+            "agent_bus",
+            {"action": "run_experiment", "experiment_id": "exp-1"},
+            {"success": True, "experiment": {"id": "exp-1", "status": "running"}},
+            {"action": "evaluate_experiment", "experiment_id": "exp-1"},
+            {"success": True, "experiment": {"id": "exp-1", "status": "completed"}},
+            {"success": True, "experiment": {"id": "exp-1", "status": "failed"}},
+            {"success": True, "experiment": {"id": "exp-1", "status": "cancelled"}},
+        ),
+        (
+            "delegate_task",
+            {"goal": "research the listing"},
+            {"status": "dispatched", "task_id": "child-1"},
+            {"goal": "check child-1"},
+            {"status": "completed", "task_id": "child-1"},
+            {"status": "failed", "task_id": "child-1"},
+            {"status": "cancelled", "task_id": "child-1"},
+        ),
+    ],
+)
+def test_async_pending_identity_reaches_only_truthful_terminal_state(
+    tool_name,
+    pending_arguments,
+    pending_payload,
+    terminal_arguments,
+    success_payload,
+    failed_payload,
+    cancelled_payload,
+):
+    pending = run_agent._pending_tool_transition(
+        tool_name,
+        pending_arguments,
+        json.dumps(pending_payload),
+    )
+    succeeded = run_agent._pending_tool_transition(
+        tool_name,
+        terminal_arguments,
+        json.dumps(success_payload),
+    )
+    failed = run_agent._pending_tool_transition(
+        tool_name,
+        terminal_arguments,
+        json.dumps(failed_payload),
+    )
+    cancelled = run_agent._pending_tool_transition(
+        tool_name,
+        terminal_arguments,
+        json.dumps(cancelled_payload),
+    )
+
+    assert pending is not None and pending[0] == "pending"
+    assert succeeded is not None and succeeded[0] == "completed"
+    assert failed is not None and failed[0] == "failed"
+    assert cancelled is not None and cancelled[0] == "failed"
+    assert {pending[1], succeeded[1], failed[1], cancelled[1]} == {pending[1]}
 
 
 @pytest.fixture()
@@ -225,6 +553,17 @@ def _mock_tool_call(name="web_search", arguments="{}", call_id=None):
     )
 
 
+def _write_valid_pdf(path: Path, label: str) -> int:
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), label)
+    document.save(path)
+    document.close()
+    return path.stat().st_size
+
+
 def _mock_response(
     content="Hello",
     finish_reason="stop",
@@ -249,6 +588,28 @@ def _mock_response(
     else:
         resp.usage = None
     return resp
+
+
+def _mock_native_gemini_empty_response():
+    response = _mock_response(content=None, finish_reason="stop")
+    response._elevate_gemini_diagnostic = {
+        "finish_reason": "STOP",
+        "prompt_block_reason": "UNSPECIFIED",
+        "candidate_count": 1,
+        "part_counts": {
+            "text": 0,
+            "thought_text": 0,
+            "function_call": 0,
+            "thought_signature": 0,
+            "other": 0,
+        },
+        "usable_part_count": 0,
+        "prompt_tokens": 31,
+        "candidate_tokens": 0,
+        "thought_tokens": 0,
+        "total_tokens": 31,
+    }
+    return response
 
 
 # ===================================================================
@@ -1548,7 +1909,7 @@ class TestExecuteToolCalls:
             or "interrupted" in messages[0]["content"].lower()
         )
 
-    def test_invalid_json_args_defaults_empty(self, agent):
+    def test_invalid_json_args_refuses_execution(self, agent):
         tc = _mock_tool_call(
             name="web_search", arguments="not valid json", call_id="c1"
         )
@@ -1556,13 +1917,11 @@ class TestExecuteToolCalls:
         messages = []
         with patch("run_agent.handle_function_call", return_value="ok") as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
-            # Invalid JSON args should fall back to empty dict
-            args, kwargs = mock_hfc.call_args
-            assert args[:3] == ("web_search", {}, "task-1")
-            assert set(kwargs.get("enabled_tools", [])) == agent.valid_tool_names
+            mock_hfc.assert_not_called()
         assert len(messages) == 1
         assert messages[0]["role"] == "tool"
         assert messages[0]["tool_call_id"] == "c1"
+        assert "invalid tool arguments" in messages[0]["content"]
 
     def test_result_truncation_over_100k(self, agent, tmp_path, monkeypatch):
         monkeypatch.setenv("ELEVATE_HOME", str(tmp_path / ".elevate"))
@@ -2169,6 +2528,58 @@ class TestHandleMaxIterations:
             "finish_reason": "error",
         }
 
+    def test_truncated_summary_is_retried_and_never_published(self, agent):
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="PARTIAL_SUMMARY_MUST_NOT_PERSIST",
+                finish_reason="length",
+            ),
+            _mock_response(content="Complete safe summary.", finish_reason="stop"),
+        ]
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{"role": "user", "content": "do stuff"}]
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert result == "Complete safe summary."
+        assert all(
+            "PARTIAL_SUMMARY_MUST_NOT_PERSIST"
+            not in str(message.get("content", ""))
+            for message in messages
+        )
+        assert agent.client.chat.completions.create.call_count == 2
+
+    def test_helper_truncated_summary_is_retried_and_never_published(
+        self, agent
+    ):
+        from agent.chat_completion_helpers import handle_max_iterations
+
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="PARTIAL_HELPER_SUMMARY_MUST_NOT_PERSIST",
+                finish_reason="length",
+            ),
+            _mock_response(content="Complete helper summary.", finish_reason="stop"),
+        ]
+        agent._cached_system_prompt = "You are helpful."
+        messages = [{"role": "user", "content": "do stuff"}]
+
+        with patch.object(
+            agent,
+            "_drop_thinking_only_and_merge_users",
+            side_effect=lambda value: value,
+            create=True,
+        ):
+            result = handle_max_iterations(agent, messages, 60)
+
+        assert result == "Complete helper summary."
+        assert all(
+            "PARTIAL_HELPER_SUMMARY_MUST_NOT_PERSIST"
+            not in str(message.get("content", ""))
+            for message in messages
+        )
+        assert agent.client.chat.completions.create.call_count == 2
+
     def test_summary_skips_reasoning_for_unsupported_openrouter_model(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
         agent.model = "minimax/minimax-m2.5"
@@ -2229,6 +2640,2959 @@ class TestRunConversation:
         assert result["api_calls"] == 2
         assert mock_handle_function_call.call_args.kwargs["tool_call_id"] == "c1"
         assert mock_handle_function_call.call_args.kwargs["session_id"] == agent.session_id
+
+    def test_sequential_tool_failure_cannot_be_erased_by_done_prose(self, agent):
+        self._setup_agent(agent)
+        failed_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"missing listing"}',
+            call_id="failure-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[failed_call],
+            ),
+            _mock_response(content="Done, I found it.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {"success": False, "error": "listing lookup failed"}
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Find the listing")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["turn_exit_reason"] == "tool_execution_failed"
+        assert "did not complete" in result["final_response"]
+        assert "Done, I found it." in result["final_response"]
+        assert result["messages"][-1]["finish_reason"] == "error"
+
+    def test_concurrent_tool_failure_survives_same_batch_sibling_success(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        failed_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"bad"}',
+            call_id="failure-1",
+        )
+        sibling_success = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"good"}',
+            call_id="success-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[failed_call, sibling_success],
+            ),
+            _mock_response(content="Everything succeeded.", finish_reason="stop"),
+        ]
+
+        def _tool_result(_name, args, *_positional, **_kwargs):
+            if args["query"] == "bad":
+                return json.dumps({"success": False, "error": "search failed"})
+            return json.dumps({"success": True, "results": ["found"]})
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_tool_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run both searches")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "Everything succeeded." in result["final_response"]
+
+    def test_later_batch_same_action_success_clears_failure(self, agent):
+        self._setup_agent(agent)
+        first_attempt = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"listing","limit":5}',
+            call_id="attempt-1",
+        )
+        canonical_retry = _mock_tool_call(
+            name="web_search",
+            arguments='{ "limit": 5, "query": "listing" }',
+            call_id="attempt-2",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[first_attempt],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[canonical_retry],
+            ),
+            _mock_response(content="Retry succeeded.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps({"success": False, "error": "temporary failure"}),
+                    json.dumps({"success": True, "results": ["listing"]}),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Retry the exact search")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["final_response"] == "Retry succeeded."
+
+    def test_later_batch_different_action_does_not_clear_failure(self, agent):
+        self._setup_agent(agent)
+        failed_action = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"listing-a"}',
+            call_id="attempt-1",
+        )
+        different_action = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"listing-b"}',
+            call_id="attempt-2",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[failed_action],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[different_action],
+            ),
+            _mock_response(content="The other search worked.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps({"success": False, "error": "first search failed"}),
+                    json.dumps({"success": True, "results": ["listing-b"]}),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Try two different searches")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "The other search worked." in result["final_response"]
+
+    def test_tool_failure_ledger_resets_for_next_user_turn(self, agent):
+        self._setup_agent(agent)
+        failed_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"listing"}',
+            call_id="failure-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[failed_call],
+            ),
+            _mock_response(content="Done despite failure.", finish_reason="stop"),
+            _mock_response(content="Fresh turn answer.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {"success": False, "error": "listing lookup failed"}
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            failed_turn = agent.run_conversation("Find the listing")
+            fresh_turn = agent.run_conversation("What time is it?")
+
+        assert failed_turn["completed"] is False
+        assert failed_turn["failed"] is True
+        assert failed_turn["partial"] is True
+        assert fresh_turn["completed"] is True
+        assert fresh_turn["failed"] is False
+        assert fresh_turn["partial"] is False
+        assert fresh_turn["final_response"] == "Fresh turn answer."
+
+    def test_balanced_malformed_tool_args_bar_text_only_completion(self, agent):
+        self._setup_agent(agent)
+        malformed_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query": ???}',
+            call_id="malformed-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[malformed_call],
+            ),
+            _mock_response(
+                content="Done. The search completed successfully.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call") as dispatch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the search")
+
+        dispatch.assert_not_called()
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["turn_exit_reason"] == "tool_execution_failed"
+
+    def test_malformed_action_is_not_cleared_by_same_tool_different_args(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        malformed_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query": ???}',
+            call_id="malformed-1",
+        )
+        unrelated_valid_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"unrelated"}',
+            call_id="valid-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[malformed_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[unrelated_valid_call],
+            ),
+            _mock_response(content="The original search is done.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps({"success": True, "results": ["other"]}),
+            ) as dispatch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the original search")
+
+        assert dispatch.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+
+    def test_unoffered_tool_call_bars_text_only_completion(self, agent):
+        self._setup_agent(agent)
+        invented_call = _mock_tool_call(
+            name="invented_listing_writer",
+            arguments='{"listing":"A"}',
+            call_id="invented-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[invented_call],
+            ),
+            _mock_response(
+                content="Done. The listing was written.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call") as dispatch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Write listing A")
+
+        dispatch.assert_not_called()
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "invented_listing_writer" in result["error"]
+
+    def test_excess_delegate_call_gets_paired_failure_and_cannot_false_complete(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("delegate_task")
+        first = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"research listing A"}',
+            call_id="delegate-1",
+        )
+        excess = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"prepare listing B"}',
+            call_id="delegate-2",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[first, excess],
+            ),
+            _mock_response(
+                content="Done. Both delegated tasks completed.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch(
+                "tools.delegate_tool._get_max_concurrent_children",
+                return_value=1,
+            ),
+            patch.object(
+                agent,
+                "_dispatch_delegate_task",
+                return_value=json.dumps({"success": True, "result": "first done"}),
+            ) as dispatch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Delegate both tasks")
+
+        assert dispatch.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "Both delegated tasks completed." in result["final_response"]
+        assistant_calls = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ]
+        assert len(assistant_calls[-1]["tool_calls"]) == 2
+        paired_results = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") in {"delegate-1", "delegate-2"}
+        ]
+        assert len(paired_results) == 2
+        assert "not started" in paired_results[-1]["content"]
+
+    def test_duplicate_tool_call_is_paired_suppressed_and_cannot_false_complete(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        first = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"listing A"}',
+            call_id="search-1",
+        )
+        duplicate = _mock_tool_call(
+            name="web_search",
+            arguments='{ "query": "listing A" }',
+            call_id="search-2",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[first, duplicate],
+            ),
+            _mock_response(
+                content="Done. I ran both requested searches.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps({"success": True, "results": ["A"]}),
+            ) as dispatch,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run both searches")
+
+        assert dispatch.call_count == 1
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "both requested searches" in result["final_response"]
+        assistant_calls = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "assistant" and message.get("tool_calls")
+        ]
+        assert len(assistant_calls[-1]["tool_calls"]) == 2
+        paired_results = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") in {"search-1", "search-2"}
+        ]
+        assert len(paired_results) == 2
+        assert "duplicate tool action" in paired_results[-1]["content"]
+
+    @pytest.mark.parametrize(
+        ("surface", "terminal_outcome", "expected_failed"),
+        [
+            (surface, outcome, outcome != "succeeded")
+            for surface in ("admin_deal", "cronjob", "agent_handoff", "agent_bus")
+            for outcome in ("succeeded", "failed", "cancelled")
+        ],
+    )
+    def test_async_pending_clears_only_to_truthful_terminal_outcome(
+        self,
+        agent,
+        surface,
+        terminal_outcome,
+        expected_failed,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add(surface)
+
+        if surface == "admin_deal":
+            pending_args = {
+                "action": "complete_run",
+                "run_id": "run-1",
+                "status": "waiting_human",
+            }
+            pending_payload = {
+                "success": True,
+                "completedRun": "run-1",
+                "status": "waiting_human",
+            }
+            terminal_args = {"action": "complete_run", "run_id": "run-1"}
+            terminal_payload = {
+                "success": True,
+                "completedRun": "run-1",
+                "status": terminal_outcome,
+            }
+        elif surface == "cronjob":
+            pending_args = {"action": "run_now", "job_id": "job-1"}
+            pending_payload = {
+                "success": True,
+                "job": {"job_id": "job-1", "state": "scheduled"},
+            }
+            terminal_args = {"action": "list", "job_id": "job-1"}
+            last_status = {
+                "succeeded": "ok",
+                "failed": "error",
+                "cancelled": "cancelled",
+            }[terminal_outcome]
+            terminal_payload = {
+                "success": True,
+                "jobs": [
+                    {
+                        "job_id": "job-1",
+                        "last_run_at": "2026-07-13T12:00:00Z",
+                        "last_status": last_status,
+                    }
+                ],
+            }
+        elif surface == "agent_handoff":
+            pending_args = {"action": "create", "to_agent_id": "admin"}
+            pending_payload = {
+                "success": True,
+                "handoff": {"id": "handoff-1", "status": "running"},
+            }
+            terminal_args = {"action": "get", "handoff_id": "handoff-1"}
+            handoff_status = "completed" if terminal_outcome == "succeeded" else terminal_outcome
+            terminal_payload = {
+                "success": True,
+                "handoff": {"id": "handoff-1", "status": handoff_status},
+            }
+        else:
+            pending_args = {"action": "run_experiment", "experiment_id": "exp-1"}
+            pending_payload = {
+                "success": True,
+                "experiment": {"id": "exp-1", "status": "running"},
+            }
+            terminal_args = {
+                "action": "evaluate_experiment",
+                "experiment_id": "exp-1",
+            }
+            experiment_status = "completed" if terminal_outcome == "succeeded" else terminal_outcome
+            terminal_payload = {
+                "success": True,
+                "experiment": {"id": "exp-1", "status": experiment_status},
+            }
+
+        pending_call = _mock_tool_call(
+            name=surface,
+            arguments=json.dumps(pending_args),
+            call_id=f"{surface}-pending",
+        )
+        terminal_call = _mock_tool_call(
+            name=surface,
+            arguments=json.dumps(terminal_args),
+            call_id=f"{surface}-terminal",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[pending_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[terminal_call],
+            ),
+            _mock_response(content="Async work finished.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[json.dumps(pending_payload), json.dumps(terminal_payload)],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run this async work")
+
+        assert result["pending"] is False
+        assert result["failed"] is expected_failed
+        assert result["completed"] is (not expected_failed)
+        if expected_failed:
+            assert result["partial"] is True
+            assert "Async work finished." in result["final_response"]
+        else:
+            assert result["partial"] is False
+            assert result["final_response"] == "Async work finished."
+
+    def test_cron_stale_prior_success_does_not_clear_new_scheduled_run(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("cronjob")
+        run_call = _mock_tool_call(
+            name="cronjob",
+            arguments=json.dumps({"action": "run_now", "job_id": "job-1"}),
+            call_id="cron-pending",
+        )
+        list_call = _mock_tool_call(
+            name="cronjob",
+            arguments=json.dumps({"action": "list", "job_id": "job-1"}),
+            call_id="cron-observe",
+        )
+        stale_time = "2026-07-12T12:00:00Z"
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[run_call]),
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[list_call]),
+            _mock_response(content="The new cron run finished.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {
+                            "success": True,
+                            "job": {
+                                "job_id": "job-1",
+                                "state": "scheduled",
+                                "last_run_at": stale_time,
+                                "last_status": "ok",
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "success": True,
+                            "jobs": [
+                                {
+                                    "job_id": "job-1",
+                                    "last_run_at": stale_time,
+                                    "last_status": "ok",
+                                }
+                            ],
+                        }
+                    ),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the scheduled task now")
+
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["pending"] is True
+        assert result["turn_exit_reason"] == "tool_execution_pending"
+        assert "The new cron run finished." not in result["final_response"]
+
+    @pytest.mark.parametrize(
+        ("surface", "arguments", "payload"),
+        [
+            (
+                "cronjob",
+                {"action": "list", "job_id": "old-job"},
+                {
+                    "success": True,
+                    "jobs": [
+                        {
+                            "job_id": "old-job",
+                            "last_run_at": "2026-07-12T12:00:00Z",
+                            "last_status": "error",
+                        }
+                    ],
+                },
+            ),
+            (
+                "agent_handoff",
+                {"action": "get", "handoff_id": "old-handoff"},
+                {
+                    "success": True,
+                    "handoff": {"id": "old-handoff", "status": "failed"},
+                },
+            ),
+        ],
+    )
+    def test_standalone_async_failure_status_read_does_not_fail_current_turn(
+        self,
+        agent,
+        surface,
+        arguments,
+        payload,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add(surface)
+        read_call = _mock_tool_call(
+            name=surface,
+            arguments=json.dumps(arguments),
+            call_id=f"{surface}-read-old-failure",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[read_call]),
+            _mock_response(
+                content="The prior work failed; no new work was started.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value=json.dumps(payload)),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Check the prior work status")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["pending"] is False
+        assert result["final_response"] == (
+            "The prior work failed; no new work was started."
+        )
+
+    def test_dispatched_delegate_remains_pending_and_cannot_claim_child_work(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("delegate_task")
+        dispatch_call = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"prepare the transaction forms"}',
+            call_id="delegate-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[dispatch_call],
+            ),
+            _mock_response(
+                content="Done. The forms are prepared.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_dispatch_delegate_task",
+                return_value=json.dumps(
+                    {"status": "dispatched", "task_id": "child-123"}
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Prepare the forms")
+
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["partial"] is True
+        assert result["pending"] is True
+        assert result["turn_exit_reason"] == "tool_execution_pending"
+        assert "still running" in result["final_response"]
+        assert "child-123" in result["final_response"]
+        assert "forms are prepared" not in result["final_response"]
+        assert result["pending_tool_obligations"] == [
+            {
+                "tool": "delegate_task",
+                "task_id": "child-123",
+                "status": "pending",
+            }
+        ]
+        assert result["messages"][-1]["finish_reason"] == "incomplete"
+
+    def test_delegate_pending_clears_only_on_observed_child_completion(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("delegate_task")
+        dispatch_call = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"prepare the transaction forms"}',
+            call_id="delegate-1",
+        )
+        observe_call = _mock_tool_call(
+            name="delegate_task",
+            arguments='{"goal":"check child-123 completion"}',
+            call_id="delegate-2",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[dispatch_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[observe_call],
+            ),
+            _mock_response(content="The child completed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(
+                agent,
+                "_dispatch_delegate_task",
+                side_effect=[
+                    json.dumps(
+                        {"status": "dispatched", "task_id": "child-123"}
+                    ),
+                    json.dumps(
+                        {"status": "completed", "task_id": "child-123"}
+                    ),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Delegate and verify the research task")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["pending"] is False
+        assert result["final_response"] == "The child completed."
+        assert "pending_tool_obligations" not in result
+
+    def test_background_terminal_start_remains_pending_and_cannot_claim_success(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"terminal", "process"})
+        background_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": "pytest",
+                    "background": True,
+                    "notify_on_complete": True,
+                }
+            ),
+            call_id="terminal-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[background_call],
+            ),
+            _mock_response(content="All tests passed.", finish_reason="stop"),
+        ]
+        background_result = json.dumps(
+            {
+                "output": "Background process started",
+                "session_id": "proc-123",
+                "exit_code": 0,
+                "notify_on_complete": True,
+            }
+        )
+
+        with (
+            patch("run_agent.handle_function_call", return_value=background_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the tests")
+
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["partial"] is True
+        assert result["pending"] is True
+        assert "terminal session proc-123 is still running" in result["final_response"]
+        assert "All tests passed" not in result["final_response"]
+        assert result["pending_tool_obligations"] == [
+            {
+                "tool": "terminal",
+                "session_id": "proc-123",
+                "status": "pending",
+            }
+        ]
+
+    def test_background_terminal_pending_clears_on_successful_process_wait(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"terminal", "process"})
+        background_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps({"command": "pytest", "background": True}),
+            call_id="terminal-1",
+        )
+        wait_call = _mock_tool_call(
+            name="process",
+            arguments=json.dumps(
+                {"action": "wait", "session_id": "proc-123"}
+            ),
+            call_id="process-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[background_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[wait_call],
+            ),
+            _mock_response(content="The tests passed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {
+                            "output": "Background process started",
+                            "session_id": "proc-123",
+                            "exit_code": 0,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "status": "completed",
+                            "session_id": "proc-123",
+                            "exit_code": 0,
+                        }
+                    ),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run and wait for the tests")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["pending"] is False
+        assert result["final_response"] == "The tests passed."
+
+    @pytest.mark.parametrize("process_status", ["running", "timeout"])
+    def test_background_terminal_running_process_does_not_clear_pending(
+        self,
+        agent,
+        process_status,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"terminal", "process"})
+        background_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps({"command": "pytest", "background": True}),
+            call_id="terminal-1",
+        )
+        poll_call = _mock_tool_call(
+            name="process",
+            arguments=json.dumps(
+                {"action": "poll", "session_id": "proc-123"}
+            ),
+            call_id="process-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[background_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[poll_call],
+            ),
+            _mock_response(content="The tests passed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {
+                            "output": "Background process started",
+                            "session_id": "proc-123",
+                            "exit_code": 0,
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "status": process_status,
+                            "output": "still working",
+                        }
+                    ),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run and monitor the tests")
+
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["partial"] is True
+        assert result["pending"] is True
+        assert result["turn_exit_reason"] == "tool_execution_pending"
+        assert "proc-123" in result["final_response"]
+        assert "The tests passed" not in result["final_response"]
+
+    @pytest.mark.parametrize("process_action", ["wait", "poll"])
+    def test_background_terminal_nonzero_process_exit_is_failed_not_pending(
+        self,
+        agent,
+        process_action,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"terminal", "process"})
+        background_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps({"command": "pytest", "background": True}),
+            call_id="terminal-1",
+        )
+        wait_call = _mock_tool_call(
+            name="process",
+            arguments=json.dumps(
+                {"action": process_action, "session_id": "proc-123"}
+            ),
+            call_id="process-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[background_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[wait_call],
+            ),
+            _mock_response(content="The tests passed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {
+                            "output": "Background process started",
+                            "session_id": "proc-123",
+                            "exit_code": 0,
+                        }
+                    ),
+                    # ProcessRegistry.wait omits session_id and relies on the
+                    # request args to identify the observed session.
+                    json.dumps(
+                        {
+                            "status": "exited",
+                            "exit_code": 2,
+                            "output": "2 failed",
+                        }
+                    ),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run and wait for the tests")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["pending"] is False
+        assert result["turn_exit_reason"] == "tool_execution_failed"
+        assert "process [exit 2]" in result["final_response"]
+        assert "The tests passed." in result["final_response"]
+
+    @pytest.mark.parametrize(
+        ("process_action", "process_result", "expected_failed"),
+        [
+            (
+                "kill",
+                {"status": "killed", "session_id": "proc-123"},
+                True,
+            ),
+            (
+                "kill",
+                {"status": "already_exited", "exit_code": 0},
+                False,
+            ),
+            (
+                "kill",
+                {"status": "already_exited", "exit_code": 2},
+                True,
+            ),
+            (
+                "wait",
+                {"status": "not_found", "error": "No process with ID proc-123"},
+                True,
+            ),
+            (
+                "poll",
+                {"status": "not_found", "error": "No process with ID proc-123"},
+                True,
+            ),
+        ],
+    )
+    def test_terminal_process_terminal_observations_do_not_stay_pending(
+        self,
+        agent,
+        process_action,
+        process_result,
+        expected_failed,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"terminal", "process"})
+        background_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps({"command": "pytest", "background": True}),
+            call_id="terminal-1",
+        )
+        process_call = _mock_tool_call(
+            name="process",
+            arguments=json.dumps(
+                {"action": process_action, "session_id": "proc-123"}
+            ),
+            call_id="process-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[background_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[process_call],
+            ),
+            _mock_response(content="Process handling is done.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {
+                            "output": "Background process started",
+                            "session_id": "proc-123",
+                            "exit_code": 0,
+                        }
+                    ),
+                    json.dumps(process_result),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run and manage the tests")
+
+        assert result["pending"] is False
+        assert result["failed"] is expected_failed
+        assert result["completed"] is (not expected_failed)
+        if expected_failed:
+            assert result["partial"] is True
+            assert result["turn_exit_reason"] == "tool_execution_failed"
+        else:
+            assert result["partial"] is False
+            assert result["final_response"] == "Process handling is done."
+
+    def test_terminal_foreground_retry_clears_background_notify_refusal(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("terminal")
+        refused_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": "pytest -q",
+                    "workdir": "/tmp/project",
+                    "background": True,
+                    "notify_on_complete": True,
+                    "timeout": 300,
+                    "pty": True,
+                }
+            ),
+            call_id="terminal-refused",
+        )
+        foreground_retry = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": "pytest -q",
+                    "workdir": "/tmp/project",
+                    "background": False,
+                    "timeout": 120,
+                    "pty": False,
+                }
+            ),
+            call_id="terminal-retry",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[refused_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[foreground_retry],
+            ),
+            _mock_response(content="The tests passed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {"error": "background notification is unavailable"}
+                    ),
+                    json.dumps({"output": "10 passed", "exit_code": 0}),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the tests")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["final_response"] == "The tests passed."
+
+    def test_terminal_unrelated_success_does_not_clear_notify_refusal(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("terminal")
+        refused_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": "pytest -q",
+                    "workdir": "/tmp/project",
+                    "background": True,
+                    "notify_on_complete": True,
+                }
+            ),
+            call_id="terminal-refused",
+        )
+        unrelated_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": "pwd",
+                    "workdir": "/tmp/project",
+                    "background": False,
+                }
+            ),
+            call_id="terminal-unrelated",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[refused_call],
+            ),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[unrelated_call],
+            ),
+            _mock_response(content="The tests passed.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=[
+                    json.dumps(
+                        {"error": "background notification is unavailable"}
+                    ),
+                    json.dumps({"output": "/tmp/project", "exit_code": 0}),
+                ],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Run the tests")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "terminal [error]" in result["final_response"]
+        assert "The tests passed." in result["final_response"]
+
+    @pytest.mark.parametrize(
+        ("user_request", "kind"),
+        [
+            ("Send the email to the client", "send"),
+            ("Create a PDF transaction summary", "create_document"),
+            ("Update the deal board to closed", "deal_update"),
+        ],
+    )
+    def test_mutation_claim_without_action_evidence_fails_after_two_nudges(
+        self,
+        agent,
+        user_request,
+        kind,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Done. I completed it.", finish_reason="stop"),
+            _mock_response(content="Done now.", finish_reason="stop"),
+            _mock_response(content="Definitely complete.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(user_request)
+
+        assert result["api_calls"] == 3
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert result["needs_input"] is False
+        assert result["turn_exit_reason"] == "action_obligation_unverified"
+        assert "was not completed" in result["final_response"]
+        assert "no successful relevant tool or artifact" in result["final_response"]
+        assert "Definitely complete" not in result["final_response"]
+        assert result["action_obligation"] == {
+            "kind": kind,
+            "verified": False,
+        }
+        nudges = [
+            message
+            for message in result["messages"]
+            if message.get("role") == "user"
+            and str(message.get("content") or "").startswith(
+                "[System: Execute the requested"
+            )
+        ]
+        assert len(nudges) == 2
+        assert result["messages"][-1]["finish_reason"] == "error"
+
+    @pytest.mark.parametrize(
+        "user_request",
+        [
+            "How do I send the email to the client?",
+            "Should I update the deal board?",
+            "Should the contract be sent to John?",
+            "Draft an email to the buyer",
+            "Write me an email draft",
+        ],
+    )
+    def test_advice_and_chat_drafts_do_not_create_action_obligation(
+        self,
+        agent,
+        user_request,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Here is the requested guidance or draft.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(user_request)
+
+        assert result["api_calls"] == 1
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert "action_obligation" not in result
+
+    def test_persisted_document_write_language_creates_action_obligation(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Saved.", finish_reason="stop"),
+            _mock_response(content="Saved.", finish_reason="stop"),
+            _mock_response(content="Saved.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Write the contract document and save it to /tmp/contract.docx"
+            )
+
+        assert result["completed"] is False
+        assert result["action_obligation"] == {
+            "kind": "create_document",
+            "verified": False,
+        }
+
+    def test_action_obligation_applies_to_later_genuine_user_turn(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+        ]
+        history = [
+            {"role": "user", "content": "Draft the note"},
+            {"role": "assistant", "content": "Draft ready."},
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Send the email now",
+                conversation_history=history,
+            )
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 3
+        assert result["action_obligation"] == {
+            "kind": "send",
+            "verified": False,
+        }
+
+    @pytest.mark.parametrize(
+        "user_request",
+        [
+            "Please go ahead and send the contract to John",
+            "The contract needs to be sent to John",
+            "I want the contract sent to John",
+        ],
+    )
+    def test_explicit_external_send_wording_requires_delivery_evidence(
+        self,
+        agent,
+        user_request,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(user_request)
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 3
+        assert result["action_obligation"] == {
+            "kind": "send",
+            "verified": False,
+        }
+
+    def test_send_me_summary_can_be_answered_in_current_chat(self, agent):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="The deal is waiting on the inspection report.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Send me the latest deal summary")
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 1
+        assert "action_obligation" not in result
+
+    @pytest.mark.parametrize("execution_context", ["subagent", "cron"])
+    def test_delegated_and_scheduled_action_goals_still_require_evidence(
+        self,
+        agent,
+        execution_context,
+    ):
+        self._setup_agent(agent)
+        if execution_context == "subagent":
+            agent._subagent_id = "sa-proof-test"
+        else:
+            agent.platform = "cron"
+            agent.session_id = "cron_proof_test"
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="The PDF is ready.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Complete.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Create the PDF package")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["action_obligation"] == {
+            "kind": "create_document",
+            "verified": False,
+        }
+
+    @pytest.mark.parametrize(
+        ("follow_up", "kind"),
+        [
+            ("Okay, send it", "send"),
+            ("alright make the PDF", "create_document"),
+            ("yes, update the deal", "deal_update"),
+            ("sure upload it", "upload"),
+        ],
+    )
+    def test_conversational_prefix_does_not_bypass_later_turn_action_gate(
+        self,
+        agent,
+        follow_up,
+        kind,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+        ]
+        history = [
+            {"role": "user", "content": "Let's discuss the next action"},
+            {"role": "assistant", "content": "Ready when you are."},
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                follow_up,
+                conversation_history=history,
+            )
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 3
+        assert result["action_obligation"] == {
+            "kind": kind,
+            "verified": False,
+        }
+
+    def test_action_clarification_returns_needs_input_without_retrying(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Which address should I send it to?",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Send the email")
+
+        assert result["api_calls"] == 1
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["partial"] is True
+        assert result["needs_input"] is True
+        assert result["pending"] is False
+        assert "error" not in result
+        assert result["turn_exit_reason"] == "action_obligation_needs_input"
+        assert "not complete" in result["final_response"]
+        assert "Which address" in result["final_response"]
+        assert result["messages"][-1]["finish_reason"] == "needs_input"
+        assert result["action_obligation"] == {
+            "kind": "send",
+            "verified": False,
+        }
+
+    def test_non_user_fixable_tool_inability_fails_unverified_after_bound(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="I cannot send because the tool is unavailable.",
+                finish_reason="stop",
+            ),
+            _mock_response(
+                content="I cannot send because the tool is unavailable.",
+                finish_reason="stop",
+            ),
+            _mock_response(
+                content="I cannot send because the tool is unavailable.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Send the email")
+
+        assert result["api_calls"] == 3
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["needs_input"] is False
+        assert result["turn_exit_reason"] == "action_obligation_unverified"
+
+    def test_successful_write_file_result_verifies_document_action(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("write_file")
+        import fitz
+
+        pdf_path = tmp_path / "summary.pdf"
+        write_call = _mock_tool_call(
+            name="write_file",
+            arguments=json.dumps(
+                {"path": str(pdf_path), "content": "summary"}
+            ),
+            call_id="write-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[write_call],
+            ),
+            _mock_response(content="The PDF is ready.", finish_reason="stop"),
+        ]
+
+        def create_pdf(*_args, **_kwargs):
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_text((72, 72), "Fresh transaction summary")
+            document.save(pdf_path)
+            document.close()
+            return json.dumps({"bytes_written": pdf_path.stat().st_size})
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=create_pdf,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Create a PDF transaction summary")
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["partial"] is False
+        assert result["action_obligation"] == {
+            "kind": "create_document",
+            "verified": True,
+        }
+
+    def test_admin_deal_listing_photo_upload_verifies_exact_physical_image(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("admin_deal")
+        import base64
+
+        photo_path = tmp_path / "listing-front.png"
+        photo_path.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+                "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            )
+        )
+        attach_call = _mock_tool_call(
+            name="admin_deal",
+            arguments=json.dumps(
+                {
+                    "action": "attach",
+                    "deal_id": "deal-1",
+                    "kind": "listing_photos",
+                    "file_path": str(photo_path),
+                }
+            ),
+            call_id="attach-photo",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[attach_call],
+            ),
+            _mock_response(content="The listing photo is attached.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {
+                        "success": True,
+                        "attachment": {
+                            "kind": "listing_photos",
+                            "filePath": str(photo_path),
+                        },
+                    }
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f'Attach the listing photo at "{photo_path}"'
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["action_obligation"] == {
+            "kind": "upload",
+            "verified": True,
+        }
+
+    def test_admin_deal_listing_photo_zip_verifies_real_decodable_image(
+        self,
+        tmp_path,
+    ):
+        import base64
+        import zipfile
+
+        archive_path = tmp_path / "listing-photos.zip"
+        image_data = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.writestr("front.png", image_data)
+        args = {
+            "action": "attach",
+            "deal_id": "deal-1",
+            "kind": "listing_photos",
+            "file_path": str(archive_path),
+        }
+        payload = {
+            "success": True,
+            "attachment": {
+                "kind": "listing_photos",
+                "filePath": str(archive_path),
+            },
+        }
+
+        assert run_agent._admin_deal_attachment_verified(
+            args,
+            payload,
+            "Attach the listing photos",
+        ) is True
+
+    def test_missing_listing_photo_cannot_verify_upload_action(self, tmp_path):
+        missing = tmp_path / "missing.png"
+        args = {
+            "action": "attach",
+            "deal_id": "deal-1",
+            "kind": "listing_photos",
+            "file_path": str(missing),
+        }
+        payload = {
+            "success": True,
+            "attachment": {
+                "kind": "listing_photos",
+                "filePath": str(missing),
+            },
+        }
+
+        assert run_agent._admin_deal_attachment_verified(
+            args,
+            payload,
+            "Attach the listing photo",
+        ) is False
+
+    def test_wrong_photo_cannot_satisfy_exact_requested_photo_path(self, tmp_path):
+        import base64
+
+        requested = tmp_path / "requested.png"
+        wrong = tmp_path / "wrong.png"
+        wrong.write_bytes(
+            base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+                "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            )
+        )
+        args = {
+            "action": "attach",
+            "deal_id": "deal-1",
+            "kind": "listing_photos",
+            "file_path": str(wrong),
+        }
+        payload = {
+            "success": True,
+            "attachment": {
+                "kind": "listing_photos",
+                "filePath": str(wrong),
+            },
+        }
+
+        assert run_agent._admin_deal_attachment_verified(
+            args,
+            payload,
+            f'Attach the listing photo at "{requested}"',
+        ) is False
+
+    def test_fake_listing_photo_cannot_verify_upload_action(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("admin_deal")
+        photo_path = tmp_path / "fake-listing.jpg"
+        photo_path.write_bytes(b"this is not an image")
+        attach_call = _mock_tool_call(
+            name="admin_deal",
+            arguments=json.dumps(
+                {
+                    "action": "attach",
+                    "deal_id": "deal-1",
+                    "kind": "listing_photos",
+                    "file_path": str(photo_path),
+                }
+            ),
+            call_id="attach-fake-photo",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[attach_call],
+            ),
+            _mock_response(content="The listing photo is attached.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Complete.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {
+                        "success": True,
+                        "attachment": {
+                            "kind": "listing_photos",
+                            "filePath": str(photo_path),
+                        },
+                    }
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f'Attach the listing photo at "{photo_path}"'
+            )
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"] == "action_obligation_unverified"
+        assert result["action_obligation"] == {
+            "kind": "upload",
+            "verified": False,
+        }
+
+    def test_stale_preexisting_pdf_cannot_verify_current_write_call(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("write_file")
+        import fitz
+
+        pdf_path = tmp_path / "stale-summary.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Artifact from an earlier run")
+        document.save(pdf_path)
+        document.close()
+        stale_bytes = pdf_path.stat().st_size
+        write_call = _mock_tool_call(
+            name="write_file",
+            arguments=json.dumps({"path": str(pdf_path), "content": "summary"}),
+            call_id="stale-write",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[write_call],
+            ),
+            _mock_response(content="The PDF is ready.", finish_reason="stop"),
+            _mock_response(content="It is complete.", finish_reason="stop"),
+            _mock_response(content="Definitely done.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps({"bytes_written": stale_bytes}),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f"Create a PDF transaction summary at {pdf_path}"
+            )
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"] == "action_obligation_unverified"
+        assert result["action_obligation"] == {
+            "kind": "create_document",
+            "verified": False,
+        }
+
+    def test_changed_preexisting_pdf_verifies_current_write_call(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("write_file")
+        import fitz
+
+        pdf_path = tmp_path / "changed-summary.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Old summary")
+        document.save(pdf_path)
+        document.close()
+        write_call = _mock_tool_call(
+            name="write_file",
+            arguments=json.dumps({"path": str(pdf_path), "content": "new summary"}),
+            call_id="changed-write",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[write_call],
+            ),
+            _mock_response(content="The PDF is ready.", finish_reason="stop"),
+        ]
+
+        def replace_pdf(*_args, **_kwargs):
+            pdf_path.unlink()
+            updated = fitz.open()
+            page = updated.new_page()
+            page.insert_text((72, 72), "New current-run transaction summary")
+            updated.save(pdf_path)
+            updated.close()
+            return json.dumps({"bytes_written": pdf_path.stat().st_size})
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=replace_pdf),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f"Create a PDF transaction summary at {pdf_path}"
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["action_obligation"]["verified"] is True
+
+    def test_same_content_replacement_is_not_fresh_document_evidence(
+        self,
+        tmp_path,
+    ):
+        path = tmp_path / "same.txt"
+        path.write_text("unchanged document", encoding="utf-8")
+        args = {"path": str(path), "content": "unchanged document"}
+        baselines = run_agent._capture_document_artifact_baselines(
+            "write_file",
+            args,
+            f"Create a document at {path}",
+        )
+        path.unlink()
+        path.write_text("unchanged document", encoding="utf-8")
+
+        assert run_agent._fresh_document_artifact_from_tool(
+            "write_file",
+            args,
+            {"bytes_written": path.stat().st_size},
+            f"Create a document at {path}",
+            baselines,
+        ) is False
+
+    def test_blank_pdf_and_textless_docx_are_not_documents(self, tmp_path):
+        import fitz
+        import zipfile
+
+        blank_pdf = tmp_path / "blank.pdf"
+        document = fitz.open()
+        document.new_page()
+        document.save(blank_pdf)
+        document.close()
+        empty_docx = tmp_path / "empty.docx"
+        with zipfile.ZipFile(empty_docx, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr(
+                "word/document.xml",
+                "<w:document xmlns:w='urn:test'><w:body><w:p/></w:body></w:document>",
+            )
+
+        assert run_agent._validate_document_artifact(blank_pdf) is False
+        assert run_agent._validate_document_artifact(empty_docx) is False
+
+    def test_docx_rejects_malformed_xml_and_duplicate_members(self, tmp_path):
+        import warnings
+        import zipfile
+
+        malformed = tmp_path / "malformed.docx"
+        with zipfile.ZipFile(malformed, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("word/document.xml", "<w:document>")
+        duplicate = tmp_path / "duplicate.docx"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with zipfile.ZipFile(duplicate, "w") as archive:
+                archive.writestr("[Content_Types].xml", "<Types/>")
+                archive.writestr(
+                    "word/document.xml",
+                    "<document><body>First</body></document>",
+                )
+                archive.writestr(
+                    "word/document.xml",
+                    "<document><body>Second</body></document>",
+                )
+
+        assert run_agent._validate_document_artifact(malformed) is False
+        assert run_agent._validate_document_artifact(duplicate) is False
+
+    def test_docx_bounds_count_directories_and_total_uncompressed_bytes(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import zipfile
+
+        too_many = tmp_path / "too-many.docx"
+        with zipfile.ZipFile(too_many, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr(
+                "word/document.xml",
+                "<document><body>Contract</body></document>",
+            )
+            archive.writestr("unused-one/", b"")
+            archive.writestr("unused-two/", b"")
+        monkeypatch.setattr(run_agent, "_DOCX_MAX_ARCHIVE_ENTRIES", 3)
+        assert run_agent._validate_document_artifact(too_many) is False
+
+        oversized = tmp_path / "oversized.docx"
+        with zipfile.ZipFile(oversized, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr(
+                "word/document.xml",
+                "<document><body>" + ("x" * 200) + "</body></document>",
+            )
+        monkeypatch.setattr(run_agent, "_DOCX_MAX_ARCHIVE_ENTRIES", 2048)
+        monkeypatch.setattr(run_agent, "_DOCX_MAX_UNCOMPRESSED_BYTES", 100)
+        assert run_agent._validate_document_artifact(oversized) is False
+
+    def test_docx_rejects_media_parts_above_bound(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        import zipfile
+
+        media_docx = tmp_path / "media.docx"
+        with zipfile.ZipFile(media_docx, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr(
+                "word/document.xml",
+                "<document><body/></document>",
+            )
+            archive.writestr("word/media/photo.png", b"x" * 20)
+        monkeypatch.setattr(run_agent, "_DOCX_MAX_MEDIA_PART_BYTES", 10)
+
+        assert run_agent._validate_document_artifact(media_docx) is False
+
+    def test_quoted_spaced_requested_path_rejects_wrong_artifact(self, tmp_path):
+        import fitz
+
+        requested = tmp_path / "deal file.pdf"
+        wrong = tmp_path / "wrong.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Wrong artifact")
+        document.save(wrong)
+        document.close()
+
+        assert run_agent._validate_document_artifact(
+            wrong,
+            f'Create the PDF at "{requested}"',
+        ) is False
+
+    def test_bare_relative_requested_filename_rejects_wrong_output(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_path)
+        requested = tmp_path / "requested-summary.pdf"
+        wrong = tmp_path / "wrong-summary.pdf"
+        _write_valid_pdf(wrong, "Wrong summary")
+
+        assert run_agent._requested_artifact_paths(
+            "Create requested-summary.pdf"
+        ) == [requested]
+        assert run_agent._validate_document_artifact(
+            wrong,
+            "Create requested-summary.pdf",
+        ) is False
+
+    def test_unrelated_terminal_cannot_claim_externally_appearing_file(
+        self,
+        tmp_path,
+    ):
+        import fitz
+
+        path = tmp_path / "external.pdf"
+        args = {"command": "true", "workdir": str(tmp_path)}
+        request = f"Create a PDF at {path}"
+        baselines = run_agent._capture_document_artifact_baselines(
+            "terminal", args, request
+        )
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Created by another actor")
+        document.save(path)
+        document.close()
+
+        assert run_agent._fresh_document_artifact_from_tool(
+            "terminal",
+            args,
+            {"exit_code": 0, "output": ""},
+            request,
+            baselines,
+        ) is False
+
+    def test_hardlink_alias_writes_are_not_parallel_safe(self, tmp_path):
+        original = tmp_path / "original.txt"
+        alias = tmp_path / "alias.txt"
+        original.write_text("shared", encoding="utf-8")
+        os.link(original, alias)
+        calls = [
+            _mock_tool_call(
+                name="write_file",
+                arguments=json.dumps({"path": str(path), "content": "new"}),
+                call_id=f"write-{index}",
+            )
+            for index, path in enumerate((original, alias))
+        ]
+
+        assert run_agent._should_parallelize_tool_batch(calls) is False
+
+    def test_future_targets_under_symlinked_parent_are_not_parallel_safe(
+        self,
+        tmp_path,
+    ):
+        real_parent = tmp_path / "real"
+        real_parent.mkdir()
+        alias_parent = tmp_path / "alias"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        calls = [
+            _mock_tool_call(
+                name="write_file",
+                arguments=json.dumps({"path": str(path), "content": "new"}),
+                call_id=f"write-{index}",
+            )
+            for index, path in enumerate(
+                (real_parent / "future.pdf", alias_parent / "future.pdf")
+            )
+        ]
+
+        assert not (real_parent / "future.pdf").exists()
+        assert run_agent._should_parallelize_tool_batch(calls) is False
+
+    def test_terminal_created_pdf_verifies_exact_requested_artifact(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("terminal")
+        import fitz
+
+        pdf_path = tmp_path / "terminal-summary.pdf"
+        terminal_call = _mock_tool_call(
+            name="terminal",
+            arguments=json.dumps(
+                {
+                    "command": f"generate-summary --output '{pdf_path}'",
+                    "workdir": str(tmp_path),
+                }
+            ),
+            call_id="terminal-pdf",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[terminal_call],
+            ),
+            _mock_response(content="The PDF is ready.", finish_reason="stop"),
+        ]
+
+        def create_pdf(*_args, **_kwargs):
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_text((72, 72), "Terminal generated summary")
+            document.save(pdf_path)
+            document.close()
+            return json.dumps({"output": "created", "exit_code": 0})
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=create_pdf),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(f"Create a PDF at {pdf_path}")
+
+        assert result["completed"] is True
+        assert result["action_obligation"]["verified"] is True
+
+    @pytest.mark.parametrize("tool_name", ["terminal", "execute_code"])
+    def test_one_physical_code_call_verifies_multiple_distinct_requested_outputs(
+        self,
+        agent,
+        tmp_path,
+        tool_name,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add(tool_name)
+        first = tmp_path / "MLC output.pdf"
+        second = tmp_path / "FINTRAC output.pdf"
+        source_key = "command" if tool_name == "terminal" else "code"
+        tool_call = _mock_tool_call(
+            name=tool_name,
+            arguments=json.dumps(
+                {
+                    source_key: (
+                        f'generate-forms --mlc "{first}" --fintrac "{second}"'
+                    ),
+                    "workdir": str(tmp_path),
+                }
+            ),
+            call_id=f"{tool_name}-two-pdfs",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call],
+            ),
+            _mock_response(content="Both PDFs are ready.", finish_reason="stop"),
+        ]
+
+        def create_pdfs(*_args, **_kwargs):
+            _write_valid_pdf(first, "MLC")
+            _write_valid_pdf(second, "FINTRAC")
+            if tool_name == "terminal":
+                return json.dumps({"output": "created two PDFs", "exit_code": 0})
+            return json.dumps({"output": "created two PDFs", "status": "success"})
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=create_pdfs),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f'Create PDFs at "{first}" and "{second}"'
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert [
+            entry["verified"] for entry in result["action_obligations"]
+        ] == [True, True]
+        assert len(
+            {entry["evidence"]["resource"] for entry in result["action_obligations"]}
+        ) == 2
+
+    def test_unregistered_document_adapter_cannot_verify_output(
+        self,
+        agent,
+        tmp_path,
+    ):
+        import zipfile
+
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("document_export")
+        docx_path = tmp_path / "contract.docx"
+        export_call = _mock_tool_call(
+            name="document_export",
+            arguments=json.dumps({"output_path": str(docx_path)}),
+            call_id="docx-export",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[export_call],
+            ),
+            _mock_response(content="The DOCX is ready.", finish_reason="stop"),
+            _mock_response(content="The DOCX is ready.", finish_reason="stop"),
+            _mock_response(content="The DOCX is ready.", finish_reason="stop"),
+        ]
+
+        def create_docx(*_args, **_kwargs):
+            with zipfile.ZipFile(docx_path, "w") as archive:
+                archive.writestr(
+                    "[Content_Types].xml",
+                    "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>",
+                )
+                archive.writestr(
+                    "word/document.xml",
+                    "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:t>Contract</w:t></w:r></w:p></w:body></w:document>",
+                )
+            return json.dumps(
+                {"success": True, "output_path": str(docx_path)}
+            )
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=create_docx),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                f"Create a DOCX contract at {docx_path}"
+            )
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["action_obligation"]["verified"] is False
+
+    def test_two_documents_one_created_does_not_complete_compound_request(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("write_file")
+        mlc_path = tmp_path / "MLC.pdf"
+        write_call = _mock_tool_call(
+            name="write_file",
+            arguments=json.dumps({"path": str(mlc_path), "content": "MLC"}),
+            call_id="write-mlc",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[write_call],
+            ),
+            _mock_response(content="Both are ready.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Complete.", finish_reason="stop"),
+        ]
+
+        def _physical_tool(tool_name, args, *_args, **_kwargs):
+            assert tool_name == "write_file"
+            return json.dumps(
+                {"bytes_written": _write_valid_pdf(Path(args["path"]), "MLC")}
+            )
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_physical_tool),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Create MLC and FINTRAC PDFs")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["turn_exit_reason"] == "action_obligation_unverified"
+        assert [entry["verified"] for entry in result["action_obligations"]] == [
+            True,
+            False,
+        ]
+        assert "document creation (1/2 verified)" in result["final_response"]
+
+    def test_two_documents_two_attachments_and_send_require_all_evidence(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"write_file", "admin_deal", "send_message"})
+        mlc_path = tmp_path / "MLC.pdf"
+        fintrac_path = tmp_path / "FINTRAC.pdf"
+        calls = [
+            _mock_tool_call(
+                name="write_file",
+                arguments=json.dumps({"path": str(mlc_path), "content": "MLC"}),
+                call_id="write-mlc",
+            ),
+            _mock_tool_call(
+                name="write_file",
+                arguments=json.dumps(
+                    {"path": str(fintrac_path), "content": "FINTRAC"}
+                ),
+                call_id="write-fintrac",
+            ),
+            _mock_tool_call(
+                name="admin_deal",
+                arguments=json.dumps(
+                    {
+                        "action": "attach",
+                        "deal_id": "deal-1",
+                        "kind": "MLC",
+                        "file_path": str(mlc_path),
+                    }
+                ),
+                call_id="attach-mlc",
+            ),
+            _mock_tool_call(
+                name="admin_deal",
+                arguments=json.dumps(
+                    {
+                        "action": "attach",
+                        "deal_id": "deal-1",
+                        "kind": "FINTRAC",
+                        "file_path": str(fintrac_path),
+                    }
+                ),
+                call_id="attach-fintrac",
+            ),
+            _mock_tool_call(
+                name="send_message",
+                arguments=json.dumps(
+                    {
+                        "action": "send",
+                        "target": "email:client@example.com",
+                        "message": "Package attached",
+                    }
+                ),
+                call_id="send-package",
+            ),
+        ]
+        agent.client.chat.completions.create.side_effect = [
+            *[
+                _mock_response(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[call],
+                )
+                for call in calls
+            ],
+            _mock_response(
+                content="The complete package was sent.", finish_reason="stop"
+            ),
+        ]
+
+        def _physical_tool(tool_name, args, *_args, **_kwargs):
+            if tool_name == "write_file":
+                return json.dumps(
+                    {
+                        "bytes_written": _write_valid_pdf(
+                            Path(args["path"]),
+                            str(args["content"]),
+                        )
+                    }
+                )
+            if tool_name == "admin_deal":
+                return json.dumps(
+                    {
+                        "success": True,
+                        "attachment": {
+                            "kind": args["kind"],
+                            "filePath": args["file_path"],
+                        },
+                    }
+                )
+            assert tool_name == "send_message"
+            return json.dumps({"success": True, "message_id": "message-1"})
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_physical_tool),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Create MLC and FINTRAC PDFs, attach them, and email the package"
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["action_obligation"] == {
+            "kind": "create_document",
+            "verified": True,
+        }
+        assert len(result["action_obligations"]) == 5
+        assert all(entry["verified"] for entry in result["action_obligations"])
+        assert len(
+            {entry["evidence"]["resource"] for entry in result["action_obligations"]}
+        ) == 5
+
+    @pytest.mark.parametrize("include_attachment", [False, True])
+    def test_create_attach_send_partial_sequences_stay_incomplete(
+        self,
+        agent,
+        tmp_path,
+        include_attachment,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.update({"write_file", "admin_deal", "send_message"})
+        contract_path = tmp_path / "contract.pdf"
+        write_call = _mock_tool_call(
+            name="write_file",
+            arguments=json.dumps(
+                {"path": str(contract_path), "content": "contract"}
+            ),
+            call_id="write-contract",
+        )
+        tool_calls = [write_call]
+        if include_attachment:
+            tool_calls.append(
+                _mock_tool_call(
+                    name="admin_deal",
+                    arguments=json.dumps(
+                        {
+                            "action": "attach",
+                            "deal_id": "deal-1",
+                            "kind": "contract",
+                            "file_path": str(contract_path),
+                        }
+                    ),
+                    call_id="attach-contract",
+                )
+            )
+        agent.client.chat.completions.create.side_effect = [
+            *[
+                _mock_response(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[call],
+                )
+                for call in tool_calls
+            ],
+            _mock_response(content="All done.", finish_reason="stop"),
+            _mock_response(content="Done now.", finish_reason="stop"),
+            _mock_response(content="Complete.", finish_reason="stop"),
+        ]
+
+        def _physical_tool(tool_name, args, *_args, **_kwargs):
+            if tool_name == "write_file":
+                return json.dumps(
+                    {
+                        "bytes_written": _write_valid_pdf(
+                            Path(args["path"]), "contract"
+                        )
+                    }
+                )
+            return json.dumps(
+                {
+                    "success": True,
+                    "attachment": {
+                        "kind": args["kind"],
+                        "filePath": args["file_path"],
+                    },
+                }
+            )
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_physical_tool),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Create the contract PDF, attach it, and send it to the client"
+            )
+
+        verified_by_kind = {
+            entry["kind"]: entry["verified"]
+            for entry in result["action_obligations"]
+        }
+        assert result["completed"] is False
+        assert verified_by_kind == {
+            "create_document": True,
+            "upload": include_attachment,
+            "send": False,
+        }
+
+    def test_duplicate_document_path_cannot_satisfy_plural_count_twice(
+        self,
+        agent,
+        tmp_path,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("write_file")
+        duplicate_path = tmp_path / "duplicate.pdf"
+        calls = [
+            _mock_tool_call(
+                name="write_file",
+                arguments=json.dumps(
+                    {"path": str(duplicate_path), "content": content}
+                ),
+                call_id=f"write-{content}",
+            )
+            for content in ("first", "second")
+        ]
+        agent.client.chat.completions.create.side_effect = [
+            *[
+                _mock_response(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[call],
+                )
+                for call in calls
+            ],
+            _mock_response(content="Both PDFs are ready.", finish_reason="stop"),
+            _mock_response(content="Done.", finish_reason="stop"),
+            _mock_response(content="Complete.", finish_reason="stop"),
+        ]
+
+        def _physical_tool(_tool_name, args, *_args, **_kwargs):
+            path = Path(args["path"])
+            if path.exists():
+                path.unlink()
+            return json.dumps(
+                {
+                    "bytes_written": _write_valid_pdf(
+                        path,
+                        str(args["content"]),
+                    )
+                }
+            )
+
+        with (
+            patch("run_agent.handle_function_call", side_effect=_physical_tool),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("Create two PDFs")
+
+        assert result["completed"] is False
+        assert [entry["verified"] for entry in result["action_obligations"]] == [
+            True,
+            False,
+        ]
+
+    def test_successful_send_message_result_verifies_delivery_action(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("send_message")
+        send_call = _mock_tool_call(
+            name="send_message",
+            arguments=json.dumps(
+                {
+                    "action": "send",
+                    "target": "telegram:client",
+                    "message": "Update",
+                }
+            ),
+            call_id="send-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[send_call],
+            ),
+            _mock_response(content="The message was sent.", finish_reason="stop"),
+        ]
+
+        with (
+            patch(
+                "run_agent.handle_function_call",
+                return_value=json.dumps(
+                    {"success": True, "message_id": "msg-123"}
+                ),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "Send the update to the client on Telegram"
+            )
+
+        assert result["completed"] is True
+        assert result["failed"] is False
+        assert result["action_obligation"] == {
+            "kind": "send",
+            "verified": True,
+        }
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_result", "user_request", "kind"),
+        [
+            ("pretend_send_email", "looks good", "Send the email", "send"),
+            (
+                "pretend_send_email",
+                json.dumps({"success": True, "id": "fake"}),
+                "Send the email",
+                "send",
+            ),
+            (
+                "dry_run_send_email",
+                json.dumps({"success": True, "message_id": "preview"}),
+                "Send the email",
+                "send",
+            ),
+            (
+                "send_email_preview",
+                json.dumps({"success": True, "message_id": "preview"}),
+                "Send the email",
+                "send",
+            ),
+            (
+                "pretend_upload",
+                json.dumps({"success": True, "upload_id": "fake"}),
+                "Upload the contract",
+                "upload",
+            ),
+        ],
+    )
+    def test_spoofed_action_tool_is_not_evidence(
+        self,
+        agent,
+        tool_name,
+        tool_result,
+        user_request,
+        kind,
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add(tool_name)
+        spoof_call = _mock_tool_call(
+            name=tool_name,
+            arguments=json.dumps({"to": "client@example.com"}),
+            call_id="spoof-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[spoof_call],
+            ),
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+            _mock_response(content="Sent.", finish_reason="stop"),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call", return_value=tool_result),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(user_request)
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["action_obligation"] == {
+            "kind": kind,
+            "verified": False,
+        }
+
+    def test_document_evidence_rejects_invalid_or_mismatched_artifacts(
+        self,
+        tmp_path,
+    ):
+        import fitz
+
+        zero_pdf = tmp_path / "zero.pdf"
+        zero_pdf.write_bytes(b"")
+        invalid_pdf = tmp_path / "invalid.pdf"
+        invalid_pdf.write_bytes(b"hello")
+        wrong_extension = tmp_path / "summary.txt"
+        wrong_extension.write_text("hello")
+        source_file = tmp_path / "random.py"
+        source_file.write_text("x=1")
+        invalid_docx = tmp_path / "contract.docx"
+        invalid_docx.write_bytes(b"not-a-zip")
+
+        for path, request in (
+            (zero_pdf, "Create a PDF summary"),
+            (invalid_pdf, "Create a PDF summary"),
+            (wrong_extension, "Create a PDF summary"),
+            (source_file, "Create a document"),
+            (invalid_docx, "Create a DOCX contract"),
+        ):
+            assert run_agent._tool_satisfies_action_obligation(
+                "create_document",
+                "write_file",
+                {"path": str(path)},
+                json.dumps({"bytes_written": path.stat().st_size}),
+                request,
+            ) is False
+
+        valid_pdf = tmp_path / "actual.pdf"
+        document = fitz.open()
+        document.new_page()
+        document.save(valid_pdf)
+        document.close()
+        requested_pdf = tmp_path / "requested.pdf"
+        assert run_agent._tool_satisfies_action_obligation(
+            "create_document",
+            "write_file",
+            {"path": str(valid_pdf)},
+            json.dumps({"bytes_written": valid_pdf.stat().st_size}),
+            f"Create a PDF at {requested_pdf}",
+        ) is False
+
+    def test_admin_deal_attach_requires_matching_real_artifact(
+        self,
+        tmp_path,
+    ):
+        import fitz
+
+        valid_pdf = tmp_path / "contract.pdf"
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Contract evidence")
+        document.save(valid_pdf)
+        document.close()
+        args = {
+            "action": "attach",
+            "deal_id": "d1",
+            "kind": "contract",
+            "file_path": str(valid_pdf),
+        }
+        payload = json.dumps(
+            {
+                "success": True,
+                "attachment": {
+                    "kind": "contract",
+                    "filePath": str(valid_pdf),
+                },
+            }
+        )
+        assert run_agent._tool_satisfies_action_obligation(
+            "upload",
+            "admin_deal",
+            args,
+            payload,
+            "Attach the contract to deal d1",
+        ) is True
+
+        missing_args = {**args, "file_path": str(tmp_path / "missing.pdf")}
+        missing_payload = json.dumps(
+            {
+                "success": True,
+                "attachment": {"filePath": missing_args["file_path"]},
+            }
+        )
+        assert run_agent._tool_satisfies_action_obligation(
+            "upload",
+            "admin_deal",
+            missing_args,
+            missing_payload,
+            "Attach the contract to deal d1",
+        ) is False
+
+        invalid_pdf = tmp_path / "invalid-contract.pdf"
+        invalid_pdf.write_bytes(b"not a pdf")
+        invalid_args = {**args, "file_path": str(invalid_pdf)}
+        invalid_payload = json.dumps(
+            {
+                "success": True,
+                "attachment": {"filePath": str(invalid_pdf)},
+            }
+        )
+        assert run_agent._tool_satisfies_action_obligation(
+            "upload",
+            "admin_deal",
+            invalid_args,
+            invalid_payload,
+            "Attach the contract to deal d1",
+        ) is False
+
+    @pytest.mark.parametrize(
+        "internal_prompt",
+        [
+            "[automated] Send the email summary to the user",
+            "⟦subagent-result:completed⟧ Send the prepared package",
+            "[System: Send the status update now]",
+        ],
+    )
+    def test_internal_action_prompts_are_not_treated_as_user_obligations(
+        self,
+        agent,
+        internal_prompt,
+    ):
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="Internal turn handled.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(internal_prompt)
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 1
+        assert "action_obligation" not in result
 
     def test_request_scoped_api_hooks_fire_for_each_api_call(self, agent):
         self._setup_agent(agent)
@@ -2392,7 +5756,7 @@ class TestRunConversation:
         assert persisted["messages"][-1]["finish_reason"] == "error"
 
     def test_invalid_tool_name_retry(self, agent):
-        """Model hallucinates an invalid tool name, agent retries and succeeds."""
+        """A hallucinated tool cannot be erased by a text-only follow-up."""
         self._setup_agent(agent)
         bad_tc = _mock_tool_call(name="nonexistent_tool", arguments="{}", call_id="c1")
         resp_bad = _mock_response(
@@ -2406,8 +5770,10 @@ class TestRunConversation:
             patch.object(agent, "_cleanup_task_resources"),
         ):
             result = agent.run_conversation("do something")
-        assert result["final_response"] == "Got it"
-        assert result["completed"] is True
+        assert "Got it" in result["final_response"]
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
         assert result["api_calls"] == 2
 
     def test_reasoning_only_local_resumed_no_compression_triggered(self, agent):
@@ -2490,6 +5856,351 @@ class TestRunConversation:
             if roles[i] == "assistant" and roles[i + 1] == "assistant":
                 raise AssertionError("Consecutive assistant messages found in history")
 
+    def test_native_gemini_empty_stream_recovers_once_without_streaming(
+        self, agent
+    ):
+        self._setup_agent(agent)
+        agent.provider = "gemini"
+        agent._fallback_chain = []
+        empty_response = _mock_native_gemini_empty_response()
+        empty_response._elevate_gemini_diagnostic["SECRET_FIELD"] = (
+            "SECRET_DIAGNOSTIC_VALUE"
+        )
+        recovered_response = _mock_response(
+            content="Recovered without streaming.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                return_value=empty_response,
+            ) as stream_call,
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=recovered_response,
+            ) as nonstream_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(run_agent.logger, "warning") as warning_log,
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered without streaming."
+        assert result["api_calls"] == 2
+        assert stream_call.call_count == 1
+        assert nonstream_call.call_count == 1
+        assert not getattr(agent, "_disable_streaming", False)
+        diagnostic_logs = [
+            call
+            for call in warning_log.call_args_list
+            if call.args
+            and call.args[0] == "Native Gemini returned an empty response: %s"
+        ]
+        assert len(diagnostic_logs) == 1
+        serialized_diagnostic = diagnostic_logs[0].args[1]
+        assert '"finish_reason":"STOP"' in serialized_diagnostic
+        assert "SECRET_FIELD" not in serialized_diagnostic
+        assert "SECRET_DIAGNOSTIC_VALUE" not in serialized_diagnostic
+
+    @pytest.mark.parametrize(
+        (
+            "diagnostic_finish_reason",
+            "prompt_block_reason",
+            "expected_reason",
+            "expected_subject",
+        ),
+        [
+            (
+                "UNSPECIFIED",
+                "PROHIBITED_CONTENT",
+                "PROHIBITED_CONTENT",
+                "request",
+            ),
+            ("SAFETY", "UNSPECIFIED", "SAFETY", "response"),
+            ("RECITATION", "UNSPECIFIED", "RECITATION", "response"),
+        ],
+    )
+    def test_native_gemini_content_block_fails_once_without_retry(
+        self,
+        agent,
+        diagnostic_finish_reason,
+        prompt_block_reason,
+        expected_reason,
+        expected_subject,
+    ):
+        self._setup_agent(agent)
+        agent.provider = "gemini"
+        agent._fallback_chain = []
+        blocked_response = _mock_response(
+            content="Partial filtered content",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call(name="deals_overview")],
+        )
+        blocked_response._elevate_gemini_diagnostic = {
+            "finish_reason": diagnostic_finish_reason,
+            "prompt_block_reason": prompt_block_reason,
+            "candidate_count": 0,
+            "part_counts": {
+                "text": 0,
+                "thought_text": 0,
+                "function_call": 0,
+                "thought_signature": 0,
+                "other": 0,
+            },
+            "usable_part_count": 0,
+            "prompt_tokens": 13,
+            "candidate_tokens": 0,
+            "thought_tokens": 0,
+            "total_tokens": 13,
+            "SECRET_FIELD": "SECRET_BLOCK_DETAILS",
+        }
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                return_value=blocked_response,
+            ) as stream_call,
+            patch.object(agent, "_interruptible_api_call") as nonstream_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_execute_tool_calls") as execute_tools,
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 1
+        assert result["final_response"] == (
+            f"The AI provider "
+            f"{'blocked' if expected_subject == 'request' else 'rejected'} "
+            f"this {expected_subject} ({expected_reason}); no response or tool "
+            "action was accepted."
+        )
+        assert "SECRET_BLOCK_DETAILS" not in result["final_response"]
+        assert stream_call.call_count == 1
+        nonstream_call.assert_not_called()
+        execute_tools.assert_not_called()
+
+    def test_native_gemini_nonstream_probe_stays_inside_four_call_cap(
+        self, agent
+    ):
+        self._setup_agent(agent)
+        agent.provider = "gemini"
+        agent._fallback_chain = []
+        empty_response = _mock_native_gemini_empty_response()
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                return_value=empty_response,
+            ) as stream_call,
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=empty_response,
+            ) as nonstream_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 4
+        assert stream_call.call_count == 3
+        assert nonstream_call.call_count == 1
+
+    def test_generic_content_filter_fails_once_without_tool_execution(
+        self, agent
+    ):
+        self._setup_agent(agent)
+        agent.provider = "openrouter"
+        agent.model = "google/gemini-2.5-flash"
+        agent._fallback_chain = []
+        blocked_response = _mock_response(
+            content="APPROVE FILTERED PARTIAL",
+            finish_reason="content_filter",
+            tool_calls=[_mock_tool_call(name="deals_overview")],
+        )
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                return_value=blocked_response,
+            ) as stream_call,
+            patch.object(agent, "_interruptible_api_call") as nonstream_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_execute_tool_calls") as execute_tools,
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["api_calls"] == 1
+        assert result["final_response"] == (
+            "The AI provider rejected this response (content_filter); no "
+            "response or tool action was accepted."
+        )
+        assert "APPROVE" not in result["final_response"]
+        assert stream_call.call_count == 1
+        nonstream_call.assert_not_called()
+        execute_tools.assert_not_called()
+
+    def test_interrupted_gemini_stream_never_persists_withheld_text(
+        self, agent
+    ):
+        self._setup_agent(agent)
+        agent.provider = "gemini"
+        agent.model = "gemini-2.5-flash"
+        agent._fallback_chain = []
+        interrupted_response = _mock_response(
+            content="WITHHELD_UNTERMINATED_GEMINI_TEXT",
+            finish_reason="incomplete",
+        )
+        interrupted_response._elevate_stream_incomplete_error = (
+            "Provider stream ended without a terminal frame."
+        )
+        interrupted_response._elevate_stream_output_withheld = True
+
+        def _interrupt_during_stream(_api_kwargs, **_kwargs):
+            agent._interrupt_requested = True
+            return interrupted_response
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=_interrupt_during_stream,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is False
+        assert result["failed"] is False
+        assert result["interrupted"] is True
+        assert result["partial"] is False
+        assert "WITHHELD_UNTERMINATED_GEMINI_TEXT" not in result["final_response"]
+        assert result["final_response"] == (
+            "Operation interrupted before the provider completed its response."
+        )
+
+    def test_non_gemini_empty_stream_does_not_change_protocol(self, agent):
+        self._setup_agent(agent)
+        agent.provider = "openrouter"
+        empty_response = _mock_native_gemini_empty_response()
+        recovered_response = _mock_response(
+            content="Recovered on streaming retry.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_has_stream_consumers", return_value=True),
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=[empty_response, recovered_response],
+            ) as stream_call,
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+            ) as nonstream_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is True
+        assert result["api_calls"] == 2
+        assert stream_call.call_count == 2
+        nonstream_call.assert_not_called()
+
+    def test_empty_response_retry_uses_bounded_jitter(self, agent):
+        self._setup_agent(agent)
+        empty_response = _mock_response(content=None, finish_reason="stop")
+        recovered_response = _mock_response(
+            content="Recovered after backoff.",
+            finish_reason="stop",
+        )
+
+        with (
+            patch(
+                "run_agent.jittered_backoff",
+                return_value=0.0,
+            ) as backoff,
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                side_effect=[empty_response, recovered_response],
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is True
+        backoff.assert_called_once_with(
+            1,
+            base_delay=0.5,
+            max_delay=2.0,
+        )
+        with patch("run_agent.jittered_backoff", return_value=9.0):
+            assert run_agent._empty_response_retry_delay(3) == 2.0
+
+    def test_empty_response_backoff_is_interruptible(self, agent):
+        self._setup_agent(agent)
+        empty_response = _mock_response(content=None, finish_reason="stop")
+
+        def _interrupt_during_sleep(_delay):
+            agent._interrupt_requested = True
+
+        with (
+            patch("run_agent.jittered_backoff", return_value=1.0),
+            patch(
+                "run_agent.time.sleep",
+                side_effect=_interrupt_during_sleep,
+            ) as sleep_call,
+            patch.object(
+                agent,
+                "_interruptible_api_call",
+                return_value=empty_response,
+            ) as api_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent._set_interrupt"),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert result["completed"] is False
+        assert result["interrupted"] is True
+        assert result["failed"] is False
+        assert result["api_calls"] == 1
+        assert api_call.call_count == 1
+        assert sleep_call.call_count == 1
+        assert sleep_call.call_args.args[0] <= 0.2
+
     def test_truly_empty_response_retries_3_times_then_fails_visibly(self, agent):
         """Exhausted empty responses are persisted and returned as a failure."""
         self._setup_agent(agent)
@@ -2541,6 +6252,42 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Here is the actual answer."
         assert result["api_calls"] == 2  # 1 original + 1 nudge retry
+
+    def test_recovered_tool_call_resets_empty_response_retry_budget(self, agent):
+        self._setup_agent(agent)
+        tool_call = _mock_tool_call(
+            name="web_search", arguments="{}", call_id="search-1"
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content=None, finish_reason="stop"),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[tool_call],
+            ),
+            _mock_response(content="Done after tool recovery.", finish_reason="stop"),
+        ]
+        retry_counts_at_execution = []
+
+        def _handle_function_call(*_args, **_kwargs):
+            retry_counts_at_execution.append(agent._empty_content_retries)
+            return "search result"
+
+        with (
+            patch("run_agent.jittered_backoff", return_value=0.0),
+            patch(
+                "run_agent.handle_function_call",
+                side_effect=_handle_function_call,
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search before answering")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Done after tool recovery."
+        assert retry_counts_at_execution == [0]
 
     def test_post_tool_empty_failure_does_not_persist_retry_sentinels(self, agent):
         self._setup_agent(agent)
@@ -2915,6 +6662,34 @@ class TestRunConversation:
         assert "partial text was preserved" in result["error"]
         assert result["final_response"] == "Here is the partial answer that was stream"
         assert result["api_calls"] == 1  # No retries
+
+    def test_unterminated_tool_stream_reports_no_action(self, agent):
+        self._setup_agent(agent)
+        partial_resp = _mock_response(
+            content=None,
+            finish_reason="length",
+            tool_calls=None,
+        )
+        partial_resp._elevate_stream_incomplete_error = (
+            "Provider stream ended without a terminal frame."
+        )
+        partial_resp._elevate_stream_output_withheld = True
+        partial_resp._elevate_had_tool_intent = True
+        agent.client.chat.completions.create.return_value = partial_resp
+
+        with (
+            patch("run_agent.handle_function_call") as execute_tool,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("write a file")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert "incomplete tool request" in result["error"]
+        assert "no tool action was executed" in result["error"]
+        execute_tool.assert_not_called()
 
     def test_partial_stream_recovery_on_empty_stub(self, agent):
         """When stub response has no content but text was streamed, use streamed text."""
@@ -3412,6 +7187,74 @@ class TestRunConversation:
         assert "truncated due to output length limit" in result["error"]
         mock_handle_function_call.assert_not_called()
 
+    @pytest.mark.parametrize("finish_reason", [None, "future_reason"])
+    def test_nonterminal_tool_call_fails_without_execution(
+        self, agent, finish_reason
+    ):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("web_search")
+        tool_call = _mock_tool_call(
+            name="web_search",
+            arguments='{"query":"unsafe"}',
+            call_id="nonterminal-1",
+        )
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="partial",
+            finish_reason=finish_reason,
+            tool_calls=[tool_call],
+        )
+
+        with (
+            patch("run_agent.handle_function_call") as execute_tool,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert "incomplete tool request" in result["error"]
+        execute_tool.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [None, "", "   ", '"scalar"', "[]", "42", "null", [], 42],
+    )
+    def test_tool_call_arguments_must_be_json_object(self, agent, arguments):
+        self._setup_agent(agent)
+        agent.valid_tool_names.add("web_search")
+        bad_tool_call = _mock_tool_call(
+            name="web_search",
+            arguments=arguments,
+            call_id="bad-shape-1",
+        )
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[bad_tool_call],
+            ),
+            _mock_response(
+                content="I could not safely run that tool request.",
+                finish_reason="stop",
+            ),
+        ]
+
+        with (
+            patch("run_agent.handle_function_call") as execute_tool,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search")
+
+        assert result["completed"] is False
+        assert result["failed"] is True
+        assert result["partial"] is True
+        assert "I could not safely run that tool request." in result["final_response"]
+        execute_tool.assert_not_called()
+
     def test_truncated_tool_call_retries_once_before_refusing(self, agent):
         """When tool call args are truncated, the agent retries the API call
         once. If the retry succeeds (valid JSON args), tool execution proceeds."""
@@ -3670,6 +7513,48 @@ class TestFlushSentinelNotLeaked:
             assert "_flush_sentinel" not in msg, (
                 f"_flush_sentinel leaked to API in message: {msg}"
             )
+
+    def test_missing_finish_tool_call_never_mutates_memory(
+        self, agent_with_memory_tool
+    ):
+        agent = agent_with_memory_tool
+        agent._memory_store = MagicMock()
+        agent._memory_flush_min_turns = 1
+        agent._user_turn_count = 10
+        agent._cached_system_prompt = "system"
+        memory_call = _mock_tool_call(
+            name="memory",
+            arguments=(
+                '{"action":"add","target":"memory",'
+                '"content":"MUST_NOT_PERSIST"}'
+            ),
+        )
+        agent.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=None,
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[memory_call],
+                    ),
+                )
+            ]
+        )
+        messages = [
+            {"role": "user", "content": "remember this"},
+            {"role": "assistant", "content": "working"},
+        ]
+
+        with (
+            patch(
+                "agent.auxiliary_client.call_llm",
+                side_effect=RuntimeError("no provider"),
+            ),
+            patch("tools.memory_tool.memory_tool") as mutate_memory,
+        ):
+            agent.flush_memories(messages, min_turns=0)
+
+        mutate_memory.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -4672,7 +8557,7 @@ class TestStreamingApiCall:
         assert tc[0].function.name == "search"
         assert tc[1].function.name == "read"
 
-    def test_truncated_tool_call_args_upgrade_finish_reason_to_length(self, agent):
+    def test_incomplete_stream_tool_args_preserve_length_intent(self, agent):
         chunks = [
             _make_chunk(tool_calls=[_make_tc_delta(0, "call_1", "write_file", '{"path":"x.txt","content":"hel')]),
         ]
@@ -4680,11 +8565,33 @@ class TestStreamingApiCall:
 
         resp = agent._interruptible_streaming_api_call({"messages": []})
 
-        tc = resp.choices[0].message.tool_calls
-        assert len(tc) == 1
-        assert tc[0].function.name == "write_file"
-        assert tc[0].function.arguments == '{"path":"x.txt","content":"hel'
+        assert resp.choices[0].message.tool_calls is None
         assert resp.choices[0].finish_reason == "length"
+        assert resp._elevate_had_tool_intent is True
+        assert resp._elevate_stream_output_withheld is True
+
+    def test_terminal_malformed_tool_args_are_scrubbed_as_error(self, agent):
+        chunks = [
+            _make_chunk(
+                tool_calls=[
+                    _make_tc_delta(
+                        0,
+                        "call_1",
+                        "write_file",
+                        '{"path":"x.txt","content":"hel',
+                    )
+                ]
+            ),
+            _make_chunk(finish_reason="tool_calls"),
+        ]
+        agent.client.chat.completions.create.return_value = iter(chunks)
+
+        resp = agent._interruptible_streaming_api_call({"messages": []})
+
+        assert resp.choices[0].message.tool_calls is None
+        assert resp.choices[0].finish_reason == "error"
+        assert resp._elevate_had_tool_intent is True
+        assert resp._elevate_stream_output_withheld is True
 
     def test_ollama_reused_index_separate_tool_calls(self, agent):
         """Ollama sends every tool call at index 0 with different ids.

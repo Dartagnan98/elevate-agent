@@ -1,211 +1,396 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 import type { ThreadContextResponse } from "@/lib/api-types";
-import type { LeadsProfile } from "../leads-data";
-import { ProfileDrawerThread, type ProfileDrawerMessage } from "./profile-drawer-thread";
+import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
+import type { DraftSendLifecycleNotice } from "../draft-send-lifecycle";
+import { crmTemperatureForProfile } from "./crm-profile-helpers";
+import { DraftRow } from "./draft-row";
 import { StatusPill } from "./profile-status";
 
+type TimelineItem = {
+  id: string;
+  kind: "message-in" | "message-out" | "note" | "activity" | "send";
+  label: string;
+  title: string;
+  body: string;
+  timestamp: string | null;
+};
+
+function timestampValue(value: string | null | undefined): number {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatTime(value: string | null | undefined): string {
+  if (!value) return "Time unavailable";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "Time unavailable";
+  return parsed.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function buildConversationTimeline(context: ThreadContextResponse | null, profile: LeadsProfile): TimelineItem[] {
+  if (!context) return [];
+  const items: TimelineItem[] = [];
+
+  for (const message of context.messages || []) {
+    const outbound = message.direction === "outbound";
+    items.push({
+      id: `message:${message.id}`,
+      kind: outbound ? "message-out" : "message-in",
+      label: outbound ? "Text sent" : "Text received",
+      title: outbound ? "You" : message.sender || profile.name,
+      body: message.text || "Message text unavailable.",
+      timestamp: message.timestamp,
+    });
+  }
+  for (const note of context.notes || []) {
+    items.push({
+      id: `note:${note.id}`,
+      kind: "note",
+      label: "Note",
+      title: note.author || note.title || "CRM note",
+      body: note.summary || note.title || "Note details unavailable.",
+      timestamp: note.timestamp,
+    });
+  }
+  for (const activity of context.activity || []) {
+    items.push({
+      id: `activity:${activity.id}`,
+      kind: "activity",
+      label: (activity.type || "Activity").replace(/_/g, " "),
+      title: activity.title || "CRM activity",
+      body: activity.summary || activity.address || "Activity details unavailable.",
+      timestamp: activity.timestamp,
+    });
+  }
+  for (const send of context.sends || []) {
+    const body = send.payload?.text || send.payload?.body || "Outbound content unavailable.";
+    items.push({
+      id: `send:${send.id}`,
+      kind: "send",
+      label: `${(send.channel || "outbound").toUpperCase()} · ${send.status || "unknown"}`,
+      title: "Delivery record",
+      body,
+      timestamp: send.updatedAt || send.createdAt,
+    });
+  }
+  return items.sort((a, b) => timestampValue(b.timestamp) - timestampValue(a.timestamp));
+}
+
 export function ProfileDrawer({
-  profile, onClose, onStatusChange,
+  profile,
+  draft,
+  onClose,
+  onStatusChange,
+  onFavoriteChange,
+  onDraftAction,
+  onDraftActionComplete,
+  draftSendNotices = [],
+  onEditTemplate,
 }: {
   profile: LeadsProfile;
+  draft?: LeadsDraft;
   onClose: () => void;
-  onStatusChange?: (profile: LeadsProfile, value: string) => void;
+  onStatusChange?: (profile: LeadsProfile, value: string) => void | Promise<void>;
+  onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
+  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
+  onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
+  draftSendNotices?: DraftSendLifecycleNotice[];
+  onEditTemplate?: () => void;
 }) {
-  const handleStatusChange = (v: string) => {
-    onStatusChange?.(profile, v);
-  };
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
-  }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
+  const titleId = useId();
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
   const [context, setContext] = useState<ThreadContextResponse | null>(null);
-  const [loadingCtx, setLoadingCtx] = useState(false);
-  const [ctxError, setCtxError] = useState<string | null>(null);
-  const sourceId = profile.sourceId || "";
-  const threadId = profile.threadId || "";
-  useEffect(() => {
-    if (!sourceId || !threadId) {
-      setContext(null);
+  const [loadingContext, setLoadingContext] = useState(Boolean(profile.sourceId && profile.threadId));
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [trackedDraftId, setTrackedDraftId] = useState<string | null>(null);
+  const trackedDraftSendNotice = trackedDraftId
+    ? draftSendNotices.find((notice) => notice.draftId === trackedDraftId) ?? null
+    : null;
+  const approvalInProgress = Boolean(
+    trackedDraftId
+    && draftBusy
+    && (!trackedDraftSendNotice || trackedDraftSendNotice.phase === "pending"),
+  );
+
+  const requestClose = () => {
+    if (approvalInProgress) {
+      setDraftError("Approval is still processing. Wait for the exact send result before closing this contact.");
       return;
     }
-    let cancelled = false;
-    setLoadingCtx(true);
-    setCtxError(null);
-    api
-      .getThreadContext(sourceId, threadId)
-      .then((res: ThreadContextResponse) => {
-        if (!cancelled) setContext(res);
-      })
-      .catch((err: { message?: string }) => {
-        if (!cancelled) setCtxError(err?.message || "Failed to load thread");
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingCtx(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sourceId, threadId]);
-
-  if (!profile) return null;
-
-  const heatTone = profile.heat >= 80 ? "hot" : profile.heat >= 50 ? "warm" : "cool";
-
-  const fmtTime = (iso?: string | null) => {
-    if (!iso) return "";
-    const t = new Date(iso);
-    if (!isFinite(t.getTime())) return "";
-    return t.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    onClose();
   };
 
-  const activity = (context?.activity || []).map((a) => ({
-    id: a.id,
-    kind: (a.type || "activity").replace(/_/g, " "),
-    time: fmtTime(a.timestamp),
-    title: a.title,
-    summary: a.summary,
-  }));
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.body.style.overflow = "hidden";
+    window.requestAnimationFrame(() => closeRef.current?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      previouslyFocused?.focus();
+    };
+  }, []);
 
-  const messages: ProfileDrawerMessage[] = (context?.messages || []).map((m) => ({
-    id: m.id,
-    direction: m.direction === "outbound" ? "out" : "in",
-    from: m.direction === "outbound" ? "You" : (m.sender || profile.name),
-    text: m.text || "",
-    time: fmtTime(m.timestamp),
-  }));
+  useEffect(() => {
+    const sourceId = profile.sourceId || "";
+    const threadId = profile.threadId || "";
+    if (!sourceId || !threadId) return;
 
-  const notes = context?.notes || [];
-  const tasks = context?.tasks || [];
+    let cancelled = false;
+    api.getThreadContext(sourceId, threadId)
+      .then((result) => { if (!cancelled) setContext(result); })
+      .catch((error: { message?: string }) => {
+        if (!cancelled) setContextError(error?.message || "Could not load this conversation.");
+      })
+      .finally(() => { if (!cancelled) setLoadingContext(false); });
+    return () => { cancelled = true; };
+  }, [profile.sourceId, profile.threadId]);
 
-  const sendHistory = (context?.sends || []).map((h, idx) => ({
-    id: h.id || String(idx),
-    transport: (h.channel || "EMAIL").toUpperCase(),
-    status: h.status || "sent",
-    time: fmtTime(h.createdAt),
-    text: (h.payload && (h.payload.text || h.payload.body)) || "",
-  }));
+  const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      requestClose();
+      return;
+    }
+    if (event.key !== "Tab" || !drawerRef.current) return;
+    const focusable = Array.from(drawerRef.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => !element.hasAttribute("hidden"));
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  const handleFavorite = async () => {
+    if (!onFavoriteChange) return;
+    setFavoriteBusy(true);
+    setFavoriteError(null);
+    try {
+      await onFavoriteChange(profile, !profile.favorite);
+    } catch (error) {
+      setFavoriteError(error instanceof Error ? error.message : "Could not update favorite.");
+    } finally {
+      setFavoriteBusy(false);
+    }
+  };
+
+  const handleStatus = async (value: string) => {
+    if (!onStatusChange) return;
+    setStatusBusy(true);
+    setStatusError(null);
+    try {
+      await onStatusChange(profile, value);
+    } catch (error) {
+      setStatusError(error instanceof Error ? error.message : "Could not update lead status.");
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
+  const handleDraftAction = async (action: LeadsDraftAction, nextDraft: LeadsDraft, scheduledAt?: string) => {
+    if (!onDraftAction) return;
+    if (action === "approve") setTrackedDraftId(nextDraft.id);
+    setDraftBusy(true);
+    setDraftError(null);
+    try {
+      await onDraftAction(action, nextDraft, scheduledAt);
+      await onDraftActionComplete?.(action);
+      setDraftError(null);
+    } catch (error) {
+      setDraftError(error instanceof Error ? error.message : `Could not ${action} draft.`);
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const timeline = useMemo(() => buildConversationTimeline(context, profile), [context, profile]);
+  const lead = context?.lead;
+  const tags = lead?.tags?.length ? lead.tags : profile.tags;
+  const emails = lead?.emails?.length ? lead.emails : (profile.email ? [profile.email] : []);
+  const phones = lead?.phones?.length ? lead.phones : (profile.phone ? [profile.phone] : []);
+  const owner = lead?.assignedUser || context?.source.ownerAgent || "Unassigned";
+  const temperature = crmTemperatureForProfile(profile);
+  const initials = profile.name.split(/\s+/).map((part) => part[0]).filter(Boolean).slice(0, 2).join("").toUpperCase();
+  const hasConversationIdentity = Boolean(profile.sourceId && profile.threadId);
 
   return (
-    <div className="lb-drawer-backdrop" onClick={onClose}>
-      <aside className="lb-drawer" role="dialog" aria-modal="true" aria-label={"Profile: " + profile.name} onClick={(e) => e.stopPropagation()}>
-        <header className="lb-drawer-head">
-          <div className="lb-drawer-head-title">
-            <h2 className="lb-drawer-name">{profile.name}</h2>
-            <div className="lb-drawer-tags">
-              <span className="lb-drawer-source mono">{profile.source.toLowerCase().replace(" crm", "")}</span>
-              <span className="lb-drawer-tag mono">Outreach</span>
-              <span className="lb-drawer-msg-count mono">{messages.length} messages</span>
+    <div className="lb-drawer-backdrop crm-contact-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
+      <aside
+        ref={drawerRef}
+        className="lb-drawer crm-contact-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onKeyDown={handleDialogKeyDown}
+      >
+        <header className="crm-contact-head">
+          <div className="crm-contact-identity">
+            <div className="crm-contact-avatar" data-tone={temperature} aria-hidden="true">{initials}</div>
+            <div>
+              <div className="crm-contact-name-row">
+                <h2 id={titleId}>{profile.name}</h2>
+                {profile.verified && <span className="crm-verified">✓ Verified</span>}
+                {profile.favorite && <span className="crm-favorite-badge">★ Favorite</span>}
+              </div>
+              <p>{profile.source}{lead?.leadSource ? ` · ${lead.leadSource}` : ""}</p>
+              <div className="crm-contact-inline-details">
+                {emails[0] && <a href={`mailto:${emails[0]}`}>{emails[0]}</a>}
+                {phones[0] && <a href={`tel:${phones[0]}`}>{phones[0]}</a>}
+              </div>
             </div>
           </div>
-          <div className="lb-drawer-head-actions">
-            <StatusPill status={profile.status} onChange={handleStatusChange} />
-            <button type="button" className="lb-drawer-close" onClick={onClose} aria-label="Close">×</button>
+          <div className="crm-contact-head-actions">
+            {onStatusChange
+              ? <StatusPill status={profile.status} onChange={(value) => void handleStatus(value)} disabled={statusBusy} />
+              : <span className="lb-profile-status">{profile.status || "No status"}</span>}
+            {statusBusy && <span className="sr-only" role="status">Saving lead status…</span>}
+            {onFavoriteChange && (
+              <button type="button" className="crm-favorite-button" onClick={() => void handleFavorite()} disabled={favoriteBusy} aria-pressed={Boolean(profile.favorite)}>
+                {favoriteBusy ? "Saving…" : profile.favorite ? "★ Favorited" : "☆ Favorite"}
+              </button>
+            )}
+            <button
+              ref={closeRef}
+              type="button"
+              className="lb-drawer-close"
+              onClick={requestClose}
+              disabled={approvalInProgress}
+              title={approvalInProgress ? "Wait for the exact send result before closing" : undefined}
+              aria-label={`Close ${profile.name}`}
+            >×</button>
           </div>
         </header>
 
-        <div className="lb-drawer-body">
-          <ProfileDrawerThread loading={loadingCtx} error={ctxError} messages={messages} />
+        {(statusError || favoriteError || draftError) && (
+          <div className="crm-contact-error" role="alert">{statusError || favoriteError || draftError}</div>
+        )}
+        {trackedDraftSendNotice && (
+          <div
+            className={trackedDraftSendNotice.phase === "failed" || trackedDraftSendNotice.phase === "timeout" || trackedDraftSendNotice.phase === "unknown"
+              ? "crm-contact-error"
+              : "crm-contact-scope"}
+            role={trackedDraftSendNotice.phase === "failed" || trackedDraftSendNotice.phase === "timeout" || trackedDraftSendNotice.phase === "unknown" ? "alert" : "status"}
+            aria-live="polite"
+          >
+            <strong>{trackedDraftSendNotice.draftName}</strong> · {trackedDraftSendNotice.message}
+          </div>
+        )}
+        <div className="crm-contact-scope" role="note">
+          {hasConversationIdentity
+            ? `Conversation details are from the selected ${profile.source} thread. Other channels may appear separately.`
+            : "No conversation identifier is attached to this lead, so only list-level CRM details are available."}
+        </div>
 
-          <aside className="lb-drawer-side">
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">Lead score</div>
-              <div className={"lb-drawer-score " + heatTone}>
-                <span className="lb-drawer-score-num">{profile.heat}</span>
-                <span className="lb-drawer-score-label">{heatTone}</span>
-              </div>
-              <div className="lb-drawer-kv">
-                <span className="lb-drawer-kv-label mono">Source</span>
-                <span className="lb-drawer-kv-val">{profile.source}</span>
-              </div>
-              <div className="lb-drawer-kv">
-                <span className="lb-drawer-kv-label mono">Owner</span>
-                <span className="lb-drawer-kv-val">Demo Agent</span>
-              </div>
-              <div className="lb-drawer-pills">
-                {profile.tags.map(t => (
-                  <span key={t} className="lb-drawer-pill mono">{t.toLowerCase()}</span>
-                ))}
-              </div>
-            </section>
-
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">Contact</div>
-              <div className="lb-drawer-contact">{profile.email}</div>
-            </section>
-
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">▤ Notes <span className="lb-drawer-section-count">{notes.length}</span></div>
-              {notes.length === 0 ? (
-                <div className="lb-drawer-empty-small">No notes yet.</div>
-              ) : (
-                <div className="lb-drawer-activity">
-                  {notes.map(n => (
-                    <div key={n.id} className="lb-drawer-activity-row" title={n.summary || n.title || ""}>
-                      <span className="lb-drawer-activity-kind">{n.title || n.summary || "Note"}</span>
-                      <span className="lb-drawer-activity-time mono">{fmtTime(n.timestamp)}</span>
-                    </div>
-                  ))}
+        <div className="crm-contact-body">
+          <div className="crm-contact-main">
+            {draft && (
+              <section className="crm-contact-section crm-contact-draft" aria-labelledby={`${titleId}-draft`}>
+                <div className="crm-section-heading">
+                  <div><span className="crm-section-kicker">Approval gate</span><h3 id={`${titleId}-draft`}>Draft ready</h3></div>
+                  <span className="crm-safe-send">Nothing sends until approved</span>
                 </div>
-              )}
-            </section>
+                <DraftRow
+                  draft={draft}
+                  selected={false}
+                  expanded
+                  onAction={onDraftAction ? (action, nextDraft, scheduledAt) => void handleDraftAction(action, nextDraft, scheduledAt) : undefined}
+                  busy={draftBusy}
+                  onEditTemplate={approvalInProgress ? undefined : onEditTemplate}
+                  hideSelection
+                  expandable={false}
+                />
+              </section>
+            )}
 
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">▦ Tasks <span className="lb-drawer-section-count">{tasks.length}</span></div>
-              {tasks.length === 0 ? (
-                <div className="lb-drawer-empty-small">No tasks.</div>
+            <section className="crm-contact-section" aria-labelledby={`${titleId}-timeline`}>
+              <div className="crm-section-heading">
+                <div><span className="crm-section-kicker">Selected thread</span><h3 id={`${titleId}-timeline`}>Conversation timeline</h3></div>
+                <span className="mono">{timeline.length} events</span>
+              </div>
+              {loadingContext ? (
+                <div className="crm-contact-loading" role="status">Loading conversation details…</div>
+              ) : contextError ? (
+                <div className="crm-contact-empty" role="alert"><strong>Conversation unavailable</strong><span>{contextError}</span></div>
+              ) : timeline.length === 0 ? (
+                <div className="crm-contact-empty"><strong>No conversation events on file.</strong><span>New messages, notes, sends, and source activity will appear here.</span></div>
               ) : (
-                <div className="lb-drawer-activity">
-                  {tasks.map(t => (
-                    <div key={t.id} className="lb-drawer-activity-row" title={t.summary || t.title || ""}>
-                      <span className="lb-drawer-activity-kind">{t.title || "Task"}</span>
-                      <span className="lb-drawer-activity-time mono">{fmtTime(t.dueAt || t.timestamp)}</span>
-                    </div>
+                <ol className="crm-timeline">
+                  {timeline.map((item) => (
+                    <li key={item.id} data-kind={item.kind}>
+                      <span className="crm-timeline-marker" aria-hidden="true" />
+                      <article>
+                        <div className="crm-timeline-meta">
+                          <span className="crm-timeline-label">{item.label}</span>
+                          <time dateTime={item.timestamp || undefined}>{formatTime(item.timestamp)}</time>
+                        </div>
+                        <strong>{item.title}</strong>
+                        <p>{item.body}</p>
+                      </article>
+                    </li>
                   ))}
-                </div>
+                </ol>
               )}
             </section>
+          </div>
 
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">∿ Property activity <span className="lb-drawer-section-count">{activity.length}</span></div>
-              {activity.length === 0 ? (
-                <div className="lb-drawer-empty-small">No activity recorded.</div>
-              ) : (
-                <div className="lb-drawer-activity">
-                  {activity.map(a => (
-                    <div key={a.id} className="lb-drawer-activity-row" title={a.summary || a.title || ""}>
-                      <span className="lb-drawer-activity-kind mono">{a.kind}</span>
-                      <span className="lb-drawer-activity-time mono">{a.time}</span>
-                    </div>
+          <aside className="crm-contact-rail" aria-label="Contact details">
+            <section className="crm-contact-section">
+              <div className="crm-section-heading"><h3>Lead details</h3></div>
+              <dl className="crm-detail-list">
+                <div><dt>Pipeline</dt><dd>{lead?.stage || profile.status || "No status"}</dd></div>
+                <div><dt>Temperature</dt><dd><span className={`crm-temp ${temperature}`}>{temperature} · {profile.heat}</span></dd></div>
+                <div><dt>Owner</dt><dd>{owner}</dd></div>
+                <div><dt>Source</dt><dd>{lead?.leadSource || profile.source}</dd></div>
+                <div><dt>Last touch</dt><dd>{profile.lastTouch || profile.age || "Unknown"}</dd></div>
+              </dl>
+              {lead?.summary && <p className="crm-lead-summary">{lead.summary}</p>}
+            </section>
+
+            <section className="crm-contact-section">
+              <div className="crm-section-heading"><h3>Contact</h3></div>
+              <div className="crm-contact-links">
+                {emails.map((email) => <a key={email} href={`mailto:${email}`}>{email}</a>)}
+                {phones.map((phone) => <a key={phone} href={`tel:${phone}`}>{phone}</a>)}
+                {emails.length === 0 && phones.length === 0 && <span>No contact details on file.</span>}
+              </div>
+            </section>
+
+            <section className="crm-contact-section">
+              <div className="crm-section-heading"><h3>Tags</h3><span className="mono">{tags.length}</span></div>
+              {tags.length > 0 ? (
+                <div className="crm-contact-tags">{tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+              ) : <p className="crm-rail-empty">No tags on this source record.</p>}
+            </section>
+
+            <section className="crm-contact-section">
+              <div className="crm-section-heading"><h3>Tasks</h3><span className="mono">{context?.tasks.length ?? 0}</span></div>
+              {(context?.tasks.length ?? 0) > 0 ? (
+                <ul className="crm-task-list">
+                  {context?.tasks.map((task) => (
+                    <li key={task.id}>
+                      <span className={`crm-task-state ${task.status === "done" ? "done" : ""}`} aria-hidden="true" />
+                      <div><strong>{task.title || "Task"}</strong><span>{task.summary || formatTime(task.dueAt || task.timestamp)}</span></div>
+                    </li>
                   ))}
-                </div>
-              )}
-            </section>
-
-            <section className="lb-drawer-section">
-              <div className="lb-drawer-section-label mono">Send history <span className="lb-drawer-section-count">{sendHistory.length}</span></div>
-              {sendHistory.length === 0 ? (
-                <div className="lb-drawer-empty-small">No outbound sends yet.</div>
-              ) : (
-                sendHistory.map(h => (
-                  <div key={h.id} className="lb-drawer-send">
-                    <div className="lb-drawer-send-head">
-                      <span className="lb-drawer-send-transport mono">{h.transport}</span>
-                      <span className="lb-drawer-send-status mono">{h.status}</span>
-                    </div>
-                    <div className="lb-drawer-send-text">{h.text}</div>
-                    <div className="lb-drawer-send-time mono">{h.time}</div>
-                  </div>
-                ))
-              )}
+                </ul>
+              ) : <p className="crm-rail-empty">No tasks on this conversation.</p>}
             </section>
           </aside>
         </div>

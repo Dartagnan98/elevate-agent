@@ -147,6 +147,89 @@ class TestPromptReceipt:
         ) is True
         assert db.get_recoverable_prompt_receipt("s1") is None
 
+    def test_deferred_terminal_receipt_is_not_restart_recoverable(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+        )
+
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="deferred"
+        ) is True
+        assert db.get_recoverable_prompt_receipt("s1") is None
+
+    def test_waiting_input_receipt_is_terminal_not_restart_recoverable(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.prepare_prompt_receipt(
+            "s1",
+            "first",
+            assistant_message_id="assistant-1",
+            client_message_id="user-1",
+            payload={"text": "first"},
+        )
+
+        assert db.claim_prompt_receipt("s1", "user-1", owner_id="owner-a") is True
+        assert db.finish_prompt_receipt(
+            "s1", "user-1", owner_id="owner-a", status="waiting_input"
+        ) is True
+        assert db.get_recoverable_prompt_receipt("s1") is None
+
+    def test_update_message_finish_reason_round_trips(self, db):
+        db.create_session(session_id="s1", source="tui")
+        db.append_message(
+            "s1",
+            "assistant",
+            content="Which province?",
+            finish_reason="incomplete",
+            client_message_id="assistant-1",
+        )
+
+        assert db.update_message_finish_reason(
+            "s1", "assistant-1", "needs_input"
+        ) is True
+        assert db.get_messages_as_conversation("s1")[0]["finish_reason"] == "needs_input"
+
+    def test_preserved_terminal_receipt_stays_idempotent_after_replay_clear(self, db):
+        db.create_session(session_id="s1", source="tui")
+        first = _prepare_receipt(
+            db,
+            "s1",
+            message_id="overflow-user",
+            content="oversized prompt",
+        )
+        assert db.claim_prompt_receipt(
+            "s1", "overflow-user", owner_id="owner-a"
+        ) is True
+        assert db.finish_prompt_receipt(
+            "s1", "overflow-user", owner_id="owner-a", status="error"
+        ) is True
+
+        db.replace_messages("s1", [], preserve_prompt_receipts=True)
+
+        duplicate = _prepare_receipt(
+            db,
+            "s1",
+            message_id="overflow-user",
+            content="oversized prompt",
+        )
+        assert duplicate["inserted"] is False
+        assert duplicate["status"] == "error"
+        assert duplicate["assistant_message_id"] == first["assistant_message_id"]
+        assert db.get_messages("s1") == []
+
+        with pytest.raises(ValueError, match="different prompt"):
+            _prepare_receipt(
+                db,
+                "s1",
+                message_id="overflow-user",
+                content="different prompt",
+            )
+
     def test_dead_owner_claim_can_be_recovered_once(self, db):
         db.create_session(session_id="s1", source="tui")
         db.prepare_prompt_receipt(

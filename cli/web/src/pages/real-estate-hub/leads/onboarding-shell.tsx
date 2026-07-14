@@ -72,12 +72,23 @@ export function LeadsOnboardingGate({ onStart, onSkip }: { onStart: () => void; 
   );
 }
 
-export function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
+export function LeadsOnboardingWelcome({
+  onContinue,
+  onClose,
+}: {
+  onContinue: () => void;
+  onClose: () => void;
+}) {
   const [exiting, setExiting] = useState(false);
 
   useEffect(() => {
     playOnboardingSwell();
-  }, []);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
 
   const handleStart = useCallback(() => {
     playOnboardingWhoosh();
@@ -105,6 +116,15 @@ export function LeadsOnboardingWelcome({ onContinue }: { onContinue: () => void 
       onAnimationEnd={handleAnimationEnd}
     >
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        onClick={onClose}
+        className="absolute right-4 top-4 z-10 text-muted-foreground hover:text-foreground"
+      >
+        Back to CRM
+      </Button>
       <div className="relative flex max-w-xl flex-col items-center px-6 text-center">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
           Elevation · Leads

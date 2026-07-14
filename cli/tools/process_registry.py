@@ -479,6 +479,7 @@ class ProcessRegistry:
         session_key: str = "",
         env_vars: dict = None,
         use_pty: bool = False,
+        notify_on_complete: bool = False,
     ) -> ProcessSession:
         """
         Spawn a background process locally.
@@ -497,6 +498,7 @@ class ProcessRegistry:
             session_key=session_key,
             cwd=_resolve_safe_cwd(cwd or os.getcwd()),
             started_at=time.time(),
+            notify_on_complete=notify_on_complete,
         )
 
         if use_pty:
@@ -527,11 +529,13 @@ class ProcessRegistry:
                     name=f"proc-pty-reader-{session.id}",
                 )
                 session._reader_thread = reader
-                reader.start()
-
                 with self._lock:
                     self._prune_if_needed()
                     self._running[session.id] = session
+                # Register before the reader starts. A very short command can
+                # exit immediately; starting first lets _move_to_finished()
+                # miss the session and strand an exited process in _running.
+                reader.start()
 
                 self._write_checkpoint()
                 return session
@@ -539,6 +543,14 @@ class ProcessRegistry:
             except ImportError:
                 logger.warning("ptyprocess not installed, falling back to pipe mode")
             except Exception as e:
+                with self._lock:
+                    self._running.pop(session.id, None)
+                try:
+                    if session._pty is not None and session._pty.isalive():
+                        session._pty.kill(signal.SIGKILL)
+                except Exception:
+                    pass
+                session._pty = None
                 logger.warning("PTY spawn failed (%s), falling back to pipe mode", e)
 
         # Standard Popen path (non-PTY or PTY fallback)
@@ -578,17 +590,18 @@ class ProcessRegistry:
                 name=f"proc-reader-{session.id}",
             )
             session._reader_thread = reader
-            reader.start()
-
             with self._lock:
                 self._prune_if_needed()
                 self._running[session.id] = session
+            reader.start()
 
             self._write_checkpoint()
         except Exception:
             # Post-Popen setup failed — kill the orphaned subprocess (and any
             # descendants spawned via setsid) before re-raising so they do not
             # leak as untracked background processes.
+            with self._lock:
+                self._running.pop(session.id, None)
             try:
                 if not _IS_WINDOWS:
                     try:
@@ -615,6 +628,7 @@ class ProcessRegistry:
         task_id: str = "",
         session_key: str = "",
         timeout: int = 10,
+        notify_on_complete: bool = False,
     ) -> ProcessSession:
         """
         Spawn a background process through a non-local environment backend.
@@ -636,6 +650,7 @@ class ProcessRegistry:
             started_at=time.time(),
             env_ref=env,
             pid_scope="sandbox",
+            notify_on_complete=notify_on_complete,
         )
 
         # Run the command in the sandbox with output capture
@@ -678,11 +693,14 @@ class ProcessRegistry:
                 name=f"proc-poller-{session.id}",
             )
             session._reader_thread = reader
+            with self._lock:
+                self._prune_if_needed()
+                self._running[session.id] = session
             reader.start()
-
-        with self._lock:
-            self._prune_if_needed()
-            self._running[session.id] = session
+        else:
+            with self._lock:
+                self._prune_if_needed()
+                self._finished[session.id] = session
 
         self._write_checkpoint()
         return session

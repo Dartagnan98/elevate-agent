@@ -16,7 +16,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.auxiliary_client import extract_content_or_reasoning
+from agent.auxiliary_client import (
+    AuxiliaryResponseRejectedError,
+    extract_content_or_reasoning,
+)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -28,7 +31,7 @@ def _make_response(content, **msg_attrs):
     (e.g. reasoning="...", reasoning_content="...", reasoning_details=[...]).
     """
     message = types.SimpleNamespace(content=content, tool_calls=None, **msg_attrs)
-    choice = types.SimpleNamespace(message=message)
+    choice = types.SimpleNamespace(message=message, finish_reason="stop")
     return types.SimpleNamespace(choices=[choice])
 
 
@@ -292,3 +295,10 @@ class TestExtractContentOrReasoning:
         """When both content and reasoning exist, content wins."""
         response = _make_response("Actual answer", reasoning="Internal reasoning")
         assert extract_content_or_reasoning(response) == "Actual answer"
+
+    def test_filtered_partial_content_is_rejected(self):
+        response = _make_response("APPROVE")
+        response.choices[0].finish_reason = "content_filter"
+
+        with pytest.raises(AuxiliaryResponseRejectedError):
+            extract_content_or_reasoning(response)

@@ -6,6 +6,7 @@ into ``data.deals`` (move_deal_stage, set_deal_toggle).
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 import pytest
@@ -97,6 +98,17 @@ def _complete_admin_setup():
             ],
         )
         complete_admin_setup(conn)
+
+
+def _write_valid_pdf(path: Path, text: str = "Verified test artifact") -> Path:
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    document.save(path)
+    document.close()
+    return path
 
 
 # ── Endpoint auth ────────────────────────────────────────────────────────
@@ -238,6 +250,7 @@ def _new_listing_deal():
             side="listing",
             actor="human:test",
             current_stage=4,
+            province="BC",
         )
 
 
@@ -627,7 +640,7 @@ def test_seeded_defaults_launch_matrix_and_buyer_stages():
     assert any(run["skill"] == "real-estate-admin/offer-review" for run in buyer_runs)
 
 
-def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
+def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch, tmp_path: Path):
     # A skill invoked in a live session finalizes the deal through the admin_deal
     # tool, mirroring the background run-result callback: the kanban card syncs
     # (fields + checklist + artifact) and the stage advances.
@@ -639,8 +652,17 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
     _complete_admin_setup()
     with connect() as conn:
         ensure_default_admin_actions(conn)
-        deal = create_deal(conn, title="CMA in session", side="listing", actor="human:test", current_stage=1)
+        deal = create_deal(
+            conn,
+            title="CMA in session",
+            side="listing",
+            actor="human:test",
+            current_stage=1,
+            province="BC",
+        )
         did = deal["id"]
+
+    cma_path = _write_valid_pdf(tmp_path / "cma.pdf", "CMA pricing analysis")
 
     # Entering CMA auto-launched a blocking run, so the gate is held.
     shown = json.loads(_admin_deal_handler({"action": "show", "deal_id": did}))
@@ -661,7 +683,7 @@ def test_admin_deal_tool_finalizes_session_work_to_the_board(monkeypatch):
             {"id": "client_yes_to_listing", "completed": True},
             {"id": "workflow_cma_date_requested", "completed": True},
         ],
-        "artifacts": [{"kind": "cma_report", "file_path": "/tmp/cma.pdf", "summary": "CMA"}],
+        "artifacts": [{"kind": "cma_report", "file_path": str(cma_path), "summary": "CMA"}],
     }))
     assert done["completedRun"]
     # The blocking run cleared and the card advanced CMA (1) -> Listing Intake (2).
@@ -683,7 +705,14 @@ def test_admin_deal_tool_writes_sync_the_gate(monkeypatch):
 
     _complete_admin_setup()
     with connect() as conn:
-        deal = create_deal(conn, title="Pre-CMA writes", side="listing", actor="human:test", current_stage=0)
+        deal = create_deal(
+            conn,
+            title="Pre-CMA writes",
+            side="listing",
+            actor="human:test",
+            current_stage=0,
+            province="BC",
+        )
         did = deal["id"]
 
     before = json.loads(_admin_deal_handler({"action": "show", "deal_id": did}))

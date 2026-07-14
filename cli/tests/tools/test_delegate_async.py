@@ -1,10 +1,11 @@
 """Tests for async (non-blocking) delegation dispatch (#9).
 
-When the parent agent carries an `_async_delegate_sink` callable AND it is a
-top-level agent (depth 0), `delegate_task` must dispatch the child on a
-background thread and return immediately with {status:"dispatched", task_id},
-calling the sink with the result payload when the child finishes. CLI/cron
-(no sink) and nested orchestrators (depth>0) keep the synchronous path.
+When the experimental async setting is explicitly enabled, the parent carries
+an `_async_delegate_sink` callable, and it is a top-level agent (depth 0),
+`delegate_task` dispatches the child on a background thread and returns
+immediately with {status:"dispatched", task_id}, calling the sink with the
+result payload when the child finishes. The production default, CLI/cron (no
+sink), and nested orchestrators (depth>0) keep the synchronous path.
 """
 
 import json
@@ -13,7 +14,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tools.delegate_tool import delegate_task, _get_async_delegation_enabled
+from tools.delegate_tool import (
+    _build_top_level_description,
+    _get_async_delegation_enabled,
+    delegate_task,
+)
 from tests.tools.test_delegate import _make_mock_parent
 
 
@@ -31,7 +36,8 @@ class TestAsyncDelegation(unittest.TestCase):
         return parent, sink_calls, done
 
     @patch("tools.delegate_tool._run_single_child")
-    def test_dispatch_returns_immediately_and_sink_fires(self, mock_run):
+    @patch("tools.delegate_tool._get_async_delegation_enabled", return_value=True)
+    def test_dispatch_returns_immediately_and_sink_fires(self, _async_on, mock_run):
         # The child run blocks on a gate the test controls, so dispatch must
         # return WITHOUT the child having finished — no wall-clock flakiness.
         release = threading.Event()
@@ -122,7 +128,8 @@ class TestAsyncDelegation(unittest.TestCase):
         self.assertEqual(sink_calls, [])
 
     @patch("tools.delegate_tool._run_single_child")
-    def test_sink_exception_does_not_crash_dispatch(self, mock_run):
+    @patch("tools.delegate_tool._get_async_delegation_enabled", return_value=True)
+    def test_sink_exception_does_not_crash_dispatch(self, _async_on, mock_run):
         mock_run.return_value = {
             "task_index": 0,
             "status": "completed",
@@ -144,9 +151,24 @@ class TestAsyncDelegation(unittest.TestCase):
         self.assertTrue(boom.wait(timeout=3.0))
 
     def test_async_enabled_default_and_env(self):
-        self.assertTrue(_get_async_delegation_enabled({}))
+        self.assertFalse(_get_async_delegation_enabled({}))
         self.assertFalse(_get_async_delegation_enabled({"async_enabled": False}))
         self.assertTrue(_get_async_delegation_enabled({"async_enabled": "yes"}))
+        with patch.dict(
+            "tools.delegate_tool.os.environ",
+            {"DELEGATION_ASYNC_ENABLED": "1"},
+            clear=True,
+        ):
+            self.assertTrue(_get_async_delegation_enabled({}))
+
+    def test_description_matches_safe_sync_default(self):
+        with patch(
+            "tools.delegate_tool._get_async_delegation_enabled",
+            return_value=False,
+        ):
+            description = _build_top_level_description()
+        self.assertIn("durable-safe synchronous delegation", description)
+        self.assertNotIn("this tool is NON-BLOCKING", description)
 
 
 if __name__ == "__main__":

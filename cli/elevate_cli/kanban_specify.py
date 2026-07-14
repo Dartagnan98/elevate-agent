@@ -20,9 +20,9 @@ Design notes
   Keeps the surface area tiny and the failure modes predictable.
 
 * The prompt is a short system + user pair. We ask for JSON with
-  ``{title, body}``; if parsing fails, we fall back to treating the
-  whole response as the body and leave the title untouched. No
-  retry loop — one shot, keep cost bounded.
+  ``{title, body}`` and fail closed when the provider does not satisfy
+  that schema. A refusal or prose reply must never promote a triage task.
+  No retry loop — one shot, keep cost bounded.
 
 * Structured output / JSON mode is not requested explicitly so the
   specifier works on providers that don't implement it. The parse
@@ -107,19 +107,12 @@ _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
-    """Lenient JSON extraction — tolerates fenced code blocks and
-    leading/trailing whitespace. Returns None if nothing parses."""
+    """Parse one JSON object, tolerating only an optional code fence."""
     if not raw:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
-    # Greedy: find the first `{` and last `}` and try that slice.
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
     try:
-        val = json.loads(candidate)
+        val = json.loads(stripped)
     except (ValueError, json.JSONDecodeError):
         return None
     if not isinstance(val, dict):
@@ -160,7 +153,11 @@ def specify_task(
         )
 
     try:
-        from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
+        from agent.auxiliary_client import (
+            _validate_llm_response,
+            get_auxiliary_extra_body,
+            get_text_auxiliary_client,
+        )
     except Exception as exc:  # pragma: no cover — import smoke test
         logger.debug("specify: auxiliary client import failed: %s", exc)
         return SpecifyOutcome(task_id, False, "auxiliary client unavailable")
@@ -183,16 +180,19 @@ def specify_task(
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=ELEVATE_KANBAN_SPECIFY_MAX_TOKENS,
-            timeout=timeout or 120,
-            extra_body=get_auxiliary_extra_body() or None,
+        resp = _validate_llm_response(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=ELEVATE_KANBAN_SPECIFY_MAX_TOKENS,
+                timeout=timeout or 120,
+                extra_body=get_auxiliary_extra_body() or None,
+            ),
+            "triage_specifier",
         )
     except Exception as exc:
         logger.info(
@@ -203,41 +203,61 @@ def specify_task(
             task_id, False, f"LLM error: {type(exc).__name__}"
         )
 
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if not (
+        isinstance(finish_reason, str)
+        and finish_reason.strip().lower() == "stop"
+    ):
+        normalized_reason = (
+            finish_reason.strip().lower()
+            if isinstance(finish_reason, str) and finish_reason.strip()
+            else "missing"
+        )
+        return SpecifyOutcome(
+            task_id,
+            False,
+            f"LLM response incomplete ({normalized_reason})",
+        )
+
+    message = resp.choices[0].message
+    if getattr(message, "tool_calls", None):
+        return SpecifyOutcome(
+            task_id,
+            False,
+            "LLM returned an unexpected tool call for a text-only task",
+        )
+
     try:
-        raw = (resp.choices[0].message.content or "").strip()
+        raw = (message.content or "").strip()
     except Exception:
         raw = ""
 
     parsed = _extract_json_blob(raw)
 
-    new_title: Optional[str]
-    new_body: Optional[str]
     if parsed is None:
-        # Fall back: treat the whole reply as the body, leave title as-is.
-        # Worst case the user edits afterward — still better than stranding
-        # the task in triage on a malformed LLM reply.
-        stripped_raw = raw.strip()
-        if not stripped_raw:
-            return SpecifyOutcome(
-                task_id, False, "LLM returned an empty response"
-            )
-        new_title = None
-        new_body = stripped_raw
-    else:
-        title_val = parsed.get("title")
-        body_val = parsed.get("body")
-        new_title = (
-            title_val.strip()
-            if isinstance(title_val, str) and title_val.strip()
-            else None
+        return SpecifyOutcome(
+            task_id,
+            False,
+            "LLM returned malformed JSON instead of a task specification",
         )
-        new_body = (
-            body_val if isinstance(body_val, str) and body_val.strip() else None
+
+    expected_keys = {"title", "body"}
+    if set(parsed) != expected_keys:
+        return SpecifyOutcome(
+            task_id,
+            False,
+            "LLM response must contain exactly title and body",
         )
-        if new_body is None and new_title is None:
-            return SpecifyOutcome(
-                task_id, False, "LLM response missing title and body"
-            )
+
+    title_val = parsed["title"]
+    body_val = parsed["body"]
+    if not isinstance(title_val, str) or not title_val.strip():
+        return SpecifyOutcome(task_id, False, "LLM response has invalid title")
+    if not isinstance(body_val, str) or not body_val.strip():
+        return SpecifyOutcome(task_id, False, "LLM response has invalid body")
+
+    new_title = title_val.strip()
+    new_body = body_val.strip()
 
     with kb.connect() as conn:
         ok = kb.specify_triage_task(

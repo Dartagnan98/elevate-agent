@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertTriangle,
   BriefcaseBusiness,
   Building2,
   CalendarClock,
@@ -97,6 +98,17 @@ import {
   sessionMatches,
 } from "@/pages/real-estate-hub/_shared/page-helpers";
 import { AdminDesignShell } from "./AdminDesignShell";
+import {
+  adminOnboardingExitDelay,
+  adminOnboardingSeedingStepState,
+  canClaimAdminSetupReady,
+  missingAdminOnboardingFields,
+  provinceGuideAvailability,
+  runAdminOnboardingSeedWithTimeout,
+  saveBeforeAdminOnboardingAdvance,
+  unresolvedAdminSetupReadiness,
+  type AdminOnboardingSeedOutcome,
+} from "./admin-onboarding-state";
 
 const DEFAULT_ADMIN_AUTOMATIONS = [
   {
@@ -979,6 +991,7 @@ export function useAdminSetup(): {
 }
 
 function AdminSetupField({
+  id,
   label,
   value,
   onChange,
@@ -988,7 +1001,11 @@ function AdminSetupField({
   type,
   helper,
   autoComplete,
+  required = false,
+  invalid = false,
+  dataOnboardingField,
 }: {
+  id?: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
@@ -998,12 +1015,23 @@ function AdminSetupField({
   type?: "text" | "email" | "password" | "url";
   helper?: string;
   autoComplete?: string;
+  required?: boolean;
+  invalid?: boolean;
+  dataOnboardingField?: string;
 }) {
   const resolvedListId = suggestions && suggestions.length > 0 ? listId : undefined;
   return (
     <label className="block min-w-0">
-      <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">{label}</span>
+      <span className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
+        {label}
+        {required && (
+          <span className="font-mono-ui text-[9px] uppercase tracking-wider text-muted-foreground/80">
+            Required
+          </span>
+        )}
+      </span>
       <input
+        id={id}
         type={type ?? "text"}
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -1011,7 +1039,14 @@ function AdminSetupField({
         list={resolvedListId}
         autoComplete={autoComplete ?? (type === "password" ? "new-password" : "off")}
         spellCheck={type === "password" || type === "email" ? false : undefined}
-        className="h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30"
+        required={required}
+        aria-required={required}
+        aria-invalid={invalid}
+        data-onboarding-field={dataOnboardingField}
+        className={cn(
+          "h-9 w-full rounded-md border border-border bg-card/60 px-3 text-[13px] text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/50 focus:border-primary focus:ring-1 focus:ring-primary/30",
+          invalid && "border-destructive focus:border-destructive focus:ring-destructive/30",
+        )}
       />
       {helper && (
         <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">{helper}</span>
@@ -1253,6 +1288,13 @@ function AdminOnboardingGate({ onStart, onSkip }: { onStart: () => void; onSkip:
 
 function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
   const [exiting, setExiting] = useState(false);
+  const continuedRef = useRef(false);
+
+  const continueOnce = useCallback(() => {
+    if (continuedRef.current) return;
+    continuedRef.current = true;
+    onContinue();
+  }, [onContinue]);
 
   const handleStart = useCallback(() => {
     playOnboardingSwell();
@@ -1262,10 +1304,25 @@ function AdminOnboardingWelcome({ onContinue }: { onContinue: () => void }) {
   const handleAnimationEnd = useCallback(
     (event: React.AnimationEvent<HTMLDivElement>) => {
       if (event.target !== event.currentTarget) return;
-      if (exiting) onContinue();
+      if (exiting) continueOnce();
     },
-    [exiting, onContinue],
+    [continueOnce, exiting],
   );
+
+  useEffect(() => {
+    if (!exiting) return;
+    let prefersReducedMotion = false;
+    try {
+      prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {
+      // The timed fallback below still guarantees progress.
+    }
+    const fallbackId = window.setTimeout(
+      continueOnce,
+      adminOnboardingExitDelay(prefersReducedMotion),
+    );
+    return () => window.clearTimeout(fallbackId);
+  }, [continueOnce, exiting]);
 
   return createPortal(
     <div
@@ -1313,17 +1370,23 @@ function AdminOnboardingWizard({
   error,
   savedMessage,
   provinceCoverage,
+  provinceCoverageLoading,
+  provinceCoverageError,
+  onRetryProvinceCoverage,
   savedProvinceCode,
 }: {
   draft: AdminSetupDraft;
   updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
-  onAdvanceSave: () => Promise<void>;
+  onAdvanceSave: () => Promise<boolean>;
   onFinish: () => Promise<void>;
   saving: boolean;
   verifying: boolean;
   error: string | null;
   savedMessage: string | null;
   provinceCoverage: AdminProvinceGuideCoverage[];
+  provinceCoverageLoading: boolean;
+  provinceCoverageError: string | null;
+  onRetryProvinceCoverage: () => void;
   savedProvinceCode: string;
 }) {
   const [stepIdx, setStepIdx] = useState(0);
@@ -1333,18 +1396,11 @@ function AdminOnboardingWizard({
   const isFirst = stepIdx === 0;
   const busy = saving || verifying;
 
-  const missingFields = useMemo(() => {
-    return step.fields.filter((field) => {
-      if (field.optional) return false;
-      const raw = draft[field.key];
-      const value = typeof raw === "string" ? raw.trim() : "";
-      return value.length === 0;
-    });
-  }, [step, draft]);
+  const missingFields = useMemo(
+    () => missingAdminOnboardingFields(step.fields, draft),
+    [step, draft],
+  );
   const canAdvance = missingFields.length === 0;
-  useEffect(() => {
-    setShowMissing(false);
-  }, [stepIdx]);
 
   const provinceCoverageByCode = useMemo(
     () => new Map(provinceCoverage.map((item) => [item.province, item])),
@@ -1356,21 +1412,32 @@ function AdminOnboardingWizard({
     if (busy) return;
     if (!canAdvance) {
       setShowMissing(true);
+      const firstMissingKey = String(missingFields[0]?.key ?? "");
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-onboarding-field="${firstMissingKey}"]`)
+          ?.focus();
+      });
       return;
     }
     playOnboardingClick();
-    await onAdvanceSave();
+    const saved = await saveBeforeAdminOnboardingAdvance(onAdvanceSave, () => {
+      if (!isLast) {
+        setShowMissing(false);
+        setStepIdx((idx) => Math.min(idx + 1, WIZARD_STEPS.length - 1));
+      }
+    });
+    if (!saved) return;
     if (isLast) {
       playOnboardingSwell();
       await onFinish();
-      return;
     }
-    setStepIdx((idx) => Math.min(idx + 1, WIZARD_STEPS.length - 1));
-  }, [busy, canAdvance, isLast, onAdvanceSave, onFinish]);
+  }, [busy, canAdvance, isLast, missingFields, onAdvanceSave, onFinish]);
 
   const handleBack = useCallback(() => {
     if (busy) return;
     playOnboardingClick();
+    setShowMissing(false);
     setStepIdx((idx) => Math.max(idx - 1, 0));
   }, [busy]);
 
@@ -1427,20 +1494,37 @@ function AdminOnboardingWizard({
                     provinceCoverageByCode={provinceCoverageByCode}
                     selectedProvinceCoverage={selectedProvinceCoverage}
                     savedProvinceCode={savedProvinceCode}
+                    provinceCoverageLoading={provinceCoverageLoading}
+                    provinceCoverageError={provinceCoverageError}
+                    onRetryProvinceCoverage={onRetryProvinceCoverage}
+                    required={!field.optional}
+                    invalid={showMissing && missingFields.some((missing) => missing.key === field.key)}
                   />
                 );
               }
               if (field.type === "textarea") {
                 return (
                   <label key={field.key} className="block min-w-0 md:col-span-2">
-                    <span className="mb-1.5 block text-[12px] font-medium text-muted-foreground">
+                    <span className="mb-1.5 flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
                       {field.label}
+                      {!field.optional && (
+                        <span className="font-mono-ui text-[9px] uppercase tracking-wider text-muted-foreground/80">
+                          Required
+                        </span>
+                      )}
                     </span>
                     <textarea
                       value={draft[field.key]}
                       onChange={(event) => updateDraft(field.key, event.target.value)}
                       placeholder={field.placeholder}
-                      className="min-h-28 w-full rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30"
+                      required={!field.optional}
+                      aria-required={!field.optional}
+                      aria-invalid={showMissing && missingFields.some((missing) => missing.key === field.key)}
+                      data-onboarding-field={String(field.key)}
+                      className={cn(
+                        "min-h-28 w-full rounded-md border border-border bg-card/60 px-3 py-2 text-[13px] leading-5 text-foreground outline-none backdrop-blur-sm transition-colors placeholder:text-muted-foreground/60 focus:border-primary focus:ring-1 focus:ring-primary/30",
+                        showMissing && missingFields.some((missing) => missing.key === field.key) && "border-destructive focus:border-destructive focus:ring-destructive/30",
+                      )}
                     />
                     {field.helper && (
                       <span className="mt-1.5 block text-[11.5px] leading-5 text-muted-foreground/80">
@@ -1466,6 +1550,9 @@ function AdminOnboardingWizard({
                     }
                     helper={field.helper}
                     autoComplete={field.autoComplete}
+                    required={!field.optional}
+                    invalid={showMissing && missingFields.some((missing) => missing.key === field.key)}
+                    dataOnboardingField={String(field.key)}
                   />
                 </div>
               );
@@ -1490,9 +1577,9 @@ function AdminOnboardingWizard({
 
         <div className="mt-9 flex items-center justify-between gap-3 border-t border-border/60 pt-5">
           <div className="min-h-[18px] flex-1 text-[12px] leading-5 text-muted-foreground/80">
-            {showMissing && !canAdvance && (
-              <span className="text-destructive">
-                Fill in {missingFields.map((f) => `"${f.label}"`).join(", ")} before continuing.
+            {!canAdvance && (
+              <span className={showMissing ? "text-destructive" : undefined}>
+                Required before continuing: {missingFields.map((field) => field.label).join(", ")}.
               </span>
             )}
           </div>
@@ -1502,7 +1589,7 @@ function AdminOnboardingWizard({
             </Button>
             <Button
               onClick={() => void handleNext()}
-              disabled={busy || !canAdvance}
+              disabled={busy}
               className="min-w-[140px]"
             >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
@@ -1533,49 +1620,35 @@ const ONBOARDING_SEEDING_STEPS: OnboardingSeedingStep[] = [
 function AdminOnboardingSeeding({
   onMissing,
   onComplete,
+  onReturnToForm,
   runSeed,
 }: {
   onMissing: () => void;
   onComplete: () => void;
+  onReturnToForm: () => void;
   runSeed: () => Promise<{ missing: boolean; error: string | null }>;
 }) {
-  const [activeIdx, setActiveIdx] = useState(0);
-  const [seedDone, setSeedDone] = useState(false);
-  const [seedResult, setSeedResult] = useState<{ missing: boolean; error: string | null } | null>(null);
+  const [outcome, setOutcome] = useState<AdminOnboardingSeedOutcome>({ kind: "running" });
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    runSeed()
-      .then((result) => {
-        if (!cancelled) setSeedResult(result);
-      })
-      .catch((err) => {
-        if (!cancelled) setSeedResult({ missing: true, error: String(err?.message ?? err) });
-      });
+    void runAdminOnboardingSeedWithTimeout(runSeed).then((result) => {
+      if (!cancelled) setOutcome(result);
+    });
     return () => {
       cancelled = true;
     };
-  }, [runSeed]);
+  }, [attempt, runSeed]);
 
   useEffect(() => {
-    if (activeIdx >= ONBOARDING_SEEDING_STEPS.length) {
-      setSeedDone(true);
-      return;
-    }
-    const id = window.setTimeout(() => {
-      setActiveIdx((idx) => idx + 1);
-    }, 1600);
-    return () => window.clearTimeout(id);
-  }, [activeIdx]);
-
-  useEffect(() => {
-    if (!seedDone || !seedResult) return;
-    const finishId = window.setTimeout(() => {
-      if (seedResult.missing) onMissing();
-      else onComplete();
-    }, 500);
+    if (outcome.kind !== "complete" && outcome.kind !== "missing") return;
+    const finishId = window.setTimeout(
+      outcome.kind === "missing" ? onMissing : onComplete,
+      450,
+    );
     return () => window.clearTimeout(finishId);
-  }, [seedDone, seedResult, onMissing, onComplete]);
+  }, [onComplete, onMissing, outcome.kind]);
 
   return createPortal(
     <div
@@ -1587,19 +1660,22 @@ function AdminOnboardingSeeding({
       <div className="onboarding-aurora-bg pointer-events-none absolute inset-0" aria-hidden />
       <div className="relative flex w-full max-w-lg flex-col px-6">
         <div className="onboarding-rise font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          Admin · running databases
+          Admin · checking setup
         </div>
         <h2 className="onboarding-rise-delay-1 mt-3 text-[28px] font-medium leading-[1.1] tracking-tight text-foreground">
-          Running databases. This will take a few minutes.
+          {outcome.kind === "complete" ? "Setup verified." : "Checking your saved setup."}
         </h2>
         <p className="onboarding-rise-delay-2 mt-2 max-w-md text-[13.5px] leading-6 text-muted-foreground">
-          Importing your province pack, seeding the agent playbook, and checking what's already connected. You can keep chatting with the coach while this runs.
+          {outcome.kind === "complete"
+            ? "Your province pack and readiness checks are complete."
+            : "We’re verifying your province pack and saved connections. This can take up to one minute; you can keep chatting with the coach."}
         </p>
 
         <ul className="onboarding-rise-delay-3 mt-7 flex flex-col gap-3">
           {ONBOARDING_SEEDING_STEPS.map((step, idx) => {
-            const done = idx < activeIdx || (seedDone && seedResult);
-            const active = idx === activeIdx && !seedDone;
+            const state = adminOnboardingSeedingStepState(outcome, idx);
+            const done = state === "done";
+            const active = state === "active";
             return (
               <li key={step.id} className="flex items-start gap-3">
                 <span
@@ -1635,9 +1711,27 @@ function AdminOnboardingSeeding({
           })}
         </ul>
 
-        {seedResult?.error && (
-          <div className="onboarding-rise-delay-3 mt-6 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
-            {seedResult.error}
+        {outcome.kind === "error" && (
+          <div className="onboarding-rise-delay-3 mt-6 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-3 text-[12px] text-destructive">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{outcome.message}</span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                onClick={() => {
+                  setOutcome({ kind: "running" });
+                  setAttempt((current) => current + 1);
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry setup check
+              </Button>
+              <Button size="sm" variant="outline" onClick={onReturnToForm}>
+                Review setup form
+              </Button>
+            </div>
           </div>
         )}
       </div>
@@ -1656,11 +1750,15 @@ type OnboardingConnectorCard = {
   title: string;
   question: string;
   helpText: string;
+  statusLabel: string;
   icon: typeof Cloud;
   action: OnboardingConnectorAction;
 };
 
-const ONBOARDING_CONNECTOR_TEMPLATES: Record<string, Omit<OnboardingConnectorCard, "key">> = {
+const ONBOARDING_CONNECTOR_TEMPLATES: Record<
+  string,
+  Omit<OnboardingConnectorCard, "key" | "statusLabel">
+> = {
   drive: {
     title: "Cloud drive",
     question: "Where do your active deal folders live today?",
@@ -1712,28 +1810,31 @@ const ONBOARDING_CONNECTOR_TEMPLATES: Record<string, Omit<OnboardingConnectorCar
   },
 };
 
-const ONBOARDING_CONNECTOR_KEY_ORDER = [
-  "drive",
-  "email",
-  "calendar",
-  "crm",
-  "mls",
-  "compliance_platform",
-  "showing_platform",
-];
-
 function buildOnboardingConnectorCards(setup: AdminSetupSnapshot): OnboardingConnectorCard[] {
-  const itemByKey = new Map(setup.items.map((it) => [it.key, it]));
-  const cards: OnboardingConnectorCard[] = [];
-  for (const key of ONBOARDING_CONNECTOR_KEY_ORDER) {
-    const tpl = ONBOARDING_CONNECTOR_TEMPLATES[key];
-    if (!tpl) continue;
-    const item = itemByKey.get(key);
-    const status = item?.status ?? "missing";
-    if (status === "configured" || status === "connected") continue;
-    cards.push({ key, ...tpl });
-  }
-  return cards;
+  return unresolvedAdminSetupReadiness(setup).map((readiness) => {
+    const template = ONBOARDING_CONNECTOR_TEMPLATES[readiness.key];
+    if (template) {
+      return {
+        key: readiness.key,
+        ...template,
+        question: readiness.detail || template.question,
+        helpText: readiness.action || template.helpText,
+        statusLabel: readiness.state.replaceAll("_", " "),
+      };
+    }
+    return {
+      key: readiness.key,
+      title: readiness.label,
+      question: readiness.detail || `${readiness.label} still needs attention.`,
+      helpText: readiness.action || "Review this item in the setup form, then verify again.",
+      statusLabel: readiness.state.replaceAll("_", " "),
+      icon: AlertTriangle,
+      action: {
+        kind: "manual",
+        helpText: readiness.action || "Review this item in the setup form.",
+      },
+    };
+  });
 }
 
 function AdminOnboardingConnectors({
@@ -1748,6 +1849,7 @@ function AdminOnboardingConnectors({
   onRefreshSetup: () => Promise<void>;
 }) {
   const cards = useMemo(() => buildOnboardingConnectorCards(setup), [setup]);
+  const setupReady = canClaimAdminSetupReady(setup);
   const [pendingBrowserKey, setPendingBrowserKey] = useState<string | null>(null);
   const [pendingComposioKey, setPendingComposioKey] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, { ok: boolean; message: string; runUrl?: string | null }>>({});
@@ -1827,7 +1929,7 @@ function AdminOnboardingConnectors({
     }
   }, []);
 
-  if (cards.length === 0) {
+  if (cards.length === 0 && setupReady) {
     return (
       <section className="border-t border-border pt-6">
         <div className="mx-auto flex max-w-2xl flex-col items-start">
@@ -1848,6 +1950,27 @@ function AdminOnboardingConnectors({
     );
   }
 
+  if (cards.length === 0) {
+    return (
+      <section className="border-t border-border pt-6">
+        <div className="mx-auto flex max-w-2xl flex-col items-start">
+          <div className="font-mono-ui text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            Admin · setup check
+          </div>
+          <h2 className="mt-3 text-[24px] font-medium leading-tight tracking-tight text-foreground">
+            Setup still needs verification.
+          </h2>
+          <p className="mt-2 text-[13.5px] leading-6 text-muted-foreground">
+            We could not confirm the remaining setup items. Review the setup form, then run Verify connections again.
+          </p>
+          <Button className="mt-6" onClick={onContinue}>
+            Review setup form
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="border-t border-border pt-6">
       <div className="mx-auto flex max-w-3xl flex-col">
@@ -1855,7 +1978,7 @@ function AdminOnboardingConnectors({
           Admin · connectors
         </div>
         <h2 className="mt-3 text-[24px] font-medium leading-tight tracking-tight text-foreground">
-          Connect your systems
+            Finish the remaining setup checks
         </h2>
         <p className="mt-2 max-w-2xl text-[13.5px] leading-6 text-muted-foreground">
           The coach on the right will walk you through each one. For browser-based portals, save the URL + email + password first, then hit Connect & analyze — Admin launches browser-use and scans the dashboard.
@@ -1893,7 +2016,7 @@ function AdminOnboardingConnectors({
                   <div className="flex flex-wrap items-baseline justify-between gap-2">
                     <div className="text-[14px] font-medium text-foreground">{card.title}</div>
                     <span className="font-mono-ui text-[0.6rem] uppercase tracking-wider text-muted-foreground">
-                      missing
+                      {card.statusLabel}
                     </span>
                   </div>
                   <p className="mt-1 text-[13px] leading-5 text-foreground/80">{card.question}</p>
@@ -1966,9 +2089,9 @@ function AdminOnboardingConnectors({
             onClick={onContinue}
             className="text-[12px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
           >
-            Finish later — open Admin anyway
+            Finish later — review setup form
           </button>
-          <Button onClick={onContinue}>Done — open Admin</Button>
+          <Button onClick={onContinue}>Review remaining setup</Button>
         </div>
       </div>
     </section>
@@ -2147,19 +2270,42 @@ function OnboardingProvinceField({
   provinceCoverageByCode,
   selectedProvinceCoverage,
   savedProvinceCode,
+  provinceCoverageLoading,
+  provinceCoverageError,
+  onRetryProvinceCoverage,
+  required,
+  invalid,
 }: {
   draft: AdminSetupDraft;
   updateDraft: (field: keyof AdminSetupDraft, value: string) => void;
   provinceCoverageByCode: Map<string, AdminProvinceGuideCoverage>;
   selectedProvinceCoverage: AdminProvinceGuideCoverage | undefined;
   savedProvinceCode: string;
+  provinceCoverageLoading: boolean;
+  provinceCoverageError: string | null;
+  onRetryProvinceCoverage: () => void;
+  required: boolean;
+  invalid: boolean;
 }) {
   const [unlocked, setUnlocked] = useState(false);
   const locked = Boolean(savedProvinceCode) && !unlocked;
+  const coverageState = provinceGuideAvailability({
+    province: draft.province,
+    coverage: [...provinceCoverageByCode.values()],
+    loading: provinceCoverageLoading,
+    error: provinceCoverageError,
+  });
   return (
     <label className="block min-w-0 md:col-span-2">
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <span className="block text-[12px] font-medium text-muted-foreground">Province / territory</span>
+        <span className="flex items-center gap-2 text-[12px] font-medium text-muted-foreground">
+          Province / territory
+          {required && (
+            <span className="font-mono-ui text-[9px] uppercase tracking-wider text-muted-foreground/80">
+              Required
+            </span>
+          )}
+        </span>
         <div className="flex items-center gap-2">
           {locked && (
             <button
@@ -2184,7 +2330,14 @@ function OnboardingProvinceField({
         <select
           value={draft.province.trim().toUpperCase()}
           onChange={(event) => updateDraft("province", event.target.value)}
-          className="h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30"
+          required={required}
+          aria-required={required}
+          aria-invalid={invalid}
+          data-onboarding-field="province"
+          className={cn(
+            "h-9 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none transition-colors focus:border-primary focus:ring-1 focus:ring-primary/30",
+            invalid && "border-destructive focus:border-destructive focus:ring-destructive/30",
+          )}
         >
           <option value="">Select province</option>
           {CANADIAN_PROVINCES.map(({ code, label }) => {
@@ -2219,7 +2372,24 @@ function OnboardingProvinceField({
           )}
         </div>
       )}
-      {draft.province.trim() && !selectedProvinceCoverage && (
+      {coverageState === "loading" && (
+        <div className="mt-1.5 text-[11px] text-muted-foreground">
+          Checking the local province guide…
+        </div>
+      )}
+      {coverageState === "error" && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-warning">
+          <span>Could not check the local province guide. Your province selection is still saved.</span>
+          <button
+            type="button"
+            onClick={onRetryProvinceCoverage}
+            className="text-foreground underline underline-offset-2"
+          >
+            Retry guide check
+          </button>
+        </div>
+      )}
+      {coverageState === "unavailable" && (
         <div className="mt-1.5 text-[11px] text-muted-foreground">
           No local guide for this province yet — fall back to manual references.
         </div>
@@ -2249,6 +2419,9 @@ export function AdminSetupLaunch({
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [provinceCoverage, setProvinceCoverage] = useState<AdminProvinceGuideCoverage[]>([]);
+  const [provinceCoverageLoading, setProvinceCoverageLoading] = useState(true);
+  const [provinceCoverageError, setProvinceCoverageError] = useState<string | null>(null);
+  const provinceCoverageRequestRef = useRef(0);
   const [provinceUnlocked, setProvinceUnlocked] = useState(false);
   const [phase, setPhase] = useState<"gate" | "welcome" | "wizard" | "seeding" | "connectors" | "form">(() =>
     forceOnboarding ? "welcome" : isBrandNewAdminSetup(setup) ? "gate" : "form",
@@ -2277,27 +2450,50 @@ export function AdminSetupLaunch({
     setProvinceUnlocked(false);
   }, [savedProvinceCode]);
 
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getAdminProvinceGuides()
-      .then((guides) => {
-        if (cancelled) return;
-        if ("items" in guides) setProvinceCoverage(guides.items);
-      })
-      .catch(() => {
-        if (!cancelled) setProvinceCoverage([]);
-      });
-    return () => {
-      cancelled = true;
-    };
+  const loadProvinceCoverage = useCallback(async () => {
+    const requestId = provinceCoverageRequestRef.current + 1;
+    provinceCoverageRequestRef.current = requestId;
+    setProvinceCoverageLoading(true);
+    setProvinceCoverageError(null);
+    try {
+      const guides = await api.getAdminProvinceGuides();
+      if (provinceCoverageRequestRef.current !== requestId) return;
+      if (!("items" in guides) || !Array.isArray(guides.items)) {
+        throw new Error("Province guide coverage returned an invalid response.");
+      }
+      setProvinceCoverage(guides.items);
+    } catch (err) {
+      if (provinceCoverageRequestRef.current === requestId) {
+        setProvinceCoverageError(errorMessage(err, "Could not check province guides"));
+      }
+    } finally {
+      if (provinceCoverageRequestRef.current === requestId) {
+        setProvinceCoverageLoading(false);
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    const startId = window.setTimeout(() => {
+      void loadProvinceCoverage();
+    }, 0);
+    return () => {
+      window.clearTimeout(startId);
+      provinceCoverageRequestRef.current += 1;
+    };
+  }, [loadProvinceCoverage]);
 
   const provinceCoverageByCode = useMemo(
     () => new Map(provinceCoverage.map((item) => [item.province, item])),
     [provinceCoverage],
   );
   const selectedProvinceCoverage = provinceCoverageByCode.get(draft.province.trim().toUpperCase());
+  const selectedProvinceCoverageState = provinceGuideAvailability({
+    province: draft.province,
+    coverage: provinceCoverage,
+    loading: provinceCoverageLoading,
+    error: provinceCoverageError,
+  });
 
   const updateDraft = useCallback(
     (field: keyof AdminSetupDraft, value: string) => {
@@ -2306,7 +2502,7 @@ export function AdminSetupLaunch({
     [],
   );
 
-  const submit = useCallback(async () => {
+  const submit = useCallback(async (): Promise<boolean> => {
     setSaving(true);
     setError(null);
     setSavedMessage(null);
@@ -2318,8 +2514,10 @@ export function AdminSetupLaunch({
           ? "Saved. Verify connections before Admin can start."
           : "Saved. Finish and verify the missing setup items before Admin can start.",
       );
+      return true;
     } catch (err) {
       setError(errorMessage(err, "Save admin setup failed"));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -2358,16 +2556,8 @@ export function AdminSetupLaunch({
   }, [draft, onSetupUpdated]);
 
   const handleWizardFinish = useCallback(async () => {
-    setError(null);
-    setSavedMessage(null);
-    try {
-      await api.updateAdminSetup(adminSetupPayloadFromDraft(draft));
-    } catch (err) {
-      setError(errorMessage(err, "Save admin setup failed"));
-      return;
-    }
     setPhase("seeding");
-  }, [draft]);
+  }, []);
 
   const runSeedAndVerify = useCallback(async (): Promise<{ missing: boolean; error: string | null }> => {
     try {
@@ -2419,6 +2609,9 @@ export function AdminSetupLaunch({
         error={error}
         savedMessage={savedMessage}
         provinceCoverage={provinceCoverage}
+        provinceCoverageLoading={provinceCoverageLoading}
+        provinceCoverageError={provinceCoverageError}
+        onRetryProvinceCoverage={() => void loadProvinceCoverage()}
         savedProvinceCode={savedProvinceCode}
       />
     );
@@ -2429,6 +2622,7 @@ export function AdminSetupLaunch({
       <AdminOnboardingSeeding
         runSeed={runSeedAndVerify}
         onMissing={() => setPhase("connectors")}
+        onReturnToForm={() => setPhase("form")}
         onComplete={() => {
           playOnboardingChime();
           setPhase("form");
@@ -2604,7 +2798,24 @@ export function AdminSetupLaunch({
                 )}
               </div>
             )}
-            {draft.province.trim() && !selectedProvinceCoverage && (
+            {selectedProvinceCoverageState === "loading" && (
+              <div className="mt-1.5 text-[11px] text-muted-foreground">
+                Checking the local province guide…
+              </div>
+            )}
+            {selectedProvinceCoverageState === "error" && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-warning">
+                <span>Could not check the local province guide. Your province selection is still saved.</span>
+                <button
+                  type="button"
+                  onClick={() => void loadProvinceCoverage()}
+                  className="text-foreground underline underline-offset-2"
+                >
+                  Retry guide check
+                </button>
+              </div>
+            )}
+            {selectedProvinceCoverageState === "unavailable" && (
               <div className="mt-1.5 text-[11px] text-muted-foreground">
                 No local guide for this province yet — fall back to manual references.
               </div>

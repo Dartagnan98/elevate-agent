@@ -41,7 +41,13 @@ export interface TranscriptTrace {
   messageId?: string;
 }
 
-export type TranscriptStatus = "streaming" | "complete" | "error" | "interrupted";
+export type TranscriptStatus =
+  | "streaming"
+  | "complete"
+  | "needs_input"
+  | "pending"
+  | "error"
+  | "interrupted";
 
 export interface TranscriptMessage {
   id: string;
@@ -476,7 +482,13 @@ export function appendDelta(
     beginAssistant(chatKey, messageId);
     m = b.byId.get(messageId)!;
   }
-  if (m.status === "complete" || m.status === "interrupted" || m.status === "error") {
+  if (
+    m.status === "complete" ||
+    m.status === "needs_input" ||
+    m.status === "pending" ||
+    m.status === "interrupted" ||
+    m.status === "error"
+  ) {
     // A late delta for a finished message would corrupt final content.
     return;
   }
@@ -631,7 +643,12 @@ export function unionHydrate(
       if (
         wire.status &&
         wire.status !== "streaming" &&
-        (next.status === "streaming" || next.status === undefined)
+        (
+          next.status === "streaming" ||
+          next.status === undefined ||
+          ((wire.status === "pending" || wire.status === "needs_input") &&
+            next.status === "complete")
+        )
       ) {
         next.status = wire.status;
         changed = true;

@@ -221,6 +221,7 @@ from elevate_cli.source_connector_modules.thread_context import (
 from elevate_cli.source_connector_modules.source_actions import (
     _approve_atomic,
     _channel_for_source,
+    _channel_for_task,
     _fire_approve_tick,
     _source_view_for_state,
     _thread_draft_template_state,

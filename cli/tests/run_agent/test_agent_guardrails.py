@@ -115,11 +115,12 @@ class TestSanitizeApiMessages:
 
 class TestCapDelegateTaskCalls:
 
-    def test_excess_delegates_truncated(self):
+    def test_excess_delegates_preserved_for_paired_errors(self):
         tcs = [make_tc("delegate_task") for _ in range(MAX_CONCURRENT_CHILDREN + 2)]
         out = AIAgent._cap_delegate_task_calls(tcs)
         delegate_count = sum(1 for tc in out if tc.function.name == "delegate_task")
-        assert delegate_count == MAX_CONCURRENT_CHILDREN
+        assert delegate_count == MAX_CONCURRENT_CHILDREN + 2
+        assert out is tcs
 
     def test_non_delegate_calls_preserved(self):
         tcs = (
@@ -162,9 +163,8 @@ class TestCapDelegateTaskCalls:
         w1 = make_tc("web_search", '{"q":"x"}')
         tcs = [delegates[0], t1, delegates[1], w1] + delegates[2:]
         out = AIAgent._cap_delegate_task_calls(tcs)
-        expected = [delegates[0], t1, delegates[1], w1] + delegates[2:MAX_CONCURRENT_CHILDREN]
-        assert len(out) == len(expected)
-        for i, (actual, exp) in enumerate(zip(out, expected)):
+        assert len(out) == len(tcs)
+        for i, (actual, exp) in enumerate(zip(out, tcs)):
             assert actual is exp, f"mismatch at index {i}"
 
 
@@ -174,13 +174,14 @@ class TestCapDelegateTaskCalls:
 
 class TestDeduplicateToolCalls:
 
-    def test_duplicate_pair_deduplicated(self):
+    def test_duplicate_pair_preserved_for_paired_suppression(self):
         tcs = [
             make_tc("web_search", '{"query":"foo"}'),
             make_tc("web_search", '{"query":"foo"}'),
         ]
         out = AIAgent._deduplicate_tool_calls(tcs)
-        assert len(out) == 1
+        assert out is tcs
+        assert len(out) == 2
 
     def test_multiple_duplicates(self):
         tcs = [
@@ -191,7 +192,8 @@ class TestDeduplicateToolCalls:
             make_tc("terminal", '{"cmd":"pwd"}'),
         ]
         out = AIAgent._deduplicate_tool_calls(tcs)
-        assert len(out) == 3
+        assert out is tcs
+        assert len(out) == 5
 
     def test_same_tool_different_args_kept(self):
         tcs = [
@@ -220,12 +222,13 @@ class TestDeduplicateToolCalls:
     def test_empty_list_safe(self):
         assert AIAgent._deduplicate_tool_calls([]) == []
 
-    def test_first_occurrence_kept(self):
+    def test_all_occurrences_kept_for_protocol_pairing(self):
         tc1 = make_tc("terminal", '{"cmd":"ls"}')
         tc2 = make_tc("terminal", '{"cmd":"ls"}')
         out = AIAgent._deduplicate_tool_calls([tc1, tc2])
-        assert len(out) == 1
+        assert len(out) == 2
         assert out[0] is tc1
+        assert out[1] is tc2
 
     def test_original_list_not_mutated(self):
         tcs = [

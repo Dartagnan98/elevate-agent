@@ -145,6 +145,7 @@ interface GatewayTranscriptMessage {
   message_id?: string | null;
   name?: string;
   role: "assistant" | "system" | "tool" | "user";
+  status?: "streaming" | "complete" | "needs_input" | "pending" | "error" | "interrupted";
   text?: string;
 }
 
@@ -218,7 +219,7 @@ interface ChatMessage {
   createdAt: number;
   id: string;
   role: ChatRole;
-  status?: "streaming" | "complete" | "error" | "interrupted";
+  status?: "streaming" | "complete" | "needs_input" | "pending" | "error" | "interrupted";
   title?: string;
   warning?: string;
   // Snapshotted at message.complete so the activity digest (tool
@@ -1044,6 +1045,8 @@ function hasActivitySnapshot(message: Partial<ChatMessage>): boolean {
   return (
     message.role === "assistant" &&
     (message.status === "streaming" ||
+      message.status === "needs_input" ||
+      message.status === "pending" ||
       !!message.tools?.length ||
       !!message.traces?.length ||
       typeof message.tokenCount === "number")
@@ -1087,7 +1090,14 @@ function normalizeTranscript(messages?: GatewayTranscriptMessage[]): ChatMessage
       createdAt: Date.now() - Math.max(0, (messages?.length ?? 0) - index),
       id: stableHydrateId(m.message_id, `history-${index}`),
       role: m.role,
-      status: "complete" as const,
+      status:
+        m.status === "streaming" ||
+        m.status === "needs_input" ||
+        m.status === "pending" ||
+        m.status === "error" ||
+        m.status === "interrupted"
+          ? m.status
+          : "complete" as const,
       title: m.name,
     }));
 }
@@ -1138,8 +1148,14 @@ function turnCompletionPresentation(
   stopForced = false,
   hasToolError = false,
 ): {
-  messageStatus: "complete" | "error" | "interrupted";
-  statusText: "Error" | "Finished with issues" | "Interrupted" | "Ready";
+  messageStatus: "complete" | "needs_input" | "pending" | "error" | "interrupted";
+  statusText:
+    | "Error"
+    | "Finished with issues"
+    | "Interrupted"
+    | "Ready"
+    | "Waiting for your input"
+    | "Waiting for completion";
   unfinishedToolStatus: "done" | "error";
 } {
   const status = rawStatus.trim().toLowerCase();
@@ -1164,11 +1180,38 @@ function turnCompletionPresentation(
       unfinishedToolStatus: "error",
     };
   }
+  if (["incomplete", "pending"].includes(status)) {
+    return {
+      messageStatus: "pending",
+      statusText: "Waiting for completion",
+      unfinishedToolStatus: "done",
+    };
+  }
+  if (["needs_input", "waiting_input"].includes(status)) {
+    return {
+      messageStatus: "needs_input",
+      statusText: "Waiting for your input",
+      unfinishedToolStatus: "done",
+    };
+  }
   return {
     messageStatus: "complete",
     statusText: "Ready",
     unfinishedToolStatus: "done",
   };
+}
+
+function delegateCompletionIsVerified(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return false;
+  }
+  const completion = payload as Record<string, unknown>;
+  return (
+    completion.status === "complete" &&
+    typeof completion.task_id === "string" &&
+    completion.task_id.trim().length > 0 &&
+    !completion.error
+  );
 }
 
 function subagentCompletionStatus(rawStatus: unknown): SubagentEntry["status"] {
@@ -1256,7 +1299,12 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
   let pendingTurnHasTokenCount = false;
   let pendingTurnCompletedAt: number | undefined;
   let pendingTurnMessageId: string | undefined;
-  let pendingTurnTerminalStatus: "error" | "interrupted" | undefined;
+  let pendingTurnTerminalStatus:
+    | "needs_input"
+    | "pending"
+    | "error"
+    | "interrupted"
+    | undefined;
   let pendingTraces: ActivityTrace[] = [];
 
   const resetPendingTurn = (): void => {
@@ -1382,7 +1430,12 @@ function normalizeStoredTranscript(messages?: StoredSessionMessage[]): ChatMessa
       const terminalStatus = turnCompletionPresentation(
         m.finish_reason ?? "complete",
       ).messageStatus;
-      if (terminalStatus === "error" || terminalStatus === "interrupted") {
+      if (
+        terminalStatus === "error" ||
+        terminalStatus === "interrupted" ||
+        (terminalStatus === "needs_input" && pendingTurnTerminalStatus === undefined) ||
+        (terminalStatus === "pending" && pendingTurnTerminalStatus === undefined)
+      ) {
         pendingTurnTerminalStatus = terminalStatus;
       }
       const reasoningText = (
@@ -1595,6 +1648,7 @@ export const __chatPageTestables = {
   contextRingTitle,
   defaultActivityDigestOpen,
   describeToolGroup,
+  delegateCompletionIsVerified,
   failActiveTurnMessage,
   isCompactSlashCommand,
   isOpenPreviewIntent,
@@ -1671,6 +1725,8 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
     const hasCachedActivity =
       role === "assistant" &&
       (entry.status === "streaming" ||
+        entry.status === "needs_input" ||
+        entry.status === "pending" ||
         !!tools?.length ||
         !!traces?.length ||
         typeof entry.tokenCount === "number");
@@ -1695,6 +1751,8 @@ function normalizeCachedTranscript(messages: unknown): ChatMessage[] | null {
       status:
         entry.status === "error" ||
         entry.status === "interrupted" ||
+        entry.status === "needs_input" ||
+        entry.status === "pending" ||
         entry.status === "streaming"
           ? entry.status
           : "complete" as const,
@@ -4385,7 +4443,7 @@ export default function ChatPage() {
     if (sig === lastTodoSigRef.current) return;
     lastTodoSigRef.current = sig;
     setPlanRefreshSignal((value) => value + 1);
-    if (isPlan && latest.status !== "error") setPlanReadyForApproval(true);
+    if (isPlan && latest.status === "done") setPlanReadyForApproval(true);
     if (!planAutoOpenDisabledRef.current && sidePanel === "none") {
       openSidePanel("plan");
     }
@@ -5655,26 +5713,6 @@ export default function ChatPage() {
         const stopForced = stoppedAssistantIdsRef.current.has(messageId);
         flushAssistantDelta();
 
-        // The agent just finished a turn — if the user asked it to change
-        // anything (add a card, update a template, move a deal, edit an
-        // automation, update memory), the change is already written
-        // server-side. Broadcast one app-wide signal so EVERY data view
-        // re-fetches immediately, instead of waiting on each page's poll or an
-        // app restart. Data hooks subscribe via useRefreshOnAgentTurn(); each
-        // listener only fires while its page is mounted. Background
-        // (cron/heartbeat) changes still ride the per-page poll as a fallback.
-        if (typeof window !== "undefined") {
-          const sidebarSessionId =
-            persistedSessionIdRef.current ??
-            activeSessionRef.current ??
-            (typeof ev.session_id === "string" ? ev.session_id : null);
-          window.dispatchEvent(
-            new CustomEvent("elevate:agent-turn-complete", {
-              detail: { sessionId: sidebarSessionId ?? undefined },
-            }),
-          );
-        }
-
         // Snapshot the finished turn's tools + reasoning traces onto the
         // message so the activity digest survives a session resume. A running
         // tool can only become done when the turn itself completed cleanly.
@@ -5690,6 +5728,23 @@ export default function ChatPage() {
           stopForced,
           hasToolError,
         );
+        // Only a clean completion proves that requested changes are ready for
+        // downstream views to refresh. A pending turn releases the composer
+        // but must not broadcast the same success-shaped signal.
+        if (
+          completion.messageStatus === "complete" &&
+          typeof window !== "undefined"
+        ) {
+          const sidebarSessionId =
+            persistedSessionIdRef.current ??
+            activeSessionRef.current ??
+            (typeof ev.session_id === "string" ? ev.session_id : null);
+          window.dispatchEvent(
+            new CustomEvent("elevate:agent-turn-complete", {
+              detail: { sessionId: sidebarSessionId ?? undefined },
+            }),
+          );
+        }
         const turnTools = toolsRef.current
           .filter((tool) => tool.messageId === messageId)
           .map((tool) =>
@@ -6201,7 +6256,9 @@ export default function ChatPage() {
       // only releases any lingering sidebar "working" affordance for the
       // session; it must NOT append a bubble (the event carries no text).
       gw.on("delegate.complete", (ev) => {
-        if (!accepts(ev)) return;
+        if (!accepts(ev) || !delegateCompletionIsVerified(ev.payload)) {
+          return;
+        }
         if (typeof window !== "undefined") {
           const sidebarSessionId =
             persistedSessionIdRef.current ??
@@ -10607,6 +10664,22 @@ function MessageRow({
           {message.warning && (
             <div className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_12%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]">
               {message.warning}
+            </div>
+          )}
+          {isAssistant && message.status === "pending" && (
+            <div
+              className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--chat-warning)_12%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]"
+              role="status"
+            >
+              Work is still pending. Completion has not been verified.
+            </div>
+          )}
+          {isAssistant && message.status === "needs_input" && (
+            <div
+              className="mt-3 rounded-lg border border-[color-mix(in_srgb,var(--chat-accent)_35%,transparent)] bg-[color-mix(in_srgb,var(--chat-accent)_10%,var(--chat-bg))] px-3 py-2 text-xs text-[var(--chat-text)]"
+              role="status"
+            >
+              Waiting for your input before continuing.
             </div>
           )}
           {/* Artifacts are NOT pinned to the bottom of the message anymore.

@@ -4,6 +4,8 @@ We only extend ``_ARTIFACT_CHECKLIST_HINTS`` (no broad tool-name hook). These
 lock the new aliases and prove the existing run-completion auto-tick path still
 ticks the mapped cell with no explicit checklist write.
 """
+from pathlib import Path
+
 from elevate_cli.data import connect, create_deal
 from elevate_cli.data.deals import _ARTIFACT_CHECKLIST_HINTS, get_deal, record_run_result
 from elevate_cli.data.dispatch import queue_action_run
@@ -12,8 +14,24 @@ from elevate_cli.data.dispatch import queue_action_run
 def _make_deal():
     with connect() as conn:
         return create_deal(
-            conn, title="Artifact Deal", side="listing", current_stage=0, actor="human:test"
+            conn,
+            title="Artifact Deal",
+            side="listing",
+            current_stage=0,
+            actor="human:test",
+            province="BC",
         )
+
+
+def _write_valid_pdf(path: Path) -> Path:
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "CMA checklist evidence")
+    document.save(path)
+    document.close()
+    return path
 
 
 def test_new_aliases_map_to_existing_sibling_cells():
@@ -24,8 +42,9 @@ def test_new_aliases_map_to_existing_sibling_cells():
     assert _ARTIFACT_CHECKLIST_HINTS["listing_agreement"] == "workflow_stage_2_complete"
 
 
-def test_completed_run_with_mapped_artifact_ticks_cell():
+def test_completed_run_with_mapped_artifact_ticks_cell(tmp_path: Path):
     deal = _make_deal()
+    cma_path = _write_valid_pdf(tmp_path / "cma.pdf")
     with connect() as conn:
         run = queue_action_run(conn, deal_id=deal["id"], skill="cma-pdf", actor="system")
         # No explicit checklist_updates — the tick must come purely from the
@@ -36,7 +55,7 @@ def test_completed_run_with_mapped_artifact_ticks_cell():
             deal["id"],
             run["id"],
             status="succeeded",
-            artifacts=[{"kind": "cma_pdf", "file_path": "/tmp/cma.pdf", "summary": "CMA"}],
+            artifacts=[{"kind": "cma_pdf", "file_path": str(cma_path), "summary": "CMA"}],
             actor="skill:cma-pdf",
         )
         toggles = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}

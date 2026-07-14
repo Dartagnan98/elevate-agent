@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import DealDetailModal, { type Deal as AdminModalDeal } from "../../admin/components/deal-modal";
 import { ADMIN_PIPELINE, ADMIN_BUYER_PIPELINE } from "../../admin/admin-data";
 import type { AdminDeal } from "@/lib/api-types";
+import type { DraftSendLifecycleNotice } from "../../leads/draft-send-lifecycle";
 
 // Build the Admin DealDetailModal `Deal` from a raw AdminDeal. `currentStage`
 // is 0-based; the modal does pipeline.find(p => p.id === deal.phase), so phase
@@ -86,6 +87,7 @@ export type TodayDraft = {
   confidence: number | null;
   intent: string;
   heat: number | null;
+  approvalBlockedReason?: string;
 };
 
 export type TodayCalendarEvent = {
@@ -150,6 +152,7 @@ export type TodayBoardProps = {
   live: TodayLiveItem[];
   pipeline: TodayPipelineStage[];
   drafts: TodayDraft[];
+  draftSendNotices?: DraftSendLifecycleNotice[];
   calendar: TodayCalendarEvent[];
   sources: TodaySources;
   runs: TodayAgentRun[];
@@ -580,11 +583,20 @@ function PipelineVelocity({ stages }: { stages: TodayPipelineStage[] }) {
   );
 }
 
-function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDraftAction?: TodayBoardProps["onDraftAction"] }) {
+function QuickApprovals({
+  drafts,
+  draftSendNotices = [],
+  onDraftAction,
+}: {
+  drafts: TodayDraft[];
+  draftSendNotices?: DraftSendLifecycleNotice[];
+  onDraftAction?: TodayBoardProps["onDraftAction"];
+}) {
   const [skipped, setSkipped] = useState<Set<string>>(() => new Set());
   const [approved, setApproved] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   const visible = drafts.filter((d) => !skipped.has(d.id) && !approved.has(d.id));
+  const approvable = visible.filter((draft) => !draft.approvalBlockedReason);
 
   const handle = async (action: "approve" | "skip", id: string) => {
     setBusy((s) => new Set(s).add(id));
@@ -618,8 +630,8 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
           <button
             type="button"
             className="td-card-link mono"
-            disabled={visible.length === 0 || busy.size > 0}
-            onClick={() => { for (const d of visible) void handle("approve", d.id); }}
+            disabled={approvable.length === 0 || busy.size > 0}
+            onClick={() => { for (const d of approvable) void handle("approve", d.id); }}
           >
             Approve all
           </button>
@@ -628,6 +640,24 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
           </Link>
         </div>
       </header>
+      {draftSendNotices.length > 0 && (
+        <div className="space-y-2 border-t border-border px-3 py-3" aria-label="Today approved draft send status" aria-live="polite">
+          {draftSendNotices.map((notice) => {
+            const needsAttention = notice.phase === "failed" || notice.phase === "timeout" || notice.phase === "unknown";
+            return (
+              <div
+                key={notice.draftId}
+                className={needsAttention
+                  ? "rounded-md border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                  : "rounded-md border border-border bg-background/70 px-3 py-2 text-xs text-foreground"}
+                role={needsAttention ? "alert" : "status"}
+              >
+                <strong>{notice.draftName}</strong> · {notice.message}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {visible.length === 0 ? (
         <div className="td-priority-empty">Nothing to approve. Drafts will appear here as the agent prepares them.</div>
       ) : (
@@ -648,6 +678,11 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
                   <span className="td-approval-meta-dot">·</span>
                   <span>{d.handle}</span>
                 </div>
+                {d.approvalBlockedReason && (
+                  <div className="mt-1 text-[11px] text-[var(--status-error)]" role="note">
+                    {d.approvalBlockedReason}
+                  </div>
+                )}
               </div>
               <div className="td-approval-preview">{d.preview}</div>
               <div className="td-approval-foot">
@@ -665,8 +700,14 @@ function QuickApprovals({ drafts, onDraftAction }: { drafts: TodayDraft[]; onDra
                     {busy.has(d.id) ? "…" : "Skip"}
                   </button>
                   <Link to="/leads" className="td-btn ghost">Edit</Link>
-                  <button type="button" className="td-btn primary" disabled={busy.has(d.id)} onClick={() => handle("approve", d.id)}>
-                    {busy.has(d.id) ? "…" : "Approve & send"}
+                  <button
+                    type="button"
+                    className="td-btn primary"
+                    disabled={busy.has(d.id) || Boolean(d.approvalBlockedReason)}
+                    title={d.approvalBlockedReason}
+                    onClick={() => handle("approve", d.id)}
+                  >
+                    {busy.has(d.id) ? "Processing…" : d.approvalBlockedReason ? "Approve unavailable" : "Approve & send"}
                   </button>
                 </div>
               </div>
@@ -970,7 +1011,11 @@ export function TodayBoard(props: TodayBoardProps) {
         <ActiveDeals deals={props.deals} adminDealsById={props.adminDealsById} />
         <div className="td-two">
           <PriorityQueue items={props.priority} />
-          <QuickApprovals drafts={props.drafts} onDraftAction={props.onDraftAction} />
+          <QuickApprovals
+            drafts={props.drafts}
+            draftSendNotices={props.draftSendNotices}
+            onDraftAction={props.onDraftAction}
+          />
         </div>
         <DayShape hourBuckets={props.hourBuckets} dayBuckets={props.dayBuckets} />
         <div className="td-two">

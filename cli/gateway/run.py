@@ -34,7 +34,13 @@ from datetime import datetime
 from typing import Dict, Optional, Any, List
 
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
-from agent.result_outcome import agent_result_error, agent_result_succeeded
+from agent.result_outcome import (
+    agent_result_context_overflow,
+    agent_result_error,
+    agent_result_needs_input,
+    agent_result_pending,
+    agent_result_succeeded,
+)
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -1449,6 +1455,13 @@ def _normalize_empty_agent_response(
     Consolidates the existing ``failed`` handler and adds a catch-all for
     the case where the agent did work (api_calls > 0) but returned no text.
     """
+    if agent_result_needs_input(agent_result):
+        return response or "I need more information before I can continue."
+    if agent_result_pending(agent_result):
+        return response or (
+            "Work is still pending. Completion has not been "
+            "verified yet."
+        )
     if (
         agent_result_succeeded(agent_result)
         and agent_result.get("final_response") != "(empty)"
@@ -1514,6 +1527,24 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     has nothing to schedule.
     """
     return agent_result_succeeded(agent_result)
+
+
+def _should_suppress_transcript_growth(agent_result: dict) -> bool:
+    """Return whether replaying this turn would recreate an oversized prompt.
+
+    Ordinary provider, tool, approval, and action failures are still part of
+    the conversation and must survive in the transcript.  Suppression is the
+    narrow #1630 safety valve: use it only when the agent exhausted context
+    compression or the provider error explicitly says the prompt exceeded the
+    model context.  Generic HTTP 400/413/429 codes are not enough evidence.
+    """
+    if (
+        not isinstance(agent_result, dict)
+        or agent_result_pending(agent_result)
+        or agent_result_needs_input(agent_result)
+    ):
+        return False
+    return agent_result_context_overflow(agent_result)
 
 
 def _preserve_queued_followup_history_offset(
@@ -7055,6 +7086,7 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
             turn_succeeded = agent_result_succeeded(agent_result)
+            turn_pending = agent_result_pending(agent_result)
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
@@ -7188,11 +7220,13 @@ class GatewayRunner:
             # compression exhausted), do NOT persist the user's message.
             # Persisting it would make the session even larger, causing the
             # same failure on the next attempt — an infinite loop. (#1630, #9893)
-            agent_failed_early = not turn_succeeded
-            if agent_failed_early:
+            suppress_transcript_growth = _should_suppress_transcript_growth(
+                agent_result
+            )
+            if suppress_transcript_growth:
                 logger.info(
-                    "Skipping transcript persistence for failed request in "
-                    "session %s to prevent session growth loop.",
+                    "Skipping transcript persistence for explicit context-overflow "
+                    "request in session %s to prevent session growth loop.",
                     session_entry.session_id,
                 )
 
@@ -7200,18 +7234,11 @@ class GatewayRunner:
             # large to process.  Auto-reset it so the next message starts
             # fresh instead of replaying the same oversized context in an
             # infinite fail loop.  (#9893)
-            if agent_result.get("compression_exhausted") and session_entry and session_key:
-                logger.info(
-                    "Auto-resetting session %s after compression exhaustion.",
-                    session_entry.session_id,
-                )
-                self.session_store.reset_session(session_key)
-                self._evict_cached_agent(session_key)
-                self._session_model_overrides.pop(session_key, None)
-                response = (response or "") + (
-                    "\n\n🔄 Session auto-reset — the conversation exceeded the "
-                    "maximum context size and could not be compressed further. "
-                    "Your next message will start a fresh session."
+            if suppress_transcript_growth and session_entry and session_key:
+                response = self._reset_context_overflow_session(
+                    session_key=session_key,
+                    previous_session_id=session_entry.session_id,
+                    response=response,
                 )
 
             ts = datetime.now().isoformat()
@@ -7219,7 +7246,7 @@ class GatewayRunner:
             # If this is a fresh session (no history), write the full tool
             # definitions as the first entry so the transcript is self-describing
             # -- the same list of dicts sent as tools=[...] in the API request.
-            if agent_failed_early:
+            if suppress_transcript_growth:
                 pass  # Skip all transcript writes — don't grow a broken session
             elif not history:
                 tool_defs = agent_result.get("tools", [])
@@ -7238,7 +7265,7 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
-            if not agent_failed_early:
+            if not suppress_transcript_growth:
                 history_len = agent_result.get("history_offset", len(history))
                 new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
                 
@@ -9348,6 +9375,39 @@ class GatewayRunner:
             result = await self._run_in_executor_with_context(run_sync)
 
             response = result.get("final_response", "") if result else ""
+            if result and agent_result_needs_input(result):
+                question = _normalize_empty_agent_response(result, response)
+                self._record_background_task(
+                    task_id,
+                    "needs_input",
+                    prompt,
+                    source,
+                    result=question,
+                )
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=f"❓ Background task {task_id} needs your input:\n\n{question}",
+                    metadata=_thread_metadata,
+                )
+                return
+            if result and agent_result_pending(result):
+                pending_text = _normalize_empty_agent_response(result, response)
+                self._record_background_task(
+                    task_id,
+                    "pending",
+                    prompt,
+                    source,
+                    result=pending_text,
+                )
+                await adapter.send(
+                    chat_id=source.chat_id,
+                    content=(
+                        f"⏳ Background task {task_id} still has pending work:\n\n"
+                        f"{pending_text}"
+                    ),
+                    metadata=_thread_metadata,
+                )
+                return
             if result and not _should_clear_resume_pending_after_turn(result):
                 failure_text = _normalize_empty_agent_response(result, response)
                 if not failure_text:
@@ -11954,6 +12014,32 @@ class GatewayRunner:
         else:
             _cache.pop(session_key, None)
 
+    def _reset_context_overflow_session(
+        self,
+        *,
+        session_key: str,
+        previous_session_id: str,
+        response: str,
+    ) -> str:
+        """Branch future turns away from a prewritten oversized transcript."""
+        logger.info(
+            "Auto-resetting session %s after explicit context overflow.",
+            previous_session_id,
+        )
+        new_entry = self.session_store.reset_session(session_key)
+        self._evict_cached_agent(session_key)
+        self._session_model_overrides.pop(session_key, None)
+        if new_entry is None:
+            return (response or "") + (
+                "\n\n⚠️ This conversation exceeded the model context and could "
+                "not be reset automatically. Use /reset before trying again."
+            )
+        return (response or "") + (
+            "\n\n🔄 Session auto-reset — this conversation exceeded the model "
+            "context and could not be recovered safely. Your next message will "
+            "start in a fresh session."
+        )
+
     def _release_evicted_agent_soft(self, agent: Any) -> None:
         """Soft cleanup for cache-evicted agents — preserves session tool state.
 
@@ -12929,10 +13015,19 @@ class GatewayRunner:
                     model, runtime_kwargs.get("provider"), (session_key or "")[:30],
                 )
             except Exception as exc:
+                error_text = f"Provider authentication failed: {exc}"
                 return {
-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
+                    "final_response": f"⚠️ {error_text}",
                     "messages": [],
                     "api_calls": 0,
+                    "completed": False,
+                    "error": error_text,
+                    "failed": True,
+                    "interrupted": False,
+                    "needs_input": False,
+                    "partial": False,
+                    "pending": False,
+                    "pending_tool_obligations": [],
                     "tools": [],
                 }
 
@@ -13529,6 +13624,11 @@ class GatewayRunner:
                     "interrupted": result.get("interrupted", False),
                     "error": result.get("error"),
                     "completed": result.get("completed", False),
+                    "needs_input": result.get("needs_input", False),
+                    "pending": result.get("pending", False),
+                    "pending_tool_obligations": result.get(
+                        "pending_tool_obligations", []
+                    ),
                     "compression_exhausted": result.get("compression_exhausted", False),
                     "tools": tools_holder[0] or [],
                     "history_offset": len(agent_history),
@@ -13644,6 +13744,11 @@ class GatewayRunner:
                 "completed": result.get(
                     "completed",
                     not result.get("failed") and not result.get("error"),
+                ),
+                "needs_input": result.get("needs_input", False),
+                "pending": result.get("pending", False),
+                "pending_tool_obligations": result.get(
+                    "pending_tool_obligations", []
                 ),
                 "tools": tools_holder[0] or [],
                 "history_offset": _effective_history_offset,

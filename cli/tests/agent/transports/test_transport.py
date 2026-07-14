@@ -133,7 +133,7 @@ class TestAnthropicTransport:
         assert transport.map_finish_reason("stop_sequence") == "stop"
         assert transport.map_finish_reason("refusal") == "content_filter"
         assert transport.map_finish_reason("model_context_window_exceeded") == "length"
-        assert transport.map_finish_reason("unknown") == "stop"
+        assert transport.map_finish_reason("unknown") == "error"
 
     def test_extract_cache_stats_none_usage(self, transport):
         r = SimpleNamespace(usage=None)
@@ -186,6 +186,86 @@ class TestAnthropicTransport:
         assert tc.name == "terminal"
         assert tc.id == "toolu_123"
         assert '"command"' in tc.arguments
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "expected_finish"),
+        [
+            (None, "error"),
+            ("future_stop_reason", "error"),
+            ("end_turn", "error"),
+            ("stop_sequence", "error"),
+            ("max_tokens", "length"),
+        ],
+    )
+    def test_normalize_response_tool_calls_require_terminal_reason(
+        self,
+        transport,
+        stop_reason,
+        expected_finish,
+    ):
+        r = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_unconfirmed",
+                    name="terminal",
+                    input={"command": "whoami"},
+                )
+            ],
+            stop_reason=stop_reason,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == expected_finish
+        assert nr.tool_calls is None
+
+    @pytest.mark.parametrize("bad_input", [None, [], "oops", 42])
+    def test_normalize_response_rejects_non_object_tool_input(
+        self,
+        transport,
+        bad_input,
+    ):
+        r = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_bad",
+                    name="terminal",
+                    input=bad_input,
+                )
+            ],
+            stop_reason="tool_use",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "error"
+        assert nr.tool_calls is None
+
+    def test_normalize_response_rejects_whole_mixed_tool_batch(self, transport):
+        r = SimpleNamespace(
+            content=[
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_good",
+                    name="terminal",
+                    input={"command": "pwd"},
+                ),
+                SimpleNamespace(
+                    type="tool_use",
+                    id="toolu_bad",
+                    name="web_search",
+                    input="not-an-object",
+                ),
+            ],
+            stop_reason="tool_use",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "error"
+        assert nr.tool_calls is None
 
     def test_normalize_response_thinking(self, transport):
         """Test normalization preserves thinking content."""

@@ -125,6 +125,8 @@ const loadRealEstateAdminPage = () =>
 const loadRealEstateTemplatesPage = () => import("@/pages/RealEstateTemplatesPage");
 const loadRealEstateLeadsPage = () =>
   import("@/pages/RealEstateHubPages").then((m) => ({ default: m.RealEstateLeadsPage }));
+const loadRealEstateReportingPage = () =>
+  import("@/pages/real-estate-hub/reporting").then((m) => ({ default: m.RealEstateReportingPage }));
 const loadRealEstateMemoryPage = () =>
   import("@/pages/real-estate-hub/memory").then((m) => ({ default: m.RealEstateMemoryPage }));
 const loadRealEstateSocialMediaPage = () =>
@@ -155,6 +157,7 @@ const ProjectPage = lazy(loadProjectPage);
 const RealEstateAdminPage = lazy(loadRealEstateAdminPage);
 const RealEstateTemplatesPage = lazy(loadRealEstateTemplatesPage);
 const RealEstateLeadsPage = lazy(loadRealEstateLeadsPage);
+const RealEstateReportingPage = lazy(loadRealEstateReportingPage);
 const RealEstateMemoryPage = lazy(loadRealEstateMemoryPage);
 const RealEstateSocialMediaPage = lazy(loadRealEstateSocialMediaPage);
 const RealEstateTodayPage = lazy(loadRealEstateTodayPage);
@@ -163,6 +166,7 @@ const AgentOnboardingPage = lazy(loadAgentOnboardingPage);
 const ROUTE_PRELOADERS: Record<string, () => Promise<unknown>> = {
   "/today": loadRealEstateTodayPage,
   "/leads": loadRealEstateLeadsPage,
+  "/reporting": loadRealEstateReportingPage,
   "/admin": loadRealEstateAdminPage,
   "/admin/templates": loadRealEstateTemplatesPage,
   "/social-media": loadRealEstateSocialMediaPage,
@@ -200,7 +204,7 @@ function normalizePreloadPath(path: string): string {
 }
 
 function preloadRealEstateRouteData(path: string): void {
-  if (!["/", "/today", "/leads", "/admin", "/memory", "/social-media"].includes(path)) return;
+  if (!["/", "/today", "/leads", "/reporting", "/admin", "/memory", "/social-media"].includes(path)) return;
   void import("@/pages/real-estate-hub/_shared/use-hub-data").then((module) => {
     void module.preloadRealEstateHubData(path);
   });
@@ -624,6 +628,7 @@ function buildAccessControlledBuiltinRoutes(
     "/": accessPending ? AccessLoadingPage : realEstateDashboard ? RootRedirect : CoreRootRedirect,
     "/today": realEstateDashboard ? RealEstateTodayPage : PendingOrLocked,
     "/leads": packs.realEstateSales ? RealEstateLeadsPage : PendingOrLocked,
+    "/reporting": packs.realEstateSales ? RealEstateReportingPage : PendingOrLocked,
     "/admin": packs.realEstateAdmin ? RealEstateAdminPage : PendingOrLocked,
     "/admin/templates": packs.realEstateAdmin
       ? RealEstateTemplatesPage
@@ -1122,7 +1127,12 @@ function coalesceInFlight<T>(
   return request;
 }
 
-export const __appTestables = { coalesceInFlight, sessionStatusPresentation };
+export const __appTestables = {
+  buildAccessControlledBuiltinRoutes,
+  coalesceInFlight,
+  routePreloaders: ROUTE_PRELOADERS,
+  sessionStatusPresentation,
+};
 
 function readStoredSessionIds(key: string): string[] {
   if (typeof window === "undefined") return [];
@@ -1909,6 +1919,7 @@ function DesktopSidebar({
   }
   if (realEstatePacks.realEstateSales) {
     agentPrimaryNavItems.push({ icon: Users, label: "Leads", path: "/leads" });
+    agentPrimaryNavItems.push({ icon: BarChart3, label: "Reporting", path: "/reporting" });
   }
   if (realEstatePacks.realEstateAdmin) {
     agentPrimaryNavItems.push({ icon: BriefcaseBusiness, label: "Admin", path: "/admin" });

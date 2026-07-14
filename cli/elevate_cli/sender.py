@@ -5,10 +5,10 @@ into `outreach_db.send_queue` inside the same transaction that flips task state
 to `approved`. This module owns the *outbound* half: a tick loop claims due rows,
 dispatches per channel, and durably records the outcome.
 
-Phase 0 ships the queue + tick + dispatch *interface*. Channel dispatchers are
-stubbed (`_stub_dispatch`) and return a synthetic `provider_message_id` so the
-queue path is exercisable end-to-end without real provider creds. Phase 5a
-replaces the stubs with real Composio `execute_tool` calls and Twilio.
+Sandbox mode can route through `_stub_dispatch` so the queue path is exercisable
+without contacting a real recipient. Outside that explicit sandbox, channels
+without a registered transport fail closed; a synthetic provider id must never
+be recorded as a real send.
 
 Failure model
 -------------
@@ -36,7 +36,6 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 from elevate_cli import outreach_db
@@ -63,7 +62,7 @@ Dispatcher = Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]
 
 
 def _stub_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Phase 0 stub: pretends to send and returns a synthetic provider id.
+    """Explicit-sandbox stub: simulate a send with a synthetic provider id.
 
     Phase 5a replaces this with channel-specific dispatchers (Composio social DMs,
     Composio Gmail send, Twilio SMS, CRM note adapters).
@@ -74,6 +73,13 @@ def _stub_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         row["channel"], row["taskId"], list(row.get("payload", {}).keys()), pmid,
     )
     return pmid, {"stub": True, "dispatched_at": _now()}
+
+
+def _unsupported_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    channel = str(row.get("channel") or "unknown")
+    raise SenderPermanentError(
+        f"unsupported outbound channel {channel!r}: no dispatcher is registered; no message was sent"
+    )
 
 
 _DISPATCHERS: dict[str, Dispatcher] = {}
@@ -107,7 +113,34 @@ def get_dispatcher(channel: str) -> Dispatcher:
     # even if a real dispatcher was registered before the flag was set.
     if sandbox_enabled():
         return _stub_dispatch
-    return _DISPATCHERS.get(channel, _stub_dispatch)
+    return _DISPATCHERS.get(channel, _unsupported_dispatch)
+
+
+_APPLE_MESSAGES_CHANNELS = frozenset({"sms", "imessage", "apple-messages", "apple_messages"})
+APPLE_MESSAGES_OUTBOUND_DISABLED_ERROR = (
+    "Apple Messages outbound is disabled; no message was sent"
+)
+
+
+def is_apple_messages_channel(channel: Any) -> bool:
+    """Whether a queue channel ultimately uses the native Messages transport."""
+    return str(channel or "").strip().lower() in _APPLE_MESSAGES_CHANNELS
+
+
+def apple_messages_outbound_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Read the outbound kill switch from the active (or supplied) profile.
+
+    The explicit outreach sandbox is the only exception: its dispatcher cannot
+    reach a real recipient, so retaining the stub path makes dry-run coverage
+    possible even when production Apple Messages delivery is paused.
+    """
+    if sandbox_enabled():
+        return True
+    from elevate_cli import source_connectors
+
+    return bool(
+        source_connectors.get_apple_messages_directions(config).get("outbound", True)
+    )
 
 
 def composio_dispatcher(toolkit: str) -> Dispatcher:
@@ -150,14 +183,49 @@ def composio_dispatcher(toolkit: str) -> Dispatcher:
             raise SenderPermanentError(f"composio[{toolkit}] {status}: {err}")
 
         data = resp.get("data") or {}
-        # Composio tool results vary; pick a stable id if present, otherwise
-        # synthesize one bound to the slug+account so retries don't dup.
+        # A 2xx response only proves that Composio accepted the wrapper call.
+        # Its body separately reports whether the provider tool succeeded.
+        # Wrapper execution/log IDs are observability tokens, not evidence that
+        # Gmail (or another provider) accepted the message.
+        if not isinstance(data, dict) or data.get("successful") is not True:
+            detail = data.get("error") if isinstance(data, dict) else None
+            raise SenderPermanentError(
+                f"composio[{toolkit}]: provider tool rejected the dispatch"
+                + (f": {detail}" if str(detail or "").strip() else "")
+                + "; no message was recorded as sent"
+            )
+        if str(data.get("error") or "").strip():
+            raise SenderPermanentError(
+                f"composio[{toolkit}]: provider tool returned an error: "
+                f"{data['error']}; no message was recorded as sent"
+            )
+
+        # Composio tool results vary, but provider evidence lives inside the
+        # nested tool data. Never promote wrapper execution_id/log_id/id fields
+        # to provider receipts.
+        nested_data = data.get("data")
+        nested_data = nested_data if isinstance(nested_data, dict) else {}
+        nested_error = nested_data.get("error")
+        if str(nested_error or "").strip():
+            raise SenderPermanentError(
+                f"composio[{toolkit}]: provider returned an error: {nested_error}; "
+                "no message was recorded as sent"
+            )
+        nested_message = nested_data.get("message")
+        nested_message = nested_message if isinstance(nested_message, dict) else {}
         pmid = (
-            (data.get("data") or {}).get("response_id")
-            or data.get("id")
-            or data.get("execution_id")
-            or f"composio-{toolkit}-{uuid.uuid4().hex[:12]}"
+            nested_data.get("response_id")
+            or nested_data.get("responseId")
+            or nested_data.get("message_id")
+            or nested_data.get("messageId")
+            or nested_data.get("id")
+            or nested_message.get("id")
         )
+        if not str(pmid or "").strip():
+            raise SenderPermanentError(
+                f"composio[{toolkit}]: transport unavailable / no provider receipt; "
+                "tool returned success but delivery outcome is unverified; verify before retrying"
+            )
         return str(pmid), {
             "toolkit": toolkit,
             "slug": slug,
@@ -166,11 +234,6 @@ def composio_dispatcher(toolkit: str) -> Dispatcher:
         }
 
     return _dispatch
-
-
-_SEND_AGENT_MODEL = os.getenv("ELEVATE_SEND_AGENT_MODEL", "openai/gpt-5.4-nano")
-_SEND_AGENT_MAX_TURNS = int(os.getenv("ELEVATE_SEND_AGENT_MAX_TURNS", "6"))
-_SEND_AGENT_TIMEOUT_S = int(os.getenv("ELEVATE_SEND_AGENT_TIMEOUT", "90"))
 
 
 def _format_phone(value: Any) -> str:
@@ -189,139 +252,20 @@ def _format_phone(value: Any) -> str:
     return f"+{digits}"
 
 
-def _haiku_recipient_descriptor(payload: dict[str, Any], channel: str) -> str:
-    recipient = payload.get("recipient") or {}
-    phone = _format_phone(recipient.get("phone"))
-    email = str(recipient.get("email") or "").strip()
-    handle = str(recipient.get("social_handle") or "").strip()
-    person = str(recipient.get("person_name") or "").strip()
-    bits: list[str] = []
-    if person:
-        bits.append(f"name: {person}")
-    if channel == "sms":
-        if phone:
-            bits.append(f"phone (iMessage): {phone}")
-        if email:
-            bits.append(f"iMessage email fallback: {email}")
-    elif channel == "email":
-        if email:
-            bits.append(f"email: {email}")
-    elif channel == "social_dm":
-        if handle:
-            bits.append(f"handle: {handle}")
-    else:
-        if phone:
-            bits.append(f"phone: {phone}")
-        if email:
-            bits.append(f"email: {email}")
-        if handle:
-            bits.append(f"handle: {handle}")
-    return "; ".join(bits) if bits else "(no recipient info)"
-
-
-def _build_send_prompt(row: dict[str, Any]) -> str:
-    payload = row.get("payload") or {}
-    channel = row.get("channel") or ""
-    draft = str(payload.get("draft_text") or "").strip()
-    descriptor = _haiku_recipient_descriptor(payload, channel)
-    if channel == "sms":
-        instructions = (
-            "Send this iMessage via the macOS Messages.app using the terminal toolset.\n"
-            "Run osascript with a 'tell application \"Messages\"' block that targets the iMessage service\n"
-            "and sends to the phone number (use the buddy form: `send \"<text>\" to buddy \"<phone>\" of (service whose service type is iMessage)`).\n"
-            "If the buddy form errors, fall back to opening a new chat: use participants {<phone>}, account (1st account whose service type is iMessage).\n"
-            "After osascript returns 0, reply with the single line: SENT <provider-id>\n"
-            "Where <provider-id> is any short token you choose (timestamp is fine)."
-        )
-    else:
-        instructions = (
-            "Use the send_message tool to deliver this draft to the recipient on the most appropriate platform.\n"
-            "After the tool reports success, reply with: SENT <message_id>."
-        )
-    return (
-        f"You are an outbound sender agent. {instructions}\n\n"
-        f"Recipient: {descriptor}\n"
-        f"Channel: {channel}\n"
-        f"Draft text:\n{draft}\n"
-    )
-
-
-def _parse_agent_provider_id(stdout: str) -> str | None:
-    for line in reversed((stdout or "").splitlines()):
-        text = line.strip()
-        if not text:
-            continue
-        if text.startswith("SENT "):
-            token = text[5:].strip()
-            return token or f"agent-{uuid.uuid4().hex[:10]}"
-        if text == "SENT":
-            return f"agent-{uuid.uuid4().hex[:10]}"
-    return None
-
-
 def _send_agent_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Spawn a low-tier OpenAI elevate chat session to actually send the message.
+    """Fail closed: free-form model output is not a provider send receipt.
 
-    Channel `sms` routes through Messages.app via osascript (the terminal
-    toolset). Other channels lean on the agent's cross-platform `send_message`
-    tool (messaging toolset). Returns (provider_message_id, info).
+    The previous transport spawned an agent and treated a ``SENT <token>`` line
+    from its stdout as proof. That allowed hallucinated stdout (and even a
+    non-zero subprocess carrying that stdout) to become a durable ``sent`` row.
+    It is unsafe to invoke the agent and then retry without a provider receipt,
+    because the first invocation may have delivered the message. Until this
+    path can return a verifiable tool/provider result, it must not run at all.
     """
-    channel = row.get("channel") or ""
-    elevate_bin = shutil.which("elevate") or str(Path.home() / ".local" / "bin" / "elevate")
-    if not elevate_bin or not os.path.exists(elevate_bin):
-        raise SenderPermanentError("haiku-dispatch: elevate CLI not on PATH")
-
-    payload = row.get("payload") or {}
-    if not str(payload.get("draft_text") or "").strip():
-        raise SenderPermanentError("send-agent: payload missing draft_text")
-
-    toolsets = "terminal,messaging" if channel == "sms" else "messaging"
-    prompt = _build_send_prompt(row)
-
-    cmd = [
-        elevate_bin, "chat",
-        "-q", prompt,
-        "-m", _SEND_AGENT_MODEL,
-        "-t", toolsets,
-        "-Q",
-        "--yolo",
-        "--ignore-rules",
-        "--max-turns", str(_SEND_AGENT_MAX_TURNS),
-    ]
-    _log.info(
-        "sender.send_agent_dispatch channel=%s task=%s model=%s",
-        channel, row.get("taskId"), _SEND_AGENT_MODEL,
+    channel = str(row.get("channel") or "unknown")
+    raise SenderPermanentError(
+        f"send-agent[{channel}]: transport unavailable / no provider receipt; no message was sent"
     )
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_SEND_AGENT_TIMEOUT_S,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SenderTransientError(f"send-agent timed out after {_SEND_AGENT_TIMEOUT_S}s") from exc
-
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-    pmid = _parse_agent_provider_id(stdout)
-    if result.returncode != 0 and pmid is None:
-        snippet = (stderr.strip().splitlines() or [""])[-1][:280]
-        raise SenderTransientError(
-            f"send-agent exit={result.returncode}: {snippet}"
-        )
-    if pmid is None:
-        snippet = (stdout.strip().splitlines() or [""])[-1][:280]
-        raise SenderTransientError(
-            f"send-agent produced no SENT line: {snippet}"
-        )
-    return pmid, {
-        "agent": "send-agent",
-        "model": _SEND_AGENT_MODEL,
-        "channel": channel,
-        "dispatched_at": _now(),
-    }
 
 
 _CHAT_DB_PATH = os.path.expanduser("~/Library/Messages/chat.db")
@@ -438,8 +382,9 @@ def _detect_preferred_transport(phone: str) -> str:
     route SMS too. We use the blue bubble only on positive proof (history or a
     live IDS hit).
 
-    chat.db.error: 0 = delivered/queued OK, 22 = "Not Delivered" (unreachable
-    on iMessage). We only count error=0 is_sent=1 rows as proof.
+    chat.db.error: 0 = accepted/queued without a recorded error, 22 =
+    "Not Delivered" (unreachable on iMessage). Even error=0 is not
+    recipient-delivery proof; it is only stronger dispatch evidence.
     """
     default = _outreach_default_transport()
     if not os.path.exists(_CHAT_DB_PATH):
@@ -478,7 +423,7 @@ def _detect_preferred_transport(phone: str) -> str:
 
 
 def _verify_send_landed(phone: str, draft_prefix: str, since_epoch: float) -> tuple[str, int] | None:
-    """Confirm the message actually delivered by reading chat.db.
+    """Read the newest matching Messages dispatch state from chat.db.
 
     Returns (service, error_code) for the most recent matching outbound
     row, or None if nothing matched. Used after osascript returns 0 to
@@ -704,7 +649,9 @@ def _messages_native_dispatch(row: dict[str, Any]) -> tuple[str, dict[str, Any]]
                 }
             # Service-level rejection (error 22 = "Not Delivered" for iMessage).
             return None
-        # Couldn't observe the row at all — assume delivered (rare on this Mac).
+        # Messages accepted the command, but the row is not observable yet.
+        # Record dispatcher acceptance only; callers/UI must not upgrade this
+        # synthetic correlation token into recipient-delivery proof.
         pmid = f"{service_type.lower()}-{uuid.uuid4().hex[:10]}"
         return pmid, {
             "agent": "messages-native",
@@ -740,9 +687,11 @@ _imessage_native_dispatch = _messages_native_dispatch
 def _wire_default_dispatchers() -> None:
     """Register dispatchers for outbound channels.
 
-    - sms: native osascript (set ELEVATE_SMS_DISPATCHER=agent to use the agent).
-    - email / social_dm: low-tier-GPT agent dispatcher.
-    Disable both with `ELEVATE_SENDER_DISABLE_AGENT` so harnesses keep the stub.
+    - sms: native Messages transport.
+    - email / social_dm: no default until a provider/tool-backed dispatcher can
+      return a trustworthy receipt. Free-form agent stdout is never registered.
+    Use the explicit outreach sandbox flag when a harness intentionally needs
+    synthetic stubs.
     """
     if sandbox_enabled():
         # Belt-and-suspenders: don't even register real transports. get_dispatcher
@@ -751,12 +700,12 @@ def _wire_default_dispatchers() -> None:
     if os.getenv("ELEVATE_SENDER_DISABLE_AGENT"):
         return
     sms_mode = (os.getenv("ELEVATE_SMS_DISPATCHER") or "native").lower()
-    if sms_mode == "agent":
-        register_dispatcher("sms", _send_agent_dispatch)
-    else:
+    if sms_mode != "agent":
         register_dispatcher("sms", _messages_native_dispatch)
-    for channel in ("email", "social_dm"):
-        register_dispatcher(channel, _send_agent_dispatch)
+    else:
+        _log.error(
+            "ELEVATE_SMS_DISPATCHER=agent is disabled: transport unavailable / no provider receipt"
+        )
 
 
 _wire_default_dispatchers()
@@ -787,9 +736,24 @@ def dispatch_one(row: dict[str, Any]) -> dict[str, Any]:
 
     # Crash-recovery short-circuit: if a previous tick succeeded at the
     # provider but died before mark_sent, the next claim sees the row in
-    # 'sending' with a provider_message_id already set.
+    # 'sending' with a provider_message_id already set. This only records the
+    # prior durable provider evidence; it does not invoke a dispatcher, so it
+    # remains safe when the outbound switch was turned off afterward.
     if row.get("providerMessageId") and row.get("status") != outreach_db.SEND_STATUS_SENT:
         return outreach_db.mark_sent(queue_id, row["providerMessageId"])
+
+    # Final defense-in-depth boundary. Approval/retry/tick each check the same
+    # profile-scoped flag earlier for better UX, but every path converges here
+    # before a real Messages dispatcher can run. Sandbox remains a safe stub.
+    if (
+        not sandbox_enabled()
+        and is_apple_messages_channel(channel)
+        and not apple_messages_outbound_enabled()
+    ):
+        return outreach_db.mark_failed(
+            queue_id,
+            error=APPLE_MESSAGES_OUTBOUND_DISABLED_ERROR,
+        )
 
     dispatcher = get_dispatcher(channel)
     try:
@@ -829,7 +793,19 @@ def tick(*, batch: int = 10, skip_channels: "set[str] | None" = None) -> dict[st
     approve-tick, not the daemon. The app's tick passes no skip (handles all)."""
     started = time.time()
     counts = {"claimed": 0, "sent": 0, "retrying": 0, "failed": 0}
-    rows = outreach_db.claim_due_sends(limit=batch, skip_channels=skip_channels)
+    recovered = outreach_db.recover_stale_sends()
+    counts["recovered_sent"] = recovered["sent"]
+    counts["recovered_failed"] = recovered["failed"]
+    effective_skip_channels = set(skip_channels or set())
+    if not sandbox_enabled() and not apple_messages_outbound_enabled():
+        # Leave paused SMS rows queued rather than claiming and failing them.
+        # A direct dispatch_one call still fails closed, covering races and any
+        # future caller that bypasses this scheduler boundary.
+        effective_skip_channels.update(_APPLE_MESSAGES_CHANNELS)
+    rows = outreach_db.claim_due_sends(
+        limit=batch,
+        skip_channels=effective_skip_channels or None,
+    )
     counts["claimed"] = len(rows)
     for row in rows:
         result = dispatch_one(row) or {}

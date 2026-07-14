@@ -7,6 +7,7 @@
 // keeps it deployable independently). Render from deal-modal for listing deals.
 import { useState, useCallback } from "react";
 import { api } from "../../../../lib/api";
+import { kitErrorMessage, requireKitResponse, runKitRequests } from "./kit-http";
 
 type AnyObj = Record<string, any>;
 
@@ -77,6 +78,7 @@ export default function ListingKitWizard({
   const collapsed = manualCollapse !== null ? manualCollapse : (currentStage ?? 0) >= 5;
   const setCollapsed = setManualCollapse;
   const tok = () => (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
+  const [kitError, setKitError] = useState("");
 
   // ── Schedule A clause selection (Step 2) ──
   const savedClauses: string[] = Array.isArray(extra.scheduleAClauses) ? (extra.scheduleAClauses as string[]) : [];
@@ -110,10 +112,17 @@ export default function ListingKitWizard({
   const recordsPulled = !!(extra.pid || extra.legalDescription || extra.legal);
   const pullStatus = (extra.recordsPullStatus as string) || "";
   const pullRecords = useCallback(async () => {
-    setPulling(true);
-    await fetch(`/api/admin/deals/${dealId}/listing-pull-records`, {
-      method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
-    }).catch(() => {});
+    setPulling(true); setKitError("");
+    try {
+      const response = await fetch(`/api/admin/deals/${dealId}/listing-pull-records`, {
+        method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" },
+      });
+      await requireKitResponse(response, "Could not start the listing-record pull");
+    } catch (error) {
+      setPulling(false);
+      setKitError(kitErrorMessage(error, "Listing records could not be pulled. This connection may not be available yet."));
+      return;
+    }
     let n = 0;
     const poll = setInterval(() => { n += 1; onUpdate?.(); if (n > 30) { clearInterval(poll); setPulling(false); } }, 6000);
   }, [dealId, onUpdate]);
@@ -139,17 +148,26 @@ export default function ListingKitWizard({
   const [genBusy, setGenBusy] = useState<string | null>(null);
 
   const buildKit = useCallback(async () => {
-    setBuilding(true); setBuiltMsg("");
+    setBuilding(true); setBuiltMsg(""); setKitError("");
     try {
-      await api.setAdminDealToggle(dealId, "scheduleAClauses", Array.from(selected) as any).catch(() => {});
-      await api.setAdminDealToggle(dealId, "scheduleACustomClauses", custom as any).catch(() => {});
-      await fetch(`/api/admin/deals/${dealId}/listing-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
+      await api.setAdminDealToggle(dealId, "scheduleAClauses", Array.from(selected) as any);
+      await api.setAdminDealToggle(dealId, "scheduleACustomClauses", custom as any);
       const enabled = LISTING_FORMS.filter((f) => f.required || (kitForms[f.id] ?? LISTING_FORM_DEFAULTS[f.id] ?? true)).map((f) => f.id);
-      for (const id of enabled) {
-        await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${id}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }).catch(() => {});
-      }
+      await runKitRequests([
+        {
+          request: () => fetch(`/api/admin/deals/${dealId}/listing-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }),
+          fallback: "Listing package generation is not available yet",
+        },
+        ...enabled.map((id) => ({
+          request: () => fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${id}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }),
+          fallback: `Could not generate ${LISTING_FORMS.find((form) => form.id === id)?.label || id}`,
+        })),
+      ]);
       setBuiltMsg(`✓ Built ${enabled.length} documents into the listing package`);
       onUpdate?.();
+    } catch (error) {
+      setBuiltMsg("");
+      setKitError(kitErrorMessage(error, "The listing package could not be built. A verified province document pack is required."));
     } finally { setBuilding(false); }
   }, [dealId, kitForms, onUpdate, selected, custom]);
 
@@ -159,24 +177,40 @@ export default function ListingKitWizard({
     window.open(`${ext}/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank", "noopener,noreferrer");
   }, [dealId]);
   const approveKitDoc = useCallback(async (docId: string, status: string) => {
-    await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/approve`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ status }) }).catch(() => {});
-    onUpdate?.();
+    setKitError("");
+    try {
+      const response = await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/approve`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
+      await requireKitResponse(response, "Could not update document approval");
+      onUpdate?.();
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The listing document approval could not be saved."));
+    }
   }, [dealId, onUpdate]);
   const generateKitDoc = useCallback(async (docId: string) => {
-    setGenBusy(docId);
-    try { await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } }); onUpdate?.(); }
+    setGenBusy(docId); setKitError("");
+    try {
+      const response = await fetch(`/api/admin/deals/${dealId}/listing-kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
+      await requireKitResponse(response, "Listing document generation is not available yet");
+      onUpdate?.();
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The listing PDF could not be generated. A verified province document pack is required."));
+    }
     finally { setGenBusy(null); }
   }, [dealId, onUpdate]);
   // Draft-first send to sellers (mirrors onboarding-sign on the buyer side).
   const [sendMsg, setSendMsg] = useState("");
   const [sending, setSending] = useState(false);
   const sendForSign = useCallback(async () => {
-    setSending(true); setSendMsg("");
+    setSending(true); setSendMsg(""); setKitError("");
     try {
       const r = await fetch(`/api/admin/deals/${dealId}/listing-sign`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
-      setSendMsg(r.ok ? "Listing package dispatched — you'll get a Review & approve card with the Preview before anything sends to the sellers." : "Could not dispatch. Try again.");
+      await requireKitResponse(r, "Could not dispatch the listing package");
+      setSendMsg("Listing package dispatched — you'll get a Review & approve card with the Preview before anything sends to the sellers.");
       onUpdate?.();
-    } catch { setSendMsg("Could not dispatch. Try again."); } finally { setSending(false); }
+    } catch (error) {
+      setSendMsg("");
+      setKitError(kitErrorMessage(error, "The listing package could not be dispatched. Nothing was sent."));
+    } finally { setSending(false); }
   }, [dealId, onUpdate]);
 
   const mls = (extra.mlsNumber as string) || "";
@@ -409,6 +443,11 @@ export default function ListingKitWizard({
       <div style={{ padding: "18px 22px 20px" }}>
         <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: 0.6, color: INK }}>BUILD LISTING KIT · STEP {step} OF 4</div>
         <div style={{ marginTop: 12 }}>{Stepper}</div>
+        {kitError && (
+          <div role="alert" aria-live="polite" style={{ margin: "12px 0", border: "1px solid #e4b5a5", background: "#fff4ef", color: "#7a321f", borderRadius: 9, padding: "11px 13px", fontSize: 13, fontWeight: 600 }}>
+            {kitError}
+          </div>
+        )}
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : Step4}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
           {step > 1 ? <button type="button" onClick={() => setStep((s) => s - 1)} style={{ ...navBtn, background: "#fff", color: INK, border: `1px solid ${BORDER}` }}>← Back</button> : <span />}

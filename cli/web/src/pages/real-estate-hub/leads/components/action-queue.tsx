@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import type {
   LeadsDraft,
@@ -7,13 +7,13 @@ import type {
   LeadsPipeline,
   LeadsSkippedEntry,
 } from "../leads-data";
-import { matchesLeadsSourceFilter, nextDraftQueueSelection } from "./action-queue-helpers";
+import { matchesLeadsSourceFilter } from "./action-queue-helpers";
 import { DraftRow } from "./draft-row";
 
 type QueueTab = "approve" | "hot" | "followups" | "skipped";
 
 export function ActionQueue({
-  drafts, pipeline, sourceFilter, onDraftAction, onDraftActionComplete, onEditTemplate, onOpenHotLead,
+  drafts, pipeline, sourceFilter, onDraftAction, onDraftActionComplete, onEditTemplate, onOpenHotLead, canOpenHotLead,
 }: {
   drafts: LeadsDraft[];
   pipeline: LeadsPipeline;
@@ -22,11 +22,11 @@ export function ActionQueue({
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onEditTemplate?: () => void;
   onOpenHotLead?: (entry: LeadsHotEntry) => void;
+  canOpenHotLead?: (entry: LeadsHotEntry) => boolean;
 }) {
   const [tab, setTab] = useState<QueueTab>("approve");
   const [page, setPage] = useState(0);
   const [showAll, setShowAll] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
@@ -51,35 +51,9 @@ export function ActionQueue({
     }
   };
 
-  const handleBulkAction = async (action: LeadsDraftAction) => {
-    if (!onDraftAction) return;
-    const targets = filteredDrafts.filter((d) => selected.has(d.id));
-    setSelected(new Set());
-    for (const draft of targets) {
-      await handleDraftAction(action, draft, { notifyComplete: false });
-    }
-    await onDraftActionComplete?.(action);
-  };
-
-  useEffect(() => { setPage(0); setSelected(new Set()); setExpanded(null); }, [tab, sourceFilter]);
-
   const filteredDrafts = useMemo(() => {
     return drafts.filter((draft) => matchesLeadsSourceFilter(draft, sourceFilter));
   }, [drafts, sourceFilter]);
-
-  useEffect(() => {
-    setSelected((prev) => {
-      if (prev.size === 0) return prev;
-      const allowed = new Set(filteredDrafts.map((draft) => draft.id));
-      let changed = false;
-      const next = new Set<string>();
-      for (const id of prev) {
-        if (allowed.has(id)) next.add(id);
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [filteredDrafts]);
 
   const tabs: Array<{ id: QueueTab; label: string; count: number; urgent: boolean }> = [
     { id: "approve", label: "Approve", count: filteredDrafts.length, urgent: filteredDrafts.length > 0 },
@@ -100,18 +74,6 @@ export function ActionQueue({
   const rangeStart = activeList.length === 0 ? 0 : safePage * PAGE + 1;
   const rangeEnd = Math.min(activeList.length, safePage * PAGE + PAGE);
 
-  function toggle(id: string) {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-  function toggleAllDrafts() {
-    setSelected(prev => nextDraftQueueSelection(prev, filteredDrafts));
-  }
-
   return (
     <section className="ab-card lb-queue">
       <header className="lb-queue-head">
@@ -121,7 +83,7 @@ export function ActionQueue({
               key={t.id}
               type="button"
               className={"lb-queue-tab" + (tab === t.id ? " active" : "")}
-              onClick={() => setTab(t.id)}
+              onClick={() => { setTab(t.id); setPage(0); setExpanded(null); }}
             >
               {t.urgent && t.count > 0 && <span className="lb-queue-pulse"></span>}
               <span>{t.label}</span>
@@ -132,27 +94,7 @@ export function ActionQueue({
 
         {tab === "approve" && filteredDrafts.length > 0 && (
           <div className="lb-queue-actions">
-            {selected.size > 0 ? (
-              <>
-                <span className="lb-replies-selected mono">{selected.size} selected</span>
-                <button type="button" className="lb-btn ghost sm" onClick={() => setSelected(new Set())}>Clear</button>
-                <button type="button" className="lb-btn ghost sm" disabled={!onDraftAction} onClick={() => void handleBulkAction("skip")}>Skip</button>
-                <button type="button" className="lb-btn primary sm" disabled={!onDraftAction} onClick={() => void handleBulkAction("approve")}>Approve {selected.size}</button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className="lb-replies-selectall"
-                  onClick={toggleAllDrafts}
-                  aria-label={`Select all ${filteredDrafts.length} drafts`}
-                >
-                  <span className="lb-checkbox" aria-hidden="true"></span>
-                  <span>Select all {filteredDrafts.length}</span>
-                </button>
-                <span className="lb-replies-hint">Nothing sends until you click Approve.</span>
-              </>
-            )}
+            <span className="lb-replies-hint">Review each recipient separately. Nothing sends until that draft is approved.</span>
           </div>
         )}
       </header>
@@ -164,18 +106,18 @@ export function ActionQueue({
       <div className="lb-queue-list">
         {tab === "approve" && (
           visible.length === 0
-            ? <div className="lb-replies-empty">Inbox zero on drafts. Next outreach run lands in ~1h.</div>
+            ? <div className="lb-replies-empty">No drafts are waiting for approval.</div>
             : (visible as LeadsDraft[]).map(d => (
                 <DraftRow
                   key={d.id}
                   draft={d}
-                  selected={selected.has(d.id)}
+                  selected={false}
                   expanded={expanded === d.id}
-                  onToggle={() => toggle(d.id)}
                   onExpand={() => setExpanded(e => e === d.id ? null : d.id)}
                   onAction={onDraftAction ? (a, d2, scheduledAt) => handleDraftAction(a, d2, { scheduledAt }) : undefined}
                   busy={busy.has(d.id)}
                   onEditTemplate={onEditTemplate}
+                  hideSelection
                 />
               ))
         )}
@@ -184,25 +126,31 @@ export function ActionQueue({
             ? (
                 <div className="lb-replies-empty">
                   {tab === "hot" ? "No hot leads right now." : "No follow-ups queued."}
-                  {tab === "followups" && (
-                    <>
-                      <br />
-                      <span className="lb-replies-hint-2">Threads that go cold 7+ days re-enter this queue automatically.</span>
-                    </>
-                  )}
                 </div>
               )
-            : (visible as LeadsHotEntry[]).map(p => (
+            : (visible as LeadsHotEntry[]).map(p => {
+                const canOpen = Boolean(onOpenHotLead && (!canOpenHotLead || canOpenHotLead(p)));
+                return (
                 <div key={p.id} className="lb-q-row">
                   <span className={tab === "hot" ? "lb-heat-dot" : "lb-q-mute-dot"}></span>
                   <div className="lb-q-body">
                     <div className="lb-q-name">{p.name}</div>
                     <div className="lb-q-meta">{p.signal} · {p.age}</div>
                   </div>
-                  <button type="button" className="lb-btn ghost sm" disabled={!onOpenHotLead} onClick={() => onOpenHotLead?.(p)}>Draft reply</button>
-                  <button type="button" className="lb-btn ghost sm" disabled={!onOpenHotLead} onClick={() => onOpenHotLead?.(p)}>Open thread</button>
+                  <button
+                    type="button"
+                    className="lb-btn ghost sm"
+                    disabled={!canOpen}
+                    title={!canOpen
+                      ? "This queue item is not linked to a stable source thread, so Elevate will not open or mutate a guessed contact."
+                      : "Open the linked source thread"}
+                    onClick={() => onOpenHotLead?.(p)}
+                  >
+                    {canOpen ? "Open thread" : "Thread unavailable"}
+                  </button>
                 </div>
-              ))
+                );
+              })
         )}
         {tab === "skipped" && (
           visible.length === 0

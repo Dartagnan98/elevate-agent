@@ -121,7 +121,10 @@ Default assignee (used when no profile fits a task): {default_assignee}
 """
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+_FENCE_RE = re.compile(
+    r"^\s*```(?:json)?\s*|\s*```\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -143,16 +146,12 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
+    """Parse one JSON object, tolerating only an optional code fence."""
     if not raw:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
     try:
-        val = json.loads(candidate)
+        val = json.loads(stripped)
     except (ValueError, json.JSONDecodeError):
         return None
     if not isinstance(val, dict):
@@ -299,6 +298,7 @@ def decompose_task(
 
     try:
         from agent.auxiliary_client import (  # type: ignore
+            _validate_llm_response,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
         )
@@ -324,16 +324,19 @@ def decompose_task(
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-            timeout=timeout or 180,
-            extra_body=get_auxiliary_extra_body() or None,
+        resp = _validate_llm_response(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=4000,
+                timeout=timeout or 180,
+                extra_body=get_auxiliary_extra_body() or None,
+            ),
+            "kanban_decomposer",
         )
     except Exception as exc:
         logger.info(
@@ -341,8 +344,32 @@ def decompose_task(
         )
         return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
 
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if not (
+        isinstance(finish_reason, str)
+        and finish_reason.strip().lower() == "stop"
+    ):
+        normalized_reason = (
+            finish_reason.strip().lower()
+            if isinstance(finish_reason, str) and finish_reason.strip()
+            else "missing"
+        )
+        return DecomposeOutcome(
+            task_id,
+            False,
+            f"LLM response incomplete ({normalized_reason})",
+        )
+
+    message = resp.choices[0].message
+    if getattr(message, "tool_calls", None):
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "LLM returned an unexpected tool call for a text-only task",
+        )
+
     try:
-        raw = resp.choices[0].message.content or ""
+        raw = message.content or ""
     except Exception:
         raw = ""
 
@@ -350,25 +377,63 @@ def decompose_task(
     if parsed is None:
         return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
 
-    fanout = bool(parsed.get("fanout"))
+    fanout = parsed.get("fanout")
+    if type(fanout) is not bool:
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "decomposer response fanout must be a boolean",
+        )
+
+    rationale = parsed.get("rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "decomposer response rationale is missing or empty",
+        )
+
     audit_author = author or _profile_author()
 
     if not fanout:
-        # Fall back to single-task spec promotion (same effect as specify).
-        new_title = parsed.get("title")
-        new_body = parsed.get("body")
-        title_val = new_title.strip() if isinstance(new_title, str) and new_title.strip() else None
-        body_val = new_body if isinstance(new_body, str) and new_body.strip() else None
+        expected_keys = {"fanout", "rationale", "title", "body", "assignee"}
+        if set(parsed) != expected_keys:
+            return DecomposeOutcome(
+                task_id,
+                False,
+                "decomposer fanout=false response has invalid fields",
+            )
+        new_title = parsed["title"]
+        new_body = parsed["body"]
+        if not isinstance(new_title, str) or not new_title.strip():
+            return DecomposeOutcome(
+                task_id,
+                False,
+                "decomposer fanout=false title is missing or empty",
+            )
+        if not isinstance(new_body, str) or not new_body.strip():
+            return DecomposeOutcome(
+                task_id,
+                False,
+                "decomposer fanout=false body is missing or empty",
+            )
+        assignee = parsed["assignee"]
+        if assignee is not None and (
+            not isinstance(assignee, str) or not assignee.strip()
+        ):
+            return DecomposeOutcome(
+                task_id,
+                False,
+                "decomposer fanout=false assignee must be a profile name or null",
+            )
+        title_val = new_title.strip()
+        body_val = new_body.strip()
         assignee_val = None
         if not task.assignee:
             assignee_val = _normalize_assignee_choice(
-                parsed.get("assignee"),
+                assignee,
                 default_assignee=default_assignee,
                 valid_names=valid_names,
-            )
-        if title_val is None and body_val is None:
-            return DecomposeOutcome(
-                task_id, False, "decomposer returned fanout=false with no title/body",
             )
         with kb.connect() as conn:
             ok = kb.specify_triage_task(
@@ -388,10 +453,23 @@ def decompose_task(
             fanout=False, new_title=title_val,
         )
 
-    raw_tasks = parsed.get("tasks") or []
+    if set(parsed) != {"fanout", "rationale", "tasks"}:
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "decomposer fanout=true response has invalid fields",
+        )
+
+    raw_tasks = parsed["tasks"]
     if not isinstance(raw_tasks, list) or not raw_tasks:
         return DecomposeOutcome(
             task_id, False, "decomposer returned fanout=true with empty tasks list",
+        )
+    if not 2 <= len(raw_tasks) <= 6:
+        return DecomposeOutcome(
+            task_id,
+            False,
+            "decomposer fanout must contain between 2 and 6 tasks",
         )
 
     # Rewrite invalid assignees to the default fallback. Never leave a
@@ -402,15 +480,31 @@ def decompose_task(
             return DecomposeOutcome(
                 task_id, False, f"tasks[{idx}] is not an object",
             )
-        title = entry.get("title")
+        if set(entry) != {"title", "body", "assignee", "parents"}:
+            return DecomposeOutcome(
+                task_id,
+                False,
+                f"tasks[{idx}] has invalid fields",
+            )
+        title = entry["title"]
         if not isinstance(title, str) or not title.strip():
             return DecomposeOutcome(
                 task_id, False, f"tasks[{idx}].title is missing or empty",
             )
-        body = entry.get("body")
-        if not isinstance(body, str):
-            body = ""
-        assignee = entry.get("assignee")
+        body = entry["body"]
+        if not isinstance(body, str) or not body.strip():
+            return DecomposeOutcome(
+                task_id, False, f"tasks[{idx}].body is missing or empty",
+            )
+        assignee = entry["assignee"]
+        if assignee is not None and (
+            not isinstance(assignee, str) or not assignee.strip()
+        ):
+            return DecomposeOutcome(
+                task_id,
+                False,
+                f"tasks[{idx}].assignee must be a profile name or null",
+            )
         chosen = _normalize_assignee_choice(
             assignee,
             default_assignee=default_assignee,
@@ -426,11 +520,38 @@ def decompose_task(
                 "routing to default_assignee %r",
                 task_id, idx, assignee, default_assignee,
             )
-        parents = entry.get("parents") or []
+        parents = entry["parents"]
         if not isinstance(parents, list):
-            parents = []
-        # Clean parent indices: drop non-int and out-of-range.
-        clean_parents = [p for p in parents if isinstance(p, int) and 0 <= p < len(raw_tasks) and p != idx]
+            return DecomposeOutcome(
+                task_id, False, f"tasks[{idx}].parents must be a list",
+            )
+        clean_parents: list[int] = []
+        for parent_pos, parent_idx in enumerate(parents):
+            if type(parent_idx) is not int:
+                return DecomposeOutcome(
+                    task_id,
+                    False,
+                    f"tasks[{idx}].parents[{parent_pos}] must be an integer index",
+                )
+            if not 0 <= parent_idx < len(raw_tasks):
+                return DecomposeOutcome(
+                    task_id,
+                    False,
+                    f"tasks[{idx}].parents[{parent_pos}] is out of range",
+                )
+            if parent_idx == idx:
+                return DecomposeOutcome(
+                    task_id,
+                    False,
+                    f"tasks[{idx}] cannot list itself as a parent",
+                )
+            if parent_idx in clean_parents:
+                return DecomposeOutcome(
+                    task_id,
+                    False,
+                    f"tasks[{idx}] contains a duplicate parent index",
+                )
+            clean_parents.append(parent_idx)
         children.append({
             "title": title.strip()[:200],
             "body": body.strip(),

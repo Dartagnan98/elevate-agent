@@ -195,9 +195,19 @@ def _dependency_blocks(conn: sqlite3.Connection, handoff: Mapping[str, Any]) -> 
                 blocks.append({"type": "attachment", "kind": kind, "label": label})
                 continue
             try:
-                from elevate_cli.data.deals import list_deal_attachments
+                from elevate_cli.data.deals import (
+                    _revalidated_gate_attachments,
+                    list_deal_attachments,
+                )
 
-                attachments = list_deal_attachments(conn, str(deal_id), kind=kind or None, limit=1)
+                attachments = _revalidated_gate_attachments(
+                    list_deal_attachments(
+                        conn,
+                        str(deal_id),
+                        kind=kind or None,
+                        limit=100,
+                    )
+                )
             except Exception:
                 attachments = []
             if not attachments:

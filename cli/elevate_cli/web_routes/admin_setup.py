@@ -493,7 +493,15 @@ def create_admin_setup_router(
                 package_key = package_key_from_jurisdiction(
                     country=country,
                     province=province,
-                    package_key=body.profile.get("packageKey") or body.profile.get("package_key") or real_estate.get("package_key"),
+                    package_key=(
+                        body.profile.get("packageKey")
+                        or body.profile.get("package_key")
+                        or (
+                            real_estate.get("package_key")
+                            if "province" not in body.profile
+                            else None
+                        )
+                    ),
                 )
                 real_estate.update({"country": country, "province": province, "market": market, "package_key": package_key})
                 config["real_estate"] = real_estate

@@ -34,12 +34,19 @@ def _open_cell_ids(deal_id):
         return [c["id"] for c in deal_open_stage_cells(conn, deal)]
 
 
-def _fake_llm(satisfied_ids, counter=None):
+def _fake_llm(satisfied_ids, counter=None, *, finish_reason="stop"):
     def _call(*a, **k):
         if counter is not None:
             counter.append(1)
         content = json.dumps({"satisfied_ids": list(satisfied_ids)})
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=finish_reason,
+                    message=SimpleNamespace(content=content, tool_calls=None),
+                )
+            ]
+        )
     return _call
 
 
@@ -83,6 +90,24 @@ def test_infers_and_ticks_on_chat_only_turn(monkeypatch):
     with connect() as conn:
         toggles = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
     assert toggles.get(target) is True
+
+
+def test_length_truncated_inference_never_ticks_scorecard(monkeypatch):
+    deal = _make_deal()
+    cells = _open_cell_ids(deal["id"])
+    target = cells[0]
+    _patch_deal(monkeypatch, deal["id"])
+    monkeypatch.setattr(
+        "agent.auxiliary_client.call_llm",
+        _fake_llm([target], finish_reason="length"),
+    )
+
+    applied = ta.run_scorecard_inference(_chat_turn())
+
+    assert applied == []
+    with connect() as conn:
+        toggles = (get_deal(conn, deal["id"]) or {}).get("extraToggles") or {}
+    assert toggles.get(target) is not True
 
 
 def test_skips_human_controlled_cell(monkeypatch):
@@ -293,8 +318,13 @@ def test_attribute_turn_safely_default_is_async_and_quick(monkeypatch):
 
     def _slow_llm(*a, **k):
         time.sleep(2.0)  # if attribution were synchronous this would block the turn
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-            content=json.dumps({"satisfied_ids": [target]})))])
+        return SimpleNamespace(choices=[SimpleNamespace(
+            finish_reason="stop",
+            message=SimpleNamespace(
+                content=json.dumps({"satisfied_ids": [target]}),
+                tool_calls=None,
+            ),
+        )])
 
     monkeypatch.setattr("agent.auxiliary_client.call_llm", _slow_llm)
 

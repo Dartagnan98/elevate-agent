@@ -16,7 +16,7 @@ export function SentMessageRow({ message }: { message: LeadsSentMessage }) {
       <span
         className={
           "lb-sent-status " +
-          (message.status === "sent"
+          (message.status === "dispatch accepted"
             ? "sent"
             : message.status === "failed"
               ? "failed"

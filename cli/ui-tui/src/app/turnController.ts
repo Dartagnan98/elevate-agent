@@ -269,7 +269,12 @@ class TurnController {
     this.persistedToolLabels.clear()
   }
 
-  recordMessageComplete(payload: { rendered?: string; reasoning?: string; text?: string }) {
+  recordMessageComplete(payload: {
+    rendered?: string
+    reasoning?: string
+    status?: Msg['status']
+    text?: string
+  }) {
     const rawText = (payload.rendered ?? payload.text ?? this.bufRef).trimStart()
     const split = splitReasoning(rawText)
     const finalText = split.text
@@ -297,12 +302,31 @@ class TurnController {
     if (finalText) {
       finalMessages.push({
         role: 'assistant',
+        ...(payload.status && { status: payload.status }),
         text: finalText,
         thinking: savedReasoning || undefined,
         thinkingTokens: savedReasoning ? savedReasoningTokens : undefined,
         toolTokens: savedToolTokens || undefined,
         ...(tools.length && { tools })
       })
+    }
+
+    // A terminal frame can close a turn whose visible text was already
+    // flushed into an earlier segment. Preserve the outcome on the final
+    // assistant row in that case too; otherwise pending/needs-input/error
+    // truth disappears from the live transcript until the next hydration.
+    if (!finalText && payload.status) {
+      for (let index = finalMessages.length - 1; index >= 0; index -= 1) {
+        const message = finalMessages[index]
+
+        if (message?.role !== 'assistant') {
+          continue
+        }
+
+        finalMessages[index] = { ...message, status: payload.status }
+
+        break
+      }
     }
 
     const wasInterrupted = this.interrupted

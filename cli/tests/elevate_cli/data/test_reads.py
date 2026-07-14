@@ -192,6 +192,68 @@ def test_source_inbox_includes_populated_threads():
     ]
 
 
+def test_source_inbox_profile_pairs_latest_message_with_exact_thread():
+    with connect() as conn:
+        contact = upsert_contact(
+            conn,
+            display_name="Morgan Multi Source",
+            primary_email="morgan@example.com",
+            source_key="lofty:morgan",
+        )
+        older = get_or_create_conversation(
+            conn,
+            contact_id=contact["id"],
+            source_id="apple-messages",
+            channel="imessage",
+            thread_key="aaa-older",
+        )
+        newer = get_or_create_conversation(
+            conn,
+            contact_id=contact["id"],
+            source_id="gmail",
+            channel="email",
+            thread_key="zzz-newer",
+        )
+        record_inbound(
+            conn,
+            contact_id=contact["id"],
+            conversation_id=older["id"],
+            channel="imessage",
+            body="Older text thread",
+            source_id="apple-messages",
+            thread_key="aaa-older",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        bump_conversation_counters(
+            conn,
+            older["id"],
+            direction="inbound",
+            ts="2026-05-01T10:00:00+00:00",
+        )
+        record_inbound(
+            conn,
+            contact_id=contact["id"],
+            conversation_id=newer["id"],
+            channel="email",
+            body="Newest email thread",
+            source_id="gmail",
+            thread_key="zzz-newer",
+            ts="2026-05-01T11:00:00+00:00",
+        )
+        bump_conversation_counters(
+            conn,
+            newer["id"],
+            direction="inbound",
+            ts="2026-05-01T11:00:00+00:00",
+        )
+
+    profile = db_source_inbox_response(limit=16)["profiles"][0]
+    assert profile["latestText"] == "Newest email thread"
+    assert profile["latestSourceId"] == "gmail"
+    assert profile["latestThreadId"] == "zzz-newer"
+    assert profile["latestSourceLabel"]
+
+
 def test_source_inbox_lead_sections_follow_contact_cells():
     with connect() as conn:
         contact = upsert_contact(

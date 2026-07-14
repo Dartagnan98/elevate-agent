@@ -233,7 +233,7 @@ class ResponsesApiTransport(ProviderTransport):
         return NormalizedResponse(
             content=msg.content if msg else None,
             tool_calls=tool_calls,
-            finish_reason=finish_reason or "stop",
+            finish_reason=finish_reason or "error",
             reasoning=msg.reasoning if msg and hasattr(msg, "reasoning") else None,
             usage=None,  # Codex usage is extracted separately in normalize_usage()
             provider_data=provider_data or None,
@@ -272,10 +272,10 @@ class ResponsesApiTransport(ProviderTransport):
         _MAP = {
             "completed": "stop",
             "incomplete": "length",
-            "failed": "stop",
-            "cancelled": "stop",
+            "failed": "error",
+            "cancelled": "error",
         }
-        return _MAP.get(raw_reason, "stop")
+        return _MAP.get(raw_reason, "error")
 
 
 # Auto-register on import

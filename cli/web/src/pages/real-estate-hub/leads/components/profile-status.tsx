@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { ChevronDown } from "../../admin/icons";
 
@@ -31,13 +31,18 @@ export function StatusPill({
   status,
   onChange,
   className,
+  disabled = false,
 }: {
   status: string;
   onChange: (s: string) => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -57,13 +62,48 @@ export function StatusPill({
 
   const display = status || "No status";
   const cls = PROFILE_STATUS_CLASS[display] || "";
+  const selectedIndex = Math.max(0, PROFILE_STATUS_OPTIONS.indexOf(display));
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, selectedIndex]);
+
+  const handleListKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const current = optionRefs.current.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    let next = current;
+    if (event.key === "ArrowDown") next = (Math.max(current, -1) + 1) % PROFILE_STATUS_OPTIONS.length;
+    else if (event.key === "ArrowUp") next = (current <= 0 ? PROFILE_STATUS_OPTIONS.length : current) - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = PROFILE_STATUS_OPTIONS.length - 1;
+    else return;
+    event.preventDefault();
+    optionRefs.current[next]?.focus();
+  };
 
   return (
     <div className="lb-status-wrap" ref={ref} onClick={(e) => e.stopPropagation()}>
       <button
+        ref={triggerRef}
         type="button"
         className={"lb-profile-status " + cls + (className ? " " + className : "")}
         aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-controls={open ? menuId : undefined}
+        disabled={disabled}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((o) => !o);
@@ -73,16 +113,18 @@ export function StatusPill({
         <ChevronDown className="lb-profile-status-caret" />
       </button>
       {open && (
-        <div className="lb-status-menu" role="listbox">
-          {PROFILE_STATUS_OPTIONS.map((s) => {
+        <div id={menuId} className="lb-status-menu" role="listbox" onKeyDown={handleListKeyDown}>
+          {PROFILE_STATUS_OPTIONS.map((s, index) => {
             const sCls = PROFILE_STATUS_CLASS[s] || "";
             const selected = s === display;
             return (
               <button
+                ref={(element) => { optionRefs.current[index] = element; }}
                 key={s}
                 type="button"
                 role="option"
                 aria-selected={selected}
+                disabled={disabled}
                 className="lb-status-menu-row"
                 onClick={() => {
                   onChange(s);

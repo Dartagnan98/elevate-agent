@@ -946,6 +946,15 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
 
+    def _terminal_summary_text(normalized_response) -> str:
+        finish = getattr(normalized_response, "finish_reason", None)
+        if not (
+            isinstance(finish, str)
+            and finish.strip().lower() == "stop"
+        ):
+            return ""
+        return (getattr(normalized_response, "content", None) or "").strip()
+
     summary_request = (
         "You've reached the maximum number of tool-calling iterations allowed. "
         "Please provide a final response summarizing what you've found and accomplished so far, "
@@ -1037,7 +1046,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             summary_response = agent._run_codex_stream(codex_kwargs)
             _ct_sum = agent._get_transport()
             _cnr_sum = _ct_sum.normalize_response(summary_response)
-            final_response = (_cnr_sum.content or "").strip()
+            final_response = _terminal_summary_text(_cnr_sum)
         else:
             summary_kwargs = {
                 "model": agent.model,
@@ -1098,11 +1107,18 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                preserve_dots=agent._anthropic_preserve_dots())
                 summary_response = agent._anthropic_messages_create(_ant_kw)
                 _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=agent._is_anthropic_oauth)
-                final_response = (_summary_result.content or "").strip()
+                final_response = _terminal_summary_text(_summary_result)
             else:
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                from agent.auxiliary_client import _validate_llm_response
+
+                summary_response = _validate_llm_response(
+                    agent._ensure_primary_openai_client(
+                        reason="iteration_limit_summary"
+                    ).chat.completions.create(**summary_kwargs),
+                    "iteration_limit_summary",
+                )
                 _summary_result = agent._get_transport().normalize_response(summary_response)
-                final_response = (_summary_result.content or "").strip()
+                final_response = _terminal_summary_text(_summary_result)
 
         if final_response:
             if "<think>" in final_response:
@@ -1119,7 +1135,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 retry_response = agent._run_codex_stream(codex_kwargs)
                 _ct_retry = agent._get_transport()
                 _cnr_retry = _ct_retry.normalize_response(retry_response)
-                final_response = (_cnr_retry.content or "").strip()
+                final_response = _terminal_summary_text(_cnr_retry)
             elif agent.api_mode == "anthropic_messages":
                 _tretry = agent._get_transport()
                 _ant_kw2 = _tretry.build_kwargs(model=agent.model, messages=api_messages, tools=None,
@@ -1128,7 +1144,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                                 preserve_dots=agent._anthropic_preserve_dots())
                 retry_response = agent._anthropic_messages_create(_ant_kw2)
                 _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=agent._is_anthropic_oauth)
-                final_response = (_retry_result.content or "").strip()
+                final_response = _terminal_summary_text(_retry_result)
             else:
                 summary_kwargs = {
                     "model": agent.model,
@@ -1143,9 +1159,16 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
 
-                summary_response = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                from agent.auxiliary_client import _validate_llm_response
+
+                summary_response = _validate_llm_response(
+                    agent._ensure_primary_openai_client(
+                        reason="iteration_limit_summary_retry"
+                    ).chat.completions.create(**summary_kwargs),
+                    "iteration_limit_summary",
+                )
                 _retry_result = agent._get_transport().normalize_response(summary_response)
-                final_response = (_retry_result.content or "").strip()
+                final_response = _terminal_summary_text(_retry_result)
 
             if final_response:
                 if "<think>" in final_response:

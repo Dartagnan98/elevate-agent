@@ -17,6 +17,7 @@ from elevate_cli.config import load_config
 JsonRecord = dict[str, Any]
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+_log = logging.getLogger(__name__)
 
 
 def _source_connectors():
@@ -204,14 +205,29 @@ def get_apple_messages_directions(config: dict[str, Any] | None = None) -> dict[
 
     The two are independent on purpose: a realtor can send outreach to new
     numbers (outbound) without ever importing their personal message history
-    (inbound). Defaults: both enabled, preserving prior behavior."""
+    (inbound). A genuinely absent settings file preserves the legacy default
+    of both enabled. An existing file that cannot be read or validated fails
+    outbound closed so corruption can never silently re-enable real sends."""
     try:
-        data = _read_json(_apple_messages_source_dir(config) / "directions.json") or {}
-    except Exception:
-        data = {}
+        path = _apple_messages_source_dir(config) / "directions.json"
+        if not path.exists():
+            return {"inbound": True, "outbound": True}
+        data = _read_json(path)
+    except Exception as exc:
+        _log.error(
+            "apple_messages.directions_read_failed outbound_disabled error=%s",
+            exc,
+        )
+        return {"inbound": True, "outbound": False}
+    if not isinstance(data, dict):
+        _log.error(
+            "apple_messages.directions_invalid outbound_disabled path=%s",
+            path,
+        )
+        return {"inbound": True, "outbound": False}
     return {
-        "inbound": bool(data.get("inbound", True)),
-        "outbound": bool(data.get("outbound", True)),
+        "inbound": data["inbound"] if isinstance(data.get("inbound"), bool) else True,
+        "outbound": data["outbound"] if isinstance(data.get("outbound"), bool) else False,
     }
 
 

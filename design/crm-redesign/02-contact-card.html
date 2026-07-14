@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body>
+<title>Elevation — Contact Card Mockup</title>
+<style>
+  :root {
+    --navy:#182848; --navy-2:#22355c; --navy-3:#33477a;
+    --terracotta:#C46340; --terracotta-2:#b3542f;
+    --blue:#5E8AD0; --blue-2:#4a76bc; --blue-soft:rgba(94,138,208,.12);
+    --ink:#1c2438; --sub:#5c6479; --faint:#8a90a3;
+    --paper:#eef1f6; --card:#ffffff; --line:#e3e6ee; --line-2:#eef0f5;
+    --ok:#4f7fc4; --ok-bg:rgba(94,138,208,.14);
+    --warn:#c98a2e; --warn-bg:rgba(201,138,46,.14);
+    --shadow:0 1px 2px rgba(24,40,72,.05), 0 6px 20px rgba(24,40,72,.06);
+    --shadow-lg:0 10px 40px rgba(24,40,72,.16);
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --r:12px;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --navy:#cdd8ef; --navy-2:#b3c2e0; --navy-3:#93a6cf;
+    --terracotta:#e08a63; --terracotta-2:#c46340; --blue:#7ba4e2; --blue-2:#5E8AD0; --blue-soft:rgba(123,164,226,.15);
+    --ink:#e7eaf2; --sub:#a2a9bc; --faint:#767d92;
+    --paper:#0e121b; --card:#161c29; --line:#28303f; --line-2:#20263300;
+    --ok:#7ba4e2; --ok-bg:rgba(123,164,226,.16); --warn:#e0a94e; --warn-bg:rgba(224,169,78,.15);
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);
+    --shadow-lg:0 14px 48px rgba(0,0,0,.5);
+  }}
+  :root[data-theme="light"]{--navy:#182848;--navy-2:#22355c;--terracotta:#C46340;--blue:#5E8AD0;--blue-2:#4a76bc;--blue-soft:rgba(94,138,208,.12);--ink:#1c2438;--sub:#5c6479;--faint:#8a90a3;--paper:#eef1f6;--card:#fff;--line:#e3e6ee;--line-2:#eef0f5;--ok:#4f7fc4;--ok-bg:rgba(94,138,208,.14);--warn:#c98a2e;--warn-bg:rgba(201,138,46,.14);--shadow:0 1px 2px rgba(24,40,72,.05),0 6px 20px rgba(24,40,72,.06);--shadow-lg:0 10px 40px rgba(24,40,72,.16);}
+  :root[data-theme="dark"]{--navy:#cdd8ef;--navy-2:#b3c2e0;--navy-3:#93a6cf;--terracotta:#e08a63;--terracotta-2:#c46340;--blue:#7ba4e2;--blue-2:#5E8AD0;--blue-soft:rgba(123,164,226,.15);--ink:#e7eaf2;--sub:#a2a9bc;--faint:#767d92;--paper:#0e121b;--card:#161c29;--line:#28303f;--line-2:#20263300;--ok:#7ba4e2;--ok-bg:rgba(123,164,226,.16);--warn:#e0a94e;--warn-bg:rgba(224,169,78,.15);--shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.34);--shadow-lg:0 14px 48px rgba(0,0,0,.5);}
+
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--font);line-height:1.45;-webkit-font-smoothing:antialiased;}
+  .page{max-width:1240px;margin:0 auto;padding:26px 20px 64px;}
+
+  .masthead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px;}
+  .brandmark{width:34px;height:34px;border-radius:9px;background:var(--navy);display:grid;place-items:center;color:var(--card);font-weight:800;font-size:15px;flex:none;}
+  .masthead h1{font-size:19px;margin:0;letter-spacing:-.01em;color:var(--navy);font-weight:750;}
+  .masthead .sub{font-size:12.5px;color:var(--faint);font-family:var(--mono);}
+  .switch{margin-left:auto;display:inline-flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px;box-shadow:var(--shadow);}
+  .switch button{border:0;background:transparent;color:var(--sub);font:inherit;font-size:13px;font-weight:600;padding:7px 15px;border-radius:999px;cursor:pointer;transition:.15s;}
+  .switch button[aria-selected="true"]{background:var(--navy);color:var(--card);}
+
+  /* ===== BOARD ===== */
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:0;overflow-x:auto;}
+  .tabs button{border:0;background:transparent;font:inherit;font-size:14px;font-weight:600;color:var(--faint);padding:11px 15px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:.15s;}
+  .tabs button.on{color:var(--navy);border-bottom-color:var(--terracotta);}
+  .tabs button:hover{color:var(--ink);}
+
+  .board{display:grid;grid-template-columns:290px minmax(0,1fr) 268px;gap:16px;align-items:start;}
+  /* persistent identity rail + switchable main */
+  .shell{display:grid;grid-template-columns:290px minmax(0,1fr);gap:16px;align-items:start;}
+  .main{display:grid;gap:16px;min-width:0;}
+  .maingrid{display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:16px;align-items:start;}
+  .identity-col{min-width:0;}
+  .tabpanel[hidden]{display:none;}
+  .col{display:grid;gap:16px;}
+
+  /* searches panel */
+  .crit{display:grid;grid-template-columns:1fr 1fr;gap:14px 20px;}
+  .crit .c-lab{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--mono);}
+  .crit .c-val{font-size:15px;font-weight:650;color:var(--ink);margin-top:3px;}
+  .areachips{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;}
+  .areachip{font-size:12px;font-weight:600;color:var(--blue-2);background:var(--blue-soft);padding:4px 10px;border-radius:999px;}
+  .crit-note{grid-column:1 / -1;}
+  .crit-note textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:13.5px;color:var(--ink);background:var(--paper);resize:vertical;min-height:70px;}
+  .crit-note textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .searchmeta{display:flex;align-items:center;gap:8px;margin-top:2px;}
+  .searchmeta .matchpill{font-size:11.5px;font-weight:700;color:#fff;background:var(--blue);border-radius:999px;padding:3px 10px;font-family:var(--mono);}
+
+  /* under-construction popup */
+  .uc-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:60;padding:20px;}
+  .uc-overlay[hidden]{display:none;}
+  .uc-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);max-width:360px;width:100%;padding:30px 26px;text-align:center;}
+  .uc-card .uc-ic{font-size:36px;line-height:1;}
+  .uc-card h3{margin:14px 0 6px;color:var(--navy);font-size:19px;font-weight:750;}
+  .uc-card p{margin:0 0 20px;color:var(--sub);font-size:13.5px;}
+  .uc-card button{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:10px 24px;border-radius:9px;cursor:pointer;}
+  .uc-card button:hover{filter:brightness(1.08);}
+
+  /* tags */
+  .tags{margin-top:14px;border-top:1px solid var(--line-2);padding-top:13px;}
+  .tags .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--mono);}
+  .taglist{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;}
+  .tag{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:650;color:var(--navy);background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;}
+  .tag .tx{border:0;background:transparent;color:var(--faint);cursor:pointer;font-size:15px;line-height:1;padding:0 2px;}
+  .tag .tx:hover{color:var(--terracotta);}
+  .tagadd{border:1.5px dashed var(--line);background:transparent;color:var(--blue-2);font:inherit;font-size:12px;font-weight:650;border-radius:999px;padding:4px 12px;cursor:pointer;}
+  .tagadd:hover{border-color:var(--blue);}
+
+  /* tag picker popup */
+  .tp-overlay{position:fixed;inset:0;background:rgba(24,40,72,.42);display:grid;place-items:center;z-index:60;padding:20px;}
+  .tp-overlay[hidden]{display:none;}
+  .tp-card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);max-width:460px;width:100%;max-height:84vh;overflow:auto;padding:22px 24px;}
+  .tp-card h3{margin:0 0 3px;color:var(--navy);font-size:18px;font-weight:750;}
+  .tp-card .tp-sub{font-size:12.5px;color:var(--sub);margin-bottom:16px;}
+  .tp-group{margin-bottom:14px;}
+  .tp-group .g-lab{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-family:var(--mono);margin-bottom:7px;}
+  .tp-opts{display:flex;gap:6px;flex-wrap:wrap;}
+  .tp-opt{border:1px solid var(--line);background:var(--paper);color:var(--ink);font:inherit;font-size:12.5px;font-weight:600;border-radius:999px;padding:5px 11px;cursor:pointer;transition:.13s;}
+  .tp-opt:hover{border-color:var(--blue);color:var(--blue-2);}
+  .tp-opt.added{background:var(--blue);color:#fff;border-color:transparent;}
+  .tp-custom{display:flex;gap:8px;margin-top:6px;border-top:1px solid var(--line-2);padding-top:15px;}
+  .tp-custom input{flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;color:var(--ink);background:var(--card);}
+  .tp-custom input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .tp-custom button{border:0;background:var(--blue);color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 16px;border-radius:9px;cursor:pointer;}
+  .tp-foot{display:flex;justify-content:flex-end;margin-top:16px;}
+  .tp-done{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 24px;border-radius:9px;cursor:pointer;}
+  .tp-done:hover{filter:brightness(1.08);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);}
+  .pad{padding:16px 17px;}
+
+  /* left identity */
+  .id-top{display:flex;align-items:flex-start;gap:12px;}
+  .avatar{width:48px;height:48px;border-radius:50%;flex:none;background:linear-gradient(135deg,var(--navy),var(--navy-3));color:var(--card);display:grid;place-items:center;font-weight:750;font-size:18px;letter-spacing:.02em;}
+  .id-name{font-size:19px;font-weight:750;color:var(--navy);letter-spacing:-.01em;line-height:1.1;}
+  .badge{display:inline-block;margin-top:5px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--blue-2);background:var(--blue-soft);padding:3px 9px;border-radius:999px;font-family:var(--mono);}
+  .kv{margin-top:14px;display:grid;gap:9px;}
+  .kv .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--mono);}
+  .selectish{margin-top:3px;display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line);border-radius:9px;padding:8px 11px;font-size:13.5px;font-weight:600;color:var(--ink);cursor:pointer;background:var(--paper);}
+  .selectish .chev{color:var(--faint);font-size:12px;}
+
+  .actions{margin-top:15px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .actions button{border:0;border-radius:10px;padding:11px 0;color:#fff;font:inherit;font-weight:650;font-size:12.5px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;transition:.15s;}
+  .actions button svg{width:17px;height:17px;}
+  .a-call{background:var(--navy);} .a-text{background:var(--blue);} .a-email{background:var(--terracotta);}
+  .actions button:hover{filter:brightness(1.07);}
+
+  /* Top 25 */
+  .top25btn{margin-top:12px;width:100%;border:1.5px solid var(--terracotta);background:transparent;color:var(--terracotta);font:inherit;font-weight:700;font-size:13px;padding:9px 0;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;transition:.15s;}
+  .top25btn:hover:not(.on){background:var(--paper);}
+  .top25btn.on{background:var(--terracotta);color:#fff;border-color:var(--terracotta);}
+  .top25btn.on:hover{filter:brightness(1.06);}
+  .top25-badge{display:inline-block;margin-top:5px;margin-left:6px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;background:var(--terracotta);padding:3px 9px;border-radius:999px;font-family:var(--mono);}
+  .top25-badge[hidden]{display:none;}
+
+  .insight{margin-top:16px;}
+  .insight .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;}
+  .insight .hd b{font-size:13px;color:var(--navy);}
+  .analysis{font-size:11.5px;font-weight:700;color:#fff;background:var(--blue-2);border:0;border-radius:999px;padding:4px 10px;cursor:pointer;font-family:var(--mono);}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+  .metric{border:1px solid var(--line);border-radius:9px;padding:9px 8px;text-align:center;}
+  .metric .n{font-size:17px;font-weight:750;color:var(--navy);font-variant-numeric:tabular-nums;}
+  .metric .l{font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+
+  .details{margin-top:16px;border-top:1px solid var(--line-2);padding-top:13px;display:grid;gap:8px;font-size:13px;}
+  .details .row{display:flex;gap:8px;align-items:center;color:var(--sub);}
+  .details .row b{color:var(--ink);font-weight:600;}
+  .verified{color:var(--ok);font-size:11px;font-weight:700;}
+  .consent{margin-top:14px;border-top:1px solid var(--line-2);padding-top:13px;}
+  .consent .lab{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-family:var(--mono);margin-bottom:8px;}
+  .consent .pills{display:flex;gap:6px;flex-wrap:wrap;}
+  .cpill{font-size:11.5px;font-weight:650;padding:4px 9px;border-radius:999px;display:inline-flex;gap:5px;align-items:center;}
+  .cpill.yes{color:var(--ok);background:var(--ok-bg);} .cpill.no{color:var(--warn);background:var(--warn-bg);}
+
+  /* center */
+  .compose{padding:12px 13px;}
+  .compose .modes{display:flex;gap:5px;margin-bottom:10px;}
+  .compose .modes button{border:1px solid var(--line);background:var(--paper);color:var(--sub);font:inherit;font-size:12.5px;font-weight:650;padding:6px 13px;border-radius:999px;cursor:pointer;transition:.15s;}
+  .compose .modes button.on{color:#fff;border-color:transparent;}
+  .compose .modes button.on[data-m="note"]{background:var(--navy);}
+  .compose .modes button.on[data-m="text"]{background:var(--blue);}
+  .compose .modes button.on[data-m="email"]{background:var(--terracotta);}
+  .compose textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit;font-size:13.5px;color:var(--ink);resize:none;background:var(--card);min-height:44px;}
+  .compose textarea:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
+  .compose .foot{display:flex;justify-content:space-between;align-items:center;margin-top:9px;}
+  .compose .tmpl{font-size:12.5px;color:var(--blue-2);font-weight:600;cursor:pointer;}
+  .compose .send{border:0;border-radius:9px;color:#fff;font:inherit;font-weight:700;font-size:13px;padding:8px 18px;cursor:pointer;background:var(--navy);transition:.15s;}
+  .compose .send:hover{filter:brightness(1.08);}
+
+  /* notes thread */
+  .notes-hd{display:flex;align-items:center;gap:8px;padding:13px 14px 0;}
+  .notes-hd b{font-size:14px;color:var(--navy);}
+  .ncount{font-size:11px;font-weight:750;font-family:var(--mono);color:var(--faint);background:var(--paper);border-radius:999px;padding:1px 7px;}
+  .notelist{padding:11px 14px 14px;display:grid;gap:9px;}
+  .note{border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--card);}
+  .note.pinned{border-color:var(--terracotta);border-left:3px solid var(--terracotta);}
+  .note-top{display:flex;align-items:center;gap:8px;margin-bottom:5px;}
+  .pin-badge{font-size:10px;font-weight:700;color:var(--terracotta);font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em;}
+  .note-when{font-size:11.5px;color:var(--faint);font-family:var(--mono);}
+  .note-pin{margin-left:auto;border:0;background:transparent;cursor:pointer;font-size:13px;line-height:1;opacity:.4;filter:grayscale(1);transition:.14s;}
+  .note-pin.on{opacity:1;filter:none;}
+  .note-pin:hover{opacity:.85;}
+  .note-body{font-size:13px;color:var(--ink);line-height:1.5;}
+
+  .tally{display:flex;gap:5px;flex-wrap:wrap;padding:12px 13px;border-bottom:1px solid var(--line-2);}
+  .tchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--card);border-radius:9px;padding:6px 10px;font-size:12.5px;font-weight:600;color:var(--sub);cursor:pointer;transition:.15s;}
+  .tchip svg{width:14px;height:14px;opacity:.75;}
+  .tchip .ct{font-variant-numeric:tabular-nums;color:var(--ink);font-weight:750;}
+  .tchip.on{background:var(--navy);color:#fff;border-color:transparent;}
+  .tchip.on svg{opacity:1;} .tchip.on .ct{color:#fff;}
+  .tchip:hover:not(.on){border-color:var(--navy-3);}
+
+  .feed{padding:6px 13px 14px;display:grid;gap:0;}
+  .event{display:grid;grid-template-columns:30px 1fr;gap:11px;padding:13px 2px;border-bottom:1px solid var(--line-2);}
+  .event:last-child{border-bottom:0;}
+  .ev-ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;flex:none;}
+  .ev-ic svg{width:15px;height:15px;color:#fff;}
+  .ic-note{background:var(--navy-3);} .ic-text{background:var(--blue);} .ic-call{background:var(--navy);} .ic-email{background:var(--terracotta);} .ic-search{background:#8a90a3;}
+  .ev-top{display:flex;justify-content:space-between;gap:8px;align-items:baseline;}
+  .ev-top b{font-size:13.5px;color:var(--ink);font-weight:650;}
+  .ev-top .t{font-size:11.5px;color:var(--faint);font-family:var(--mono);white-space:nowrap;}
+  .ev-body{font-size:13px;color:var(--sub);margin-top:2px;}
+
+  /* right */
+  .rhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px;}
+  .rhd b{font-size:14px;color:var(--navy);}
+  .rhd .add{width:24px;height:24px;border-radius:7px;border:1px solid var(--line);background:var(--paper);color:var(--navy);font-size:16px;line-height:1;cursor:pointer;display:grid;place-items:center;}
+  .task{display:grid;grid-template-columns:18px 1fr;gap:9px;padding:9px 0;border-top:1px solid var(--line-2);}
+  .task:first-of-type{border-top:0;}
+  .cbox{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--navy-3);margin-top:1px;cursor:pointer;}
+  .cbox.done{background:var(--blue);border-color:var(--blue);position:relative;}
+  .cbox.done::after{content:"";position:absolute;left:5px;top:1.5px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+  .task .tt{font-size:13px;color:var(--ink);font-weight:600;}
+  .task .tt.done{color:var(--faint);text-decoration:line-through;}
+  .task .tm{font-size:11.5px;color:var(--faint);font-family:var(--mono);margin-top:1px;}
+  .appt{display:grid;grid-template-columns:44px 1fr;gap:10px;align-items:center;padding-top:4px;}
+  .appt .date{background:var(--terracotta);color:#fff;border-radius:8px;text-align:center;padding:5px 0;}
+  .appt .date .d{font-size:16px;font-weight:800;line-height:1;} .appt .date .mo{font-size:9px;text-transform:uppercase;letter-spacing:.06em;}
+  .appt .info b{font-size:13px;color:var(--ink);} .appt .info .w{font-size:11.5px;color:var(--sub);font-family:var(--mono);margin-top:1px;}
+
+  /* ===== EDIT DETAILS ===== */
+  .editwrap{display:none;}
+  .modal{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow-lg);overflow:hidden;max-width:1000px;margin:0 auto;}
+  .modal .mhd{display:flex;align-items:center;justify-content:space-between;padding:16px 22px;border-bottom:1px solid var(--line);}
+  .modal .mhd h2{margin:0;font-size:14px;letter-spacing:.09em;text-transform:uppercase;color:var(--navy);font-family:var(--mono);font-weight:700;}
+  .modal .x{border:0;background:transparent;color:var(--faint);font-size:20px;cursor:pointer;line-height:1;}
+  .mbody{display:grid;grid-template-columns:250px 1fr;}
+  .fam{border-right:1px solid var(--line);padding:20px;background:var(--paper);}
+  .fam h3{font-size:16px;margin:0 0 14px;color:var(--navy);}
+  .fammem{display:flex;align-items:center;gap:8px;background:var(--blue-soft);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13.5px;font-weight:650;color:var(--ink);}
+  .fammem .pri{margin-left:auto;font-size:10px;font-family:var(--mono);text-transform:uppercase;color:var(--blue-2);font-weight:700;}
+  .famadd{margin-top:10px;border:1.5px dashed var(--line);border-radius:10px;padding:11px;text-align:center;font-size:13px;color:var(--blue-2);font-weight:600;cursor:pointer;}
+  .form{padding:22px 26px;display:grid;gap:16px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .field label{display:block;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:5px;}
+  .field label .req{color:var(--terracotta);}
+  .field input,.field .fake{width:100%;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px;color:var(--ink);background:var(--card);}
+  .field .fake{display:flex;justify-content:space-between;align-items:center;color:var(--ink);}
+  .field .fake .chev{color:var(--faint);}
+  .multi{display:flex;align-items:center;gap:8px;}
+  .multi .minus{width:20px;height:20px;border-radius:50%;background:var(--terracotta);color:#fff;display:grid;place-items:center;font-size:15px;line-height:1;flex:none;cursor:pointer;}
+  .multi input{flex:1;}
+  .prim{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub);font-weight:600;white-space:nowrap;}
+  .radio{width:14px;height:14px;border-radius:50%;border:4px solid var(--blue);background:var(--card);}
+  .addline{border:1.5px dashed var(--blue);border-radius:9px;padding:9px;text-align:center;font-size:13px;color:var(--blue-2);font-weight:600;cursor:pointer;}
+  .consent-row{border-top:1px solid var(--line-2);padding-top:14px;}
+  .consent-row .lab{font-size:12px;font-weight:700;color:var(--sub);margin-bottom:9px;}
+  .toggles{display:flex;gap:10px;flex-wrap:wrap;}
+  .tg{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:9px;padding:8px 12px;font-size:13px;font-weight:600;color:var(--ink);}
+  .sw{width:34px;height:19px;border-radius:999px;background:var(--blue);position:relative;flex:none;cursor:pointer;}
+  .sw.off{background:var(--line);}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:.15s;box-shadow:0 1px 2px rgba(0,0,0,.3);}
+  .sw:not(.off)::after{left:17px;}
+  .mfoot{display:flex;justify-content:flex-end;gap:10px;padding:14px 26px;border-top:1px solid var(--line);}
+  .btn-ghost{border:0;background:transparent;color:var(--sub);font:inherit;font-weight:650;font-size:13.5px;padding:9px 14px;cursor:pointer;}
+  .btn-save{border:0;background:var(--navy);color:#fff;font:inherit;font-weight:700;font-size:13.5px;padding:9px 22px;border-radius:9px;cursor:pointer;}
+
+  .callout{margin-top:20px;padding:14px 16px;background:var(--card);border:1px solid var(--line);border-left:3px solid var(--terracotta);border-radius:11px;font-size:13px;color:var(--sub);box-shadow:var(--shadow);}
+  .callout b{color:var(--navy);}
+
+  @media (max-width:960px){
+    .board{grid-template-columns:1fr;}
+    .shell{grid-template-columns:1fr;} .maingrid{grid-template-columns:1fr;}
+    .crit{grid-template-columns:1fr;}
+    .mbody{grid-template-columns:1fr;} .fam{border-right:0;border-bottom:1px solid var(--line);}
+    .grid2{grid-template-columns:1fr;}
+  }
+</style>
+
+<div class="page">
+  <div class="masthead">
+    <div class="brandmark">E</div>
+    <div>
+      <h1>Elevation · Contact</h1>
+      <div class="sub">mockup · your data, your brand</div>
+    </div>
+    <div class="switch" role="tablist">
+      <button id="sw-board" aria-selected="true" onclick="showView('board')">Contact board</button>
+      <button id="sw-edit" aria-selected="false" onclick="showView('edit')">Edit details</button>
+    </div>
+  </div>
+
+  <!-- ============ BOARD VIEW ============ -->
+  <div id="view-board">
+    <div class="shell">
+      <!-- LEFT identity (persistent across tabs) -->
+      <div class="col identity-col">
+        <div class="card pad">
+          <div class="id-top">
+            <div class="avatar">SH</div>
+            <div>
+              <div class="id-name">Shannon Hogan</div>
+              <span class="badge">Buyer</span>
+              <span class="top25-badge" id="top25badge" hidden>★ Top 25</span>
+            </div>
+          </div>
+
+          <div class="kv">
+            <div>
+              <div class="lab">Pipeline</div>
+              <div class="selectish">New Leads <span class="chev">▾</span></div>
+            </div>
+            <div>
+              <div class="lab">Smart list</div>
+              <div class="selectish">Prospective Buyers <span class="chev">▾</span></div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="a-call"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>Call</button>
+            <button class="a-text"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16c1.1 0 2 .9 2 2v10c0 1.1-.9 2-2 2H8l-4 4V6c0-1.1.9-2 2-2z"/></svg>Text</button>
+            <button class="a-email"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18c.6 0 1 .4 1 1v12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V6c0-.6.4-1 1-1zm9 7L4 7v1l8 5 8-5V7l-8 5z"/></svg>Email</button>
+          </div>
+
+          <button class="top25btn" id="top25btn" onclick="toggleTop25()">☆ Add to Top 25</button>
+
+          <div class="insight">
+            <div class="hd"><b>At a glance</b></div>
+            <div class="metrics">
+              <div class="metric"><div class="n">2d</div><div class="l">Last touch</div></div>
+              <div class="metric"><div class="n">60–90d</div><div class="l">Timeframe</div></div>
+              <div class="metric"><div class="n">$625k</div><div class="l">Pre-approved</div></div>
+            </div>
+          </div>
+
+          <div class="details">
+            <div class="row"><b>+1 250-852-8062</b> <span class="verified">✓ valid</span></div>
+            <div class="row">shannon3hogan@gmail.com</div>
+            <div class="row">Source: <b>Facebook ad</b></div>
+            <div class="row">Added: <b>Jun 30, 2026</b></div>
+          </div>
+
+          <div class="consent">
+            <div class="lab">Consent to contact</div>
+            <div class="pills">
+              <span class="cpill yes">Call ✓</span>
+              <span class="cpill yes">Text ✓</span>
+              <span class="cpill no">Email held</span>
+            </div>
+          </div>
+
+          <div class="tags">
+            <div class="lab">Tags</div>
+            <div class="taglist" id="taglist">
+              <span class="tag">Pre-approved<button class="tx" onclick="this.parentElement.remove()" aria-label="Remove">×</button></span>
+              <span class="tag">Kamloops<button class="tx" onclick="this.parentElement.remove()" aria-label="Remove">×</button></span>
+              <span class="tag">PPC Lead<button class="tx" onclick="this.parentElement.remove()" aria-label="Remove">×</button></span>
+              <span class="tag">Upsizing<button class="tx" onclick="this.parentElement.remove()" aria-label="Remove">×</button></span>
+              <span class="tag">Spring 2026<button class="tx" onclick="this.parentElement.remove()" aria-label="Remove">×</button></span>
+              <button class="tagadd" onclick="openTagPicker()">＋ Tag</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MAIN: tabs + switchable panels -->
+      <div class="main">
+        <div class="tabs">
+          <button class="on" onclick="showTab('overview',this)">Overview</button>
+          <button onclick="showTab('properties',this)">Properties</button>
+          <button onclick="showTab('searches',this)">Searches</button>
+          <button onclick="showTab('documents',this)">Documents</button>
+          <button onclick="showTab('automations',this)">Automations</button>
+        </div>
+
+        <div id="panel-overview" class="tabpanel">
+          <div class="maingrid">
+          <!-- CENTER feed -->
+          <div class="col">
+        <div class="card compose">
+          <div class="modes">
+            <button class="on" data-m="note" onclick="setMode('note')">Note</button>
+            <button data-m="text" onclick="setMode('text')">Text</button>
+            <button data-m="email" onclick="setMode('email')">Email</button>
+          </div>
+          <textarea id="composebox" placeholder="Add a note / log…"></textarea>
+          <div class="foot">
+            <span class="tmpl" id="tmpl" style="visibility:hidden">＋ Insert template</span>
+            <button class="send" id="sendbtn" onclick="logCompose()">Log note</button>
+          </div>
+        </div>
+
+        <div class="card notes-card">
+          <div class="notes-hd"><b>Notes</b><span class="ncount" id="ncount">3</span></div>
+          <div class="notelist" id="notelist">
+            <div class="note pinned">
+              <div class="note-top"><span class="pin-badge">📌 Pinned</span><span class="note-when">Jul 8 · you</span><button class="note-pin on" title="Unpin" onclick="togglePin(this)">📌</button></div>
+              <div class="note-body">Pre-approved to $625k with First Nations Bank. Not working with another agent.</div>
+            </div>
+            <div class="note">
+              <div class="note-top"><span class="note-when">2d ago · you</span><button class="note-pin" title="Pin" onclick="togglePin(this)">📌</button></div>
+              <div class="note-body">Wants to see 4809 Bolean this weekend. Kids' school district matters (Pacific Way / NorKam catchment).</div>
+            </div>
+            <div class="note">
+              <div class="note-top"><span class="note-when">3d ago · you</span><button class="note-pin" title="Pin" onclick="togglePin(this)">📌</button></div>
+              <div class="note-body">Relocating from Calgary, 60–90 day timeline. Husband Marc is co-buyer.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="tally">
+            <span class="tchip on"><span class="ct">12</span> All</span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h11l5 5v11H4z" opacity=".9"/></svg><span class="ct">3</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg><span class="ct">1</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16v12H8l-4 4z"/></svg><span class="ct">4</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18v14H3z"/><path d="M3 6l9 6 9-6" fill="none" stroke="var(--card)" stroke-width="1.6"/></svg><span class="ct">2</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg><span class="ct">2</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 5c-5 0-9 4.5-10 7 1 2.5 5 7 10 7s9-4.5 10-7c-1-2.5-5-7-10-7zm0 11a4 4 0 110-8 4 4 0 010 8z"/></svg><span class="ct">2</span></span>
+            <span class="tchip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 3h10a2 2 0 012 2v16l-7-4-7 4V5a2 2 0 012-2z"/></svg><span class="ct">1</span></span>
+          </div>
+
+          <div class="feed">
+            <div class="event"><div class="ev-ic ic-note"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h13l3 3v13H4z"/></svg></div>
+              <div><div class="ev-top"><b>Note</b><span class="t">2d ago</span></div>
+              <div class="ev-body">Wants to see 4809 Bolean this weekend. Pre-approved to $625k with First Nations Bank. Not working with another agent.</div></div></div>
+
+            <div class="event"><div class="ev-ic ic-text"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 4h16v12H8l-4 4z"/></svg></div>
+              <div><div class="ev-top"><b>Text sent</b><span class="t">2d ago</span></div>
+              <div class="ev-body">"Hi Shannon! Loved chatting. I pulled 3 that fit what you're after, want me to send them over?"</div></div></div>
+
+            <div class="event"><div class="ev-ic ic-call"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg></div>
+              <div><div class="ev-top"><b>Call · 6 min</b><span class="t">3d ago</span></div>
+              <div class="ev-body">Intro call. Relocating from Calgary, timeline is 60-90 days. Kids' school district matters.</div></div></div>
+
+            <div class="event"><div class="ev-ic ic-search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg></div>
+              <div><div class="ev-top"><b>Saved search</b><span class="t">3d ago</span></div>
+              <div class="ev-body">Kamloops · 3+ bed · $500k–$625k · viewed 2 listings on your site.</div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT tasks + appts -->
+      <div class="col">
+        <div class="card pad">
+          <div class="rhd"><b>Tasks</b><button class="add">＋</button></div>
+          <div class="task"><span class="cbox"></span><div><div class="tt">Send the 3 Kamloops listings</div><div class="tm">Today · text</div></div></div>
+          <div class="task"><span class="cbox"></span><div><div class="tt">Confirm Sat showing time</div><div class="tm">Tomorrow · call</div></div></div>
+          <div class="task"><span class="cbox done"></span><div><div class="tt done">First-touch text</div><div class="tm">Done · 2d ago</div></div></div>
+        </div>
+
+        <div class="card pad">
+          <div class="rhd"><b>Appointments</b><button class="add">＋</button></div>
+          <div class="appt">
+            <div class="date"><div class="d">11</div><div class="mo">Jul</div></div>
+            <div class="info"><b>Showing · 4809 Bolean</b><div class="w">Sat 1:00 PM</div></div>
+          </div>
+        </div>
+
+        <div class="card pad">
+          <div class="rhd"><b>Family</b><button class="add">＋</button></div>
+          <div class="task" style="border:0"><span class="cbox" style="border-radius:50%;border-color:var(--terracotta)"></span><div><div class="tt">Marc Hogan</div><div class="tm">Spouse · co-buyer</div></div></div>
+        </div>
+      </div>
+          </div><!-- /maingrid -->
+        </div><!-- /panel-overview -->
+
+        <!-- SEARCHES PANEL -->
+        <div id="panel-searches" class="tabpanel" hidden>
+          <div class="card pad">
+            <div class="rhd"><b>Saved search criteria</b><button class="add" title="Edit criteria">✎</button></div>
+            <div class="searchmeta"><span class="matchpill">14 matches</span><span style="font-family:var(--mono);color:var(--faint);font-size:11.5px">updated 3d ago · alerts on</span></div>
+            <div class="crit" style="margin-top:15px">
+              <div><div class="c-lab">Price range</div><div class="c-val">$500k – $625k</div></div>
+              <div><div class="c-lab">Property type</div><div class="c-val">House / half-duplex</div></div>
+              <div><div class="c-lab">Bedrooms</div><div class="c-val">3+</div></div>
+              <div><div class="c-lab">Bathrooms</div><div class="c-val">2+</div></div>
+              <div><div class="c-lab">Parking</div><div class="c-val">Garage or carport</div></div>
+              <div><div class="c-lab">Timeline</div><div class="c-val">60–90 days</div></div>
+              <div style="grid-column:1 / -1"><div class="c-lab">Preferred areas</div>
+                <div class="areachips">
+                  <span class="areachip">Sahali</span><span class="areachip">Aberdeen</span><span class="areachip">Batchelor Heights</span><span class="areachip">Juniper Ridge</span>
+                </div>
+              </div>
+              <div class="crit-note"><div class="c-lab" style="margin-bottom:6px">Notes / more details</div>
+                <textarea placeholder="Anything else about what they want…">Relocating from Calgary, buying remotely on the first couple trips. Kids' school district matters — wants the Pacific Way / NorKam catchment. Would stretch to $650k for a finished basement suite (rental offset). No busy roads.</textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /main -->
+    </div><!-- /shell -->
+
+    <div class="callout">
+      <b>What's real here:</b> the tally, notes, tasks, and appointments all read from data your dashboard already holds. Texts and calls pull from your 128k message history; the note log, tasks, and showings write straight to the deal. The <b>Note / Text / Email</b> switch on the compose box is the text-to-email toggle you asked for, one box, pick the channel.
+    </div>
+    <div class="callout">
+      <b>The tabs:</b> <b>Overview</b> and <b>Searches</b> are live — click Searches to see the saved criteria + notes. <b>Properties</b>, <b>Documents</b>, and <b>Automations</b> pop an "under construction" card for now, wired and ready to build (Properties = homes they've actually viewed / been shown / been sent; Automations = drip campaigns). Dropped <b>Deals</b> (lives in the pipeline) and the <b>lead score</b> (replaced with timeframe + pre-approval, facts you'll actually use).
+    </div>
+  </div>
+
+  <!-- ============ EDIT DETAILS VIEW ============ -->
+  <div id="view-edit" class="editwrap">
+    <div class="modal">
+      <div class="mhd"><h2>Edit details</h2><button class="x" onclick="showView('board')">✕</button></div>
+      <div class="mbody">
+        <div class="fam">
+          <h3>Family members</h3>
+          <div class="fammem">👤 Shannon Hogan <span class="pri">Primary</span></div>
+          <div class="fammem" style="margin-top:8px;background:transparent;">👤 Marc Hogan <span class="pri" style="color:var(--faint)">Co-buyer</span></div>
+          <div class="famadd">＋ New family member</div>
+        </div>
+        <div class="form">
+          <div class="grid2">
+            <div class="field"><label>Privacy</label>
+              <div class="tg" style="justify-content:space-between"><span>Hide lead details</span><span class="sw off"></span></div></div>
+            <div class="field"><label>Lead type <span class="req">*</span></label>
+              <div class="fake">Buyer <span class="chev">▾</span></div></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label>First name <span class="req">*</span></label><input value="Shannon"></div>
+            <div class="field"><label>Last name</label><input value="Hogan"></div>
+          </div>
+
+          <div class="field"><label>Email address</label>
+            <div class="multi"><span class="minus">–</span><input value="shannon3hogan@gmail.com"><span class="prim"><span class="radio"></span>Primary</span></div>
+            <div class="addline" style="margin-top:9px">＋ Add an email</div>
+          </div>
+
+          <div class="field"><label>Phone</label>
+            <div class="multi"><span class="minus">–</span><input value="🇨🇦  250-852-8062"><span class="prim"><span class="radio"></span>Primary</span></div>
+            <div class="addline" style="margin-top:9px">＋ Add a number</div>
+          </div>
+
+          <div class="consent-row">
+            <div class="lab">Consent to contact <span style="color:var(--faint);font-weight:500">· CASL, applied to every send</span></div>
+            <div class="toggles">
+              <div class="tg"><span>Call</span><span class="sw"></span></div>
+              <div class="tg"><span>Text</span><span class="sw"></span></div>
+              <div class="tg"><span>Email</span><span class="sw off"></span></div>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="field"><label>Buying timeframe</label><div class="fake">60–90 days <span class="chev">▾</span></div></div>
+            <div class="field"><label>Pre-approval</label><div class="fake">Approved · $625k <span class="chev">▾</span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="mfoot"><button class="btn-ghost" onclick="showView('board')">Cancel</button><button class="btn-save">Save</button></div>
+    </div>
+    <div class="callout">
+      <b>Added beyond Lofty's card:</b> the <b>consent toggles</b> feed straight into your send engine so a held channel is never texted or emailed (the missing-phone / opt-out safety), and <b>buying timeframe + pre-approval</b> carry into the buyer deal so nothing's re-keyed.
+    </div>
+  </div>
+</div>
+
+<!-- UNDER-CONSTRUCTION POPUP -->
+<div id="uc-modal" class="uc-overlay" hidden onclick="if(event.target===this)closeUC()">
+  <div class="uc-card">
+    <div class="uc-ic">🚧</div>
+    <h3 id="uc-title">Coming soon</h3>
+    <p id="uc-body">This one's on the build list. We'll design it next.</p>
+    <button onclick="closeUC()">Got it</button>
+  </div>
+</div>
+
+<!-- TAG PICKER -->
+<div id="tagpicker" class="tp-overlay" hidden onclick="if(event.target===this)closeTagPicker()">
+  <div class="tp-card">
+    <h3>Add tags</h3>
+    <div class="tp-sub">Tap to add or remove. These are your go-to tags — or make your own at the bottom.</div>
+    <div class="tp-group"><div class="g-lab">Property needs</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">First-time buyer</button>
+      <button class="tp-opt" onclick="addTag(this)">Upsizing</button>
+      <button class="tp-opt" onclick="addTag(this)">Downsizing</button>
+      <button class="tp-opt" onclick="addTag(this)">Investor</button>
+      <button class="tp-opt" onclick="addTag(this)">Suite / income</button>
+      <button class="tp-opt" onclick="addTag(this)">Move-in ready</button>
+    </div></div>
+    <div class="tp-group"><div class="g-lab">Financial</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">Pre-approved</button>
+      <button class="tp-opt" onclick="addTag(this)">Needs to sell first</button>
+      <button class="tp-opt" onclick="addTag(this)">$500k max</button>
+      <button class="tp-opt" onclick="addTag(this)">$750k max</button>
+      <button class="tp-opt" onclick="addTag(this)">$1M+ max</button>
+    </div></div>
+    <div class="tp-group"><div class="g-lab">Location</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">Kamloops</button>
+      <button class="tp-opt" onclick="addTag(this)">Kelowna</button>
+      <button class="tp-opt" onclick="addTag(this)">Wants rural</button>
+      <button class="tp-opt" onclick="addTag(this)">Urban core</button>
+    </div></div>
+    <div class="tp-group"><div class="g-lab">Relationship</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">SOI</button>
+      <button class="tp-opt" onclick="addTag(this)">Past Client</button>
+      <button class="tp-opt" onclick="addTag(this)">Referral</button>
+      <button class="tp-opt" onclick="addTag(this)">Open House Lead</button>
+      <button class="tp-opt" onclick="addTag(this)">PPC Lead</button>
+      <button class="tp-opt" onclick="addTag(this)">Sign Call</button>
+    </div></div>
+    <div class="tp-group"><div class="g-lab">Buying window</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">Spring 2026</button>
+      <button class="tp-opt" onclick="addTag(this)">Fall 2026</button>
+      <button class="tp-opt" onclick="addTag(this)">Winter 2026</button>
+    </div></div>
+    <div class="tp-group"><div class="g-lab">Mortgage renewal</div><div class="tp-opts">
+      <button class="tp-opt" onclick="addTag(this)">Renewal 2027</button>
+      <button class="tp-opt" onclick="addTag(this)">Renewal 2030</button>
+    </div></div>
+    <div class="tp-custom">
+      <input id="tp-input" placeholder="Add your own tag…" onkeydown="if(event.key==='Enter')addCustomTag()">
+      <button onclick="addCustomTag()">Add</button>
+    </div>
+    <div class="tp-foot"><button class="tp-done" onclick="closeTagPicker()">Done</button></div>
+  </div>
+</div>
+
+<script>
+  var root=document.documentElement;
+  (function(){try{var mq=matchMedia('(prefers-color-scheme:dark)');if(!root.getAttribute('data-theme'))root.setAttribute('data-theme',mq.matches?'dark':'light');}catch(e){}})();
+
+  function showView(v){
+    document.getElementById('view-board').style.display = v==='board'?'block':'none';
+    document.getElementById('view-edit').style.display = v==='edit'?'block':'none';
+    document.getElementById('sw-board').setAttribute('aria-selected', v==='board');
+    document.getElementById('sw-edit').setAttribute('aria-selected', v==='edit');
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+
+  // ---- tab switching (Overview + Searches are built; the rest pop "under construction") ----
+  var BUILT={overview:true,searches:true};
+  var UC={
+    properties:{title:'Properties',body:"Homes this contact has actually engaged with — viewed on your site, favorited, been shown, or that you sent them, each with a status. Ready to build next."},
+    documents:{title:'Documents',body:"Their pre-approval and signed files, attached right on the person instead of buried in Drive. On the build list."},
+    automations:{title:'Automations',body:"Where drip campaigns will live — multi-step text + email follow-up that stops the moment they reply. Coming after the core card."}
+  };
+  function showTab(name, el){
+    if(!BUILT[name]){ openUC(name); return; }        // don't switch away from the current tab
+    document.querySelectorAll('.tabs button').forEach(function(b){b.classList.remove('on');});
+    el.classList.add('on');
+    document.querySelectorAll('.tabpanel').forEach(function(p){p.hidden=true;});
+    var panel=document.getElementById('panel-'+name); if(panel)panel.hidden=false;
+  }
+  function openUC(name){
+    var d=UC[name]||{title:'Coming soon',body:"This one's on the build list."};
+    document.getElementById('uc-title').textContent=d.title;
+    document.getElementById('uc-body').textContent=d.body;
+    document.getElementById('uc-modal').hidden=false;
+  }
+  function closeUC(){ document.getElementById('uc-modal').hidden=true; }
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'){closeUC();closeTagPicker();} });
+
+  // ---- tags ----
+  function currentTags(){
+    return Array.from(document.querySelectorAll('#taglist .tag')).map(function(t){return t.firstChild.textContent.trim();});
+  }
+  function insertTag(name){
+    var list=document.getElementById('taglist');
+    var addbtn=list.querySelector('.tagadd');
+    var span=document.createElement('span');
+    span.className='tag';
+    span.innerHTML=name+'<button class="tx" onclick="this.parentElement.remove();syncPickerState()" aria-label="Remove">×</button>';
+    list.insertBefore(span, addbtn);
+  }
+  function removeTagByName(name){
+    document.querySelectorAll('#taglist .tag').forEach(function(t){ if(t.firstChild.textContent.trim()===name) t.remove(); });
+  }
+  function addTag(btn){
+    var name=btn.textContent.trim();
+    if(currentTags().indexOf(name)>=0){ removeTagByName(name); btn.classList.remove('added'); }
+    else { insertTag(name); btn.classList.add('added'); }
+  }
+  function addCustomTag(){
+    var inp=document.getElementById('tp-input'); var v=inp.value.trim(); if(!v)return;
+    if(currentTags().indexOf(v)<0) insertTag(v);
+    inp.value=''; syncPickerState();
+  }
+  function syncPickerState(){
+    var tags=currentTags();
+    document.querySelectorAll('.tp-opt').forEach(function(o){ o.classList.toggle('added', tags.indexOf(o.textContent.trim())>=0); });
+  }
+  function openTagPicker(){ syncPickerState(); document.getElementById('tagpicker').hidden=false; }
+  function closeTagPicker(){ var p=document.getElementById('tagpicker'); if(p)p.hidden=true; }
+
+  // Top 25 — flags the client into the Top 25 list on the admin board
+  function toggleTop25(){
+    var btn=document.getElementById('top25btn'), badge=document.getElementById('top25badge');
+    var on=!btn.classList.contains('on');
+    btn.classList.toggle('on',on);
+    btn.textContent = on ? '★ In Top 25' : '☆ Add to Top 25';
+    badge.hidden=!on;
+  }
+
+  var CFG={note:{ph:'Add a note / log…',btn:'Log note',tmpl:false},
+          text:{ph:'Write a text to Shannon…',btn:'Send text',tmpl:true},
+          email:{ph:'Write an email to Shannon…',btn:'Send email',tmpl:true}};
+  var composeMode='note';
+  function setMode(m){
+    composeMode=m;
+    document.querySelectorAll('.compose .modes button').forEach(function(b){b.classList.toggle('on',b.dataset.m===m);});
+    var box=document.getElementById('composebox'),btn=document.getElementById('sendbtn'),tm=document.getElementById('tmpl');
+    box.placeholder=CFG[m].ph; btn.textContent=CFG[m].btn;
+    tm.style.visibility=CFG[m].tmpl?'visible':'hidden';
+    var c=m==='note'?'var(--navy)':m==='text'?'var(--blue)':'var(--terracotta)';
+    btn.style.background=c;
+  }
+
+  // ---- notes thread ----
+  function updateNoteCount(){ document.getElementById('ncount').textContent=document.querySelectorAll('#notelist .note').length; }
+  function togglePin(btn){
+    var note=btn.closest('.note'); var list=document.getElementById('notelist');
+    if(note.classList.contains('pinned')){
+      note.classList.remove('pinned'); btn.classList.remove('on');
+      var pb=note.querySelector('.pin-badge'); if(pb)pb.remove();
+      return;
+    }
+    // single pin: clear any existing pin first
+    list.querySelectorAll('.note.pinned').forEach(function(n){
+      n.classList.remove('pinned');
+      var b=n.querySelector('.note-pin'); if(b)b.classList.remove('on');
+      var pb=n.querySelector('.pin-badge'); if(pb)pb.remove();
+    });
+    note.classList.add('pinned'); btn.classList.add('on');
+    var top=note.querySelector('.note-top');
+    if(!top.querySelector('.pin-badge')){ var s=document.createElement('span'); s.className='pin-badge'; s.textContent='📌 Pinned'; top.insertBefore(s, top.firstChild); }
+    list.insertBefore(note, list.firstChild);
+  }
+  function logCompose(){
+    var box=document.getElementById('composebox'); var txt=box.value.trim();
+    if(composeMode!=='note'){ box.value=''; return; }   // text/email are drafted from the row/brew flow
+    if(!txt) return;
+    var list=document.getElementById('notelist');
+    var note=document.createElement('div'); note.className='note';
+    note.innerHTML='<div class="note-top"><span class="note-when">just now · you</span><button class="note-pin" title="Pin" onclick="togglePin(this)">📌</button></div><div class="note-body"></div>';
+    note.querySelector('.note-body').textContent=txt;
+    var firstUnpinned=list.querySelector('.note:not(.pinned)');
+    if(firstUnpinned) list.insertBefore(note, firstUnpinned); else list.appendChild(note);
+    box.value=''; updateNoteCount();
+  }
+  // task check toggle
+  document.addEventListener('click',function(e){
+    if(e.target.classList.contains('cbox')){e.target.classList.toggle('done');
+      var tt=e.target.parentElement.querySelector('.tt'); if(tt)tt.classList.toggle('done',e.target.classList.contains('done'));}
+    if(e.target.classList.contains('sw'))e.target.classList.toggle('off');
+    var chip=e.target.closest('.tchip'); if(chip){document.querySelectorAll('.tchip').forEach(function(c){c.classList.remove('on');});chip.classList.add('on');}
+  });
+</script>
+
+</body>
+</html>

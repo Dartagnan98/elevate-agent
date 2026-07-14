@@ -13,8 +13,8 @@ badge. User can edit afterward to confirm.
 Design notes
 ------------
 - Mirrors the shape of ``elevate_cli/kanban_specify.py``: lazy aux
-  client import inside the function, lenient response parse, never
-  raises on expected failure modes.
+  client import inside the function, strict structured response validation,
+  and never raises on expected failure modes.
 - Reads at most ``MAX_SKILLS_FOR_PROMPT`` skill names to keep the
   prompt bounded. No skill body — names + categories are enough
   signal and avoid blowing context on profiles with 100+ skills.
@@ -85,7 +85,10 @@ Notable skills (up to {skill_cap}):
 """
 
 
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+_FENCE_RE = re.compile(
+    r"^\s*```(?:json)?\s*|\s*```\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -137,16 +140,12 @@ def _collect_skills(profile_dir: Path) -> list[str]:
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
+    """Parse one JSON object, tolerating only an optional code fence."""
     if not raw:
         return None
     stripped = _FENCE_RE.sub("", raw.strip())
-    first = stripped.find("{")
-    last = stripped.rfind("}")
-    if first == -1 or last == -1 or last <= first:
-        return None
-    candidate = stripped[first : last + 1]
     try:
-        val = json.loads(candidate)
+        val = json.loads(stripped)
     except (ValueError, json.JSONDecodeError):
         return None
     if not isinstance(val, dict):
@@ -212,6 +211,7 @@ def describe_profile(
 
     try:
         from agent.auxiliary_client import (  # type: ignore
+            _validate_llm_response,
             get_auxiliary_extra_body,
             get_text_auxiliary_client,
         )
@@ -238,40 +238,74 @@ def describe_profile(
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=aux_model,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=400,
-            timeout=timeout or 60,
-            extra_body=get_auxiliary_extra_body() or None,
+        resp = _validate_llm_response(
+            client.chat.completions.create(
+                model=aux_model,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=400,
+                timeout=timeout or 60,
+                extra_body=get_auxiliary_extra_body() or None,
+            ),
+            "profile_describer",
         )
     except Exception as exc:
         logger.info("describe: API call failed for %s (%s)", canon, exc)
         return DescribeOutcome(canon, False, f"LLM error: {type(exc).__name__}")
 
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if not (
+        isinstance(finish_reason, str)
+        and finish_reason.strip().lower() == "stop"
+    ):
+        normalized_reason = (
+            finish_reason.strip().lower()
+            if isinstance(finish_reason, str) and finish_reason.strip()
+            else "missing"
+        )
+        return DescribeOutcome(
+            canon,
+            False,
+            f"LLM response incomplete ({normalized_reason})",
+        )
+
+    message = resp.choices[0].message
+    if getattr(message, "tool_calls", None):
+        return DescribeOutcome(
+            canon,
+            False,
+            "LLM returned an unexpected tool call for a text-only task",
+        )
+
     try:
-        raw = resp.choices[0].message.content or ""
+        raw = message.content or ""
     except Exception:
         raw = ""
 
     parsed = _extract_json_blob(raw)
     if parsed is None:
-        # Fall back: take the raw text trimmed to one paragraph.
-        text = raw.strip().split("\n\n", 1)[0]
-        if not text:
-            return DescribeOutcome(canon, False, "LLM returned an empty response")
-        description = text[:280]
-    else:
-        val = parsed.get("description")
-        if not isinstance(val, str) or not val.strip():
-            return DescribeOutcome(
-                canon, False, "LLM response missing 'description' field"
-            )
-        description = val.strip()[:280]
+        return DescribeOutcome(
+            canon,
+            False,
+            "LLM returned malformed JSON instead of a profile description",
+        )
+    if set(parsed) != {"description"}:
+        return DescribeOutcome(
+            canon,
+            False,
+            "LLM response must contain exactly the description field",
+        )
+    val = parsed["description"]
+    if not isinstance(val, str) or not val.strip():
+        return DescribeOutcome(
+            canon,
+            False,
+            "LLM response has invalid description",
+        )
+    description = val.strip()[:280]
 
     try:
         profiles_mod.write_profile_meta(

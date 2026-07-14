@@ -788,10 +788,13 @@ class SamplingHandler:
 
     # -- Response building ---------------------------------------------------
 
-    def _build_tool_use_result(self, choice, response):
+    def _build_tool_use_result(
+        self,
+        choice,
+        response,
+        allowed_tool_names: set[str],
+    ):
         """Build a CreateMessageResultWithTools from an LLM tool_calls response."""
-        self.metrics["tool_use_count"] += 1
-
         # Tool loop governance
         if self.max_tool_rounds == 0:
             self._tool_loop_count = 0
@@ -807,8 +810,31 @@ class SamplingHandler:
                 f"(max {self.max_tool_rounds} rounds)"
             )
 
-        content_blocks = []
+        parsed_calls = []
         for tc in choice.message.tool_calls:
+            function = getattr(tc, "function", None)
+            name = getattr(function, "name", None)
+            call_id = getattr(tc, "id", None)
+            if (
+                not isinstance(name, str)
+                or not name.strip()
+                or not isinstance(call_id, str)
+                or not call_id.strip()
+            ):
+                self._tool_loop_count = 0
+                self.metrics["errors"] += 1
+                return self._error(
+                    f"Malformed tool call from sampling model for server "
+                    f"'{self.server_name}'"
+                )
+            normalized_name = name.strip()
+            if normalized_name not in allowed_tool_names:
+                self._tool_loop_count = 0
+                self.metrics["errors"] += 1
+                return self._error(
+                    f"Sampling model returned tool '{normalized_name}' that "
+                    f"was not offered by server '{self.server_name}'"
+                )
             args = tc.function.arguments
             if isinstance(args, str):
                 try:
@@ -816,17 +842,29 @@ class SamplingHandler:
                 except (json.JSONDecodeError, ValueError):
                     logger.warning(
                         "MCP server '%s': malformed tool_calls arguments "
-                        "from LLM (wrapping as raw): %.100s",
+                        "from LLM (rejected): %.100s",
                         self.server_name, args,
                     )
-                    parsed = {"_raw": args}
+                    parsed = None
             else:
-                parsed = args if isinstance(args, dict) else {"_raw": str(args)}
+                parsed = args if isinstance(args, dict) else None
 
+            if not isinstance(parsed, dict):
+                self._tool_loop_count = 0
+                self.metrics["errors"] += 1
+                return self._error(
+                    f"Malformed tool arguments from sampling model for "
+                    f"server '{self.server_name}'"
+                )
+            parsed_calls.append((call_id, normalized_name, parsed))
+
+        self.metrics["tool_use_count"] += 1
+        content_blocks = []
+        for call_id, name, parsed in parsed_calls:
             content_blocks.append(ToolUseContent(
                 type="tool_use",
-                id=tc.id,
-                name=tc.function.name,
+                id=call_id,
+                name=name,
                 input=parsed,
             ))
 
@@ -848,6 +886,13 @@ class SamplingHandler:
     def _build_text_result(self, choice, response):
         """Build a CreateMessageResult from a normal text response."""
         self._tool_loop_count = 0  # reset on text response
+        mapped_stop_reason = self._STOP_REASON_MAP.get(choice.finish_reason)
+        if mapped_stop_reason is None:
+            self.metrics["errors"] += 1
+            return self._error(
+                f"Sampling model returned an unconfirmed terminal state for "
+                f"server '{self.server_name}'"
+            )
         response_text = choice.message.content or ""
 
         logger.log(
@@ -861,7 +906,7 @@ class SamplingHandler:
             role="assistant",
             content=TextContent(type="text", text=_sanitize_error(response_text)),
             model=response.model,
-            stopReason=self._STOP_REASON_MAP.get(choice.finish_reason, "endTurn"),
+            stopReason=mapped_stop_reason,
         )
 
     # -- Session kwargs helper -----------------------------------------------
@@ -929,21 +974,62 @@ class SamplingHandler:
 
         # Forward server-provided tools
         call_tools = None
+        allowed_tool_names: set[str] = set()
         server_tools = getattr(params, "tools", None)
         if server_tools:
-            call_tools = [
-                {
+            call_tools = []
+            for tool in server_tools:
+                tool_name = getattr(tool, "name", None)
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    continue
+                normalized_name = tool_name.strip()
+                allowed_tool_names.add(normalized_name)
+                call_tools.append({
                     "type": "function",
                     "function": {
-                        "name": getattr(t, "name", ""),
-                        "description": getattr(t, "description", "") or "",
+                        "name": normalized_name,
+                        "description": getattr(tool, "description", "") or "",
                         "parameters": _normalize_mcp_input_schema(
-                            getattr(t, "inputSchema", None)
+                            getattr(tool, "inputSchema", None)
                         ),
                     },
-                }
-                for t in server_tools
-            ]
+                })
+
+        # MCP ToolChoice uses {mode: auto|required|none}. Auxiliary call_llm
+        # exposes provider-neutral request-body passthrough via extra_body;
+        # enforce the same contract locally because some provider adapters do
+        # not natively honor tool_choice.
+        tool_choice = getattr(params, "toolChoice", None)
+        tool_choice_mode = None
+        if tool_choice is not None:
+            raw_mode = (
+                tool_choice.get("mode")
+                if isinstance(tool_choice, dict)
+                else getattr(tool_choice, "mode", None)
+            )
+            tool_choice_mode = "auto" if raw_mode is None else raw_mode
+            if tool_choice_mode not in {"auto", "required", "none"}:
+                self.metrics["errors"] += 1
+                return self._error(
+                    f"Invalid MCP toolChoice mode for server "
+                    f"'{self.server_name}': {tool_choice_mode!r}"
+                )
+
+        if tool_choice_mode == "required" and not allowed_tool_names:
+            self.metrics["errors"] += 1
+            return self._error(
+                f"MCP server '{self.server_name}' required tool use but "
+                "offered no valid tools"
+            )
+        if tool_choice_mode == "none":
+            # Removing tools is the provider-independent enforcement path.
+            call_tools = None
+
+        call_extra_body = (
+            {"tool_choice": tool_choice_mode}
+            if tool_choice_mode is not None
+            else None
+        )
 
         logger.log(
             self.audit_level,
@@ -961,6 +1047,7 @@ class SamplingHandler:
                 max_tokens=max_tokens,
                 tools=call_tools,
                 timeout=self.timeout,
+                extra_body=call_extra_body,
             )
 
         try:
@@ -995,12 +1082,26 @@ class SamplingHandler:
             self.metrics["tokens_used"] += total_tokens
 
         # Dispatch based on response type
-        if (
-            choice.finish_reason == "tool_calls"
-            and hasattr(choice.message, "tool_calls")
-            and choice.message.tool_calls
-        ):
-            return self._build_tool_use_result(choice, response)
+        returned_tool_calls = getattr(choice.message, "tool_calls", None)
+        if returned_tool_calls:
+            if tool_choice_mode == "none":
+                self.metrics["errors"] += 1
+                return self._error(
+                    f"Sampling model returned a tool call even though MCP "
+                    f"server '{self.server_name}' set toolChoice=none"
+                )
+            return self._build_tool_use_result(
+                choice,
+                response,
+                allowed_tool_names,
+            )
+
+        if tool_choice_mode == "required":
+            self.metrics["errors"] += 1
+            return self._error(
+                f"Sampling model did not return a tool call required by MCP "
+                f"server '{self.server_name}'"
+            )
 
         return self._build_text_result(choice, response)
 

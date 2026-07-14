@@ -177,6 +177,30 @@ class TestCompletionQueue:
         ids = {c["session_id"] for c in completions}
         assert ids == {"proc_0", "proc_1", "proc_2"}
 
+    @pytest.mark.parametrize(
+        ("command", "expected_code", "expected_output"),
+        [
+            ("printf 'FAST_OK\\n'", 0, "FAST_OK"),
+            ("printf 'FAST_FAIL\\n'; exit 7", 7, "FAST_FAIL"),
+        ],
+    )
+    def test_real_fast_exit_is_delivered_once(
+        self, registry, tmp_path, command, expected_code, expected_output
+    ):
+        """The reader cannot beat registration and lose a completion event."""
+        with patch("tools.process_registry.CHECKPOINT_PATH", tmp_path / "procs.json"):
+            session = registry.spawn_local(
+                command,
+                cwd=str(tmp_path),
+                notify_on_complete=True,
+            )
+            completion = registry.completion_queue.get(timeout=10)
+
+        assert completion["session_id"] == session.id
+        assert completion["exit_code"] == expected_code
+        assert expected_output in completion["output"]
+        assert registry.completion_queue.empty()
+
 
 # =========================================================================
 # Checkpoint persistence
@@ -279,6 +303,40 @@ class TestTerminalSchema:
             )
             _, kwargs = mock_tt.call_args
             assert kwargs["notify_on_complete"] is True
+
+    @pytest.mark.parametrize(
+        "notification_args",
+        [
+            {"notify_on_complete": True},
+            {"watch_patterns": ["READY"]},
+        ],
+    )
+    def test_desktop_beta_refuses_unrecoverable_notification_before_spawn(
+        self, notification_args
+    ):
+        from tools.terminal_tool import terminal_tool
+
+        with (
+            patch(
+                "gateway.session_context.get_session_env",
+                return_value="tui",
+            ),
+            patch("tools.terminal_tool._get_env_config") as get_config,
+        ):
+            result = json.loads(
+                terminal_tool(
+                    command="printf 'must not run\\n'",
+                    background=True,
+                    **notification_args,
+                )
+            )
+
+        assert result["status"] == "error"
+        assert result["exit_code"] == -1
+        assert result["output"] == ""
+        assert "No process was started" in result["error"]
+        assert "desktop Beta" in result["error"]
+        get_config.assert_not_called()
 
 
 # =========================================================================

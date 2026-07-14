@@ -231,6 +231,10 @@ export interface SourceInboxProfile {
   threadCount: number;
   latestText: string;
   latestAt: string;
+  /** Exact source/thread pair that produced latestText/latestAt. */
+  latestSourceId?: string;
+  latestSourceLabel?: string;
+  latestThreadId?: string;
   heatScore: number;
   heatLabel: "hot" | "warm" | "watch" | "normal" | string;
   hasCrm: boolean;
@@ -1549,6 +1553,21 @@ export interface SourceInboxSentItem {
     task_id?: string;
     [k: string]: unknown;
   };
+}
+
+export interface SourceInboxDraftSendStatusResponse {
+  queued: boolean;
+  status: "queued" | "sending" | "sent" | "retrying" | "failed" | string | null;
+  queueId?: string;
+  /** Older test fixtures returned id before the route standardized queueId. */
+  id?: string;
+  channel?: string;
+  attempts?: number;
+  nextRetryAt?: string | null;
+  lastError?: string | null;
+  providerMessageId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface SourceInboxSentResponse {

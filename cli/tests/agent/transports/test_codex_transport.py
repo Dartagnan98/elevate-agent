@@ -165,13 +165,24 @@ class TestCodexMapFinishReason:
         assert transport.map_finish_reason("incomplete") == "length"
 
     def test_failed(self, transport):
-        assert transport.map_finish_reason("failed") == "stop"
+        assert transport.map_finish_reason("failed") == "error"
 
     def test_unknown(self, transport):
-        assert transport.map_finish_reason("unknown_status") == "stop"
+        assert transport.map_finish_reason("unknown_status") == "error"
 
 
 class TestCodexNormalizeResponse:
+
+    @staticmethod
+    def _tool_item(*, status="completed", name="terminal", call_id="call_1"):
+        return SimpleNamespace(
+            type="function_call",
+            call_id=call_id,
+            name=name,
+            arguments='{"command":"pwd"}',
+            id=f"fc_{call_id}",
+            status=status,
+        )
 
     def test_text_response(self, transport):
         """Normalize a simple text Codex response."""
@@ -218,3 +229,90 @@ class TestCodexNormalizeResponse:
         tc = nr.tool_calls[0]
         assert tc.name == "terminal"
         assert '"command"' in tc.arguments
+
+    @pytest.mark.parametrize("response_status", [None, "future", "incomplete"])
+    def test_tool_call_requires_completed_response_status(
+        self,
+        transport,
+        response_status,
+    ):
+        r = SimpleNamespace(
+            output=[self._tool_item()],
+            status=response_status,
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "incomplete"
+        assert nr.tool_calls is None or nr.tool_calls == []
+
+    @pytest.mark.parametrize(
+        "item_status",
+        [None, "future", "queued", "in_progress", "incomplete"],
+    )
+    def test_tool_call_requires_completed_item_status(
+        self,
+        transport,
+        item_status,
+    ):
+        r = SimpleNamespace(
+            output=[self._tool_item(status=item_status)],
+            status="completed",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "incomplete"
+        assert nr.tool_calls is None or nr.tool_calls == []
+
+    def test_mixed_tool_batch_is_atomic(self, transport):
+        r = SimpleNamespace(
+            output=[
+                self._tool_item(call_id="good"),
+                self._tool_item(status="incomplete", call_id="bad"),
+            ],
+            status="completed",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "incomplete"
+        assert nr.tool_calls is None or nr.tool_calls == []
+
+    def test_incomplete_message_invalidates_completed_tool_sibling(self, transport):
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    status="incomplete",
+                    content=[SimpleNamespace(type="output_text", text="partial")],
+                ),
+                self._tool_item(),
+            ],
+            status="completed",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "incomplete"
+        assert nr.tool_calls is None or nr.tool_calls == []
+
+    def test_custom_tool_call_requires_completed_item_status(self, transport):
+        r = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="custom_tool_call",
+                    status=None,
+                    call_id="custom_1",
+                    id="ct_1",
+                    name="terminal",
+                    input='{"command":"pwd"}',
+                )
+            ],
+            status="completed",
+        )
+
+        nr = transport.normalize_response(r)
+
+        assert nr.finish_reason == "incomplete"
+        assert nr.tool_calls is None or nr.tool_calls == []

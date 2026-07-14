@@ -30,6 +30,7 @@ def test_nested_failure_fields_do_not_fail_a_successful_tool(failed_count):
         {"status": "cancelled"},
         {"status": "canceled"},
         {"status": "interrupted"},
+        {"status": "killed"},
     ],
 )
 def test_top_level_failure_fields_fail_the_tool(payload):
@@ -70,4 +71,11 @@ def test_terminal_nonzero_exit_preserves_exit_code_suffix():
     assert classify_tool_failure(
         "terminal",
         json.dumps({"exit_code": 2, "error": "command failed"}),
+    ) == (True, " [exit 2]")
+
+
+def test_process_nonzero_exit_preserves_exit_code_suffix():
+    assert classify_tool_failure(
+        "process",
+        json.dumps({"status": "exited", "exit_code": 2}),
     ) == (True, " [exit 2]")

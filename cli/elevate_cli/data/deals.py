@@ -15,6 +15,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import zipfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from elevate_cli.data._util import new_id, now_iso
@@ -50,6 +53,84 @@ _DEAL_INSERT_BASE_COLUMNS: tuple[str, ...] = (
 )
 _VALID_STATUSES = {"active", "closed", "archived"}
 _VALID_EVENT_KINDS = {"created", "stage_transition", "toggle_change", "run_result", "attachment_added", "contact_linked", "agent_activity"}
+
+# Attachment validation is intentionally bounded. Listing-photo bundles can be
+# large in real workflows, so these caps are generous enough for the Beta while
+# still preventing an untrusted ZIP/DOCX from forcing unbounded reads or a ZIP
+# bomb expansion during gate checks.
+_MAX_ATTACHMENT_FILE_BYTES = 1024 * 1024 * 1024
+_MAX_ARCHIVE_FILE_COUNT = 4096
+_MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_DOCX_FILE_COUNT = 2048
+_MAX_DOCX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+_MAX_DOCX_XML_INSPECTION_BYTES = 2 * 1024 * 1024
+_MAX_IMAGE_MAGIC_BYTES = 32
+_MAX_LISTING_PHOTO_MEMBER_BYTES = 25 * 1024 * 1024
+_MAX_LISTING_PHOTO_DECODE_ATTEMPTS = 8
+
+_ATTACHMENT_ALLOWED_SUFFIXES = frozenset(
+    {
+        ".bmp",
+        ".csv",
+        ".doc",
+        ".docx",
+        ".eml",
+        ".gif",
+        ".heic",
+        ".htm",
+        ".html",
+        ".ics",
+        ".jpeg",
+        ".jpg",
+        ".json",
+        ".md",
+        ".msg",
+        ".odt",
+        ".pdf",
+        ".png",
+        ".ppt",
+        ".pptx",
+        ".rtf",
+        ".tif",
+        ".tiff",
+        ".txt",
+        ".webp",
+        ".xls",
+        ".xlsx",
+        ".xml",
+        ".zip",
+    }
+)
+_LISTING_PHOTO_SUFFIXES = frozenset({".heic", ".jpeg", ".jpg", ".png", ".webp"})
+_DOCX_IMAGE_MEDIA_SUFFIXES = _LISTING_PHOTO_SUFFIXES | frozenset(
+    {".bmp", ".gif", ".tif", ".tiff"}
+)
+
+_KIND_FORMAT_CONTRACTS: dict[str, frozenset[str]] = {
+    "contract": frozenset({".docx", ".pdf"}),
+    "cma_report": frozenset({".pdf"}),
+    "title_search": frozenset({".pdf", ".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}),
+    "signed_envelope": frozenset({".pdf"}),
+    "signed_docs": frozenset({".pdf"}),
+    "matrix_incomplete_draft": frozenset({".pdf"}),
+    "offer_pdf": frozenset({".pdf"}),
+    "disclosure_expected_remuneration": frozenset({".pdf"}),
+    "deal_sheet": frozenset({".csv", ".doc", ".docx", ".pdf", ".xls", ".xlsx"}),
+    "subject_removal_form": frozenset({".docx", ".pdf"}),
+    # Trust receipts are routinely supplied as phone scans/photos.
+    "deposit_receipt": frozenset({".heic", ".jpeg", ".jpg", ".pdf", ".png", ".tif", ".tiff", ".webp"}),
+    # Lawyer orders legitimately arrive as Office files or saved email.
+    "order_to_lawyer": frozenset({".doc", ".docx", ".eml", ".msg", ".odt", ".pdf", ".rtf", ".txt"}),
+    "sales_report": frozenset({".csv", ".pdf", ".xls", ".xlsx"}),
+    "cps_draft": frozenset({".docx", ".pdf"}),
+    "cps_signed": frozenset({".pdf"}),
+}
+_DOCUMENT_KIND_HINT_RE = re.compile(
+    r"(?:^|_)(?:contract|disclosure|document|draft|envelope|form|lawyer|pdf|receipt|report|search|sheet|signed)(?:_|$)"
+)
+_GENERIC_DOCUMENT_SUFFIXES = frozenset(
+    {".csv", ".doc", ".docx", ".eml", ".msg", ".odt", ".pdf", ".rtf", ".txt", ".xls", ".xlsx"}
+)
 
 _ENUM_FIELDS = {
     "signing_authority",
@@ -1734,7 +1815,8 @@ def add_deal_attachment(
     if not file_path or not file_path.strip():
         raise ValueError("file_path is required")
     kind_clean = kind.strip()
-    file_path_clean = file_path.strip()
+    file_path_clean = _validated_deal_attachment_path(file_path)
+    _validate_deal_attachment_kind(kind_clean, Path(file_path_clean))
     if source_run_id:
         existing = conn.execute(
             """
@@ -1767,6 +1849,445 @@ def add_deal_attachment(
     )
     _maybe_auto_advance_from_gate(conn, deal_id, actor=actor, expected_stage=int(deal.get("currentStage") or 0))
     return _row_to_deal_attachment(row)
+
+
+def _validated_deal_attachment_path(raw_path: str) -> str:
+    """Return a canonical, physically verified local attachment path.
+
+    Deal attachments drive phase gates and user-visible completion state, so a
+    database row must never be created for a missing, empty, directory, or
+    structurally invalid PDF/DOCX/ZIP.  The boundary intentionally validates an
+    existing local artifact; it does not claim this layer generated the file.
+    """
+    try:
+        path = Path(str(raw_path or "").strip()).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("attachment file does not exist or cannot be read") from exc
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError("attachment file does not exist or cannot be read") from exc
+    if not path.is_file() or size <= 0:
+        raise ValueError("attachment must be a non-empty regular file")
+    if size > _MAX_ATTACHMENT_FILE_BYTES:
+        raise ValueError("attachment exceeds the supported file-size limit")
+
+    suffix = path.suffix.lower()
+    if suffix not in _ATTACHMENT_ALLOWED_SUFFIXES:
+        raise ValueError("attachment file type is not supported")
+    if suffix == ".pdf":
+        try:
+            import fitz
+
+            with fitz.open(path) as document:
+                valid_pdf = False
+                for page_index in range(min(document.page_count, 10)):
+                    page = document.load_page(page_index)
+                    if page.get_text("text").strip() or page.get_images(full=True):
+                        valid_pdf = True
+                        break
+                    if (
+                        page.get_drawings()
+                        or any(page.widgets() or ())
+                        or page.first_annot
+                    ):
+                        valid_pdf = True
+                        break
+                    preview = page.get_pixmap(
+                        matrix=fitz.Matrix(0.2, 0.2),
+                        alpha=False,
+                    )
+                    if preview.samples and min(preview.samples) != max(preview.samples):
+                        valid_pdf = True
+                        break
+        except Exception as exc:
+            raise ValueError("attachment PDF is invalid or unreadable") from exc
+        if not valid_pdf:
+            raise ValueError("attachment PDF has no verifiable content")
+    elif suffix == ".docx":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                infos = _bounded_archive_infos(
+                    archive,
+                    label="DOCX",
+                    max_files=_MAX_DOCX_FILE_COUNT,
+                    max_uncompressed_bytes=_MAX_DOCX_UNCOMPRESSED_BYTES,
+                )
+                info_by_name = {info.filename: info for info in infos}
+                names = set(info_by_name)
+                if (
+                    "[Content_Types].xml" not in names
+                    or "word/document.xml" not in names
+                ):
+                    valid_docx = False
+                else:
+                    document_xml = _read_archive_member_bounded(
+                        archive,
+                        info_by_name["word/document.xml"],
+                        _MAX_DOCX_XML_INSPECTION_BYTES,
+                        label="DOCX document XML",
+                    )
+                    try:
+                        document_root = ET.fromstring(document_xml)
+                    except ET.ParseError as exc:
+                        raise ValueError(
+                            "attachment DOCX document XML is malformed"
+                        ) from exc
+                    visible_text = " ".join(document_root.itertext())
+                    has_text = bool(re.search(r"[A-Za-z0-9]", visible_text))
+                    has_media = False
+                    for info in infos:
+                        if (
+                            not info.filename.startswith("word/media/")
+                            or info.file_size <= 0
+                        ):
+                            continue
+                        media_data = _read_archive_member_bounded(
+                            archive,
+                            info,
+                            _MAX_LISTING_PHOTO_MEMBER_BYTES,
+                            label="DOCX media",
+                        )
+                        media_suffix = Path(info.filename).suffix.lower()
+                        if media_suffix in _DOCX_IMAGE_MEDIA_SUFFIXES:
+                            media_valid = _decode_image_bytes(
+                                media_data,
+                                media_suffix,
+                            )
+                        else:
+                            # Word also embeds EMF/WMF and other binary
+                            # media. For unknown binary media, a bounded full
+                            # read is substantive evidence without allowing an
+                            # oversized member to satisfy the document gate.
+                            media_valid = bool(media_data)
+                        if media_valid:
+                            has_media = True
+                            break
+                    valid_docx = has_text or has_media
+        except (OSError, KeyError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise ValueError("attachment DOCX is invalid or unreadable") from exc
+        if not valid_docx:
+            raise ValueError("attachment DOCX has no verifiable content")
+    elif suffix == ".zip":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                _bounded_archive_infos(
+                    archive,
+                    label="ZIP",
+                    max_files=_MAX_ARCHIVE_FILE_COUNT,
+                    max_uncompressed_bytes=_MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+                )
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise ValueError("attachment ZIP is invalid or unreadable") from exc
+    return str(path)
+
+
+def _bounded_archive_infos(
+    archive: zipfile.ZipFile,
+    *,
+    label: str,
+    max_files: int,
+    max_uncompressed_bytes: int,
+) -> list[zipfile.ZipInfo]:
+    """Validate ZIP central-directory bounds without expanding every member."""
+    all_infos = archive.infolist()
+    if not all_infos:
+        raise ValueError(f"attachment {label} contains no files")
+    if len(all_infos) > max_files:
+        raise ValueError(f"attachment {label} contains too many files")
+    names: set[str] = set()
+    total = 0
+    infos: list[zipfile.ZipInfo] = []
+    for info in all_infos:
+        if info.filename in names:
+            raise ValueError(f"attachment {label} contains duplicate member names")
+        names.add(info.filename)
+        if info.flag_bits & 0x1:
+            raise ValueError(f"attachment {label} cannot contain encrypted members")
+        if info.file_size < 0:
+            raise ValueError(f"attachment {label} has an invalid member size")
+        total += info.file_size
+        if total > max_uncompressed_bytes:
+            raise ValueError(
+                f"attachment {label} exceeds the uncompressed-size limit"
+            )
+        if not info.is_dir():
+            infos.append(info)
+    if not infos:
+        raise ValueError(f"attachment {label} contains no files")
+    return infos
+
+
+def _read_archive_prefix(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    limit: int,
+    *,
+    label: str,
+) -> bytes:
+    if info.flag_bits & 0x1:
+        raise ValueError(f"attachment {label} cannot be encrypted")
+    try:
+        with archive.open(info, "r") as member:
+            return member.read(max(1, limit))
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"attachment {label} is invalid or unreadable") from exc
+
+
+def _read_archive_member_bounded(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    limit: int,
+    *,
+    label: str,
+) -> bytes:
+    if info.file_size > limit:
+        raise ValueError(f"attachment {label} exceeds the member-size limit")
+    data = _read_archive_prefix(archive, info, limit + 1, label=label)
+    if len(data) > limit:
+        raise ValueError(f"attachment {label} exceeds the member-size limit")
+    return data
+
+
+def _image_magic_matches(suffix: str, header: bytes) -> bool:
+    suffix = suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return len(header) >= 3 and header[:3] == b"\xff\xd8\xff"
+    if suffix == ".png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix == ".webp":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+    if suffix == ".heic":
+        if len(header) < 12 or header[4:8] != b"ftyp":
+            return False
+        return any(
+            brand in header[8:]
+            for brand in (b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1")
+        )
+    if suffix in {".tif", ".tiff"}:
+        return header.startswith((b"II*\x00", b"MM\x00*"))
+    if suffix == ".gif":
+        return header.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".bmp":
+        return header.startswith(b"BM")
+    return False
+
+
+def _decode_image_bytes(data: bytes, suffix: str) -> bool:
+    if not data or len(data) > _MAX_LISTING_PHOTO_MEMBER_BYTES:
+        return False
+    if not _image_magic_matches(suffix, data[:_MAX_IMAGE_MAGIC_BYTES]):
+        return False
+    try:
+        import fitz
+
+        filetype = suffix.lower().lstrip(".")
+        if filetype == "jpg":
+            filetype = "jpeg"
+        with fitz.open(stream=data, filetype=filetype) as image_document:
+            if image_document.page_count < 1:
+                return False
+            page = image_document.load_page(0)
+            preview = page.get_pixmap(
+                matrix=fitz.Matrix(0.1, 0.1),
+                alpha=False,
+            )
+            return (
+                preview.width > 0
+                and preview.height > 0
+                and bool(preview.samples)
+            )
+    except Exception:
+        return False
+
+
+def _decode_image_path(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > _MAX_LISTING_PHOTO_MEMBER_BYTES:
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return _decode_image_bytes(data, path.suffix)
+
+
+def _path_prefix(path: Path, limit: int = 1024 * 1024) -> bytes:
+    try:
+        with path.open("rb") as file_handle:
+            return file_handle.read(limit)
+    except OSError as exc:
+        raise ValueError("attachment file is invalid or unreadable") from exc
+
+
+def _validate_office_archive(path: Path, suffix: str) -> None:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = _bounded_archive_infos(
+                archive,
+                label=suffix.lstrip(".").upper(),
+                max_files=_MAX_ARCHIVE_FILE_COUNT,
+                max_uncompressed_bytes=_MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+            )
+            names = {info.filename for info in infos}
+            if suffix == ".xlsx":
+                required = {"[Content_Types].xml", "xl/workbook.xml"}
+            elif suffix == ".odt":
+                required = {"mimetype", "content.xml"}
+            else:
+                required = {"[Content_Types].xml"}
+            if not required.issubset(names):
+                raise ValueError("attachment Office document is incomplete")
+            if suffix == ".odt":
+                mime_info = next(info for info in infos if info.filename == "mimetype")
+                mimetype = _read_archive_member_bounded(
+                    archive,
+                    mime_info,
+                    256,
+                    label="ODT mimetype",
+                )
+                if mimetype.strip() != b"application/vnd.oasis.opendocument.text":
+                    raise ValueError("attachment ODT has an invalid mimetype")
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ValueError("attachment Office document is invalid or unreadable") from exc
+
+
+def _validate_substantive_kind_format(path: Path) -> None:
+    suffix = path.suffix.lower()
+    if suffix in {".pdf", ".docx"}:
+        # Full bounded structure/content checks already ran in
+        # _validated_deal_attachment_path.
+        return
+    if suffix in {".heic", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}:
+        if not _decode_image_path(path):
+            raise ValueError("attachment image is invalid or unreadable")
+        return
+    prefix = _path_prefix(path)
+    if suffix in {".doc", ".xls", ".msg"}:
+        if not prefix.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            raise ValueError("attachment Office document has invalid binary content")
+        return
+    if suffix in {".xlsx", ".odt"}:
+        _validate_office_archive(path, suffix)
+        return
+    if suffix == ".rtf":
+        if not prefix.lstrip().startswith(b"{\\rtf"):
+            raise ValueError("attachment RTF has invalid content")
+        return
+    if suffix == ".eml":
+        try:
+            from email import policy
+            from email.parser import BytesParser
+
+            message = BytesParser(policy=policy.default).parsebytes(prefix)
+        except Exception as exc:
+            raise ValueError("attachment email has invalid content") from exc
+        if not any(message.get(header) for header in ("From", "To", "Subject")):
+            raise ValueError("attachment email has no message headers")
+        return
+    if suffix in {".csv", ".txt"}:
+        text = prefix.decode("utf-8", errors="ignore")
+        if "\x00" in text or not re.search(r"[A-Za-z0-9]", text):
+            raise ValueError("attachment text document has no substantive content")
+        return
+    raise ValueError("attachment format cannot verify this document kind")
+
+
+def _validate_deal_attachment_kind(kind: str, path: Path) -> None:
+    normalized_kind = str(kind or "").strip().lower()
+    suffix = path.suffix.lower()
+    if normalized_kind == "listing_photos":
+        if suffix in _LISTING_PHOTO_SUFFIXES:
+            if not _decode_image_path(path):
+                raise ValueError("listing_photos image content is invalid")
+            return
+        if suffix != ".zip":
+            raise ValueError("listing_photos must be an image or photo ZIP")
+        try:
+            with zipfile.ZipFile(path) as archive:
+                infos = _bounded_archive_infos(
+                    archive,
+                    label="listing_photos ZIP",
+                    max_files=_MAX_ARCHIVE_FILE_COUNT,
+                    max_uncompressed_bytes=_MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+                )
+                has_photo = False
+                attempts = 0
+                for info in infos:
+                    member_suffix = Path(info.filename).suffix.lower()
+                    if member_suffix not in _LISTING_PHOTO_SUFFIXES:
+                        continue
+                    attempts += 1
+                    if attempts > _MAX_LISTING_PHOTO_DECODE_ATTEMPTS:
+                        break
+                    try:
+                        image_data = _read_archive_member_bounded(
+                            archive,
+                            info,
+                            _MAX_LISTING_PHOTO_MEMBER_BYTES,
+                            label="listing photo",
+                        )
+                    except ValueError:
+                        continue
+                    if _decode_image_bytes(image_data, member_suffix):
+                        has_photo = True
+                        break
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise ValueError("listing_photos ZIP is invalid or unreadable") from exc
+        if not has_photo:
+            raise ValueError(
+                "listing_photos ZIP contains no physically valid supported photos"
+            )
+        return
+
+    contract = _KIND_FORMAT_CONTRACTS.get(normalized_kind)
+    if contract is None and _DOCUMENT_KIND_HINT_RE.search(normalized_kind):
+        contract = _GENERIC_DOCUMENT_SUFFIXES
+    if contract is None:
+        return
+    if suffix not in contract:
+        raise ValueError(
+            f"attachment format {suffix or '(none)'} is incompatible with kind {normalized_kind}"
+        )
+    _validate_substantive_kind_format(path)
+
+
+def _deal_attachment_is_available_for_kind(kind: Any, raw_path: Any) -> bool:
+    try:
+        canonical = _validated_deal_attachment_path(str(raw_path or ""))
+        _validate_deal_attachment_kind(str(kind or ""), Path(canonical))
+    except ValueError:
+        return False
+    return True
+
+
+def _revalidated_gate_attachments(
+    attachments: Sequence[Mapping[str, Any]],
+    *,
+    annotate: bool = False,
+) -> list[dict[str, Any]]:
+    """Return only attachments that still exist and remain physically valid.
+
+    Stored rows remain visible as historical audit records.  They are merely
+    withheld from every phase/gate calculation after deletion, replacement,
+    corruption, or an unsupported legacy/remote reference.
+    """
+    available_rows: list[dict[str, Any]] = []
+    for raw_attachment in attachments:
+        attachment = (
+            raw_attachment
+            if isinstance(raw_attachment, dict)
+            else dict(raw_attachment)
+        )
+        available = _deal_attachment_is_available_for_kind(
+            attachment.get("kind"),
+            attachment.get("filePath"),
+        )
+        if annotate:
+            attachment["physicalAvailable"] = available
+        if available:
+            available_rows.append(attachment)
+    return available_rows
 
 
 def list_deal_attachments(
@@ -1845,6 +2366,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
     checklist = deal.get("extraToggles") or {}
     attachments = list_deal_attachments(conn, deal_id)
+    gate_attachments = _revalidated_gate_attachments(attachments, annotate=True)
     prior_runs = list_deal_action_runs(conn, deal_id)
     from elevate_cli.data.province_guides import (
         condition_docs_for_conditions,
@@ -1896,7 +2418,7 @@ def get_deal_context(conn: sqlite3.Connection, deal_id: str) -> dict[str, Any]:
     deal_flow = resolve_deal_phase(
         deal=deal,
         checklist=checklist,
-        attachments=attachments,
+        attachments=gate_attachments,
         prior_runs=prior_runs,
         conditions=conditions,
         condition_docs=condition_docs,
@@ -1976,13 +2498,14 @@ def deal_card_gate(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> dict[st
     checklist = deal.get("extraToggles") or {}
     conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
     attachments = list_deal_attachments(conn, deal_id) if deal_id else []
+    gate_attachments = _revalidated_gate_attachments(attachments)
     prior_runs = list_deal_action_runs(conn, deal_id) if deal_id else []
     from elevate_cli.admin_deal_flow import resolve_deal_phase
 
     flow = resolve_deal_phase(
         deal=deal,
         checklist=checklist,
-        attachments=attachments,
+        attachments=gate_attachments,
         prior_runs=prior_runs,
         conditions=conditions,
         condition_docs=None,
@@ -2041,13 +2564,14 @@ def deal_open_stage_cells(conn: sqlite3.Connection, deal: Mapping[str, Any]) -> 
     checklist = deal.get("extraToggles") or {}
     conditions = {field: deal.get(_field_api_name(field)) for field in sorted(_NAMED_FIELDS)}
     attachments = list_deal_attachments(conn, deal_id) if deal_id else []
+    gate_attachments = _revalidated_gate_attachments(attachments)
     prior_runs = list_deal_action_runs(conn, deal_id) if deal_id else []
     from elevate_cli.admin_deal_flow import resolve_deal_phase
 
     flow = resolve_deal_phase(
         deal=deal,
         checklist=checklist,
-        attachments=attachments,
+        attachments=gate_attachments,
         prior_runs=prior_runs,
         conditions=conditions,
         condition_docs=None,
@@ -2442,16 +2966,35 @@ def record_run_result(
     allowed = {"queued", "running", "succeeded", "completed", "failed", "skipped", "cancelled", "waiting_human", "waiting_external"}
     if normalized_status not in allowed:
         raise ValueError(f"invalid run status {status!r}")
-    now = now_iso()
-    completed_at = now if normalized_status in {"succeeded", "completed", "failed", "skipped", "cancelled"} else None
     prior_key = row["result_idempotency_key"] if "result_idempotency_key" in row.keys() else None
     prior_result = row["result_json"] if "result_json" in row.keys() else None
+    # Replays are receipts for an already-recorded terminal transition. Check
+    # them before touching current artifact paths: a later cleanup/deletion must
+    # not turn the same idempotent callback into a new failure.
     if prior_key:
         if idempotency_key and prior_key == idempotency_key:
             return _row_to_action_run(row)
         raise ValueError("action run result has already been recorded")
     if prior_result and row["status"] in {"succeeded", "completed", "failed", "skipped", "cancelled"}:
         raise ValueError("action run result has already been recorded")
+    artifact_rows = [dict(item) for item in (artifacts or [])]
+    if artifact_rows and normalized_status not in {"succeeded", "completed"}:
+        raise ValueError("only a successful run may attach result artifacts")
+    # Validate every artifact before the first attachment/event/gate mutation.
+    # This keeps a valid-first/invalid-second callback from leaving a partial
+    # result when a direct caller catches the later validation error.
+    for artifact in artifact_rows:
+        kind = str(artifact.get("kind") or "").strip()
+        if not kind:
+            raise ValueError("result artifact kind is required")
+        raw_path = artifact.get("file_path") or artifact.get("filePath")
+        canonical_path = _validated_deal_attachment_path(str(raw_path or ""))
+        _validate_deal_attachment_kind(kind, Path(canonical_path))
+        artifact["kind"] = kind
+        artifact["filePath"] = canonical_path
+        artifact.pop("file_path", None)
+    now = now_iso()
+    completed_at = now if normalized_status in {"succeeded", "completed", "failed", "skipped", "cancelled"} else None
     payload = _decode_json(row["payload_json"]) or {}
     if not isinstance(payload, dict):
         payload = {"prior": payload}
@@ -2517,7 +3060,7 @@ def record_run_result(
 
     result_payload = {
         "status": status,
-        "artifacts": [dict(item) for item in (artifacts or [])],
+        "artifacts": artifact_rows,
         "nextTasks": [dict(item) for item in (next_tasks or [])],
         "checklistUpdates": checklist_updates,
         "protectedChecklistSkipped": [],
@@ -2528,12 +3071,12 @@ def record_run_result(
     }
     payload["result"] = result_payload
     output_path = row["output_path"]
-    for artifact in artifacts or []:
+    for artifact in artifact_rows:
         attachment = add_deal_attachment(
             conn,
             deal_id,
             kind=str(artifact.get("kind") or "artifact"),
-            file_path=str(artifact.get("file_path") or artifact.get("filePath") or ""),
+            file_path=str(artifact.get("filePath") or ""),
             summary=artifact.get("summary"),
             source_run_id=run_id,
             source_snapshot_id=artifact.get("source_snapshot_id") or artifact.get("sourceSnapshotId"),
@@ -2543,7 +3086,7 @@ def record_run_result(
             output_path = attachment["filePath"]
     if normalized_status in {"succeeded", "completed"}:
         updates = _explicit_checklist_updates(checklist_updates)
-        for artifact in artifacts or []:
+        for artifact in artifact_rows:
             hinted = _ARTIFACT_CHECKLIST_HINTS.get(str(artifact.get("kind") or ""))
             if hinted:
                 updates.setdefault(hinted, True)

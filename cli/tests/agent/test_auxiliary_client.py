@@ -4,11 +4,15 @@ import json
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
 from agent.auxiliary_client import (
+    AuxiliaryResponseRejectedError,
+    AuxiliaryResponseValidationError,
+    _validate_llm_response,
     get_text_auxiliary_client,
     get_available_vision_backends,
     resolve_vision_provider_client,
@@ -943,6 +947,10 @@ class TestKimiTemperatureOmitted:
         client = MagicMock()
         client.base_url = "https://api.kimi.com/coding/v1"
         response = MagicMock()
+        response.choices = [MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="ok", tool_calls=None),
+        )]
         client.chat.completions.create.return_value = response
 
         with patch(
@@ -968,6 +976,10 @@ class TestKimiTemperatureOmitted:
         client = MagicMock()
         client.base_url = "https://api.kimi.com/coding/v1"
         response = MagicMock()
+        response.choices = [MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="ok", tool_calls=None),
+        )]
         client.chat.completions.create = AsyncMock(return_value=response)
 
         with patch(
@@ -1062,6 +1074,10 @@ class TestAuxiliaryTaskExtraBody:
         client = MagicMock()
         client.base_url = "https://api.example.com/v1"
         response = MagicMock()
+        response.choices = [MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="ok", tool_calls=None),
+        )]
         client.chat.completions.create.return_value = response
 
         config = {
@@ -1096,6 +1112,10 @@ class TestAuxiliaryTaskExtraBody:
         client = MagicMock()
         client.base_url = "https://api.example.com/v1"
         response = MagicMock()
+        response.choices = [MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content="ok", tool_calls=None),
+        )]
         client.chat.completions.create = AsyncMock(return_value=response)
 
         config = {
@@ -1251,7 +1271,10 @@ class _AuxAuth401(Exception):
 
 class _DummyResponse:
     def __init__(self, text="ok"):
-        self.choices = [MagicMock(message=MagicMock(content=text))]
+        self.choices = [MagicMock(
+            finish_reason="stop",
+            message=MagicMock(content=text, tool_calls=[]),
+        )]
 
 
 class _FailingThenSuccessCompletions:
@@ -1440,6 +1463,441 @@ class TestAuxiliaryAuthRefreshRetry:
         assert fresh_client.chat.completions.create.await_count == 1
 
 
+class TestGeminiRejectedAuxiliaryResponses:
+    @staticmethod
+    def _rejected_response():
+        from agent.gemini_native_adapter import translate_gemini_response
+
+        return translate_gemini_response(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"thought": True, "text": "FILTERED_REASONING"},
+                                {"text": "FILTERED_PARTIAL_TEXT"},
+                            ]
+                        },
+                        "finishReason": "SAFETY",
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+        )
+
+    @staticmethod
+    def _prompt_blocked_response():
+        from agent.gemini_native_adapter import translate_gemini_response
+
+        return translate_gemini_response(
+            {
+                "promptFeedback": {
+                    "blockReason": "PROHIBITED_CONTENT",
+                    "blockReasonMessage": "SECRET_BLOCK_MESSAGE",
+                },
+                "usageMetadata": {"promptTokenCount": 7},
+            },
+            model="gemini-2.5-flash",
+        )
+
+    @staticmethod
+    def _generic_filtered_response():
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="content_filter",
+                    message=SimpleNamespace(
+                        content="APPROVE",
+                        reasoning="FILTERED_REASONING",
+                    ),
+                )
+            ]
+        )
+
+    def test_call_llm_rejects_filtered_gemini_response(self):
+        client = MagicMock()
+        client.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        client.chat.completions.create.return_value = self._rejected_response()
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "gemini",
+                    "gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(
+                AuxiliaryResponseRejectedError,
+                match=r"Gemini response rejected \(SAFETY\)",
+            ):
+                call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "summarize"}],
+                )
+
+        response = client.chat.completions.create.return_value
+        assert response.choices[0].message.content is None
+        assert response.choices[0].message.reasoning is None
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_rejects_filtered_gemini_response(self):
+        client = MagicMock()
+        client.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        client.chat.completions.create = AsyncMock(
+            return_value=self._rejected_response()
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "gemini",
+                    "gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(
+                AuxiliaryResponseRejectedError,
+                match=r"Gemini response rejected \(SAFETY\)",
+            ):
+                await async_call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "summarize"}],
+                )
+
+        assert client.chat.completions.create.await_count == 1
+
+    def test_call_llm_rejects_prompt_block_without_leaking_message(self):
+        client = MagicMock()
+        client.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        client.chat.completions.create.return_value = (
+            self._prompt_blocked_response()
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "gemini",
+                    "gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(AuxiliaryResponseRejectedError) as exc_info:
+                call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "summarize"}],
+                )
+
+        assert "Gemini request blocked (PROHIBITED_CONTENT)" in str(
+            exc_info.value
+        )
+        assert "SECRET_BLOCK_MESSAGE" not in str(exc_info.value)
+        assert client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_rejects_prompt_block_once(self):
+        client = MagicMock()
+        client.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        client.chat.completions.create = AsyncMock(
+            return_value=self._prompt_blocked_response()
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "gemini",
+                    "gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(
+                AuxiliaryResponseRejectedError,
+                match=r"Gemini request blocked \(PROHIBITED_CONTENT\)",
+            ):
+                await async_call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "summarize"}],
+                )
+
+        assert client.chat.completions.create.await_count == 1
+
+    def test_call_llm_rejects_generic_content_filter_without_diagnostic(self):
+        client = MagicMock()
+        client.base_url = "https://openrouter.ai/api/v1"
+        client.chat.completions.create.return_value = (
+            self._generic_filtered_response()
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "openrouter",
+                    "google/gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "google/gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(
+                AuxiliaryResponseRejectedError,
+                match=r"provider response rejected \(content_filter\)",
+            ):
+                call_llm(
+                    task="smart_approval",
+                    messages=[{"role": "user", "content": "authorize"}],
+                )
+
+        assert client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_call_llm_rejects_generic_content_filter_once(self):
+        client = MagicMock()
+        client.base_url = "https://openrouter.ai/api/v1"
+        client.chat.completions.create = AsyncMock(
+            return_value=self._generic_filtered_response()
+        )
+
+        with (
+            patch(
+                "agent.auxiliary_client._resolve_task_provider_model",
+                return_value=(
+                    "openrouter",
+                    "google/gemini-2.5-flash",
+                    client.base_url,
+                    "test-key",
+                    "chat_completions",
+                ),
+            ),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "google/gemini-2.5-flash"),
+            ),
+        ):
+            with pytest.raises(
+                AuxiliaryResponseRejectedError,
+                match=r"provider response rejected \(content_filter\)",
+            ):
+                await async_call_llm(
+                    task="smart_approval",
+                    messages=[{"role": "user", "content": "authorize"}],
+                )
+
+        assert client.chat.completions.create.await_count == 1
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"candidates": [{"content": {"parts": [{"text": "partial"}]}}]},
+            {"usageMetadata": {"promptTokenCount": 3}},
+        ],
+    )
+    def test_unspecified_native_response_is_rejected(self, payload):
+        from agent.gemini_native_adapter import translate_gemini_response
+
+        response = translate_gemini_response(
+            payload,
+            model="gemini-2.5-flash",
+        )
+
+        with pytest.raises(
+            AuxiliaryResponseRejectedError,
+            match=r"Gemini response rejected \(UNSPECIFIED\)",
+        ):
+            _validate_llm_response(response, "compression")
+
+    def test_max_tokens_native_partial_response_remains_accepted(self):
+        from agent.gemini_native_adapter import translate_gemini_response
+
+        response = translate_gemini_response(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": "accepted partial"}]},
+                        "finishReason": "MAX_TOKENS",
+                    }
+                ]
+            },
+            model="gemini-2.5-flash",
+        )
+
+        assert _validate_llm_response(response, "compression") is response
+        assert response.choices[0].message.content == "accepted partial"
+
+    def test_invalid_response_error_never_echoes_response_payload(self):
+        secret = "DARTAGNAN_DEAL_SECRET_Pablo890"
+
+        class InvalidResponse:
+            def __str__(self):
+                return secret
+
+        with pytest.raises(AuxiliaryResponseValidationError) as exc_info:
+            _validate_llm_response(InvalidResponse(), "deal_chat")
+
+        assert "InvalidResponse" in str(exc_info.value)
+        assert secret not in str(exc_info.value)
+
+    @pytest.mark.parametrize("finish_reason", [None, 42, "future_reason", "length"])
+    def test_tool_calls_require_accepted_terminal_finish(self, finish_reason):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=finish_reason,
+                    message=SimpleNamespace(
+                        content="partial",
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="memory",
+                                    arguments='{"action":"add"}',
+                                )
+                            )
+                        ],
+                    ),
+                )
+            ]
+        )
+
+        with pytest.raises(
+            AuxiliaryResponseRejectedError,
+            match="provider response rejected|incomplete provider tool call rejected",
+        ):
+            _validate_llm_response(response, "flush_memories")
+
+    @pytest.mark.parametrize("finish_reason", ["stop", "tool_calls"])
+    def test_tool_calls_accept_known_terminal_finish(self, finish_reason):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=finish_reason,
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="memory",
+                                    arguments="{}",
+                                )
+                            )
+                        ],
+                    ),
+                )
+            ]
+        )
+
+        assert _validate_llm_response(response, "flush_memories") is response
+
+    @pytest.mark.parametrize("finish_reason", [None, 42, "future_reason", "incomplete"])
+    def test_text_response_requires_known_terminal_finish(self, finish_reason):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason=finish_reason,
+                    message=SimpleNamespace(content="partial", tool_calls=None),
+                )
+            ]
+        )
+
+        with pytest.raises(
+            AuxiliaryResponseRejectedError,
+            match="provider response rejected",
+        ):
+            _validate_llm_response(response, "compression")
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [None, "", "oops", '"scalar"', "[]", "42", "null"],
+    )
+    def test_tool_calls_require_object_arguments(self, arguments):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="tool_calls",
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="memory",
+                                    arguments=arguments,
+                                )
+                            )
+                        ],
+                    ),
+                )
+            ]
+        )
+
+        with pytest.raises(
+            AuxiliaryResponseRejectedError,
+            match="malformed provider tool call rejected",
+        ):
+            _validate_llm_response(response, "flush_memories")
+
+    @pytest.mark.parametrize(
+        "malformed_reason",
+        [None, False, "", "future-safety-v2", "bad-value_UNSPECIFIED"],
+    )
+    def test_malformed_private_prompt_diagnostic_stays_fail_closed(
+        self, malformed_reason
+    ):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    finish_reason="stop",
+                    message=SimpleNamespace(content=None, tool_calls=None),
+                )
+            ],
+            _elevate_gemini_diagnostic={
+                "finish_reason": "STOP",
+                "prompt_block_reason": malformed_reason,
+            },
+        )
+
+        with pytest.raises(
+            AuxiliaryResponseRejectedError,
+            match=r"Gemini request blocked \(INVALID\)",
+        ):
+            _validate_llm_response(response, "deal_chat")
+
+
 class TestAnthropicExplicitApiKey:
     def test_try_anthropic_uses_explicit_api_key_over_env(self):
         with (
@@ -1475,9 +1933,10 @@ class TestCodexCompletionsAdapter:
         from agent.auxiliary_client import _CodexCompletionsAdapter
 
         class _Event:
-            def __init__(self, event_type, delta=""):
+            def __init__(self, event_type, delta="", response=None):
                 self.type = event_type
                 self.delta = delta
+                self.response = response
 
         class _BrokenStream:
             def __enter__(self):
@@ -1489,6 +1948,14 @@ class TestCodexCompletionsAdapter:
             def __iter__(self):
                 yield _Event("response.output_text.delta", "Recovered ")
                 yield _Event("response.output_text.delta", "title")
+                yield _Event(
+                    "response.completed",
+                    response=SimpleNamespace(
+                        status="completed",
+                        output=[],
+                        usage=None,
+                    ),
+                )
                 raise TypeError("'NoneType' object is not iterable")
 
         class _Responses:
@@ -1506,3 +1973,31 @@ class TestCodexCompletionsAdapter:
         )
 
         assert response.choices[0].message.content == "Recovered title"
+        assert response.choices[0].finish_reason == "stop"
+
+    def test_does_not_recover_streamed_text_without_completed_terminal(self):
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+
+        class _Event:
+            def __init__(self, event_type, delta=""):
+                self.type = event_type
+                self.delta = delta
+
+        class _BrokenStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                yield _Event("response.output_text.delta", "Unconfirmed")
+                raise TypeError("'NoneType' object is not iterable")
+
+        client = MagicMock()
+        client.responses.stream.return_value = _BrokenStream()
+
+        with pytest.raises(TypeError, match="NoneType"):
+            _CodexCompletionsAdapter(client, "gpt-5.5").create(
+                messages=[{"role": "user", "content": "make a title"}]
+            )

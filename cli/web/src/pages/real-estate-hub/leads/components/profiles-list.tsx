@@ -1,7 +1,13 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useMemo, useState } from "react";
 
-import type { LeadsProfile } from "../leads-data";
-import { matchesLeadsSourceFilter } from "./action-queue-helpers";
+import type { LeadsDraft, LeadsDraftAction, LeadsProfile } from "../leads-data";
+import {
+  crmTemperatureForProfile,
+  draftMatchesProfile,
+  matchesCrmProfile,
+  type CrmTemperature,
+} from "./crm-profile-helpers";
+import { DraftRow } from "./draft-row";
 import { StatusPill } from "./profile-status";
 
 export { StatusPill } from "./profile-status";
@@ -9,112 +15,173 @@ export { StatusPill } from "./profile-status";
 const PROFILE_PAGE = 50;
 
 function ProfileRow({
-  profile, onOpen, onStatusChange, onFavoriteChange, favoriteBusy,
+  profile,
+  draft,
+  draftExpanded,
+  onToggleDraft,
+  onOpen,
+  onStatusChange,
+  onFavoriteChange,
+  favoriteBusy,
 }: {
   profile: LeadsProfile;
+  draft?: LeadsDraft;
+  draftExpanded: boolean;
+  onToggleDraft: () => void;
   onOpen?: (p: LeadsProfile) => void;
   onStatusChange?: (profile: LeadsProfile, value: string) => void;
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   favoriteBusy?: boolean;
 }) {
-  const heatTone = profile.heat >= 80 ? "hot" : profile.heat >= 50 ? "warm" : "cool";
+  const heatTone = crmTemperatureForProfile(profile);
   const initials = profile.name
     .split(/\s+/)
-    .map(w => w[0])
+    .map((word) => word[0])
     .filter(Boolean)
     .slice(0, 2)
     .join("")
     .toUpperCase();
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      onOpen?.(profile);
-    }
-  };
   const isFavorite = Boolean(profile.favorite);
+
   return (
     <div
-      role="button"
-      tabIndex={0}
       className={"lb-profile-row" + (isFavorite ? " favorite" : "")}
       onClick={() => onOpen?.(profile)}
-      onKeyDown={handleKeyDown}
     >
-      <div className="lb-profile-favorite-cell" onClick={(e) => e.stopPropagation()}>
+      <div className="lb-profile-favorite-cell" onClick={(event) => event.stopPropagation()}>
         <button
           type="button"
           className={"lb-profile-star" + (isFavorite ? " active" : "")}
           aria-label={isFavorite ? `Remove ${profile.name} from favorites` : `Add ${profile.name} to favorites`}
           aria-pressed={isFavorite}
-          title={isFavorite ? "Remove favorite" : "Add favorite"}
+          title={!onFavoriteChange ? "Favorite updates are unavailable for this contact." : isFavorite ? "Remove favorite" : "Add favorite"}
           disabled={favoriteBusy || !onFavoriteChange}
-          onClick={(e) => {
-            e.stopPropagation();
-            void onFavoriteChange?.(profile, !isFavorite);
-          }}
+          onClick={() => void onFavoriteChange?.(profile, !isFavorite)}
         >
           {isFavorite ? "★" : "☆"}
         </button>
       </div>
-      <div className="lb-profile-avatar" data-tone={heatTone}>{initials}</div>
-      <div className="lb-profile-name-cell">
-        <span className="lb-profile-name">{profile.name}</span>
-        {profile.verified && <span className="lb-profile-verified-dot" title="Verified">✓</span>}
+      <div className="lb-profile-avatar" data-tone={heatTone} aria-hidden="true">{initials}</div>
+      <button type="button" className="lb-profile-open" onClick={(event) => { event.stopPropagation(); onOpen?.(profile); }}>
+        <span className="lb-profile-name-cell">
+          <span className="lb-profile-name">{profile.name}</span>
+          {profile.verified && <span className="lb-profile-verified-dot" title="Verified" aria-label="Verified">✓</span>}
+        </span>
+        <span className="lb-profile-contact-preview">{profile.email || profile.phone || "No contact details"}</span>
+      </button>
+      <div className="lb-profile-contact-cell">
+        <span className="lb-profile-email mono">{profile.email || "—"}</span>
+        <span className="lb-profile-phone mono">{profile.phone || "—"}</span>
       </div>
-      <div className="lb-profile-email mono">{profile.email}</div>
-      <div className="lb-profile-phone mono">{profile.phone || "—"}</div>
-      <div className={"lb-profile-heat-cell " + heatTone}>
-        <span className="lb-profile-heat-num mono">{profile.heat}</span>
-        <span className="lb-profile-heat-label">{heatTone}</span>
-      </div>
-      <div className="lb-profile-status-cell" onClick={(e) => e.stopPropagation()}>
+      <div className="lb-profile-status-cell" onClick={(event) => event.stopPropagation()}>
         <StatusPill
           status={profile.status}
-          onChange={(v) => onStatusChange && onStatusChange(profile, v)}
+          onChange={(value) => onStatusChange?.(profile, value)}
         />
+      </div>
+      <div className={"lb-profile-heat-cell " + heatTone}>
+        <span className="lb-profile-heat-label">{heatTone}</span>
+        <span className="lb-profile-heat-num mono">{profile.heat}</span>
       </div>
       <div className="lb-profile-source-cell">
         <div className="lb-profile-source-name">{profile.source}</div>
         <div className="lb-profile-source-sub mono">{profile.contact}</div>
       </div>
-      <div className="lb-profile-preview">{profile.lastMsg || "—"}</div>
-      <div className="lb-profile-touch-cell mono">{profile.lastTouch || profile.age}</div>
-      <div className="lb-profile-actions">
-        <span className="lb-profile-chev" aria-hidden="true">›</span>
+      <div className="lb-profile-next-cell" onClick={(event) => event.stopPropagation()}>
+        {draft ? (
+          <button
+            type="button"
+            className={"lb-profile-draft-chip" + (draftExpanded ? " active" : "")}
+            aria-expanded={draftExpanded}
+            onClick={onToggleDraft}
+          >
+            <span aria-hidden="true">✦</span>
+            <span>Draft ready</span>
+          </button>
+        ) : (
+          <span className="lb-profile-preview">{profile.lastMsg || "No next action recorded"}</span>
+        )}
       </div>
+      <div className="lb-profile-touch-cell mono">{profile.lastTouch || profile.age}</div>
+      <button
+        type="button"
+        className="lb-profile-actions"
+        aria-label={`Open ${profile.name}`}
+        onClick={(event) => { event.stopPropagation(); onOpen?.(profile); }}
+      >
+        <span className="lb-profile-chev" aria-hidden="true">›</span>
+      </button>
     </div>
   );
 }
 
 export function ProfilesList({
-  profiles: profilesProp, sourceFilter, onOpen, statusOverrides, onStatusChange, onFavoriteChange,
+  profiles: profilesProp,
+  drafts = [],
+  sourceFilter,
+  pipelineFilter = "all",
+  temperatureFilter = "all",
+  tagFilters = [],
+  searchQuery = "",
+  loading = false,
+  onOpen,
+  onStatusChange,
+  onFavoriteChange,
+  onDraftAction,
+  onDraftActionComplete,
+  onEditTemplate,
 }: {
   profiles: LeadsProfile[];
+  drafts?: LeadsDraft[];
   sourceFilter: string;
+  pipelineFilter?: string;
+  temperatureFilter?: CrmTemperature;
+  tagFilters?: string[];
+  searchQuery?: string;
+  loading?: boolean;
   onOpen: (p: LeadsProfile) => void;
-  statusOverrides: Record<string, string>;
   onStatusChange: (profile: LeadsProfile, value: string) => void;
   onFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
+  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
+  onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
+  onEditTemplate?: () => void;
 }) {
-  const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "unverified" | "potential" | "favorites">("all");
+  const [audienceFilter, setAudienceFilter] = useState<"all" | "verified" | "potential" | "favorites">("all");
   const [page, setPage] = useState(0);
   const [showAll, setShowAll] = useState(false);
   const [favoriteBusy, setFavoriteBusy] = useState<Record<string, boolean>>({});
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
+  const [draftBusy, setDraftBusy] = useState<Record<string, boolean>>({});
+  const [draftError, setDraftError] = useState<string | null>(null);
 
-  const profiles = useMemo(() => (
-    profilesProp.map(p => (statusOverrides && statusOverrides[p.id]) ? { ...p, status: statusOverrides[p.id] } : p)
-  ), [profilesProp, statusOverrides]);
+  const profiles = profilesProp;
+
+  const draftsByProfileId = useMemo(() => {
+    const byProfileId = new Map<string, LeadsDraft>();
+    for (const profile of profiles) {
+      const draft = drafts.find((candidate) => draftMatchesProfile(candidate, profile));
+      if (draft) byProfileId.set(profile.id, draft);
+    }
+    return byProfileId;
+  }, [drafts, profiles]);
 
   const filtered = useMemo(() => {
-    let list = profiles;
-    list = list.filter((profile) => matchesLeadsSourceFilter(profile, sourceFilter));
-    if (statusFilter === "verified") list = list.filter(p => p.verified);
-    if (statusFilter === "unverified") list = list.filter(p => !p.verified);
-    if (statusFilter === "potential") list = list.filter(p => !p.verified);
-    if (statusFilter === "favorites") list = list.filter(p => Boolean(p.favorite));
-    return [...list].sort((a, b) => Number(Boolean(b.favorite)) - Number(Boolean(a.favorite)));
-  }, [profiles, sourceFilter, statusFilter]);
+    let list = profiles.filter((profile) => matchesCrmProfile(profile, {
+      sourceFilter,
+      pipelineFilter,
+      temperatureFilter,
+      tagFilters,
+      searchQuery,
+    }));
+    if (audienceFilter === "verified") list = list.filter((profile) => profile.verified);
+    if (audienceFilter === "potential") list = list.filter((profile) => !profile.verified);
+    if (audienceFilter === "favorites") list = list.filter((profile) => Boolean(profile.favorite));
+    return [...list].sort((a, b) => {
+      const favoriteDelta = Number(Boolean(b.favorite)) - Number(Boolean(a.favorite));
+      return favoriteDelta || b.heat - a.heat || a.name.localeCompare(b.name);
+    });
+  }, [profiles, sourceFilter, pipelineFilter, temperatureFilter, tagFilters, searchQuery, audienceFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PROFILE_PAGE));
   const safePage = Math.min(page, totalPages - 1);
@@ -122,123 +189,136 @@ export function ProfilesList({
   const rangeStart = filtered.length === 0 ? 0 : safePage * PROFILE_PAGE + 1;
   const rangeEnd = Math.min(filtered.length, safePage * PROFILE_PAGE + PROFILE_PAGE);
 
-  const grouped = useMemo(() => {
-    const g: Record<"active" | "verified" | "unverified", LeadsProfile[]> = { active: [], verified: [], unverified: [] };
-    for (const p of visibleProfiles) g[p.group].push(p);
-    return g;
-  }, [visibleProfiles]);
+  const verifiedCount = profiles.filter((profile) => profile.verified).length;
+  const potentialCount = profiles.filter((profile) => !profile.verified).length;
+  const favoriteCount = profiles.filter((profile) => Boolean(profile.favorite)).length;
 
-  const verifiedCount = profiles.filter(p => p.verified).length;
-  const potentialCount = profiles.filter(p => !p.verified).length;
-  const favoriteCount = profiles.filter(p => Boolean(p.favorite)).length;
   const handleFavoriteChange = async (profile: LeadsProfile, favorite: boolean) => {
     if (!onFavoriteChange) return;
     setFavoriteError(null);
     setFavoriteBusy((state) => ({ ...state, [profile.id]: true }));
     try {
       await onFavoriteChange(profile, favorite);
-    } catch (err) {
-      setFavoriteError(err instanceof Error ? err.message : "Could not update favorite.");
+    } catch (error) {
+      setFavoriteError(error instanceof Error ? error.message : "Could not update favorite.");
     } finally {
       setFavoriteBusy((state) => ({ ...state, [profile.id]: false }));
     }
   };
 
-  const sections: Array<{ id: "active" | "verified" | "unverified"; label: string; desc: string }> = [
-    { id: "active", label: "Active conversations", desc: "People they are actively messaging stay first, sorted by the newest conversation activity." },
-    { id: "verified", label: "Verified — ready to queue", desc: "Verified profiles waiting on buyer workflow or seller CMA before Admin handoff." },
-    { id: "unverified", label: "Unverified — needs review", desc: "Recent inbound that hasn't been verified yet." },
-  ];
+  const handleDraftAction = async (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => {
+    if (!onDraftAction) return;
+    setDraftError(null);
+    setDraftBusy((state) => ({ ...state, [draft.id]: true }));
+    try {
+      await onDraftAction(action, draft, scheduledAt);
+      await onDraftActionComplete?.(action);
+      if (action !== "edit") setExpandedDraftId(null);
+    } catch (error) {
+      setDraftError(error instanceof Error ? error.message : `Could not ${action} draft.`);
+    } finally {
+      setDraftBusy((state) => ({ ...state, [draft.id]: false }));
+    }
+  };
+
+  const setAudience = (value: typeof audienceFilter) => {
+    setAudienceFilter((current) => current === value && value !== "all" ? "all" : value);
+    setPage(0);
+    setShowAll(false);
+  };
 
   return (
-    <section className="ab-card lb-profiles">
+    <section className="ab-card lb-profiles" aria-labelledby="leads-list-title">
       <header className="lb-profiles-head">
         <div className="lb-profiles-title-block">
-          <h2 className="lb-profiles-title">Profile list</h2>
-          <p className="lb-profiles-desc">
-            Active conversations stay at the top, then verified profiles queue buyer workflows or seller CMA before Admin handoff.
-          </p>
+          <h2 className="lb-profiles-title" id="leads-list-title">Conversation leads</h2>
+          <p className="lb-profiles-desc">Open a profile for its selected conversation, notes, tasks, and source CRM details.</p>
         </div>
-        <div className="lb-profiles-badges">
-          <button
-            type="button"
-            className={"lb-pbadge" + (statusFilter === "all" ? " active" : "")}
-            onClick={() => { setStatusFilter("all"); setPage(0); setShowAll(false); }}
-          >
-            <span className="lb-pbadge-num mono">{profiles.length}</span>
-            <span>total</span>
-          </button>
-          <button
-            type="button"
-            className={"lb-pbadge favorite" + (statusFilter === "favorites" ? " active" : "")}
-            onClick={() => { setStatusFilter(s => s === "favorites" ? "all" : "favorites"); setPage(0); setShowAll(false); }}
-          >
-            <span className="lb-pbadge-num mono">{favoriteCount}</span>
-            <span>favorites</span>
-          </button>
-          <button
-            type="button"
-            className={"lb-pbadge verified" + (statusFilter === "verified" ? " active" : "")}
-            onClick={() => { setStatusFilter(s => s === "verified" ? "all" : "verified"); setPage(0); setShowAll(false); }}
-          >
-            <span className="lb-pbadge-num mono">{verifiedCount}</span>
-            <span>verified</span>
-          </button>
-          <button
-            type="button"
-            className={"lb-pbadge potential" + (statusFilter === "potential" ? " active" : "")}
-            onClick={() => { setStatusFilter(s => s === "potential" ? "all" : "potential"); setPage(0); setShowAll(false); }}
-          >
-            <span className="lb-pbadge-num mono">{potentialCount}</span>
-            <span>potential leads</span>
-          </button>
+        <div className="lb-profiles-badges" aria-label="Lead subsets">
+          {[
+            { id: "all" as const, label: "all", count: profiles.length, tone: "" },
+            { id: "favorites" as const, label: "favorites", count: favoriteCount, tone: " favorite" },
+            { id: "verified" as const, label: "verified", count: verifiedCount, tone: " verified" },
+            { id: "potential" as const, label: "needs review", count: potentialCount, tone: " potential" },
+          ].map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`lb-pbadge${item.tone}${audienceFilter === item.id ? " active" : ""}`}
+              aria-pressed={audienceFilter === item.id}
+              onClick={() => setAudience(item.id)}
+            >
+              <span className="lb-pbadge-num mono">{item.count}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
         </div>
       </header>
 
-      {favoriteError && (
-        <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{favoriteError}</div>
+      {(favoriteError || draftError) && (
+        <div className="lb-replies-empty lb-crm-error" role="alert">{favoriteError || draftError}</div>
       )}
 
-      {sections.map(sec => {
-        const items = grouped[sec.id] || [];
-        if (items.length === 0) return null;
-        return (
-          <div key={sec.id} className="lb-profiles-section">
-            <div className="lb-profiles-section-head">
-              <span className="lb-profiles-section-label mono">{sec.label}</span>
-              <span className="lb-profiles-section-count mono">{items.length}</span>
-            </div>
-            <div className="lb-profiles-colhead">
-              <span className="mono">Fav</span>
-              <span></span>
-              <span className="mono">Name</span>
-              <span className="mono">Email</span>
-              <span className="mono">Phone</span>
-              <span className="mono">Heat</span>
-              <span className="mono">Status</span>
-              <span className="mono">Source</span>
-              <span className="mono">Last communication</span>
-              <span className="mono lb-profile-touch-col">Last contact</span>
-              <span></span>
-            </div>
-            <div className="lb-profiles-list">
-              {items.map(p => (
-                <ProfileRow
-                  key={p.id}
-                  profile={p}
-                  onOpen={onOpen}
-                  onStatusChange={onStatusChange}
-                  onFavoriteChange={handleFavoriteChange}
-                  favoriteBusy={Boolean(favoriteBusy[p.id])}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <div className="lb-profiles-colhead" aria-hidden="true">
+        <span>Fav</span>
+        <span></span>
+        <span>Lead</span>
+        <span>Contact</span>
+        <span>Pipeline</span>
+        <span>Temp</span>
+        <span>Source</span>
+        <span>Next / AI</span>
+        <span className="lb-profile-touch-col">Last touch</span>
+        <span></span>
+      </div>
 
-      {filtered.length === 0 && (
-        <div className="lb-replies-empty">No profiles match this filter.</div>
+      <div className="lb-profiles-list">
+        {visibleProfiles.map((profile) => {
+          const draft = draftsByProfileId.get(profile.id);
+          const draftExpanded = Boolean(draft && expandedDraftId === draft.id);
+          return (
+            <div key={profile.id} className="lb-profile-group">
+              <ProfileRow
+                profile={profile}
+                draft={draft}
+                draftExpanded={draftExpanded}
+                onToggleDraft={() => setExpandedDraftId((current) => current === draft?.id ? null : draft?.id ?? null)}
+                onOpen={onOpen}
+                onStatusChange={onStatusChange}
+                onFavoriteChange={handleFavoriteChange}
+                favoriteBusy={Boolean(favoriteBusy[profile.id])}
+              />
+              {draft && draftExpanded && (
+                <div className="lb-profile-inline-draft">
+                  <DraftRow
+                    draft={draft}
+                    selected={false}
+                    expanded
+                    onExpand={() => setExpandedDraftId(null)}
+                    onAction={onDraftAction ? (action, nextDraft, scheduledAt) => void handleDraftAction(action, nextDraft, scheduledAt) : undefined}
+                    busy={Boolean(draftBusy[draft.id])}
+                    onEditTemplate={onEditTemplate}
+                    hideSelection
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {loading && profiles.length === 0 && (
+        <div className="lb-crm-empty" role="status">
+          <strong>Loading conversation leads…</strong>
+          <span>Reading the connected source window.</span>
+        </div>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <div className="lb-crm-empty">
+          <strong>{profiles.length === 0 ? "No conversation leads are available." : "No leads match these filters."}</strong>
+          <span>{profiles.length === 0 ? "Connect or refresh a live source to load profiles from open conversations." : "Clear or adjust a filter to widen the list."}</span>
+        </div>
       )}
 
       {filtered.length > PROFILE_PAGE && (
@@ -249,28 +329,12 @@ export function ProfilesList({
           <div className="ab-inbox-pager">
             {!showAll && (
               <>
-                <button
-                  type="button"
-                  className="ab-inbox-page-btn"
-                  onClick={() => setPage(p => Math.max(0, p - 1))}
-                  disabled={safePage === 0}
-                  aria-label="Previous profiles"
-                >‹</button>
+                <button type="button" className="ab-inbox-page-btn" onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={safePage === 0} aria-label="Previous leads">‹</button>
                 <span className="ab-inbox-page-num mono">{safePage + 1} / {totalPages}</span>
-                <button
-                  type="button"
-                  className="ab-inbox-page-btn"
-                  onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-                  disabled={safePage === totalPages - 1}
-                  aria-label="Next profiles"
-                >›</button>
+                <button type="button" className="ab-inbox-page-btn" onClick={() => setPage((value) => Math.min(totalPages - 1, value + 1))} disabled={safePage === totalPages - 1} aria-label="Next leads">›</button>
               </>
             )}
-            <button
-              type="button"
-              className="ab-inbox-page-toggle"
-              onClick={() => { setShowAll(s => !s); setPage(0); }}
-            >
+            <button type="button" className="ab-inbox-page-toggle" onClick={() => { setShowAll((value) => !value); setPage(0); }}>
               {showAll ? "Paginate" : "Show all"}
             </button>
           </div>

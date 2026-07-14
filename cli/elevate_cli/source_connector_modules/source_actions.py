@@ -238,6 +238,39 @@ def _channel_for_source(source_id: str) -> str | None:
     return _SOURCE_TO_CHANNEL.get(source_id)
 
 
+def _channel_for_task(source_id: str, task: JsonRecord) -> str | None:
+    """Resolve an outbound transport from task evidence without guessing.
+
+    CRM can contain both internal notes and real text/email follow-ups. Route a
+    CRM task to an external sender only when its saved channel metadata and
+    recipient field agree; otherwise keep it as ``crm_note``, which the sender
+    deliberately fails closed until a real CRM-note adapter exists.
+    """
+    default = _channel_for_source(source_id)
+    if source_id != "crm":
+        return default
+    evidence = " ".join(
+        str(task.get(key) or "").strip().lower()
+        for key in (
+            "channel",
+            "template_channel",
+            "templateChannel",
+            "transport",
+            "source",
+        )
+    )
+    phone = task.get("phone") or task.get("recipient_phone") or (task.get("phones") or [None])[0]
+    email = task.get("email") or task.get("recipient_email") or (task.get("emails") or [None])[0]
+    handle = task.get("social_handle") or task.get("recipient_handle")
+    if phone and any(token in evidence for token in ("sms", "text", "imessage", "messages")):
+        return "sms"
+    if email and any(token in evidence for token in ("email", "gmail", "outlook")):
+        return "email"
+    if handle and any(token in evidence for token in ("social", "instagram", "facebook", "linkedin", "dm")):
+        return "social_dm"
+    return default
+
+
 def _source_view_for_state(source_id: str, source_dir: Path) -> JsonRecord:
     source = _read_json(source_dir / "source.json") or {}
     blueprint = _blueprint(source_id) or {}
@@ -273,8 +306,25 @@ def _thread_draft_template_state(source_id: str, task_id: str, source_dir: Path)
     return {}
 
 
-def _fire_approve_tick(task_id: str) -> None:
-    """Drain the sender ONCE, in the current process, right after an approve.
+def _merged_task_record(
+    source_dir: Path,
+    task_id: str,
+    task_record: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge persisted task evidence with the operator's current UI state."""
+    merged: dict[str, Any] = {}
+    for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
+        if _task_key(record) == task_id:
+            merged.update(record)
+            break
+    for key, value in (task_record or {}).items():
+        if value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _fire_approve_tick(task_id: str, queue_id: str | None = None) -> None:
+    """Dispatch exactly the approved row in the current app process.
 
     Runs in a daemon thread so the HTTP response isn't blocked on the send
     (10-90s). CRITICAL: this must run inside the Elevate app (dashboard)
@@ -284,13 +334,34 @@ def _fire_approve_tick(task_id: str) -> None:
     """
     if os.getenv("ELEVATE_APPROVE_AUTO_TICK", "1") in ("0", "false", "no"):
         return
+    if not queue_id:
+        logging.getLogger(__name__).error(
+            "approve dispatch skipped for %s: queue id is unavailable",
+            task_id,
+        )
+        return
     import threading
 
     def _tick() -> None:
         try:
+            from elevate_cli import outreach_db as _outreach_db
             from elevate_cli import sender as _sender
 
-            _sender.tick(batch=int(os.getenv("ELEVATE_APPROVE_TICK_BATCH", "1")))
+            queued = _outreach_db.get_send_by_id(queue_id)
+            if (
+                queued is not None
+                and not _sender.sandbox_enabled()
+                and _sender.is_apple_messages_channel(queued.get("channel"))
+                and not _sender.apple_messages_outbound_enabled()
+            ):
+                logging.getLogger(__name__).info(
+                    "approve dispatch held for %s: Apple Messages outbound is disabled",
+                    task_id,
+                )
+                return
+            claimed = _outreach_db.claim_send_by_id(queue_id)
+            if claimed is not None:
+                _sender.dispatch_one(claimed)
         except Exception:
             import traceback
 
@@ -358,14 +429,42 @@ def update_source_task_state(
     state["tasks"] = tasks
 
     if normalized == "approve":
-        # Outbound pause: if this is a native Mac Messages send (channel "sms")
-        # and the Apple Messages outbound toggle is OFF, hold the approval —
-        # don't release to the sender, don't fire. The card stays in the queue
-        # (status kept pending) so nothing leaves until outbound is turned back
-        # on. Inbound/banner are unaffected (different toggle).
-        if _channel_for_source(source_id) == "sms" and not source_connectors.get_apple_messages_directions(
-            config
-        ).get("outbound", True):
+        # Resolve the real transport before applying the outbound pause. A CRM
+        # source may contain an SMS task, and a DB-backed approval row is more
+        # authoritative than the source label or sparse ui-state record.
+        from elevate_cli import outreach_db
+        from elevate_cli import sender
+
+        pending_send = None
+        try:
+            pending_send = outreach_db.get_pending_send(source_id, task_id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "approve: pending-send channel lookup failed for %s/%s",
+                source_id,
+                task_id,
+                exc_info=True,
+            )
+        approval_channel = (
+            str(pending_send.get("channel") or "") if pending_send is not None else ""
+        )
+        if not approval_channel:
+            approval_channel = str(
+                _channel_for_task(
+                    source_id,
+                    _merged_task_record(source_dir, task_id, existing),
+                )
+                or ""
+            )
+
+        # Hold rather than release: no DB mutation, no dispatch thread. The
+        # card remains pending until the current profile's outbound setting is
+        # enabled again. Inbound import has an independent direction flag.
+        if (
+            not sender.sandbox_enabled()
+            and sender.is_apple_messages_channel(approval_channel)
+            and not sender.apple_messages_outbound_enabled(config)
+        ):
             existing["status"] = "pending"
             tasks[task_id] = existing
             state["tasks"] = tasks
@@ -398,7 +497,7 @@ def update_source_task_state(
             # to the gateway's periodic tick fails the permission check. Firing
             # here keeps the send in the app context. Best-effort + threaded so
             # the HTTP response isn't blocked.
-            _fire_approve_tick(task_id)
+            _fire_approve_tick(task_id, str(flipped.get("id") or ""))
         else:
             _approve_atomic(source_id, task_id, existing, source_dir, state)
     else:
@@ -454,23 +553,15 @@ def _approve_atomic(
     """
     from elevate_cli import outreach_db
 
-    channel = _channel_for_source(source_id)
+    # ui-state's task entry is sparse. Merge recipient/channel evidence from
+    # tasks.jsonl so the queue payload and the pre-approval kill-switch guard
+    # resolve the same transport; current UI values win.
+    merged = _merged_task_record(source_dir, task_id, task_record)
+
+    channel = _channel_for_task(source_id, merged)
     if not channel:
         _write_source_ui_state(source_dir, state)
         return
-
-    # ui-state's task entry only carries {status, updated_at, draft_text}.
-    # The recipient (phone/email/handle) lives in the original tasks.jsonl
-    # record. Merge it in so the queue payload has what the dispatcher needs;
-    # ui-state values win when present (user-edited draft_text).
-    merged: dict[str, Any] = {}
-    for record in _read_jsonl_records(source_dir / "tasks.jsonl", limit=5000):
-        if _task_key(record) == task_id:
-            merged.update(record)
-            break
-    for k, v in (task_record or {}).items():
-        if v not in (None, ""):
-            merged[k] = v
 
     thread_id = str(merged.get("thread_id") or merged.get("threadId") or task_id)
     if thread_id == task_id and task_id.startswith("thread-draft:"):
@@ -522,7 +613,7 @@ def _approve_atomic(
             if attempt_id:
                 payload["attempt_id"] = attempt_id
                 payload["attemptId"] = attempt_id
-            outreach_db.enqueue_send(
+            queued_send = outreach_db.enqueue_send(
                 conn,
                 source_id=source_id,
                 thread_id=thread_id,
@@ -533,5 +624,6 @@ def _approve_atomic(
             )
             _write_source_ui_state(source_dir, state)
 
-    # Fire the sender immediately so the UI experience is "click → sent."
-    _fire_approve_tick(task_id)
+    # Dispatch only the row created/reused by this explicit approval. A global
+    # tick could claim an older unrelated lead.
+    _fire_approve_tick(task_id, str((queued_send or {}).get("id") or ""))

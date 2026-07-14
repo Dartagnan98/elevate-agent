@@ -18,7 +18,17 @@ export interface TemplateMutations {
   onSuggest: (laneId: string) => Promise<{ name: string; body: string }>;
 }
 
-export function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane[]; mutations?: TemplateMutations }) {
+export function TemplatesView({
+  groups,
+  mutations,
+  loading = false,
+  loadError = null,
+}: {
+  groups: LeadsTemplateLane[];
+  mutations?: TemplateMutations;
+  loading?: boolean;
+  loadError?: string | null;
+}) {
   const total = groups.reduce((n, g) => n + g.templates.length, 0);
   const active = groups.reduce((n, g) => n + g.active, 0);
 
@@ -106,12 +116,23 @@ export function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane
               What's working, what's not, and fresh variants for approval. Best/worst rank after 5+ sends. Drift flags templates whose 30-day reply rate dropped 30%+ vs all-time.
             </p>
           </div>
-          <span className="lb-tpl-overview-total mono">{total} total · {active} active</span>
+          <span className="lb-tpl-overview-total mono">
+            {loading || loadError ? "—" : `${total} total · ${active} active`}
+          </span>
         </header>
 
+        {loading && <div className="lb-replies-empty" role="status">Loading templates…</div>}
+        {!loading && loadError && (
+          <div className="lb-replies-empty lb-crm-error" role="alert">
+            Templates are unavailable. {loadError}
+          </div>
+        )}
+        {!loading && !loadError && groups.length === 0 && (
+          <div className="lb-replies-empty" role="status">No outreach templates are stored yet.</div>
+        )}
         {error && <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{error}</div>}
 
-        <div className="lb-tpl-summary">
+        {!loading && !loadError && <div className="lb-tpl-summary">
           {groups.map(g => (
             <div key={g.lane} className="lb-tpl-summary-card">
               <div className="lb-tpl-summary-head">
@@ -129,10 +150,10 @@ export function TemplatesView({ groups, mutations }: { groups: LeadsTemplateLane
               <div className="lb-tpl-summary-foot">{g.needMore}</div>
             </div>
           ))}
-        </div>
+        </div>}
       </section>
 
-      {groups.map(g => (
+      {!loading && !loadError && groups.map(g => (
         <section key={g.lane} className="ab-card lb-tpl-group">
           <header className="lb-tpl-group-head">
             <span className="lb-tpl-group-icon" aria-hidden="true">{g.icon}</span>

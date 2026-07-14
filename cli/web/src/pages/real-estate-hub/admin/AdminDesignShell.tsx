@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { PageSkeleton } from "@/components/ui/skeleton";
 import { useRefreshOnAgentTurn } from "@/lib/useRefreshOnAgentTurn";
 import AdminBoard from "./components/admin-board";
 import { useAdminDeals } from "./use-admin-deals";
@@ -6,6 +9,7 @@ import { adminDealToDeal, adminDealToBuyerDeal } from "./admin-mappers";
 import { computeAdminKpis } from "./compute-admin-kpis";
 import { computeAdminEvents } from "./compute-admin-events";
 import { useAdminEvents } from "./use-admin-events";
+import { resolveAdminSetupShellState } from "./admin-onboarding-state";
 import {
   AdminSetupLaunch,
   AdminOnboardingCoach,
@@ -47,8 +51,12 @@ export function AdminDesignShell() {
     setCoachMention(null);
     setCoachOpen(true);
   }, [initialCoachQuestion]);
-  const showOnboarding =
-    !adminSetup.loading && !!setupSnapshot && (!setupSnapshot.complete || forceOnboarding);
+  const setupShellState = resolveAdminSetupShellState({
+    loading: adminSetup.loading,
+    error: adminSetup.error,
+    setup: setupSnapshot,
+    forceOnboarding,
+  });
 
   const { listingDeals, buyerDeals } = useMemo(() => {
     const listing = [];
@@ -85,13 +93,44 @@ export function AdminDesignShell() {
     };
   }, [handleRefresh]);
 
+  if (setupShellState === "loading") {
+    return (
+      <div className="app admin-design-embedded" {...rootAttrs}>
+        <div className="p-5">
+          <PageSkeleton rows={6} variant="form" />
+        </div>
+      </div>
+    );
+  }
+
+  if (setupShellState === "error" || !setupSnapshot) {
+    return (
+      <div className="app admin-design-embedded" {...rootAttrs}>
+        <div
+          role="alert"
+          className="m-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground"
+        >
+          <span className="flex min-w-0 items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <span>
+              Could not load Admin setup. {adminSetup.error || "The setup snapshot was unavailable."}
+            </span>
+          </span>
+          <Button variant="outline" size="sm" onClick={() => void adminSetup.refresh()}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app admin-design-embedded" {...rootAttrs}>
-      {showOnboarding && setupSnapshot ? (
+      {setupShellState === "onboarding" ? (
         <div className="admin-onboarding-wrap">
           <AdminSetupLaunch
             setup={setupSnapshot}
-            onSetupUpdated={(next) => adminSetup.setSetup(next)}
+            onSetupUpdated={adminSetup.setSetup}
             forceOnboarding={forceOnboarding}
             onForceOnboardingDone={() => setForceOnboarding(false)}
             openCoach={openCoach}

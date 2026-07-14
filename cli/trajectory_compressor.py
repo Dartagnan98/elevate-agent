@@ -622,9 +622,36 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = self.client.chat.completions.create(**_create_kwargs)
+                    from agent.auxiliary_client import _validate_llm_response
+
+                    response = _validate_llm_response(
+                        self.client.chat.completions.create(**_create_kwargs),
+                        "trajectory_compression",
+                    )
+
+                finish_reason = getattr(
+                    response.choices[0], "finish_reason", None
+                )
+                if not (
+                    isinstance(finish_reason, str)
+                    and finish_reason.strip().lower() == "stop"
+                ):
+                    normalized_reason = (
+                        finish_reason.strip().lower()
+                        if isinstance(finish_reason, str)
+                        and finish_reason.strip()
+                        else "missing"
+                    )
+                    raise ValueError(
+                        "Summarizer returned an incomplete response "
+                        f"({normalized_reason})"
+                    )
                 
-                summary = self._coerce_summary_content(response.choices[0].message.content)
+                summary = self._coerce_summary_content(
+                    response.choices[0].message.content
+                )
+                if not summary:
+                    raise ValueError("Summarizer returned an empty response")
                 return self._ensure_summary_prefix(summary)
                 
             except Exception as e:
@@ -691,9 +718,38 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                     }
                     if summary_temperature is not None:
                         _create_kwargs["temperature"] = summary_temperature
-                    response = await self._get_async_client().chat.completions.create(**_create_kwargs)
+                    from agent.auxiliary_client import _validate_llm_response
+
+                    response = _validate_llm_response(
+                        await self._get_async_client().chat.completions.create(
+                            **_create_kwargs
+                        ),
+                        "trajectory_compression",
+                    )
+
+                finish_reason = getattr(
+                    response.choices[0], "finish_reason", None
+                )
+                if not (
+                    isinstance(finish_reason, str)
+                    and finish_reason.strip().lower() == "stop"
+                ):
+                    normalized_reason = (
+                        finish_reason.strip().lower()
+                        if isinstance(finish_reason, str)
+                        and finish_reason.strip()
+                        else "missing"
+                    )
+                    raise ValueError(
+                        "Summarizer returned an incomplete response "
+                        f"({normalized_reason})"
+                    )
                 
-                summary = self._coerce_summary_content(response.choices[0].message.content)
+                summary = self._coerce_summary_content(
+                    response.choices[0].message.content
+                )
+                if not summary:
+                    raise ValueError("Summarizer returned an empty response")
                 return self._ensure_summary_prefix(summary)
                 
             except Exception as e:

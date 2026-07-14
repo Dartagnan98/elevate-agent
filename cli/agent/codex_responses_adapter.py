@@ -909,7 +909,13 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
     reasoning_items_raw: List[Dict[str, Any]] = []
     message_items_raw: List[Dict[str, Any]] = []
     tool_calls: List[Any] = []
-    has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
+    # Completion is affirmative: missing, future, or non-terminal top-level
+    # statuses must not be treated as a completed turn.
+    response_completed = response_status == "completed"
+    has_incomplete_items = not response_completed
+    saw_actionable_tool_item = False
+    invalid_actionable_tool_item = False
+    invalid_message_item = False
     saw_commentary_phase = False
     saw_final_answer_phase = False
 
@@ -925,6 +931,10 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
             has_incomplete_items = True
 
         if item_type == "message":
+            if item_status != "completed":
+                invalid_message_item = True
+                has_incomplete_items = True
+                continue
             item_phase = getattr(item, "phase", None)
             normalized_phase = None
             if isinstance(item_phase, str):
@@ -972,7 +982,9 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
                     raw_item["summary"] = raw_summary
                 reasoning_items_raw.append(raw_item)
         elif item_type == "function_call":
-            if item_status in {"queued", "in_progress", "incomplete"}:
+            saw_actionable_tool_item = True
+            if not response_completed or item_status != "completed":
+                invalid_actionable_tool_item = True
                 continue
             fn_name = getattr(item, "name", "") or ""
             arguments = getattr(item, "arguments", "{}")
@@ -995,6 +1007,10 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
                 function=SimpleNamespace(name=fn_name, arguments=arguments),
             ))
         elif item_type == "custom_tool_call":
+            saw_actionable_tool_item = True
+            if not response_completed or item_status != "completed":
+                invalid_actionable_tool_item = True
+                continue
             fn_name = getattr(item, "name", "") or ""
             arguments = getattr(item, "input", "{}")
             if not isinstance(arguments, str):
@@ -1017,7 +1033,11 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
             ))
 
     final_text = "\n".join([p for p in content_parts if p]).strip()
-    if not final_text and hasattr(response, "output_text"):
+    if (
+        not final_text
+        and not invalid_message_item
+        and hasattr(response, "output_text")
+    ):
         out_text = getattr(response, "output_text", "")
         if isinstance(out_text, str):
             final_text = out_text.strip()
@@ -1053,6 +1073,16 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
         # so the model keeps its chain-of-thought on the retry.
         final_text = ""
 
+    # Parallel tool batches are atomic.  If even one actionable item lacks a
+    # completed status, discard every call from the batch so a completed peer
+    # cannot execute beside a truncated/in-progress one.
+    if invalid_actionable_tool_item or (has_incomplete_items and tool_calls):
+        tool_calls = []
+    if invalid_message_item:
+        content_parts = []
+        message_items_raw = []
+        final_text = ""
+
     assistant_message = SimpleNamespace(
         content=final_text,
         tool_calls=tool_calls,
@@ -1063,7 +1093,13 @@ def _normalize_codex_response(response: Any) -> tuple[Any, str]:
         codex_message_items=message_items_raw or None,
     )
 
-    if tool_calls:
+    if (
+        invalid_actionable_tool_item
+        or has_incomplete_items
+        or (saw_actionable_tool_item and not response_completed)
+    ):
+        finish_reason = "incomplete"
+    elif tool_calls:
         finish_reason = "tool_calls"
     elif leaked_tool_call_text:
         finish_reason = "incomplete"

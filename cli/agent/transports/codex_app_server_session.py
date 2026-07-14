@@ -71,6 +71,9 @@ class TurnResult:
     error: Optional[str] = None  # Set if turn ended in a non-recoverable error
     turn_id: Optional[str] = None
     thread_id: Optional[str] = None
+    # Raw terminal proof from turn/completed. Callers must require the exact
+    # value "completed" instead of inferring success from absent error flags.
+    terminal_status: Optional[str] = None
     # Hint to the caller that the underlying codex subprocess is likely
     # wedged (turn-level timeout fired, post-tool watchdog tripped, or
     # token-refresh failure killed the child). The caller should retire
@@ -538,29 +541,50 @@ class CodexAppServerSession:
 
             if method == "turn/completed":
                 turn_complete = True
-                turn_status = (
-                    (note.get("params") or {}).get("turn") or {}
-                ).get("status")
-                if turn_status and turn_status not in {"completed", "interrupted"}:
-                    err_obj = (
-                        (note.get("params") or {}).get("turn") or {}
-                    ).get("error")
-                    if err_obj:
-                        err_msg = err_obj.get("message") or str(err_obj)
-                        # If the turn failed for an auth/refresh reason,
-                        # rewrite the error into a re-auth hint AND mark
-                        # the session for retirement.
-                        stderr_blob = "\n".join(
-                            self._client.stderr_tail(40)
+                turn_obj = (note.get("params") or {}).get("turn") or {}
+                turn_status = turn_obj.get("status")
+                result.terminal_status = (
+                    turn_status if isinstance(turn_status, str) else None
+                )
+                err_obj = turn_obj.get("error")
+                if isinstance(err_obj, dict):
+                    err_msg = err_obj.get("message") or (
+                        str(err_obj) if err_obj else ""
+                    )
+                elif err_obj is None:
+                    err_msg = ""
+                else:
+                    err_msg = str(err_obj)
+
+                if turn_status == "completed":
+                    # A contradictory completed+error payload is not success.
+                    if err_msg:
+                        result.error = self._format_error_with_stderr(
+                            "turn reported completed with an error", err_msg
                         )
-                        hint = _classify_oauth_failure(err_msg, stderr_blob)
-                        if hint is not None:
-                            result.error = hint
-                            result.should_retire = True
-                        else:
-                            result.error = self._format_error_with_stderr(
-                                f"turn ended status={turn_status}", err_msg
-                            )
+                elif turn_status == "interrupted":
+                    result.interrupted = True
+                    if err_msg:
+                        result.error = self._format_error_with_stderr(
+                            "turn was interrupted", err_msg
+                        )
+                else:
+                    if turn_status is None:
+                        error_prefix = "turn/completed omitted terminal status"
+                    else:
+                        error_prefix = f"turn ended status={turn_status!r}"
+
+                    # If the turn failed for an auth/refresh reason, rewrite
+                    # the error into a re-auth hint and retire the session.
+                    stderr_blob = "\n".join(self._client.stderr_tail(40))
+                    hint = _classify_oauth_failure(err_msg, stderr_blob)
+                    if hint is not None:
+                        result.error = hint
+                        result.should_retire = True
+                    else:
+                        result.error = self._format_error_with_stderr(
+                            error_prefix, err_msg
+                        )
 
         if not turn_complete and not result.interrupted:
             # Hit the deadline. Issue interrupt to stop wasted compute, and

@@ -2639,6 +2639,21 @@ class TestSamplingCallbackText:
         assert isinstance(result, CreateMessageResult)
         assert result.stopReason == "maxTokens"
 
+    def test_unknown_finish_reason_returns_error_without_text_content(self):
+        response = _make_llm_response(
+            content="unconfirmed text",
+            finish_reason="future_terminal_state",
+        )
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = asyncio.run(
+                self.handler(None, _make_sampling_params())
+            )
+
+        assert isinstance(result, ErrorData)
+        assert "unconfirmed terminal state" in result.message
+        assert not isinstance(getattr(result, "content", None), TextContent)
+
 
 # ---------------------------------------------------------------------------
 # 7. Tool use sampling callback
@@ -2657,7 +2672,9 @@ class TestSamplingCallbackToolUse:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            params = _make_sampling_params()
+            params = _make_sampling_params(
+                tools=[_make_mcp_tool("get_weather")]
+            )
             result = asyncio.run(self.handler(None, params))
 
         assert isinstance(result, CreateMessageResultWithTools)
@@ -2684,16 +2701,215 @@ class TestSamplingCallbackToolUse:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            result = asyncio.run(self.handler(None, _make_sampling_params()))
+            result = asyncio.run(self.handler(
+                None,
+                _make_sampling_params(tools=[
+                    _make_mcp_tool("func_a"),
+                    _make_mcp_tool("func_b"),
+                ]),
+            ))
 
         assert isinstance(result, CreateMessageResultWithTools)
         assert len(result.content) == 2
         assert result.content[0].name == "func_a"
         assert result.content[1].name == "func_b"
 
+    def test_unoffered_tool_is_rejected_without_tool_use_content(self):
+        response = _make_llm_tool_response(
+            tool_calls_data=[
+                ("call_delete", "delete_listing", '{"listing_id": "42"}'),
+            ]
+        )
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = asyncio.run(self.handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("lookup")]),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert "delete_listing" in result.message
+        assert "not offered" in result.message
+        assert not any(
+            isinstance(block, ToolUseContent)
+            for block in (getattr(result, "content", None) or [])
+        )
+        assert self.handler.metrics["tool_use_count"] == 0
+
+    def test_mixed_offered_and_unoffered_batch_is_rejected_atomically(self):
+        response = _make_llm_tool_response(
+            tool_calls_data=[
+                ("call_lookup", "lookup", '{"query": "123 Main"}'),
+                ("call_delete", "delete_listing", '{"listing_id": "42"}'),
+            ]
+        )
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = asyncio.run(self.handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("lookup")]),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert not any(
+            isinstance(block, ToolUseContent)
+            for block in (getattr(result, "content", None) or [])
+        )
+        assert self.handler.metrics["tool_use_count"] == 0
+
 
 # ---------------------------------------------------------------------------
-# 8. Tool loop governance
+# 8. Sampling toolChoice forwarding and enforcement
+# ---------------------------------------------------------------------------
+
+class TestSamplingToolChoice:
+    def test_auto_is_forwarded_to_auxiliary_request(self):
+        handler = SamplingHandler("choice-auto", {})
+        response = _make_llm_response(content="no tool needed")
+
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=response,
+        ) as mock_call:
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="auto"),
+                ),
+            ))
+
+        assert isinstance(result, CreateMessageResult)
+        assert mock_call.call_args.kwargs["extra_body"] == {
+            "tool_choice": "auto"
+        }
+        assert mock_call.call_args.kwargs["tools"][0]["function"]["name"] == (
+            "lookup"
+        )
+
+    def test_required_is_forwarded_and_accepts_offered_tool(self):
+        handler = SamplingHandler("choice-required", {})
+        response = _make_llm_tool_response(
+            tool_calls_data=[("call_lookup", "lookup", '{"query": "home"}')]
+        )
+
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=response,
+        ) as mock_call:
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="required"),
+                ),
+            ))
+
+        assert isinstance(result, CreateMessageResultWithTools)
+        assert result.content[0].name == "lookup"
+        assert mock_call.call_args.kwargs["extra_body"] == {
+            "tool_choice": "required"
+        }
+
+    def test_none_removes_tools_and_is_forwarded(self):
+        handler = SamplingHandler("choice-none", {})
+        response = _make_llm_response(content="tools disabled")
+
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=response,
+        ) as mock_call:
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="none"),
+                ),
+            ))
+
+        assert isinstance(result, CreateMessageResult)
+        assert mock_call.call_args.kwargs["tools"] is None
+        assert mock_call.call_args.kwargs["extra_body"] == {
+            "tool_choice": "none"
+        }
+
+    def test_required_rejects_text_only_response(self):
+        handler = SamplingHandler("choice-required-text", {})
+        response = _make_llm_response(content="I will not call the tool")
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="required"),
+                ),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert "required" in result.message
+        assert not any(
+            isinstance(block, ToolUseContent)
+            for block in (getattr(result, "content", None) or [])
+        )
+
+    def test_none_rejects_provider_tool_call(self):
+        handler = SamplingHandler("choice-none-tool", {})
+        response = _make_llm_tool_response(
+            tool_calls_data=[("call_lookup", "lookup", '{"query": "home"}')]
+        )
+
+        with patch("agent.auxiliary_client.call_llm", return_value=response):
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="none"),
+                ),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert "toolChoice=none" in result.message
+        assert not any(
+            isinstance(block, ToolUseContent)
+            for block in (getattr(result, "content", None) or [])
+        )
+
+    def test_required_without_offered_tools_fails_before_llm_call(self):
+        handler = SamplingHandler("choice-required-empty", {})
+
+        with patch("agent.auxiliary_client.call_llm") as mock_call:
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=None,
+                    tool_choice=SimpleNamespace(mode="required"),
+                ),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert "offered no valid tools" in result.message
+        mock_call.assert_not_called()
+
+    def test_invalid_mode_fails_before_llm_call(self):
+        handler = SamplingHandler("choice-invalid", {})
+
+        with patch("agent.auxiliary_client.call_llm") as mock_call:
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(
+                    tools=[_make_mcp_tool("lookup")],
+                    tool_choice=SimpleNamespace(mode="sometimes"),
+                ),
+            ))
+
+        assert isinstance(result, ErrorData)
+        assert "Invalid MCP toolChoice mode" in result.message
+        mock_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. Tool loop governance
 # ---------------------------------------------------------------------------
 
 class TestToolLoopGovernance:
@@ -2707,7 +2923,9 @@ class TestToolLoopGovernance:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            params = _make_sampling_params()
+            params = _make_sampling_params(
+                tools=[_make_mcp_tool("get_weather")]
+            )
             # Round 1, 2: allowed
             r1 = asyncio.run(handler(None, params))
             assert isinstance(r1, CreateMessageResultWithTools)
@@ -2731,17 +2949,20 @@ class TestToolLoopGovernance:
             side_effect=lambda **kw: responses[0],
         ):
             # Tool response (round 1 of 1 allowed)
-            r1 = asyncio.run(handler(None, _make_sampling_params()))
+            params = _make_sampling_params(
+                tools=[_make_mcp_tool("get_weather")]
+            )
+            r1 = asyncio.run(handler(None, params))
             assert isinstance(r1, CreateMessageResultWithTools)
 
             # Text response resets counter
             responses[0] = _make_llm_response()
-            r2 = asyncio.run(handler(None, _make_sampling_params()))
+            r2 = asyncio.run(handler(None, params))
             assert isinstance(r2, CreateMessageResult)
 
             # Tool response again (should succeed since counter was reset)
             responses[0] = _make_llm_tool_response()
-            r3 = asyncio.run(handler(None, _make_sampling_params()))
+            r3 = asyncio.run(handler(None, params))
             assert isinstance(r3, CreateMessageResultWithTools)
 
     def test_max_tool_rounds_zero_disables(self):
@@ -2754,7 +2975,10 @@ class TestToolLoopGovernance:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            result = asyncio.run(handler(None, _make_sampling_params()))
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("get_weather")]),
+            ))
             assert isinstance(result, ErrorData)
             assert "Tool loops disabled" in result.message
 
@@ -2919,8 +3143,8 @@ class TestModelWhitelist:
 # ---------------------------------------------------------------------------
 
 class TestMalformedToolCallArgs:
-    def test_invalid_json_wrapped_as_raw(self):
-        """Malformed JSON arguments get wrapped in {"_raw": ...}."""
+    def test_invalid_json_is_rejected_without_tool_use_content(self):
+        """Malformed JSON arguments poison the complete tool-call batch."""
         handler = SamplingHandler("mf", {})
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = _make_llm_tool_response(
@@ -2931,12 +3155,17 @@ class TestMalformedToolCallArgs:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            result = asyncio.run(handler(None, _make_sampling_params()))
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("some_tool")]),
+            ))
 
-        assert isinstance(result, CreateMessageResultWithTools)
-        tc = result.content[0]
-        assert isinstance(tc, ToolUseContent)
-        assert tc.input == {"_raw": "not valid json {{{"}
+        assert isinstance(result, ErrorData)
+        assert "Malformed tool arguments" in result.message
+        assert not any(
+            isinstance(block, ToolUseContent)
+            for block in (getattr(result, "content", None) or [])
+        )
 
     def test_dict_args_pass_through(self):
         """When arguments are already a dict, they pass through directly."""
@@ -2959,7 +3188,10 @@ class TestMalformedToolCallArgs:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            result = asyncio.run(handler(None, _make_sampling_params()))
+            result = asyncio.run(handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("do_stuff")]),
+            ))
 
         assert isinstance(result, CreateMessageResultWithTools)
         assert result.content[0].input == {"key": "val"}
@@ -2994,7 +3226,10 @@ class TestMetricsTracking:
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
         ):
-            asyncio.run(handler(None, _make_sampling_params()))
+            asyncio.run(handler(
+                None,
+                _make_sampling_params(tools=[_make_mcp_tool("get_weather")]),
+            ))
 
         assert handler.metrics["tool_use_count"] == 1
         assert handler.metrics["requests"] == 1

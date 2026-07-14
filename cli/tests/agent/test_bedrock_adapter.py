@@ -418,7 +418,7 @@ class TestNormalizeConverseResponse:
         assert _converse_stop_reason_to_openai("max_tokens") == "length"
         assert _converse_stop_reason_to_openai("content_filtered") == "content_filter"
         assert _converse_stop_reason_to_openai("guardrail_intervened") == "content_filter"
-        assert _converse_stop_reason_to_openai("unknown_reason") == "stop"
+        assert _converse_stop_reason_to_openai("unknown_reason") == "error"
 
     def test_empty_content(self):
         from agent.bedrock_adapter import normalize_converse_response
@@ -448,6 +448,96 @@ class TestNormalizeConverseResponse:
         }
         result = normalize_converse_response(response)
         assert result.choices[0].finish_reason == "tool_calls"
+
+    @pytest.mark.parametrize(
+        "stop_reason",
+        [pytest.param(None, id="missing"), "future_reason", "max_tokens"],
+    )
+    def test_nonterminal_tool_use_is_scrubbed(self, stop_reason):
+        from agent.bedrock_adapter import normalize_converse_response
+
+        response = {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "c1",
+                                "name": "terminal",
+                                "input": {"command": "whoami"},
+                            }
+                        }
+                    ],
+                }
+            },
+            "usage": {"inputTokens": 0, "outputTokens": 0},
+        }
+        if stop_reason is not None:
+            response["stopReason"] = stop_reason
+
+        result = normalize_converse_response(response)
+
+        assert result.choices[0].finish_reason in {"error", "length"}
+        assert result.choices[0].message.tool_calls is None
+
+    @pytest.mark.parametrize("bad_input", [None, [], "oops", 42])
+    def test_non_object_tool_input_invalidates_batch(self, bad_input):
+        from agent.bedrock_adapter import normalize_converse_response
+
+        response = {
+            "output": {
+                "message": {
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "c1",
+                                "name": "terminal",
+                                "input": bad_input,
+                            }
+                        }
+                    ]
+                }
+            },
+            "stopReason": "tool_use",
+        }
+
+        result = normalize_converse_response(response)
+
+        assert result.choices[0].finish_reason == "error"
+        assert result.choices[0].message.tool_calls is None
+
+    def test_malformed_parallel_tool_invalidates_valid_sibling(self):
+        from agent.bedrock_adapter import normalize_converse_response
+
+        response = {
+            "output": {
+                "message": {
+                    "content": [
+                        {
+                            "toolUse": {
+                                "toolUseId": "good",
+                                "name": "terminal",
+                                "input": {"command": "pwd"},
+                            }
+                        },
+                        {
+                            "toolUse": {
+                                "toolUseId": "bad",
+                                "name": "web_search",
+                                "input": "not-an-object",
+                            }
+                        },
+                    ]
+                }
+            },
+            "stopReason": "tool_use",
+        }
+
+        result = normalize_converse_response(response)
+
+        assert result.choices[0].finish_reason == "error"
+        assert result.choices[0].message.tool_calls is None
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +621,69 @@ class TestNormalizeConverseStreamEvents:
         ]}
         result = normalize_converse_stream_events(events)
         assert result.choices[0].message.content is None
+        assert result.choices[0].message.tool_calls is None
+
+    def test_tool_stream_without_message_stop_is_scrubbed(self):
+        from agent.bedrock_adapter import normalize_converse_stream_events
+
+        events = {"stream": [
+            {"contentBlockStart": {"start": {
+                "toolUse": {"toolUseId": "c1", "name": "terminal"},
+            }}},
+            {"contentBlockDelta": {"delta": {
+                "toolUse": {"input": '{"command":"pwd"}'},
+            }}},
+            {"contentBlockStop": {}},
+        ]}
+
+        result = normalize_converse_stream_events(events)
+
+        assert result.choices[0].finish_reason == "error"
+        assert result.choices[0].message.tool_calls is None
+
+    def test_malformed_stream_tool_json_invalidates_batch(self):
+        from agent.bedrock_adapter import normalize_converse_stream_events
+
+        events = {"stream": [
+            {"contentBlockStart": {"start": {
+                "toolUse": {"toolUseId": "c1", "name": "terminal"},
+            }}},
+            {"contentBlockDelta": {"delta": {
+                "toolUse": {"input": '{"command":'},
+            }}},
+            {"contentBlockStop": {}},
+            {"messageStop": {"stopReason": "tool_use"}},
+        ]}
+
+        result = normalize_converse_stream_events(events)
+
+        assert result.choices[0].finish_reason == "error"
+        assert result.choices[0].message.tool_calls is None
+
+    def test_malformed_stream_tool_invalidates_valid_sibling(self):
+        from agent.bedrock_adapter import normalize_converse_stream_events
+
+        events = {"stream": [
+            {"contentBlockStart": {"start": {
+                "toolUse": {"toolUseId": "good", "name": "terminal"},
+            }}},
+            {"contentBlockDelta": {"delta": {
+                "toolUse": {"input": '{"command":"pwd"}'},
+            }}},
+            {"contentBlockStop": {}},
+            {"contentBlockStart": {"start": {
+                "toolUse": {"toolUseId": "bad", "name": "web_search"},
+            }}},
+            {"contentBlockDelta": {"delta": {
+                "toolUse": {"input": "["},
+            }}},
+            {"contentBlockStop": {}},
+            {"messageStop": {"stopReason": "tool_use"}},
+        ]}
+
+        result = normalize_converse_stream_events(events)
+
+        assert result.choices[0].finish_reason == "error"
         assert result.choices[0].message.tool_calls is None
 
 

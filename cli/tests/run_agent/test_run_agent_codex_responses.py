@@ -84,6 +84,7 @@ def _codex_message_response(text: str):
         output=[
             SimpleNamespace(
                 type="message",
+                status="completed",
                 content=[SimpleNamespace(type="output_text", text=text)],
             )
         ],
@@ -98,6 +99,7 @@ def _codex_tool_call_response():
         output=[
             SimpleNamespace(
                 type="function_call",
+                status="completed",
                 id="fc_1",
                 call_id="call_1",
                 name="terminal",
@@ -174,6 +176,18 @@ class _FakeResponsesStream:
         if self._final_error is not None:
             raise self._final_error
         return self._final_response
+
+
+class _EventResponsesStream(_FakeResponsesStream):
+    def __init__(self, events, *, final_response=None, final_error=None):
+        super().__init__(
+            final_response=final_response,
+            final_error=final_error,
+        )
+        self._events = list(events)
+
+    def __iter__(self):
+        return iter(self._events)
 
 
 class _FakeCreateStream:
@@ -414,7 +428,11 @@ def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
             return _FakeResponsesStream(
                 final_error=RuntimeError("Didn't receive a `response.completed` event.")
             )
-        return _FakeResponsesStream(final_response=_codex_message_response("stream ok"))
+        completed = _codex_message_response("stream ok")
+        return _EventResponsesStream(
+            [SimpleNamespace(type="response.completed", response=completed)],
+            final_response=completed,
+        )
 
     agent.client = SimpleNamespace(
         responses=SimpleNamespace(
@@ -491,6 +509,44 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     assert response.output[0].content[0].text == "streamed create ok"
 
 
+def test_run_codex_stream_rejects_conflicting_terminal_events(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    incomplete = SimpleNamespace(status="incomplete", output=[], usage=None)
+    completed = _codex_tool_call_response()
+    stream = _EventResponsesStream(
+        [
+            SimpleNamespace(type="response.incomplete", response=incomplete),
+            SimpleNamespace(type="response.completed", response=completed),
+        ],
+        final_response=completed,
+    )
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(stream=lambda **_kwargs: stream)
+    )
+
+    with pytest.raises(RuntimeError, match="second terminal event"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+
+def test_run_codex_stream_rejects_tool_output_after_terminal(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    completed = _codex_message_response("done")
+    tool_item = _codex_tool_call_response().output[0]
+    stream = _EventResponsesStream(
+        [
+            SimpleNamespace(type="response.completed", response=completed),
+            SimpleNamespace(type="response.output_item.done", item=tool_item),
+        ],
+        final_response=completed,
+    )
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(stream=lambda **_kwargs: stream)
+    )
+
+    with pytest.raises(RuntimeError, match="output or a second terminal"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+
 def test_run_conversation_codex_plain_text(monkeypatch):
     agent = _build_agent(monkeypatch)
     monkeypatch.setattr(agent, "_interruptible_api_call", lambda api_kwargs: _codex_message_response("OK"))
@@ -501,6 +557,23 @@ def test_run_conversation_codex_plain_text(monkeypatch):
     assert result["final_response"] == "OK"
     assert result["messages"][-1]["role"] == "assistant"
     assert result["messages"][-1]["content"] == "OK"
+
+
+def test_valid_final_response_on_last_allowed_call_is_completed(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    agent.max_iterations = 1
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: _codex_message_response("Finished on the final call."),
+    )
+
+    result = agent.run_conversation("finish once")
+
+    assert result["api_calls"] == 1
+    assert result["completed"] is True
+    assert result["failed"] is False
+    assert result["final_response"] == "Finished on the final call."
 
 
 def test_run_conversation_codex_empty_output_with_output_text(monkeypatch):
@@ -929,13 +1002,53 @@ def test_run_conversation_codex_continues_after_incomplete_interim_message(monke
 
     assert result["completed"] is True
     assert result["final_response"] == "Architecture summary complete."
-    assert any(
-        msg.get("role") == "assistant"
-        and msg.get("finish_reason") == "incomplete"
-        and "inspect the repo structure" in (msg.get("content") or "")
+    assert not any(
+        "inspect the repo structure" in (msg.get("content") or "")
         for msg in result["messages"]
     )
     assert any(msg.get("role") == "tool" and msg.get("tool_call_id") == "call_1" for msg in result["messages"])
+
+
+def test_tool_execution_exception_cannot_be_erased_by_later_done_text(
+    monkeypatch,
+):
+    agent = _build_agent(monkeypatch)
+    agent.quiet_mode = False
+    responses = [
+        _codex_tool_call_response(),
+        _codex_message_response("Done — everything completed."),
+    ]
+    monkeypatch.setattr(
+        agent,
+        "_interruptible_api_call",
+        lambda api_kwargs: responses.pop(0),
+    )
+    monkeypatch.setattr(
+        agent,
+        "_execute_tool_calls",
+        lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("terminal handler crashed before execution")
+        ),
+    )
+    printed = []
+    statuses = []
+    monkeypatch.setattr(agent, "_safe_print", printed.append)
+    monkeypatch.setattr(agent, "_emit_status", statuses.append)
+
+    result = agent.run_conversation("run a command")
+
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert result["partial"] is True
+    assert "terminal handler crashed before execution" in result["error"]
+    assert result["turn_exit_reason"] == "tool_execution_failed"
+    assert result["final_response"].startswith(
+        "The task did not complete because tool execution failed"
+    )
+    assert "Done — everything completed." in result["final_response"]
+    assert not any("🎉" in line for line in printed)
+    assert any("cannot be marked complete" in line for line in statuses)
+    assert result["messages"][-1]["finish_reason"] == "error"
 
 
 def test_normalize_codex_response_marks_commentary_only_message_as_incomplete(monkeypatch):

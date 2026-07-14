@@ -1,6 +1,8 @@
 """Source inbox send-status and sent-message routes."""
 
+import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
@@ -23,7 +25,8 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
     async def get_source_inbox_sent(limit: int = 100, include_pending: bool = False):
         """Recent send_queue rows, newest first. Powers the /leads Sent tab.
 
-        - `include_pending=false` (default): only delivered messages (status=sent).
+        - `include_pending=false` (default): only rows marked sent. This is a
+          dispatcher-acceptance state, not recipient-delivery proof.
         - `include_pending=true`: also surfaces queued/sending/retrying/failed
           so the operator can see what's mid-flight or stuck.
         """
@@ -49,15 +52,17 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
 
     @router.get("/api/source-inbox/not-sent")
     async def get_source_inbox_not_sent(limit: int = 100):
-        """send_queue rows that did NOT get delivered — failed, skipped (e.g. no
-        phone / safety hold), or stuck retrying. Powers the /leads 'Didn't Send'
-        tab so silently-dropped approvals don't vanish off the board."""
+        """send_queue rows that did not reach dispatcher acceptance.
+
+        Explicitly skipped approval drafts remain in the approval work queue,
+        where Undo restores them for review; they must never become a direct
+        send path through the /leads 'Didn't Send' tab.
+        """
         try:
             from elevate_cli import outreach_db
 
             statuses = (
                 outreach_db.SEND_STATUS_FAILED,
-                outreach_db.SEND_STATUS_SKIPPED,
                 outreach_db.SEND_STATUS_RETRYING,
             )
             items = outreach_db.list_recent_sends(statuses=statuses, limit=limit)
@@ -68,35 +73,137 @@ def register_source_inbox_send_routes(router: APIRouter, *, log: logging.Logger)
 
     @router.post("/api/source-inbox/retry-send/{queue_id}")
     def retry_source_inbox_send(queue_id: str):
-        """Re-queue a failed/skipped send: re-resolve the contact's CURRENT phone
-        into the payload (it may have been blank/duplicate before), flip status
-        back to queued, then tick the sender. Powers the 'Retry' button."""
+        """Retry exactly one failed send with current recipient data.
+
+        The queue payload stores delivery fields under ``payload.recipient``.
+        Claim the selected row as ``sending`` before dispatch so a global sender
+        tick cannot race this explicit operator action or drain a different row.
+        The response reports the dispatcher's actual terminal/retry state; it
+        never upgrades a queue action into an unverified delivery claim.
+        """
         try:
-            import json as _json
             from elevate_cli import outreach_db, sender
 
             with outreach_db.connect() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT payload_json FROM send_queue WHERE id=%s", (queue_id,))
-                row = cur.fetchone()
-                if not row:
-                    raise HTTPException(status_code=404, detail="send not found")
-                payload = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
-                cid = payload.get("contact_id")
-                if cid:
-                    cur.execute("SELECT primary_phone FROM contacts WHERE id=%s", (cid,))
-                    c = cur.fetchone()
-                    if c and c[0]:
-                        payload["phone"] = c[0]
-                cur.execute(
-                    "UPDATE send_queue SET payload_json=%s, status=%s, next_retry_at=NULL, last_error=NULL, attempts=0 WHERE id=%s",
-                    (_json.dumps(payload), outreach_db.SEND_STATUS_QUEUED, queue_id),
-                )
-                conn.commit()
-            tick = sender.tick(batch=5)
-            return {"requeued": True, "phone": payload.get("phone"), "tick": tick}
+                with outreach_db.transaction(conn):
+                    row = conn.execute(
+                        "SELECT * FROM send_queue WHERE id=? FOR UPDATE",
+                        (queue_id,),
+                    ).fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="send not found")
+
+                    status = str(row["status"] or "")
+                    if status != outreach_db.SEND_STATUS_FAILED:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"send is {status or 'unknown'}; only failed sends can be retried",
+                        )
+
+                    channel = str(row["channel"] or "").strip().lower()
+                    if (
+                        not sender.sandbox_enabled()
+                        and sender.is_apple_messages_channel(channel)
+                        and not sender.apple_messages_outbound_enabled()
+                    ):
+                        # Refuse before touching payload, attempts, status, or
+                        # timestamps. Turning outbound off must make Retry a
+                        # true no-op against the selected failed row.
+                        raise HTTPException(
+                            status_code=409,
+                            detail=sender.APPLE_MESSAGES_OUTBOUND_DISABLED_ERROR,
+                        )
+
+                    raw_payload = row["payload_json"]
+                    try:
+                        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(status_code=422, detail="send payload is not valid JSON") from exc
+                    if not isinstance(payload, dict):
+                        raise HTTPException(status_code=422, detail="send payload must be an object")
+
+                    raw_recipient = payload.get("recipient")
+                    if raw_recipient is not None and not isinstance(raw_recipient, dict):
+                        raise HTTPException(status_code=422, detail="send recipient must be an object")
+                    recipient = dict(raw_recipient or {})
+                    contact_id = str(
+                        recipient.get("contact_id") or payload.get("contact_id") or ""
+                    ).strip()
+                    contact_found = False
+                    if contact_id:
+                        contact = conn.execute(
+                            "SELECT primary_phone, primary_email FROM contacts WHERE id=?",
+                            (contact_id,),
+                        ).fetchone()
+                        if contact:
+                            contact_found = True
+                            current_phone = str(contact["primary_phone"] or "").strip()
+                            current_email = str(contact["primary_email"] or "").strip()
+                            # A linked contact is authoritative. Clearing a
+                            # number/email in the contact must also clear stale
+                            # queue data instead of sending to the old value.
+                            recipient["phone"] = current_phone
+                            recipient["email"] = current_email
+                    payload["recipient"] = recipient
+
+                    if (
+                        sender.is_apple_messages_channel(channel)
+                        and contact_id
+                        and not contact_found
+                    ):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="linked contact no longer exists; choose a valid contact before retrying",
+                        )
+                    if sender.is_apple_messages_channel(channel) and not str(
+                        recipient.get("phone") or ""
+                    ).strip():
+                        raise HTTPException(
+                            status_code=409,
+                            detail="contact still has no phone number; update the contact before retrying",
+                        )
+
+                    now = datetime.now(timezone.utc).isoformat()
+                    conn.execute(
+                        """
+                        UPDATE send_queue
+                           SET payload_json=?, status=?, next_retry_at=NULL,
+                               last_error=NULL, attempts=0, updated_at=?
+                         WHERE id=?
+                        """,
+                        (
+                            json.dumps(payload, ensure_ascii=False),
+                            outreach_db.SEND_STATUS_SENDING,
+                            now,
+                            queue_id,
+                        ),
+                    )
+                    claimed_row = conn.execute(
+                        "SELECT * FROM send_queue WHERE id=?",
+                        (queue_id,),
+                    ).fetchone()
+
+            claimed = outreach_db._row_to_send(claimed_row)
+            if claimed is None:
+                raise HTTPException(status_code=500, detail="retry claim disappeared")
+            result = sender.dispatch_one(claimed) or claimed
+            result_status = str(result.get("status") or outreach_db.SEND_STATUS_SENDING)
+            return {
+                "requeued": True,
+                "id": queue_id,
+                "status": result_status,
+                "phone": recipient.get("phone"),
+                "lastError": result.get("lastError"),
+                "providerMessageId": result.get("providerMessageId"),
+            }
         except HTTPException:
             raise
         except Exception as exc:
+            try:
+                from elevate_cli import outreach_db
+
+                outreach_db.mark_failed(queue_id, error=f"retry dispatch failed: {exc}")
+            except Exception:
+                pass
             log.exception("POST /api/source-inbox/retry-send failed")
             raise HTTPException(status_code=500, detail=f"Retry failed: {exc}")

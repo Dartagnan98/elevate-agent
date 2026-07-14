@@ -14,7 +14,7 @@ the admin-run context-window bloat.
 
 import json
 import logging
-import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,6 +38,13 @@ def _chat_dir() -> Path:
 
 _MAX_PERSISTED_TURNS = 60  # keep transcripts bounded
 _MAX_CONTEXT_TURNS = 14    # how much history we feed the model each turn
+
+_PENDING_STATUS_RE = re.compile(
+    r"\b(?:pending|next|open|todo|status|done|complete|completed|finished)\b"
+    r"|\bwhat(?:'?s| is) left\b"
+    r"|\bto do\b",
+    re.IGNORECASE,
+)
 
 
 _OZZIE_SYSTEM = (
@@ -222,7 +229,7 @@ def _deal_chat_fallback(messages: List[Dict[str, str]], context: str, address: s
             k, _, v = line.partition(": ")
             snap[k.strip().lower()] = v.strip()
 
-    if any(t in q for t in ("pending", "next", "what's left", "whats left", "to do", "todo", "open")):
+    if _PENDING_STATUS_RE.search(q):
         if "open tasks" in snap:
             return f"Open on {address}: {snap['open tasks']}."
         if "current stage" in snap:
@@ -266,29 +273,44 @@ def _load_transcript(deal_id: str) -> List[Dict[str, str]]:
     p = _chat_path(deal_id)
     if not p.exists():
         return []
-    try:
-        data = json.loads(p.read_text("utf-8"))
-        msgs = data.get("messages") if isinstance(data, dict) else data
-        if isinstance(msgs, list):
-            return [
-                {"role": str(m.get("role") or "assistant"), "content": str(m.get("content") or ""),
-                 "ts": str(m.get("ts") or "")}
-                for m in msgs if isinstance(m, dict) and str(m.get("content") or "").strip()
-            ]
-    except Exception:
-        return []
-    return []
+    data = json.loads(p.read_text("utf-8"))
+    if isinstance(data, dict):
+        if "messages" not in data:
+            raise ValueError("deal chat transcript is missing messages")
+        msgs = data["messages"]
+    elif isinstance(data, list):
+        # Keep the original list-only format readable, but validate it with the
+        # same strict contract as the current envelope format.
+        msgs = data
+    else:
+        raise ValueError("deal chat transcript must be an object or list")
+
+    if not isinstance(msgs, list):
+        raise ValueError("deal chat transcript messages must be a list")
+
+    transcript: List[Dict[str, str]] = []
+    for index, message in enumerate(msgs):
+        if not isinstance(message, dict):
+            raise ValueError(f"deal chat transcript message {index} must be an object")
+        role = message.get("role")
+        content = message.get("content")
+        ts = message.get("ts", "")
+        if role not in {"user", "assistant"}:
+            raise ValueError(f"deal chat transcript message {index} has an invalid role")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"deal chat transcript message {index} has invalid content")
+        if not isinstance(ts, str):
+            raise ValueError(f"deal chat transcript message {index} has an invalid timestamp")
+        transcript.append({"role": role, "content": content, "ts": ts})
+    return transcript
 
 
 def _save_transcript(deal_id: str, messages: List[Dict[str, str]]) -> None:
-    try:
-        _chat_dir().mkdir(parents=True, exist_ok=True)
-        trimmed = messages[-_MAX_PERSISTED_TURNS:]
-        tmp = _chat_path(deal_id).with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"dealId": deal_id, "messages": trimmed}, ensure_ascii=False), "utf-8")
-        tmp.replace(_chat_path(deal_id))
-    except Exception:
-        pass
+    _chat_dir().mkdir(parents=True, exist_ok=True)
+    trimmed = messages[-_MAX_PERSISTED_TURNS:]
+    tmp = _chat_path(deal_id).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"dealId": deal_id, "messages": trimmed}, ensure_ascii=False), "utf-8")
+    tmp.replace(_chat_path(deal_id))
 
 
 def _now_iso() -> str:
@@ -302,7 +324,15 @@ def create_admin_deal_chat_router(*, log: logging.Logger | None = None) -> APIRo
     @router.get("/api/admin/deals/{deal_id}/chat")
     def get_deal_chat(deal_id: str):
         """Rehydrate the per-deal transcript when the panel opens."""
-        return {"ok": True, "messages": _load_transcript(deal_id)}
+        try:
+            messages = _load_transcript(deal_id)
+        except Exception:
+            _log.exception("deal chat: failed to load transcript for %s", deal_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Deal chat transcript could not be read safely.",
+            )
+        return {"ok": True, "messages": messages}
 
     @router.post("/api/admin/deals/{deal_id}/chat")
     def post_deal_chat(deal_id: str, body: _DealChatBody):
@@ -322,7 +352,14 @@ def create_admin_deal_chat_router(*, log: logging.Logger | None = None) -> APIRo
         context = built["context"]
         address = built["address"]
 
-        transcript = _load_transcript(deal_id)
+        try:
+            transcript = _load_transcript(deal_id)
+        except Exception:
+            _log.exception("deal chat: failed to load transcript for %s", deal_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Deal chat transcript could not be read safely.",
+            )
         transcript.append({"role": "user", "content": text, "ts": _now_iso()})
 
         # History fed to the model: recent turns only, role+content.
@@ -332,7 +369,10 @@ def create_admin_deal_chat_router(*, log: logging.Logger | None = None) -> APIRo
         reply: Optional[str] = None
         model_used = None
         try:
-            from agent.auxiliary_client import get_text_auxiliary_client
+            from agent.auxiliary_client import (
+                _validate_llm_response,
+                get_text_auxiliary_client,
+            )
 
             client, model = get_text_auxiliary_client("deal_chat")
         except Exception as exc:
@@ -341,14 +381,38 @@ def create_admin_deal_chat_router(*, log: logging.Logger | None = None) -> APIRo
 
         if client is not None and model:
             try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": system_prompt}, *history],
-                    temperature=0.4,
-                    max_tokens=400,
-                    timeout=20,
+                resp = _validate_llm_response(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            *history,
+                        ],
+                        temperature=0.4,
+                        max_tokens=400,
+                        timeout=20,
+                    ),
+                    "deal_chat",
                 )
-                reply = (resp.choices[0].message.content or "").strip()
+                choice = resp.choices[0]
+                message = choice.message
+                if (
+                    getattr(choice, "finish_reason", None) != "stop"
+                    or getattr(message, "tool_calls", None)
+                ):
+                    raise ValueError(
+                        "deal chat response did not end with an exact "
+                        "text-only stop"
+                    )
+                content = getattr(message, "content", None)
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("deal chat response did not contain text")
+                if _PENDING_STATUS_RE.search(text):
+                    raise ValueError(
+                        "deal chat pending/status questions require the "
+                        "deterministic deal snapshot answer"
+                    )
+                reply = content.strip()
                 model_used = model
             except Exception as exc:
                 _log.info("deal chat: LLM call failed (%s) — falling back", exc)
@@ -357,7 +421,14 @@ def create_admin_deal_chat_router(*, log: logging.Logger | None = None) -> APIRo
             reply = _deal_chat_fallback(history, context, address)
 
         transcript.append({"role": "assistant", "content": reply, "ts": _now_iso()})
-        _save_transcript(deal_id, transcript)
+        try:
+            _save_transcript(deal_id, transcript)
+        except Exception:
+            _log.exception("deal chat: failed to save transcript for %s", deal_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Deal chat response could not be saved.",
+            )
 
         return {"ok": True, "reply": reply, "model": model_used,
                 "messages": [{"role": m["role"], "content": m["content"]} for m in transcript[-_MAX_PERSISTED_TURNS:]]}

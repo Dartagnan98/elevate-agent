@@ -99,7 +99,7 @@ class TestBedrockMapFinishReason:
         assert transport.map_finish_reason("guardrail_intervened") == "content_filter"
 
     def test_unknown(self, transport):
-        assert transport.map_finish_reason("unknown") == "stop"
+        assert transport.map_finish_reason("unknown") == "error"
 
 
 class TestBedrockNormalize:
@@ -141,6 +141,29 @@ class TestBedrockNormalize:
         assert nr.finish_reason == "tool_calls"
         assert len(nr.tool_calls) == 1
         assert nr.tool_calls[0].name == "terminal"
+
+    @pytest.mark.parametrize("stop_reason", [None, "future_stop_reason"])
+    def test_tool_call_requires_known_terminal_reason(
+        self,
+        transport,
+        stop_reason,
+    ):
+        raw = self._make_bedrock_response(
+            text=None,
+            tool_calls=[
+                {
+                    "id": "tool_1",
+                    "name": "terminal",
+                    "input": {"command": "whoami"},
+                }
+            ],
+            stop_reason=stop_reason,
+        )
+
+        nr = transport.normalize_response(raw)
+
+        assert nr.finish_reason == "error"
+        assert nr.tool_calls is None
 
     def test_already_normalized_response(self, transport):
         """Test normalize_response handles already-normalized SimpleNamespace (from dispatch site)."""

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { __apiTestables, fetchJSON } from "../api";
+import { __apiTestables, fetchJSON, fetchJSONWithTimeout } from "../api";
 
 describe("API error formatting", () => {
   it("summarizes admin deal gate blocks without dumping JSON", () => {
@@ -100,5 +100,26 @@ describe("API auth header", () => {
 
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("X-Elevate-Session-Token")).toBe("session-token");
+  });
+
+  it("bounds a half-open request and aborts its transport", async () => {
+    let signal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: fetchMock,
+    });
+
+    await expect(fetchJSONWithTimeout(
+      "/api/source-inbox",
+      { cache: "no-store" },
+      10,
+      "Lead data timed out",
+    )).rejects.toThrow("Lead data timed out");
+
+    expect(signal?.aborted).toBe(true);
   });
 });

@@ -31,6 +31,7 @@ type HubRequestFlags = {
   includeMemoryGraph: boolean;
   includeOrchestration: boolean;
   includeSourceInbox: boolean;
+  includeStatus: boolean;
   includeWorkflowData: boolean;
 };
 
@@ -72,17 +73,20 @@ function routeHas(pathname: string, segment: string): boolean {
 }
 
 export function flagsForPath(pathname: string): HubRequestFlags {
+  const isLeadsRoute = routeHas(pathname, "/leads");
   const includeMemoryGraph = routeHas(pathname, "/memory");
+  // The CRM consumes only source-inbox data. Keeping gateway status, sessions,
+  // and cron out of this request prevents unrelated dashboard work from
+  // holding the lead list in a permanent refreshing state.
   const includeWorkflowData =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
-    routeHas(pathname, "/leads") ||
     routeHas(pathname, "/admin") ||
     routeHas(pathname, "/social-media");
   const includeSourceInbox =
     pathname === "/" ||
     routeHas(pathname, "/today") ||
-    routeHas(pathname, "/leads");
+    isLeadsRoute;
   const includeAdminTaskData =
     routeHas(pathname, "/today") ||
     pathname === "/";
@@ -95,6 +99,7 @@ export function flagsForPath(pathname: string): HubRequestFlags {
     includeMemoryGraph,
     includeOrchestration,
     includeSourceInbox,
+    includeStatus: !isLeadsRoute,
     includeWorkflowData,
   };
 }
@@ -106,6 +111,7 @@ function flagsKey(flags: HubRequestFlags): string {
     flags.includeOrchestration,
     flags.includeWorkflowData,
     flags.includeSourceInbox,
+    flags.includeStatus,
     flags.includeAdminTaskData,
   ].join(":");
 }
@@ -187,7 +193,7 @@ function writeCachedHubData(data: CachedHubData): CachedHubData {
 }
 
 function hasRequiredCoverage(data: CachedHubData, flags: HubRequestFlags): boolean {
-  if (!data.coverage.status) return false;
+  if (flags.includeStatus && !data.coverage.status) return false;
   if (flags.includeAgentHub && !data.coverage.agentHub) return false;
   if (flags.includeWorkflowData && (!data.coverage.sessions || !data.coverage.cronJobs)) return false;
   if (flags.includeSourceInbox && !data.coverage.sourceInbox) return false;
@@ -241,7 +247,7 @@ async function loadHubData(flags: HubRequestFlags, force = false): Promise<HubLo
             includeOrchestration: flags.includeOrchestration,
           })
         : Promise.resolve(null),
-      api.getStatus({ refresh: force }),
+      flags.includeStatus ? api.getStatus({ refresh: force }) : Promise.resolve(null),
       flags.includeWorkflowData ? api.getSessions(36, 0, { includeTotal: false }) : Promise.resolve(null),
       flags.includeWorkflowData ? api.getCronJobs({ compact: true }) : Promise.resolve(null),
       flags.includeSourceInbox ? api.getSourceInbox(SOURCE_INBOX_REFRESH_LIMIT, { debug: true }) : Promise.resolve(null),
@@ -259,7 +265,7 @@ async function loadHubData(flags: HubRequestFlags, force = false): Promise<HubLo
       next.snapshot = hubResult.value;
       next.coverage.agentHub = true;
     }
-    if (statusResult.status === "fulfilled") {
+    if (statusResult.status === "fulfilled" && statusResult.value) {
       next.status = statusResult.value;
       next.coverage.status = true;
     }
@@ -428,7 +434,11 @@ export function useHubHeader(
   const { setAfterTitle, setEnd, setTitle } = usePageHeader();
   const afterExtra = options?.afterExtra ?? null;
   const gatewayOnline = Boolean(data.snapshot?.gateway.running || data.status?.gateway_running);
-  const isRefreshing = data.loading || data.refreshing || Boolean(options?.refreshing);
+  const isRefreshing = resolveHubHeaderRefreshBusy(
+    data,
+    Boolean(options?.onRefresh),
+    options?.refreshing,
+  );
   const defaultRefresh = useCallback(() => void data.refresh({ force: true }), [data.refresh]);
   const refresh = options?.onRefresh ?? defaultRefresh;
 
@@ -464,4 +474,15 @@ export function useHubHeader(
       setEnd(null);
     };
   }, [afterExtra, gatewayOnline, isRefreshing, refresh, setAfterTitle, setEnd, setTitle, title]);
+}
+
+export function resolveHubHeaderRefreshBusy(
+  data: Pick<HubData, "loading" | "refreshing">,
+  hasCustomRefresh: boolean,
+  customRefreshing?: boolean,
+): boolean {
+  // A page that owns its refresh must also own the button's busy state. Hub
+  // loading can include unrelated requests and must not strand that button.
+  if (hasCustomRefresh) return Boolean(customRefreshing);
+  return data.loading || data.refreshing || Boolean(customRefreshing);
 }

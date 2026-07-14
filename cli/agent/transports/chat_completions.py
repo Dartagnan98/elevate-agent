@@ -571,12 +571,28 @@ class ChatCompletionsTransport(ProviderTransport):
         """
         choice = response.choices[0]
         msg = choice.message
-        finish_reason = choice.finish_reason or "stop"
+        raw_finish_reason = getattr(choice, "finish_reason", None)
+        finish_reason = (
+            raw_finish_reason.strip().lower()
+            if isinstance(raw_finish_reason, str)
+            else ""
+        )
+        if finish_reason == "function_call":
+            finish_reason = "tool_calls"
+        elif finish_reason not in {
+            "stop",
+            "tool_calls",
+            "length",
+            "content_filter",
+            "error",
+        }:
+            finish_reason = "error"
 
+        raw_tool_calls = getattr(msg, "tool_calls", None)
         tool_calls = None
-        if msg.tool_calls:
+        if raw_tool_calls:
             tool_calls = []
-            for tc in msg.tool_calls:
+            for tc in raw_tool_calls:
                 # Preserve provider-specific extras on the tool call.
                 # Gemini 3 thinking models attach extra_content with
                 # thought_signature — without replay on the next turn the API
@@ -601,6 +617,11 @@ class ChatCompletionsTransport(ProviderTransport):
                     )
                 )
 
+        if finish_reason == "tool_calls" and not tool_calls:
+            finish_reason = "error"
+        elif tool_calls and finish_reason not in {"stop", "tool_calls"}:
+            tool_calls = None
+
         usage = None
         if hasattr(response, "usage") and response.usage:
             u = response.usage
@@ -622,6 +643,23 @@ class ChatCompletionsTransport(ProviderTransport):
                 reasoning_content = model_extra["reasoning_content"]
 
         provider_data: Dict[str, Any] = {}
+        gemini_diagnostic = getattr(
+            response, "_elevate_gemini_diagnostic", None
+        )
+        gemini_part_counts = (
+            gemini_diagnostic.get("part_counts", {})
+            if isinstance(gemini_diagnostic, dict)
+            else {}
+        )
+        if (
+            raw_tool_calls
+            or getattr(response, "_elevate_had_tool_intent", False)
+            or (
+                isinstance(gemini_part_counts, dict)
+                and (gemini_part_counts.get("function_call", 0) or 0) > 0
+            )
+        ):
+            provider_data["had_tool_intent"] = True
         if reasoning_content is not None:
             provider_data["reasoning_content"] = reasoning_content
         rd = getattr(msg, "reasoning_details", None)

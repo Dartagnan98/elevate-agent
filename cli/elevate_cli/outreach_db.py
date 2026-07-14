@@ -21,7 +21,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -775,6 +775,38 @@ def get_send_by_task(source_id: str, thread_id: str, task_id: str) -> dict[str, 
     return _row_to_send(row)
 
 
+def get_send_by_id(queue_id: str) -> dict[str, Any] | None:
+    """Return one send queue row without changing or claiming it."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM send_queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+    return _row_to_send(row)
+
+
+def get_pending_send(source_id: str, task_id: str) -> dict[str, Any] | None:
+    """Return the pending-approval row targeted by a draft action.
+
+    This is intentionally read-only. Approval guards use it to resolve the
+    *actual queued transport* before changing the row to ``queued``; source
+    labels are not sufficient because a CRM task may be a real SMS follow-up.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM send_queue
+             WHERE status = 'pending_approval'
+               AND source_id = ?
+               AND (task_id = ? OR id = ?)
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (source_id, task_id, task_id),
+        ).fetchone()
+    return _row_to_send(row)
+
+
 def list_sends_by_thread(
     source_id: str, thread_id: str, *, limit: int = 50
 ) -> list[dict[str, Any]]:
@@ -859,12 +891,93 @@ def claim_due_sends(
                     (now, limit),
                 ).fetchall()
             for row in rows:
-                conn.execute(
-                    "UPDATE send_queue SET status=?, updated_at=? WHERE id=?",
-                    (SEND_STATUS_SENDING, now, row["id"]),
+                updated = conn.execute(
+                    """
+                    UPDATE send_queue
+                       SET status=?, updated_at=?
+                     WHERE id=? AND status IN (?, ?)
+                    """,
+                    (
+                        SEND_STATUS_SENDING,
+                        now,
+                        row["id"],
+                        SEND_STATUS_QUEUED,
+                        SEND_STATUS_RETRYING,
+                    ),
                 )
-                claimed.append(_row_to_send(row) | {"status": SEND_STATUS_SENDING})
+                if updated.rowcount == 1:
+                    claimed.append(_row_to_send(row) | {"status": SEND_STATUS_SENDING})
     return claimed
+
+
+def claim_send_by_id(queue_id: str) -> dict[str, Any] | None:
+    """Atomically claim one explicit queued/retrying row for exact dispatch.
+
+    This is the safe path for operator actions such as Approve. It prevents a
+    general queue tick from selecting an unrelated older row and the status
+    predicate prevents two concurrent clicks from dispatching the same row.
+    """
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            row = conn.execute(
+                """
+                UPDATE send_queue
+                   SET status=?, updated_at=?
+                 WHERE id=? AND status IN (?, ?)
+                 RETURNING *
+                """,
+                (
+                    SEND_STATUS_SENDING,
+                    now,
+                    queue_id,
+                    SEND_STATUS_QUEUED,
+                    SEND_STATUS_RETRYING,
+                ),
+            ).fetchone()
+    return _row_to_send(row)
+
+
+def recover_stale_sends(*, stale_after_seconds: int = 300) -> dict[str, int]:
+    """Make crashed ``sending`` rows visible without risking an auto-resend.
+
+    A row with a durable provider id can safely finish as sent. Without one,
+    the delivery outcome is ambiguous, so it becomes failed with an explicit
+    outcome-unknown error and requires operator verification before retrying.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=max(30, stale_after_seconds))
+    ).isoformat()
+    now = _now()
+    with connect() as conn:
+        with transaction(conn):
+            sent = conn.execute(
+                """
+                UPDATE send_queue
+                   SET status=?, updated_at=?
+                 WHERE status=? AND updated_at < ?
+                   AND provider_message_id IS NOT NULL
+                   AND provider_message_id <> ''
+                """,
+                (SEND_STATUS_SENT, now, SEND_STATUS_SENDING, cutoff),
+            ).rowcount
+            failed = conn.execute(
+                """
+                UPDATE send_queue
+                   SET status=?, attempts=attempts+1,
+                       last_error=?, next_retry_at=NULL, updated_at=?
+                 WHERE status=? AND updated_at < ?
+                   AND (provider_message_id IS NULL OR provider_message_id = '')
+                """,
+                (
+                    SEND_STATUS_FAILED,
+                    "outcome unknown: sender stopped before delivery confirmation; verify before retrying",
+                    now,
+                    SEND_STATUS_SENDING,
+                    cutoff,
+                ),
+            ).rowcount
+    return {"sent": int(sent or 0), "failed": int(failed or 0)}
 
 
 def approve_pending_send(

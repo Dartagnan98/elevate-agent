@@ -33,6 +33,11 @@ VERIFICATION_REQUIRED_KEYS: set[str] = set()
 BROWSER_WORKFLOW_REQUIRED_KEYS = ("mls", "compliance", "showing")
 ADMIN_ONBOARDING_MEMORY_FILE = "ADMIN_ONBOARDING.md"
 ADMIN_PROVINCE_PLAYBOOK_FILE = "ADMIN_PROVINCE_PLAYBOOK.md"
+PROVINCE_DERIVED_SETUP_KEYS = (
+    "jurisdiction",
+    "forms_provider",
+    "regional_memory",
+)
 
 PROVINCE_TERMINOLOGY: dict[str, dict[str, str]] = {
     "BC": {
@@ -1089,6 +1094,38 @@ def update_admin_setup(
     del actor  # reserved for future audit events
     _ensure_seeded(conn)
     now = now_iso()
+    profile_row = conn.execute(
+        "SELECT province FROM admin_setup_profile WHERE id=?", (PROFILE_ID,)
+    ).fetchone()
+    previous_province = str(profile_row["province"] or "").strip().upper()
+    requested_province = previous_province
+    if profile is not None and "province" in profile:
+        requested_province = str(profile.get("province") or "").strip().upper()
+    province_changed = requested_province != previous_province
+
+    if province_changed:
+        # Province-scoped truth must be re-established for the newly selected
+        # jurisdiction. Keep unrelated account connections and historical deal
+        # evidence, but clear every state that could otherwise make the prior
+        # province's guide or forms pack look launch-ready.
+        conn.execute(
+            """
+            UPDATE admin_setup_profile
+            SET completed_at=NULL, regional_memory_json=NULL, updated_at=?
+            WHERE id=?
+            """,
+            (now, PROFILE_ID),
+        )
+        placeholders = ",".join("?" for _ in PROVINCE_DERIVED_SETUP_KEYS)
+        conn.execute(
+            f"""
+            UPDATE admin_setup_items
+            SET status='missing', provider=NULL, value_json=NULL, notes=NULL,
+                updated_at=?
+            WHERE key IN ({placeholders})
+            """,
+            (now, *PROVINCE_DERIVED_SETUP_KEYS),
+        )
     if profile:
         updates: list[str] = []
         values: list[Any] = []
@@ -1143,6 +1180,11 @@ def update_admin_setup(
                     key,
                 ),
             )
+    if province_changed:
+        try:
+            _admin_province_playbook_path().unlink(missing_ok=True)
+        except OSError:
+            _log.warning("could not remove stale Admin province playbook", exc_info=True)
     snapshot = get_admin_setup(conn)
     memory = sync_admin_setup_memory(snapshot)
     snapshot["memory"] = {**snapshot.get("memory", {}), **memory, "synced": True}

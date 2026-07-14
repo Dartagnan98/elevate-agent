@@ -20,6 +20,12 @@ import { Button } from "@/components/ui/button";
 import { ListSkeleton, Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { LeadStatusControl } from "./_shared/lead-status-control";
+import {
+  draftApprovalBlockedReason,
+  initialDraftSendLifecycleState,
+  pollExactDraftSendStatus,
+  type DraftSendLifecycleState,
+} from "./leads/draft-send-lifecycle";
 
 type ThreadDrawerExtras = { skippedDraft?: SourceInboxDraft };
 type ThreadDrawerTarget =
@@ -111,7 +117,17 @@ function ThreadDrawer({
   const [reply, setReply] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [sendLifecycle, setSendLifecycle] = useState<DraftSendLifecycleState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const approvalInProgress = submitting && sendLifecycle?.phase === "pending";
+
+  const requestClose = useCallback(() => {
+    if (approvalInProgress) {
+      setError("Approval is still processing. Wait for the exact send result before closing this thread.");
+      return;
+    }
+    onClose();
+  }, [approvalInProgress, onClose]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -133,7 +149,7 @@ function ThreadDrawer({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     document.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
@@ -142,7 +158,7 @@ function ThreadDrawer({
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
     };
-  }, [onClose]);
+  }, [requestClose]);
 
   useLayoutEffect(() => {
     if (!loading && scrollRef.current) {
@@ -152,19 +168,49 @@ function ThreadDrawer({
 
   const sendDraft = useCallback(
     async (action: "approve" | "skip") => {
-      if (!context?.pendingDraft) return;
+      const draft = context?.pendingDraft;
+      if (!draft) return;
+      const approvalBlockedReason = action === "approve" ? draftApprovalBlockedReason(draft) : null;
+      if (approvalBlockedReason) {
+        setError(approvalBlockedReason);
+        return;
+      }
       setSubmitting(true);
       setError(null);
+      if (action === "approve") setSendLifecycle(initialDraftSendLifecycleState());
       try {
         const nextInbox = await api.updateSourceInboxDraft(
-          context.pendingDraft.sourceId,
-          context.pendingDraft.taskId,
+          draft.sourceId,
+          draft.taskId,
           action,
           reply,
         );
         data.setSourceInbox(nextInbox);
-        onClose();
+        if (action === "skip") {
+          onClose();
+          return;
+        }
+        const terminal = await pollExactDraftSendStatus(
+          (remainingMs) => api.getSourceInboxDraftSendStatus(
+            draft.sourceId,
+            draft.threadId,
+            draft.taskId,
+            { timeoutMs: remainingMs },
+          ),
+          { onProgress: setSendLifecycle },
+        );
+        setSendLifecycle(terminal);
+        setError(null);
+        setContext((current) => current ? { ...current, pendingDraft: null } : current);
       } catch (err) {
+        if (action === "approve") {
+          const detail = err instanceof Error ? err.message : String(err);
+          setSendLifecycle({
+            phase: "unknown",
+            status: null,
+            message: `Approval/send outcome is unknown — ${detail}`,
+          });
+        }
         setError(`Failed to ${action} draft: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setSubmitting(false);
@@ -196,6 +242,8 @@ function ThreadDrawer({
   const meta = context?.meta;
   const sends = context?.sends ?? [];
   const messages = context?.messages ?? [];
+  const pendingDraft = context?.pendingDraft;
+  const approvalBlockedReason = pendingDraft ? draftApprovalBlockedReason(pendingDraft) : null;
 
   const profile = useMemo(() => {
     const profiles = data.sourceInbox?.profiles ?? [];
@@ -216,7 +264,7 @@ function ThreadDrawer({
       <button
         type="button"
         aria-label="Close thread"
-        onClick={onClose}
+        onClick={requestClose}
         className="absolute inset-0 z-0 bg-background/80"
       />
       <div
@@ -289,9 +337,10 @@ function ThreadDrawer({
             <Button
               variant="ghost"
               size="sm"
-              onClick={onClose}
+              onClick={requestClose}
+              disabled={approvalInProgress}
               aria-label="Close thread drawer"
-              title="Close"
+              title={approvalInProgress ? "Wait for the exact send result before closing" : "Close"}
               className="text-foreground/75 hover:text-foreground"
             >
               <CloseIcon className="h-4 w-4" aria-hidden="true" />
@@ -362,6 +411,21 @@ function ThreadDrawer({
               )}
             </div>
 
+            {sendLifecycle && (
+              <div
+                className={cn(
+                  "border-t px-5 py-3 text-xs font-medium",
+                  sendLifecycle.phase === "failed" || sendLifecycle.phase === "timeout" || sendLifecycle.phase === "unknown"
+                    ? "border-destructive/55 bg-destructive/10 text-destructive"
+                    : "border-border bg-background/75 text-foreground",
+                )}
+                role={sendLifecycle.phase === "failed" || sendLifecycle.phase === "timeout" || sendLifecycle.phase === "unknown" ? "alert" : "status"}
+                aria-live="polite"
+              >
+                {sendLifecycle.message}
+              </div>
+            )}
+
             {context?.pendingDraft && (
               <div className="border-t border-border bg-background/60 px-5 py-4">
                 <div
@@ -377,22 +441,33 @@ function ThreadDrawer({
                 <textarea
                   value={reply}
                   onChange={(e) => setReply(e.target.value)}
+                  disabled={submitting || Boolean(sendLifecycle)}
                   rows={4}
                   className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2.5 text-sm leading-5 text-foreground placeholder:text-foreground/45 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
                 />
+                {approvalBlockedReason && (
+                  <div className="mt-2 rounded-md border border-destructive/55 bg-destructive/10 px-3 py-2 text-xs text-destructive" role="alert">
+                    {approvalBlockedReason}
+                  </div>
+                )}
                 <div className="mt-2.5 flex justify-end gap-2">
                   <Button
                     variant="ghost"
                     size="sm"
                     onClick={() => void sendDraft("skip")}
-                    disabled={submitting}
+                    disabled={submitting || Boolean(sendLifecycle)}
                     className="text-foreground/75 hover:text-foreground"
                   >
                     Skip
                   </Button>
-                  <Button size="sm" onClick={() => void sendDraft("approve")} disabled={submitting || !reply.trim()}>
+                  <Button
+                    size="sm"
+                    onClick={() => void sendDraft("approve")}
+                    disabled={submitting || !reply.trim() || Boolean(approvalBlockedReason) || Boolean(sendLifecycle)}
+                    title={approvalBlockedReason || undefined}
+                  >
                     {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                    Send
+                    {approvalInProgress ? "Checking exact status…" : "Send"}
                   </Button>
                 </div>
               </div>

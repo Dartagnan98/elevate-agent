@@ -592,7 +592,7 @@ export function RouteSkeleton({ className, path }: RouteSkeletonProps) {
   if (normalizedPath === "/skills") return <SkillsSkeleton className={className} />;
   if (normalizedPath === "/memory") return <MemorySkeleton className={className} />;
 
-  if (normalizedPath === "/" || normalizedPath === "/today" || normalizedPath === "/admin" || normalizedPath === "/leads" || normalizedPath === "/social-media") {
+  if (normalizedPath === "/" || normalizedPath === "/today" || normalizedPath === "/admin" || normalizedPath === "/leads" || normalizedPath === "/reporting" || normalizedPath === "/social-media") {
     return <DashboardSkeleton className={className} />;
   }
   if (normalizedPath === "/chat") return <ChatSkeleton className={className} />;

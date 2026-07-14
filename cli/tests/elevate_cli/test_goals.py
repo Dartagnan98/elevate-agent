@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -59,24 +60,87 @@ class TestParseJudgeResponse:
         assert done is True
         assert "done" in reason
 
-    def test_json_embedded_in_prose(self):
-        """Some models prefix reasoning before emitting JSON — we extract it."""
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            (
+                "I cannot verify completion. Example only: "
+                '{"done": true, "reason": "achieved"}'
+            ),
+            (
+                "I cannot verify completion. Example only:\n"
+                "```json\n"
+                '{"done": true, "reason": "achieved"}\n'
+                "```"
+            ),
+        ],
+        ids=["inline-object", "example-code-fence"],
+    )
+    def test_json_embedded_in_prose_is_not_a_verdict(self, raw):
+        """A refusal/caveat plus example JSON cannot complete a goal."""
         from elevate_cli.goals import _parse_judge_response
 
-        raw = 'Looking at this... the agent says X. Verdict: {"done": false, "reason": "partial"}'
-        done, reason, _ = _parse_judge_response(raw)
+        done, reason, parse_failed = _parse_judge_response(raw)
+
         assert done is False
-        assert reason == "partial"
+        assert parse_failed is True
+        assert "not JSON" in reason
 
-    def test_string_done_values(self):
+    def test_done_requires_exact_boolean(self):
         from elevate_cli.goals import _parse_judge_response
 
-        for s in ("true", "yes", "done", "1"):
-            done, _, _ = _parse_judge_response(f'{{"done": "{s}", "reason": "r"}}')
-            assert done is True
-        for s in ("false", "no", "not yet"):
-            done, _, _ = _parse_judge_response(f'{{"done": "{s}", "reason": "r"}}')
+        invalid_values = ('"true"', '"false"', "1", "0", "null", "[]", "{}")
+        for value in invalid_values:
+            done, reason, parse_failed = _parse_judge_response(
+                f'{{"done": {value}, "reason": "r"}}'
+            )
             assert done is False
+            assert parse_failed is True
+            assert "boolean" in reason
+
+    @pytest.mark.parametrize(
+        "reason_value",
+        [
+            pytest.param({"message": "achieved"}, id="object"),
+            pytest.param(["achieved"], id="list"),
+            pytest.param(1, id="number"),
+            pytest.param(None, id="null"),
+            pytest.param("", id="empty"),
+            pytest.param("   ", id="whitespace"),
+        ],
+    )
+    def test_done_reason_requires_exact_nonempty_string_and_never_completes(
+        self,
+        reason_value,
+    ):
+        from elevate_cli.goals import _parse_judge_response
+
+        done, reason, parse_failed = _parse_judge_response(
+            json.dumps({"done": True, "reason": reason_value})
+        )
+
+        assert done is False
+        assert parse_failed is True
+        assert "nonempty string" in reason
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "The agent is blocked on credentials",
+            "The goal is unachievable in this environment",
+            "The agent needs user input before proceeding",
+        ],
+    )
+    def test_blocked_reason_can_never_parse_as_done(self, reason):
+        from elevate_cli.goals import _parse_judge_response
+
+        done, parsed_reason, parse_failed = _parse_judge_response(
+            json.dumps({"done": True, "reason": reason})
+        )
+
+        assert done is False
+        assert parsed_reason == reason
+        assert parse_failed is False
 
     def test_malformed_json_fails_open(self):
         """Non-JSON → not done, with error-ish reason (so judge_goal can map to continue)."""
@@ -144,7 +208,11 @@ class TestJudgeGoal:
         fake_client.chat.completions.create.return_value = MagicMock(
             choices=[
                 MagicMock(
-                    message=MagicMock(content='{"done": true, "reason": "achieved"}')
+                    finish_reason="stop",
+                    message=MagicMock(
+                        content='{"done": true, "reason": "achieved"}',
+                        tool_calls=None,
+                    )
                 )
             ]
         )
@@ -163,7 +231,11 @@ class TestJudgeGoal:
         fake_client.chat.completions.create.return_value = MagicMock(
             choices=[
                 MagicMock(
-                    message=MagicMock(content='{"done": false, "reason": "not yet"}')
+                    finish_reason="stop",
+                    message=MagicMock(
+                        content='{"done": false, "reason": "not yet"}',
+                        tool_calls=None,
+                    )
                 )
             ]
         )
@@ -174,6 +246,96 @@ class TestJudgeGoal:
             verdict, reason, _ = goals.judge_goal("goal", "agent response")
         assert verdict == "continue"
         assert reason == "not yet"
+
+    def test_judge_needs_user_input_returns_blocked(self):
+        from elevate_cli import goals
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content=json.dumps({
+                        "done": False,
+                        "reason": "needs-user-input for credentials",
+                    }),
+                    tool_calls=None,
+                ),
+            )]
+        )
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = response
+
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            verdict, reason, parse_failed = goals.judge_goal(
+                "goal", "I need credentials"
+            )
+
+        assert verdict == "blocked"
+        assert "needs-user-input" in reason
+        assert parse_failed is False
+
+    def test_nonterminal_done_verdict_never_completes_goal(self):
+        from elevate_cli import goals
+
+        for finish_reason in ("length", None):
+            fake_client = MagicMock()
+            fake_client.chat.completions.create.return_value = MagicMock(
+                choices=[
+                    MagicMock(
+                        finish_reason=finish_reason,
+                        message=MagicMock(
+                            content='{"done": true, "reason": "achieved"}',
+                            tool_calls=None,
+                        ),
+                    )
+                ]
+            )
+            with patch(
+                "agent.auxiliary_client.get_text_auxiliary_client",
+                return_value=(fake_client, "judge-model"),
+            ):
+                verdict, reason, parse_failed = goals.judge_goal(
+                    "goal", "agent response"
+                )
+
+            assert verdict == "continue"
+            assert "incomplete" in reason
+            assert parse_failed is True
+
+    def test_no_tool_judge_rejects_tool_calls_before_done_content(self):
+        from elevate_cli import goals
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content='{"done": true, "reason": "achieved"}',
+                    tool_calls=[SimpleNamespace(
+                        function=SimpleNamespace(
+                            name="terminal",
+                            arguments="{}",
+                        )
+                    )],
+                ),
+            )]
+        )
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = response
+
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            verdict, reason, parse_failed = goals.judge_goal(
+                "goal", "agent response"
+            )
+
+        assert verdict == "continue"
+        assert "tool calls" in reason
+        assert parse_failed is True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -290,6 +452,42 @@ class TestGoalManager:
         assert decision["continuation_prompt"] is None
         assert mgr.state.status == "done"
         assert mgr.state.turns_used == 1
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "blocked waiting for credentials",
+            "the goal is unachievable",
+            "needs user input before proceeding",
+        ],
+    )
+    def test_blocked_done_verdict_pauses_and_never_persists_done(
+        self,
+        hermes_home,
+        reason,
+    ):
+        from elevate_cli import goals
+        from elevate_cli.goals import GoalManager, load_goal
+
+        session_id = f"blocked-{reason[:8]}"
+        mgr = GoalManager(session_id=session_id, default_max_turns=5)
+        mgr.set("ship it")
+
+        with patch.object(
+            goals,
+            "judge_goal",
+            return_value=("done", reason, False),
+        ):
+            decision = mgr.evaluate_after_turn("I could not finish")
+
+        persisted = load_goal(session_id)
+        assert decision["verdict"] == "blocked"
+        assert decision["status"] == "paused"
+        assert decision["should_continue"] is False
+        assert "Goal achieved" not in decision["message"]
+        assert mgr.state.status == "paused"
+        assert persisted is not None
+        assert persisted.status == "paused"
 
     def test_evaluate_after_turn_continue_under_budget(self, hermes_home):
         from elevate_cli import goals
@@ -437,7 +635,12 @@ class TestJudgeParseFailureAutoPause:
 
         fake_client = MagicMock()
         fake_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=""))]
+            choices=[
+                MagicMock(
+                    finish_reason="stop",
+                    message=MagicMock(content="", tool_calls=None),
+                )
+            ]
         )
         with patch(
             "agent.auxiliary_client.get_text_auxiliary_client",
@@ -677,6 +880,7 @@ class TestJudgeGoalWithSubgoals:
         class _FakeMsg:
             content = '{"done": true, "reason": "all done"}'
         class _FakeChoice:
+            finish_reason = "stop"
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
@@ -720,6 +924,7 @@ class TestJudgeGoalWithSubgoals:
         class _FakeMsg:
             content = '{"done": true, "reason": "ok"}'
         class _FakeChoice:
+            finish_reason = "stop"
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]

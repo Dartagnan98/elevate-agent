@@ -101,10 +101,34 @@ export function useSubmission(opts: UseSubmissionOptions) {
           session_id: sid,
           text: submitText,
           user_message_id: userMessageId
-        }).catch((e: Error) => {
-          sys(`error: ${e.message}`)
-          patchUiState({ busy: false, status: 'ready' })
         })
+          .then(r => {
+            // A duplicate request may resolve entirely from the durable
+            // receipt without another message.complete event. Mirror its
+            // terminal state here so a deferred receipt is never presented
+            // as finished merely because no new stream started.
+            if (r?.status !== 'duplicate') {
+              return
+            }
+
+            const pending = r.terminal_status === 'pending'
+            const needsInput = r.terminal_status === 'needs_input'
+
+            patchUiState({
+              busy: false,
+              status: needsInput ? 'waiting for your input' : pending ? 'work still pending' : 'ready'
+            })
+
+            if (needsInput) {
+              sys('waiting for your input before continuing')
+            } else if (pending) {
+              sys('work is still pending; completion has not been verified')
+            }
+          })
+          .catch((e: Error) => {
+            sys(`error: ${e.message}`)
+            patchUiState({ busy: false, status: 'ready' })
+          })
       }
 
       const sid = getUiState().sid

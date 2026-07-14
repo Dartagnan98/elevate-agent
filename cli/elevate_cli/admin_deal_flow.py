@@ -303,100 +303,59 @@ _BC: dict[str, Any] = {
 }
 
 
+def _unavailable_package(
+    package_key: str,
+    *,
+    country: str = "",
+    province: str = "",
+    province_label: str = "",
+) -> dict[str, Any]:
+    """Return an explicit no-workflow package for an unverified jurisdiction.
+
+    Provincial real-estate workflows are not interchangeable.  In particular,
+    changing a few instances of "subject" to "condition" does not turn BC's
+    contracts, forms, or stage gates into an Alberta or Ontario package.
+    """
+    label = province_label or province or "Unconfigured jurisdiction"
+    return {
+        "packageKey": package_key,
+        "country": country,
+        "province": province,
+        "available": False,
+        "unavailableReason": (
+            f"No verified Elevate workflow pack is installed for {label}. "
+            "Admin work is paused so another province's forms are never substituted."
+        ),
+        "localOverrides": {
+            "provinceLabel": label,
+            "marketLabel": province or "Unconfigured market",
+            "defaultCurrency": "CAD",
+            "preferredShowingSource": "Configured showing source",
+        },
+        "backgroundAutomations": [],
+        "listing": {"stages": []},
+        "buyer": {"stages": []},
+    }
+
+
 def _generic_package() -> dict[str, Any]:
-    package = deepcopy(_BC)
-    package.update(
-        {
-            "packageKey": DEFAULT_PACKAGE_KEY,
-            "country": "",
-            "province": "",
-            "localOverrides": {
-                "mlsBoard": "",
-                "marketLabel": "Configured market",
-                "defaultCurrency": "CAD",
-                "preferredShowingSource": "Configured showing source",
-            },
-        }
-    )
-    return package
+    return _unavailable_package(DEFAULT_PACKAGE_KEY)
 
 
 _PACKAGES: dict[str, dict[str, Any]] = {
     DEFAULT_PACKAGE_KEY: _generic_package(),
-    BC_PACKAGE_KEY: _BC,
+    BC_PACKAGE_KEY: {**_BC, "available": True, "unavailableReason": None},
 }
-
-
-# BC is the only Canadian province that calls buyer/seller conditions
-# "subjects" ("subject removal", "subjects off"). Every other province uses
-# "conditions" ("condition removal/waiver"). The reference flow (_BC) is written
-# in BC terminology, so when it's reused for another province we rewrite the
-# visible stage names + checklist labels. Field KEYS (e.g. subjectRemovalDate)
-# and checklist IDs are deliberately left untouched so the gate logic, data
-# binding, and per-deal document overlay keep working. Ordered specific->generic
-# so multi-word phrases match before the bare-word fallback.
-_CONDITION_TERM_SUBS: list[tuple[Any, str]] = [
-    (re.compile(r"\bSubjects Off\b"), "Conditions Removed"),
-    (re.compile(r"\bSubject Removal\b"), "Condition Removal"),
-    (re.compile(r"\bsubjects off\b"), "conditions removed"),
-    (re.compile(r"\bsubject removal\b"), "condition removal"),
-    (re.compile(r"\bSubjects\b"), "Conditions"),
-    (re.compile(r"\bSubject\b"), "Condition"),
-    (re.compile(r"\bsubjects\b"), "conditions"),
-    (re.compile(r"\bsubject\b"), "condition"),
-]
-
-
-def _reterm_condition(text: str) -> str:
-    if not text:
-        return text
-    for pattern, repl in _CONDITION_TERM_SUBS:
-        text = pattern.sub(repl, text)
-    return text
-
-
-def _apply_condition_terminology(package: dict[str, Any]) -> None:
-    """Rewrite BC 'subject' terminology to 'condition' on display text only."""
-    for side in ("listing", "buyer"):
-        side_cfg = package.get(side)
-        if not isinstance(side_cfg, dict):
-            continue
-        for stage in side_cfg.get("stages", []) or []:
-            if not isinstance(stage, dict):
-                continue
-            stage["title"] = _reterm_condition(stage.get("title", ""))
-            stage["subtitle"] = _reterm_condition(stage.get("subtitle", ""))
-            for item in stage.get("checklist", []) or []:
-                if isinstance(item, dict):
-                    item["label"] = _reterm_condition(item.get("label", ""))
-            for field in stage.get("requiredFields", []) or []:
-                if isinstance(field, dict):
-                    field["label"] = _reterm_condition(field.get("label", ""))
-            for doc in stage.get("requiredDocs", []) or []:
-                if isinstance(doc, dict):
-                    doc["label"] = _reterm_condition(doc.get("label", ""))
 
 
 def _canadian_province_package(province_slug: str) -> dict[str, Any]:
     province = province_slug.upper()
-    package = deepcopy(_BC)
-    package.update(
-        {
-            "packageKey": f"ca.{province_slug}",
-            "country": "CA",
-            "province": province,
-            "localOverrides": {
-                **package["localOverrides"],
-                "provinceLabel": CANADIAN_PROVINCE_LABELS.get(province_slug, province),
-                "marketLabel": province,
-                "defaultCurrency": "CAD",
-                "preferredShowingSource": "Configured showing source",
-            },
-        }
+    return _unavailable_package(
+        f"ca.{province_slug}",
+        country="CA",
+        province=province,
+        province_label=CANADIAN_PROVINCE_LABELS.get(province_slug, province),
     )
-    # Non-BC provinces use "condition" terminology, not BC's "subjects".
-    _apply_condition_terminology(package)
-    return package
 
 
 def _package_for_key(package_key: str) -> dict[str, Any]:
@@ -490,6 +449,25 @@ def resolve_admin_deal_flow(
     package = _package_for_key(resolved_key)
     side_key = side if side in {"listing", "buyer"} else "listing"
     stages = package[side_key]["stages"]
+    if not package.get("available") or not stages:
+        return {
+            "packageKey": package["packageKey"],
+            "available": False,
+            "unavailableReason": package.get("unavailableReason"),
+            "side": side_key,
+            "stage": max(0, int(stage)),
+            "stageName": "Province workflow unavailable",
+            "stageSubtitle": "Install and verify this province's workflow pack before continuing.",
+            "nextStage": None,
+            "nextStageName": None,
+            "checklistItems": [],
+            "requiredFields": [],
+            "requiredForms": [],
+            "requiredDocs": [],
+            "automationTriggers": [],
+            "backgroundAutomations": [],
+            "localOverrides": package["localOverrides"],
+        }
     last_stage = len(stages) - 1
     stage_index = min(last_stage, max(0, int(stage)))
     current = stages[stage_index]
@@ -503,6 +481,8 @@ def resolve_admin_deal_flow(
     next_stage_name = stages[next_stage]["title"] if next_stage is not None else None
     return {
         "packageKey": package["packageKey"],
+        "available": True,
+        "unavailableReason": None,
         "side": side_key,
         "stage": stage_index,
         "stageName": current["title"],
@@ -544,6 +524,22 @@ def resolve_deal_phase(
         conditions=conditions,
         condition_docs=condition_docs,
     )
+    if not flow.get("available"):
+        flow["gate"] = {
+            "stage": flow["stage"],
+            "stageName": flow["stageName"],
+            "nextStage": None,
+            "nextStageName": None,
+            "canAdvance": False,
+            "completedChecklist": 0,
+            "totalChecklist": 0,
+            "missingChecklist": [],
+            "missingFields": [],
+            "missingDocs": [],
+            "blockingRuns": [],
+            "unavailableReason": flow.get("unavailableReason"),
+        }
+        return flow
     done = checklist or {}
     attachment_kinds = {str(item.get("kind") or "") for item in (attachments or [])}
     missing_checklist = [

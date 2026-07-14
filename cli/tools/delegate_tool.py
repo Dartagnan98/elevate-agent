@@ -4,11 +4,13 @@ Delegate Tool -- Subagent Architecture
 
 Spawns child AIAgent instances with isolated context, restricted toolsets,
 and their own terminal sessions. Supports single-task and batch (parallel)
-modes. In the interactive gateway, top-level delegation is non-blocking: the
-children run on a daemon thread and their result returns as a new turn via the
-agent's _async_delegate_sink (see _get_async_delegation_enabled). CLI, cron,
-tests, and nested orchestrators have no sink and run synchronously, with the
-parent blocking until all children complete.
+modes. Delegation is synchronous by default so child completion cannot be lost
+on an app restart. When the experimental async option is explicitly enabled,
+top-level interactive delegation runs children on a daemon thread and returns
+their result as a new turn via the agent's _async_delegate_sink (see
+_get_async_delegation_enabled). CLI, cron, tests, and nested orchestrators have
+no sink and run synchronously, with the parent blocking until all children
+complete.
 
 Each child gets:
   - A fresh conversation (no parent history)
@@ -942,13 +944,17 @@ def _get_inherit_mcp_toolsets() -> bool:
 def _get_async_delegation_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
     """Whether top-level delegate_task dispatches non-blocking (async).
 
-    Default True. Only takes effect when the gateway has wired an async sink
+    Default False. The current async implementation keeps live children and
+    undelivered results in process memory, so it is not safe as a production
+    default: an app restart can lose both. Operators may explicitly opt into
+    the experimental path while durable dispatch/result persistence is built.
+
+    Async only takes effect when the gateway has wired an async sink
     onto the parent agent (i.e. interactive dashboard/desktop sessions); CLI,
     cron, tests, and nested orchestrators never have a sink, so they keep the
-    synchronous path regardless. Operator kill switch:
-    ``delegation.async_enabled: false`` in config.yaml (or
-    ``DELEGATION_ASYNC_ENABLED=0``) forces the legacy blocking behavior even in
-    the gateway.
+    synchronous path regardless. Opt in with
+    ``delegation.async_enabled: true`` in config.yaml or
+    ``DELEGATION_ASYNC_ENABLED=1``.
     """
     if cfg is None:
         cfg = _load_config()
@@ -956,9 +962,9 @@ def _get_async_delegation_enabled(cfg: Optional[Dict[str, Any]] = None) -> bool:
     if val is None:
         env_val = os.getenv("DELEGATION_ASYNC_ENABLED")
         if env_val is not None:
-            return is_truthy_value(env_val, default=True)
-        return True
-    return is_truthy_value(val, default=True)
+            return is_truthy_value(env_val, default=False)
+        return False
+    return is_truthy_value(val, default=False)
 
 
 def _is_mcp_toolset_name(name: str) -> bool:
@@ -3489,6 +3495,32 @@ def _build_top_level_description() -> str:
         orchestrator_on = _get_orchestrator_enabled()
     except Exception:
         orchestrator_on = True
+    try:
+        async_on = _get_async_delegation_enabled()
+    except Exception:
+        async_on = False
+
+    if async_on:
+        dispatch_clause = (
+            "- This install has EXPERIMENTAL non-blocking delegation enabled. "
+            "In the interactive app the tool may return immediately with "
+            "{status:'dispatched', task_id}. That means the work is still "
+            "running, not completed. Briefly tell the user what was handed "
+            "off and that a result will arrive later, then end the turn. Do "
+            "not claim the requested work is done and do not re-dispatch it.\n"
+            "- If you get a full {results:[...]} payload, the run was "
+            "synchronous; evaluate those terminal results directly.\n"
+        )
+    else:
+        dispatch_clause = (
+            "- This install uses durable-safe synchronous delegation. The "
+            "tool stays attached until its child work reaches a terminal "
+            "result and returns a full {results:[...]} payload. Evaluate each "
+            "result before claiming the user's work is complete.\n"
+            "- Do not tell the user a background task was dispatched and do "
+            "not promise a later ping unless the tool actually returns "
+            "{status:'dispatched', task_id}.\n"
+        )
 
     if max_depth >= 2 and orchestrator_on:
         nesting_clause = (
@@ -3548,15 +3580,7 @@ def _build_top_level_description() -> str:
         "cronjob (action='create') or terminal(background=True, "
         "notify_on_complete=True) instead.\n\n"
         "DISPATCH BEHAVIOR:\n"
-        "- In the interactive app this tool is NON-BLOCKING: it dispatches the "
-        "subagent(s) on a background thread and returns immediately with "
-        "{status:'dispatched', task_id}. You are NOT blocked. When that happens, "
-        "briefly tell the user what you set up and which agent(s) you handed it "
-        "to, say you'll ping them with the result when it's done, ask if there's "
-        "anything else, then END YOUR TURN. The result arrives on its own as a "
-        "new message; do NOT wait for it or re-dispatch the same work.\n"
-        "- If instead you get a full {results:[...]} payload back inline, the "
-        "run was synchronous (CLI/cron) — use the summaries directly.\n\n"
+        f"{dispatch_clause}\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"

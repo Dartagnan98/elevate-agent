@@ -1737,6 +1737,38 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
+        if background and (notify_on_complete or watch_patterns):
+            from gateway.session_context import get_session_env
+
+            session_platform = get_session_env(
+                "ELEVATE_SESSION_PLATFORM", ""
+            ).strip().lower()
+            if session_platform == "tui":
+                # Desktop's TUI gateway cannot yet recover a process's exit
+                # code/output after the app restarts. Starting a job while
+                # promising an automatic callback would therefore be an
+                # undeliverable success path. Fail before environment creation
+                # or Popen; callers can use foreground execution, or explicitly
+                # start without notifications and verify via process(wait/poll).
+                return json.dumps(
+                    {
+                        "output": "",
+                        "exit_code": -1,
+                        "error": (
+                            "No process was started. Automatic background "
+                            "completion notifications are unavailable in the "
+                            "desktop Beta because they cannot be recovered "
+                            "reliably after an app restart. Run the command in "
+                            "the foreground with an appropriate timeout, or "
+                            "use background=true without notify_on_complete/"
+                            "watch_patterns and verify it with process(action=wait "
+                            "or poll) before claiming completion."
+                        ),
+                        "status": "error",
+                    },
+                    ensure_ascii=False,
+                )
+
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]
@@ -1964,6 +1996,7 @@ def terminal_tool(
                         session_key=session_key,
                         env_vars=env.env if hasattr(env, 'env') else None,
                         use_pty=effective_pty,
+                        notify_on_complete=bool(notify_on_complete),
                     )
                 else:
                     proc_session = process_registry.spawn_via_env(
@@ -1972,6 +2005,7 @@ def terminal_tool(
                         cwd=effective_cwd,
                         task_id=effective_task_id,
                         session_key=session_key,
+                        notify_on_complete=bool(notify_on_complete),
                     )
 
                 result_data = {

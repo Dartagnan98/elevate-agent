@@ -54,6 +54,7 @@ import type {
   ComposioToolkitDetails,
   ThreadContextResponse,
   SourceInboxResponse,
+  SourceInboxDraftSendStatusResponse,
   SourceInboxSentResponse,
   TodayDashboardResponse,
   SourceInboxProfileStatus,
@@ -302,6 +303,38 @@ export function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
     return cachedFetchJSON<T>(url, DEFAULT_GET_CACHE_TTL_MS, init);
   }
   return fetchJSONNetwork<T>(url, init);
+}
+
+export function fetchJSONWithTimeout<T>(
+  url: string,
+  init?: RequestInit,
+  timeoutMs = 15_000,
+  timeoutMessage = "The request timed out. Refresh before trying again.",
+): Promise<T> {
+  const controller = new AbortController();
+  const upstreamSignal = init?.signal;
+  const forwardAbort = () => controller.abort(upstreamSignal?.reason);
+  if (upstreamSignal?.aborted) forwardAbort();
+  else upstreamSignal?.addEventListener("abort", forwardAbort, { once: true });
+
+  return new Promise<T>((resolve, reject) => {
+    let timedOut = false;
+    const timer = globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(new Error(timeoutMessage));
+    }, Math.max(1, timeoutMs));
+
+    fetchJSON<T>(url, { ...init, signal: controller.signal }).then(
+      resolve,
+      (error) => {
+        if (!timedOut) reject(error);
+      },
+    ).finally(() => {
+      globalThis.clearTimeout(timer);
+      upstreamSignal?.removeEventListener("abort", forwardAbort);
+    });
+  });
 }
 
 function cachedFetchJSON<T>(url: string, ttlMs: number, init?: RequestInit): Promise<T> {
@@ -1077,34 +1110,34 @@ export const api = {
   // Outreach templates
   getOutreachTemplates: (lane?: string) => {
     const qs = lane ? `?lane=${encodeURIComponent(lane)}` : "";
-    return fetchJSON<{ templates: OutreachTemplate[] }>(`/api/outreach/templates${qs}`);
+    return fetchJSONWithTimeout<{ templates: OutreachTemplate[] }>(`/api/outreach/templates${qs}`);
   },
   createOutreachTemplate: (body: { lane: string; name: string; body: string; channel?: string }) =>
-    fetchJSON<{ template: OutreachTemplate }>("/api/outreach/templates", {
+    fetchJSONWithTimeout<{ template: OutreachTemplate }>("/api/outreach/templates", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }),
+    }, 20_000, "Template creation outcome is unknown. Refresh templates before trying again."),
   updateOutreachTemplate: (
     id: string,
     body: { name?: string; body?: string; channel?: string; active?: boolean },
   ) =>
-    fetchJSON<{ template: OutreachTemplate }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
+    fetchJSONWithTimeout<{ template: OutreachTemplate }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }),
+    }, 20_000, "Template update outcome is unknown. Refresh templates before trying again."),
   deleteOutreachTemplate: (id: string) =>
-    fetchJSON<{ ok: boolean }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
+    fetchJSONWithTimeout<{ ok: boolean }>(`/api/outreach/templates/${encodeURIComponent(id)}`, {
       method: "DELETE",
-    }),
+    }, 20_000, "Template deletion outcome is unknown. Refresh templates before trying again."),
   getOutreachOverview: () => fetchJSON<OutreachOverview>("/api/outreach/templates/overview"),
   suggestOutreachTemplate: (body: { lane: string; channel?: string; extraBrief?: string }) =>
-    fetchJSON<{ template: OutreachTemplate }>("/api/outreach/templates/suggest", {
+    fetchJSONWithTimeout<{ template: OutreachTemplate }>("/api/outreach/templates/suggest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }),
+    }, 45_000, "Template suggestion timed out. Refresh templates before trying again."),
   approveOutreachTemplate: (id: string) =>
     fetchJSON<{ template: OutreachTemplate }>(
       `/api/outreach/templates/${encodeURIComponent(id)}/approve`,
@@ -1751,19 +1784,32 @@ export const api = {
 
   // Leads onboarding gate
   getLeadsSetup: (options?: { refresh?: boolean }) =>
-    options?.refresh
-      ? fetchJSON<LeadsSetupSnapshot>("/api/leads/setup")
-      : cachedFetchJSON<LeadsSetupSnapshot>("/api/leads/setup", 30_000),
+    fetchJSONWithTimeout<LeadsSetupSnapshot>(
+      "/api/leads/setup",
+      options?.refresh ? { cache: "reload" } : undefined,
+      15_000,
+      "Lead source setup timed out. Return to CRM and try setup again.",
+    ),
   updateLeadsSetup: (items: LeadsSetupItemUpdate[]) =>
-    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup", {
+    fetchJSONWithTimeout<LeadsSetupSnapshot>("/api/leads/setup", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ items }),
-    }),
+    }, 20_000, "Setup save outcome is unknown. Reload setup before saving again."),
   completeLeadsSetup: () =>
-    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/complete", { method: "POST" }),
+    fetchJSONWithTimeout<LeadsSetupSnapshot>(
+      "/api/leads/setup/complete",
+      { method: "POST" },
+      20_000,
+      "Setup completion outcome is unknown. Return to CRM and refresh before trying again.",
+    ),
   resetLeadsSetup: () =>
-    fetchJSON<LeadsSetupSnapshot>("/api/leads/setup/reset", { method: "POST" }),
+    fetchJSONWithTimeout<LeadsSetupSnapshot>(
+      "/api/leads/setup/reset",
+      { method: "POST" },
+      20_000,
+      "Setup reset outcome is unknown. Refresh setup before trying again.",
+    ),
 
   // Agent (top-level) onboarding gate
   getAgentSetup: () => fetchJSON<AgentSetupSnapshot>("/api/agent/setup"),
@@ -2071,32 +2117,34 @@ export const api = {
 
   // Real-estate source connectors and integrations
   getSourceConnectors: (options?: { includePrompts?: boolean }) =>
-    fetchJSON<SourceConnectorsResponse>(
+    fetchJSONWithTimeout<SourceConnectorsResponse>(
       `/api/source-connectors${options?.includePrompts ? "?include_prompts=true" : ""}`,
     ),
   getSourceRecords: (sourceId: string, limit = 12) =>
-    fetchJSON<SourceRecordsResponse>(
+    fetchJSONWithTimeout<SourceRecordsResponse>(
       `/api/source-connectors/${encodeURIComponent(sourceId)}/records?limit=${limit}`,
     ),
   getSourceConnectorPrompt: (sourceId: string) =>
-    fetchJSON<{ sourceId: string; prompt: string }>(
+    fetchJSONWithTimeout<{ sourceId: string; prompt: string }>(
       `/api/source-connectors/${encodeURIComponent(sourceId)}/prompt`,
     ),
   getToday: (sourceLimit = 160) =>
     fetchJSON<TodayDashboardResponse>(`/api/today?source_limit=${encodeURIComponent(String(sourceLimit))}`),
   getSourceInbox: (limit = 16, options?: { debug?: boolean }) =>
-    cachedFetchJSON<SourceInboxResponse>(
+    fetchJSONWithTimeout<SourceInboxResponse>(
       `/api/source-inbox?limit=${limit}${options?.debug ? "&debug=1" : ""}`,
-      5_000,
+      undefined,
+      15_000,
+      "Lead data timed out. The CRM was not refreshed; try again.",
     ),
   getThreadContext: (sourceId: string, threadId: string, limit = 200) =>
-    fetchJSON<ThreadContextResponse>(
+    fetchJSONWithTimeout<ThreadContextResponse>(
       `/api/source-inbox/thread/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}?limit=${limit}`,
     ),
   // Manual trigger for the composio inbound puller — used by the hub Refresh
   // button so a click pulls new DMs/replies in addition to re-reading state.
   pullComposioInbound: () =>
-    fetchJSON<{
+    fetchJSONWithTimeout<{
       tick_at: string;
       total_new: number;
       total_fetched: number;
@@ -2108,26 +2156,29 @@ export const api = {
         new?: number;
         fetched?: number;
       }>;
-    }>("/api/composio/inbound/pull", { method: "POST" }),
+    }>("/api/composio/inbound/pull", { method: "POST" }, 30_000, "Inbound pull timed out. Refresh before running it again."),
   updateSourceInboxThread: (
     sourceId: string,
     threadId: string,
     action: "done" | "archive" | "restore" | "open",
     options?: { returnInbox?: boolean },
   ) =>
-    fetchJSON<SourceInboxResponse>("/api/source-inbox/thread", {
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/thread", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sourceId, threadId, action, returnInbox: options?.returnInbox ?? true }),
-    }),
+    }, 20_000, "Thread update timed out. Refresh the CRM before trying again."),
   updateSourceInboxDraft: (
     sourceId: string,
     taskId: string,
     action: "approve" | "edit" | "skip" | "restore" | "open",
     draftText = "",
     options?: { returnInbox?: boolean; scheduledAt?: string },
-  ) =>
-    fetchJSON<SourceInboxResponse>("/api/source-inbox/draft", {
+  ) => {
+    const outcomeMessage = action === "approve"
+      ? "Approval outcome is unknown. Refresh the queue and send status before trying again."
+      : "Draft update timed out. Refresh the queue before trying again.";
+    return fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/draft", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2138,36 +2189,49 @@ export const api = {
         scheduledAt: options?.scheduledAt ?? null,
         returnInbox: options?.returnInbox ?? true,
       }),
-    }),
+    }, 25_000, outcomeMessage);
+  },
+  getSourceInboxDraftSendStatus: (
+    sourceId: string,
+    threadId: string,
+    taskId: string,
+    options?: { timeoutMs?: number },
+  ) =>
+    fetchJSONWithTimeout<SourceInboxDraftSendStatusResponse>(
+      `/api/source-inbox/draft/${encodeURIComponent(sourceId)}/${encodeURIComponent(threadId)}/${encodeURIComponent(taskId)}/send-status`,
+      { cache: "no-store" },
+      Math.min(4_000, Math.max(1, options?.timeoutMs ?? 4_000)),
+      "Exact send status lookup timed out.",
+    ),
   getAppleMessagesDirections: () =>
-    fetchJSON<{ inbound: boolean; outbound: boolean }>(
+    fetchJSONWithTimeout<{ inbound: boolean; outbound: boolean }>(
       "/api/source-inbox/apple-messages/directions",
     ),
   setAppleMessagesDirections: (body: { inbound?: boolean; outbound?: boolean }) =>
-    fetchJSON<{ inbound: boolean; outbound: boolean }>(
+    fetchJSONWithTimeout<{ inbound: boolean; outbound: boolean }>(
       "/api/source-inbox/apple-messages/directions",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      },
+      }, 20_000, "Messages direction update timed out. Refresh its current state before trying again.",
     ),
   updateSourceInboxProfile: (
     profileId: string,
     status: SourceInboxProfileStatus | null,
     options?: { returnInbox?: boolean },
   ) =>
-    fetchJSON<SourceInboxResponse>("/api/source-inbox/profile", {
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profileId, status, returnInbox: options?.returnInbox ?? true }),
-    }),
+    }, 20_000, "Lead status update timed out. Refresh the contact before trying again."),
   updateSourceInboxProfileFavorite: (
     profileId: string,
     favorite: boolean,
     options?: { contactId?: string | null; returnInbox?: boolean },
   ) =>
-    fetchJSON<SourceInboxResponse>("/api/source-inbox/profile/favorite", {
+    fetchJSONWithTimeout<SourceInboxResponse>("/api/source-inbox/profile/favorite", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2176,20 +2240,29 @@ export const api = {
         contactId: options?.contactId ?? null,
         returnInbox: options?.returnInbox ?? true,
       }),
-    }),
+    }, 20_000, "Favorite update timed out. Refresh the contact before trying again."),
   // Sent-messages list for the /leads "Sent" tab. Reads outreach.db.send_queue
   // (status=sent by default). Set includePending=true to also see queued /
   // sending / retrying / failed for debugging mid-flight rows.
   getSourceInboxSent: (limit = 100, includePending = false) =>
-    fetchJSON<SourceInboxSentResponse>(
+    fetchJSONWithTimeout<SourceInboxSentResponse>(
       `/api/source-inbox/sent?limit=${limit}&include_pending=${includePending ? "true" : "false"}`,
     ),
   getSourceInboxNotSent: (limit = 100) =>
-    fetchJSON<SourceInboxSentResponse>(`/api/source-inbox/not-sent?limit=${limit}`),
+    fetchJSONWithTimeout<SourceInboxSentResponse>(`/api/source-inbox/not-sent?limit=${limit}`),
   retrySourceInboxSend: (queueId: string) =>
-    fetchJSON<{ requeued: boolean; phone?: string | null }>(
+    fetchJSONWithTimeout<{
+      requeued: boolean;
+      id: string;
+      status: string;
+      phone?: string | null;
+      lastError?: string | null;
+      providerMessageId?: string | null;
+    }>(
       `/api/source-inbox/retry-send/${encodeURIComponent(queueId)}`,
       { method: "POST" },
+      95_000,
+      "Retry outcome is unknown. Refresh Didn't Send and Sent before trying again.",
     ),
   scaffoldSourceConnector: (sourceId: string) =>
     fetchJSON<SourceConnectorsResponse>("/api/source-connectors", {

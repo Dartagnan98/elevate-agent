@@ -1,56 +1,47 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  Plus,
-  Sparkles,
-  Refresh,
-} from "../../admin/icons";
-import {
-  LEADS_SOURCES as DEFAULT_SOURCES,
-  LEADS_CHANNELS as DEFAULT_CHANNELS,
-  LEADS_SCHEDULES as DEFAULT_SCHEDULES,
-  LEADS_AVAILABLE as DEFAULT_AVAILABLE,
-  LEADS_DRAFTS as DEFAULT_DRAFTS,
-  LEADS_PIPELINE as DEFAULT_PIPELINE,
-  LEADS_ACTIVITY as DEFAULT_ACTIVITY,
-  LEADS_PROFILES as DEFAULT_PROFILES,
-  LEADS_TEMPLATES as DEFAULT_TEMPLATES,
-  LEADS_SENT as DEFAULT_SENT,
-  type LeadsSource,
-  type LeadsChannel,
-  type LeadsSchedule,
-  type LeadsAvailable,
-  type LeadsDraft,
-  type LeadsPipeline,
-  type LeadsHotEntry,
-  type LeadsActivityEntry,
-  type LeadsProfile,
-  type LeadsTemplateLane,
-  type LeadsSentMessage,
-  type LeadsDraftAction,
+
+import { Plus, Refresh, Sparkles } from "../../admin/icons";
+import type {
+  LeadsActivityEntry,
+  LeadsAvailable,
+  LeadsChannel,
+  LeadsDraft,
+  LeadsDraftAction,
+  LeadsHotEntry,
+  LeadsPipeline,
+  LeadsProfile,
+  LeadsSchedule,
+  LeadsSentMessage,
+  LeadsSource,
+  LeadsTemplateLane,
 } from "../leads-data";
 import { ActionQueue } from "./action-queue";
-import { matchesLeadsSourceFilter } from "./action-queue-helpers";
 import {
-  ActivityTicker,
   AppleMessagesToggleBar,
   LeadsTabs,
   LbKpi,
   LbSourceAlert,
-  SourcesHealthPill,
   type LeadsTab,
 } from "./lead-shell";
+import { NotSentView } from "./not-sent-view";
 import { ProfileDrawer } from "./profile-drawer";
+import { draftMatchesProfile, type CrmTemperature } from "./crm-profile-helpers";
+import type { DraftSendLifecycleNotice } from "../draft-send-lifecycle";
 import { ProfilesList } from "./profiles-list";
 import { SentView } from "./sent-view";
-import { NotSentView } from "./not-sent-view";
 import { TemplatesView, type TemplateMutations } from "./templates-view";
 
 export type { TemplateMutations } from "./templates-view";
 
-// ─────────────────────────────────────────────────────────────────
-// LeadsBoard root
-// ─────────────────────────────────────────────────────────────────
+const EMPTY_PIPELINE: LeadsPipeline = { hot: [], followups: [], buyers: 0, skipped: [] };
+const EMPTY_SOURCES: LeadsSource[] = [];
+const EMPTY_CHANNELS: LeadsChannel[] = [];
+const EMPTY_DRAFTS: LeadsDraft[] = [];
+const EMPTY_PROFILES: LeadsProfile[] = [];
+const EMPTY_TEMPLATES: LeadsTemplateLane[] = [];
+const EMPTY_SENT: LeadsSentMessage[] = [];
+
 export interface LeadsBoardProps {
   sources?: LeadsSource[];
   channels?: LeadsChannel[];
@@ -62,6 +53,7 @@ export interface LeadsBoardProps {
   profiles?: LeadsProfile[];
   templates?: LeadsTemplateLane[];
   sent?: LeadsSentMessage[];
+  draftSendNotices?: DraftSendLifecycleNotice[];
   kpis?: {
     drafts?: number;
     hot?: number;
@@ -76,231 +68,348 @@ export interface LeadsBoardProps {
   loading?: boolean;
   error?: string | null;
   debugNote?: string | null;
-  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft) => void | Promise<void>;
+  onDraftAction?: (action: LeadsDraftAction, draft: LeadsDraft, scheduledAt?: string) => void | Promise<void>;
   onDraftActionComplete?: (action: LeadsDraftAction) => void | Promise<void>;
   onProfileFavoriteChange?: (profile: LeadsProfile, favorite: boolean) => void | Promise<void>;
   onProfileStatusChange?: (profile: LeadsProfile, status: string) => void | Promise<void>;
   onReRunOnboarding?: () => void;
   templateMutations?: TemplateMutations;
+  templatesState?: { loading: boolean; error: string | null };
   onSentRefresh?: (includePending: boolean) => Promise<void>;
+  sentState?: { loading: boolean; error: string | null; partial: boolean; limit: number };
   appleMessages?: { inbound: boolean; outbound: boolean; blocked?: boolean; note?: string };
   onToggleDirection?: (dir: "inbound" | "outbound", value: boolean) => void | Promise<void>;
 }
 
 export function LeadsBoard(props: LeadsBoardProps) {
-  const [tab, setTab] = useState<LeadsTab>("action");
+  const [tab, setTab] = useState<LeadsTab>("leads");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [pipelineFilter, setPipelineFilter] = useState("all");
+  const [temperatureFilter, setTemperatureFilter] = useState<CrmTemperature>("all");
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   const [activeProfile, setActiveProfile] = useState<LeadsProfile | null>(null);
-  const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
   const [profileStatusError, setProfileStatusError] = useState<string | null>(null);
 
-  const handleStatusChange = async (profile: LeadsProfile, value: string) => {
+  // Rendering an empty inbox must stay empty. Demo constants still support
+  // isolated design fixtures, but are never a fallback for the live CRM.
+  const sources = props.sources ?? EMPTY_SOURCES;
+  const channels = props.channels ?? EMPTY_CHANNELS;
+  const drafts = props.drafts ?? EMPTY_DRAFTS;
+  const pipeline = props.pipeline ?? EMPTY_PIPELINE;
+  const profiles = props.profiles ?? EMPTY_PROFILES;
+  const templates = props.templates ?? EMPTY_TEMPLATES;
+  const sent = props.sent ?? EMPTY_SENT;
+  const draftSendNotices = props.draftSendNotices ?? [];
+  const blocked = channels.filter((channel) => channel.status === "blocked");
+
+  const pipelineOptions = useMemo(() => (
+    [...new Set(profiles.map((profile) => profile.status).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  ), [profiles]);
+  const tagOptions = useMemo(() => (
+    [...new Set(profiles.flatMap((profile) => profile.tags).map((tag) => tag.trim()).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  ), [profiles]);
+  const unmatchedDrafts = useMemo(
+    () => drafts.filter((draft) => !profiles.some((profile) => draftMatchesProfile(draft, profile))),
+    [drafts, profiles],
+  );
+
+  const activeProfileFromLive = activeProfile
+    ? profiles.find((profile) => profile.id === activeProfile.id) ?? activeProfile
+    : null;
+  const activeDraft = activeProfileFromLive
+    ? drafts.find((draft) => draftMatchesProfile(draft, activeProfileFromLive))
+    : undefined;
+
+  const updateStatus = async (profile: LeadsProfile, value: string) => {
     setProfileStatusError(null);
     if (props.onProfileStatusChange) {
       try {
         await props.onProfileStatusChange(profile, value);
-      } catch (err) {
-        setProfileStatusError(err instanceof Error ? err.message : "Could not update lead status.");
-        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not update lead status.";
+        setProfileStatusError(message);
+        throw new Error(message, { cause: error });
       }
     }
-    setStatusOverrides(o => ({ ...o, [profile.id]: value }));
-    setActiveProfile(p => (p?.id === profile.id ? { ...p, status: value } : p));
   };
-  const activeProfileStatus = activeProfile
-    ? (statusOverrides[activeProfile.id] || activeProfile.status)
-    : null;
+  const handleListStatusChange = (profile: LeadsProfile, value: string) => {
+    void updateStatus(profile, value).catch(() => undefined);
+  };
 
-  const sources = props.sources ?? DEFAULT_SOURCES;
-  // The Paid Ads tab is the Action board scoped to the paid-ad lead source.
-  const paidAdsSourceId = sources.find((s) => /paid\s*ads/i.test(s.label))?.id ?? "";
-  const drafts = props.drafts ?? DEFAULT_DRAFTS;
-  const channels = props.channels ?? DEFAULT_CHANNELS;
-  const schedules = props.schedules ?? DEFAULT_SCHEDULES;
-  const available = props.available ?? DEFAULT_AVAILABLE;
-  const pipeline = props.pipeline ?? DEFAULT_PIPELINE;
-  const activity = props.activity ?? DEFAULT_ACTIVITY;
-  const profiles = props.profiles ?? DEFAULT_PROFILES;
-  const profilesWithFavoriteOverrides = profiles;
+  const handleFavoriteChange = async (profile: LeadsProfile, favorite: boolean) => {
+    if (!props.onProfileFavoriteChange) return;
+    await props.onProfileFavoriteChange(profile, favorite);
+    setActiveProfile((current) => current?.id === profile.id ? { ...current, favorite } : current);
+  };
 
-  // Open the profile drawer for a hot-lead queue entry. Prefer a real profile
-  // match (carries full thread context); otherwise synthesize a minimal one
-  // from the entry's sourceId/threadId so the drawer can still load the thread.
+  const profileForHotLead = (entry: LeadsHotEntry) => profiles.find((profile) => (
+      entry.sourceId
+      && entry.threadId
+      && profile.sourceId === entry.sourceId
+      && profile.threadId === entry.threadId
+  ));
   const openHotLead = (entry: LeadsHotEntry) => {
-    const match = profiles.find((p) => p.name === entry.name);
-    if (match) {
-      setActiveProfile(match);
-      return;
-    }
-    setActiveProfile({
-      id: entry.id,
-      name: entry.name,
-      heat: 80,
-      group: "active",
-      verified: false,
-      status: "",
-      source: entry.sourceId || "—",
-      email: "",
-      phone: "",
-      contact: "",
-      threads: 1,
-      age: entry.age,
-      tags: [],
-      sub: entry.signal,
-      lastMsg: entry.signal,
-      lastTouch: entry.age,
-      sourceId: entry.sourceId,
-      threadId: entry.threadId,
-    });
+    const match = profileForHotLead(entry);
+    if (match) setActiveProfile(match);
   };
-  const templates = props.templates ?? DEFAULT_TEMPLATES;
-  const sent = props.sent ?? DEFAULT_SENT;
-  const blocked = channels.filter(c => c.status === "blocked");
 
-  const k = {
-    drafts: props.kpis?.drafts ?? drafts.length,
-    hot: props.kpis?.hot ?? pipeline.hot.length,
-    avgFirstTouch: props.kpis?.avgFirstTouch ?? "—",
-    avgDaysSinceTouch: props.kpis?.avgDaysSinceTouch ?? "—",
-    replyRate: props.kpis?.replyRate ?? "—",
-    newLeads7d: props.kpis?.newLeads7d ?? "—",
-    medianWait: props.kpis?.medianWait ?? "—",
-    nextRun: props.kpis?.nextRun ?? "—",
+  const toggleTag = (tag: string) => {
+    setTagFilters((current) => current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag]);
   };
+  const resetFilters = () => {
+    setSourceFilter("all");
+    setPipelineFilter("all");
+    setTemperatureFilter("all");
+    setTagFilters([]);
+    setSearchQuery("");
+  };
+  const activeFilterCount = Number(sourceFilter !== "all")
+    + Number(pipelineFilter !== "all")
+    + Number(temperatureFilter !== "all")
+    + tagFilters.length
+    + Number(Boolean(searchQuery.trim()));
+
+  const kpis = {
+    newLeads7d: props.kpis?.newLeads7d ?? "—",
+    replyRate: props.kpis?.replyRate ?? "—",
+  };
+  const queueCount = unmatchedDrafts.length + pipeline.hot.length + pipeline.followups.length + pipeline.skipped.length;
+  const sourceInboxLoaded = props.sources !== undefined || props.drafts !== undefined || props.profiles !== undefined;
+  const sourceInboxState = props.error
+    ? { label: "Source refresh failed", tone: "error" }
+    : props.loading
+      ? { label: "Refreshing source inbox", tone: "warn" }
+      : sourceInboxLoaded
+        ? { label: "Source inbox ready", tone: "done" }
+        : { label: "Source inbox not loaded", tone: "warn" };
 
   return (
-    <main className="admin-board">
-      <header className="ab-top">
-        <div className="ab-crumb">
-          <span className="crumb">Lead desk</span>
-          <span className="sep">·</span>
-          <span className="ab-live"><span className="ab-live-dot"></span>Local gateway online</span>
-          {props.loading && <span className="sep">·</span>}
-          {props.loading && <span className="ab-live mono">loading…</span>}
-          {props.error && <span className="sep">·</span>}
-          {props.error && <span className="ab-live mono" style={{ color: "var(--accent-warn, #e0a44c)" }}>{props.error}</span>}
-          {!props.error && props.debugNote && <span className="sep">·</span>}
-          {!props.error && props.debugNote && <span className="ab-live mono">{props.debugNote}</span>}
+    <main className="admin-board crm-board">
+      <header className="ab-top crm-masthead">
+        <div className="crm-title-block">
+          <span className="crm-eyebrow">Elevation CRM</span>
+          <div className="crm-title-row">
+            <h1>Leads</h1>
+            <span className="crm-live-state" style={{ color: `var(--status-${sourceInboxState.tone})` }}>
+              <span className={`dot ${sourceInboxState.tone}`} aria-hidden="true" />
+              {sourceInboxState.label}
+            </span>
+          </div>
+          {(props.loading || props.error || props.debugNote) && (
+            <div className="crm-data-note mono" role={props.error ? "alert" : "status"}>
+              {props.error || (props.loading ? "Refreshing live lead data…" : props.debugNote)}
+            </div>
+          )}
         </div>
         <div className="ab-top-actions">
-          <SourcesHealthPill channels={channels} schedules={schedules} available={available} />
-          <button className="ab-btn ghost" type="button" onClick={props.onRefresh}><Refresh /><span>Refresh</span></button>
-          <button className="ab-btn ghost" type="button" onClick={props.onReRunOnboarding}><Sparkles /><span>Re-run onboarding</span></button>
-          <Link className="ab-btn primary" to="/config#connectors"><Plus /><span>New lead</span></Link>
+          <button className="ab-btn ghost" type="button" onClick={props.onRefresh} disabled={!props.onRefresh || props.loading}>
+            <Refresh /><span>{props.loading ? "Refreshing…" : "Refresh"}</span>
+          </button>
+          <button className="ab-btn ghost" type="button" onClick={props.onReRunOnboarding} disabled={!props.onReRunOnboarding}>
+            <Sparkles /><span>Source setup</span>
+          </button>
+          <Link className="ab-btn primary" to="/config#connectors"><Plus /><span>Connect source</span></Link>
         </div>
       </header>
 
-      <div className="ab-scroll">
-        <div className="lb-tabs-wrap">
+      <div className="ab-scroll crm-scroll">
+        <div className="crm-viewbar">
           <LeadsTabs tab={tab} onChange={setTab} />
-          <ActivityTicker activity={activity} />
-          <div className="lb-source-filters">
-            {sources.map(s => (
-              <button
-                key={s.id}
-                type="button"
-                className={"lb-source-chip" + (sourceFilter === s.id ? " active" : "")}
-                onClick={() => setSourceFilter(s.id)}
-              >
-                <span>{s.label}</span>
-                <span className="lb-source-chip-count mono">{s.count}</span>
-              </button>
-            ))}
-          </div>
+          <span className="crm-record-count mono">{profiles.length.toLocaleString()} conversation {profiles.length === 1 ? "profile" : "profiles"} loaded</span>
         </div>
 
-        {profileStatusError && (
-          <div className="lb-replies-empty" style={{ color: "var(--accent-warn, #e0a44c)" }}>{profileStatusError}</div>
+        {tab === "leads" && (
+          <div className="crm-coverage-note" role="note">
+            Beta coverage: this list contains profiles found in currently open source conversations. It is not yet an all-contacts CRM directory.
+          </div>
         )}
 
-        {tab === "action" && (
-          <>
-            <section className="ab-kpis">
-              <LbKpi label="Drafts to approve" value={k.drafts} breakdown="approval-gated" delta={k.drafts > 0 ? "review queue" : "inbox zero"} deltaTone={k.drafts > 0 ? "warn" : ""} />
-              <LbKpi label="Hot leads" value={k.hot} breakdown="replies + repeats" delta={pipeline.hot[0] ? `next: ${pipeline.hot[0].name.split(" ")[0]} ${pipeline.hot[0].name.split(" ")[1]?.[0] ?? ""}.` : "none queued"} deltaTone="" />
-              <LbKpi label="Avg first touch" value={k.avgFirstTouch} breakdown="lead lands → reply" delta="" deltaTone="" />
-              <LbKpi label="Avg days since touch" value={k.avgDaysSinceTouch} breakdown="across all leads" delta="" deltaTone="warn" />
-              <LbKpi label="Reply rate" value={k.replyRate} breakdown="last 7 days" delta="" deltaTone="" />
-              <LbKpi label="New leads (7d)" value={k.newLeads7d} breakdown="across all sources" delta="" deltaTone="" />
-              <LbKpi label="Median wait" value={k.medianWait} breakdown="reply latency" delta="" deltaTone="" />
-              <LbKpi label="Next agent run" value={k.nextRun} breakdown="Hot Leads Watcher" delta="" deltaTone="" />
+        {profileStatusError && <div className="lb-replies-empty lb-crm-error" role="alert">{profileStatusError}</div>}
+
+        {draftSendNotices.length > 0 && (
+          <section aria-label="Approved draft send status" aria-live="polite">
+            {draftSendNotices.map((notice) => {
+              const needsAttention = notice.phase === "failed" || notice.phase === "timeout" || notice.phase === "unknown";
+              return (
+                <div
+                  key={notice.draftId}
+                  className={`lb-replies-empty${needsAttention ? " lb-crm-error" : ""}`}
+                  role={needsAttention ? "alert" : "status"}
+                >
+                  <strong>{notice.draftName}</strong> · {notice.message}
+                </div>
+              );
+            })}
+          </section>
+        )}
+
+        {tab === "leads" && (
+          <div className="crm-tab-panel" role="tabpanel" id="crm-panel-leads" aria-labelledby="crm-tab-leads">
+            <section className="crm-kpis" aria-label="Lead overview">
+              <LbKpi label="Profiles loaded" value={profiles.length} breakdown="from open conversations" delta="" deltaTone="" />
+              <LbKpi label="Drafts loaded" value={drafts.length} breakdown="nothing sends without approval" delta={drafts.length ? "review needed" : "inbox zero"} deltaTone={drafts.length ? "warn" : ""} />
+              <LbKpi label="Hot queue shown" value={pipeline.hot.length} breakdown="up to 8 prioritized conversations" delta="" deltaTone="" />
+              <LbKpi label="Touched (7d)" value={kpis.newLeads7d} breakdown="status or conversation activity" delta="" deltaTone="" />
+              <LbKpi label="Reply rate" value={kpis.replyRate} breakdown="last 7 days" delta="" deltaTone="" />
             </section>
 
-            <AppleMessagesToggleBar
-              appleMessages={props.appleMessages}
-              onToggle={props.onToggleDirection}
-            />
-            {props.appleMessages
-              ? (props.appleMessages.blocked ? (
-                  <LbSourceAlert
-                    blocked={[{
-                      id: "imessage",
-                      name: "Apple Messages",
-                      kind: "imessage",
-                      status: "blocked",
-                      uncontacted: 0,
-                      contacted: 0,
-                      records: 0,
-                      note: props.appleMessages.note
-                        || "Open System Settings → Privacy & Security → Full Disk Access, turn ON Elevate, then quit and reopen Elevate.",
-                    }]}
-                  />
-                ) : null)
-              : <LbSourceAlert blocked={blocked} />}
-            <ActionQueue
+            <section className="crm-filterbar" aria-label="Filter leads">
+              <label className="crm-search">
+                <span className="sr-only">Search leads</span>
+                <span aria-hidden="true">⌕</span>
+                <input
+                  type="search"
+                  value={searchQuery}
+                  placeholder="Search name, email, or phone"
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                />
+              </label>
+              <label className="crm-quick-filter">
+                <span>Source</span>
+                <select value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); }}>
+                  {(sources.some((source) => source.id === "all") ? sources : [{ id: "all", label: "All sources", count: profiles.length, isAll: true }, ...sources]).map((source) => (
+                    <option key={source.id} value={source.id}>{source.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="crm-quick-filter">
+                <span>Pipeline</span>
+                <select value={pipelineFilter} onChange={(event) => setPipelineFilter(event.target.value)}>
+                  <option value="all">All stages</option>
+                  {pipelineOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+                </select>
+              </label>
+              <label className="crm-quick-filter">
+                <span>Temperature</span>
+                <select value={temperatureFilter} onChange={(event) => setTemperatureFilter(event.target.value as CrmTemperature)}>
+                  <option value="all">All temperatures</option>
+                  <option value="hot">Hot · 80–100</option>
+                  <option value="warm">Warm · 50–79</option>
+                  <option value="cool">Cool · under 50</option>
+                </select>
+              </label>
+              <details className="crm-tags-filter">
+                <summary>Tags{tagFilters.length ? ` · ${tagFilters.length}` : ""}</summary>
+                <div className="crm-tags-popover">
+                  <div className="crm-tags-popover-head">
+                    <strong>Filter by tags</strong>
+                    <button type="button" onClick={() => setTagFilters([])} disabled={tagFilters.length === 0}>Clear</button>
+                  </div>
+                  {tagOptions.length === 0 ? (
+                    <p>No tags on loaded conversation profiles.</p>
+                  ) : (
+                    <fieldset>
+                      <legend className="sr-only">Contact tags</legend>
+                      {tagOptions.map((tag) => (
+                        <label key={tag}>
+                          <input type="checkbox" checked={tagFilters.includes(tag)} onChange={() => toggleTag(tag)} />
+                          <span>{tag}</span>
+                        </label>
+                      ))}
+                    </fieldset>
+                  )}
+                </div>
+              </details>
+              {activeFilterCount > 0 && <button type="button" className="crm-clear-filters" onClick={resetFilters}>Clear {activeFilterCount}</button>}
+            </section>
+
+            <AppleMessagesToggleBar appleMessages={props.appleMessages} onToggle={props.onToggleDirection} />
+            {props.appleMessages?.blocked && (
+              <LbSourceAlert blocked={[{
+                id: "imessage",
+                name: "Apple Messages",
+                kind: "imessage",
+                status: "blocked",
+                uncontacted: 0,
+                contacted: 0,
+                records: 0,
+                note: props.appleMessages.note || "Open System Settings → Privacy & Security → Full Disk Access, turn ON Elevate, then quit and reopen Elevate.",
+              }]} />
+            )}
+            {!props.appleMessages && blocked.length > 0 && <LbSourceAlert blocked={blocked} />}
+
+            <ProfilesList
+              profiles={profiles}
               drafts={drafts}
-              pipeline={pipeline}
               sourceFilter={sourceFilter}
+              pipelineFilter={pipelineFilter}
+              temperatureFilter={temperatureFilter}
+              tagFilters={tagFilters}
+              searchQuery={searchQuery}
+              loading={Boolean(props.loading)}
+              onOpen={setActiveProfile}
+              onStatusChange={handleListStatusChange}
+              onFavoriteChange={props.onProfileFavoriteChange ? handleFavoriteChange : undefined}
               onDraftAction={props.onDraftAction}
               onDraftActionComplete={props.onDraftActionComplete}
               onEditTemplate={() => setTab("templates")}
-              onOpenHotLead={openHotLead}
             />
-          </>
-        )}
 
-        {tab === "profiles" && (
-          <ProfilesList
-            profiles={profilesWithFavoriteOverrides}
-            sourceFilter={sourceFilter}
-            onOpen={setActiveProfile}
-            statusOverrides={statusOverrides}
-            onStatusChange={handleStatusChange}
-            onFavoriteChange={props.onProfileFavoriteChange}
-          />
+            {queueCount > 0 && (
+              <details className="crm-work-queue" open={unmatchedDrafts.length > 0}>
+                <summary>
+                  <span>Additional follow-up work</span>
+                  <span className="mono">{queueCount}</span>
+                </summary>
+                <ActionQueue
+                  drafts={unmatchedDrafts}
+                  pipeline={pipeline}
+                  sourceFilter={sourceFilter}
+                  onDraftAction={props.onDraftAction}
+                  onDraftActionComplete={props.onDraftActionComplete}
+                  onEditTemplate={() => setTab("templates")}
+                  onOpenHotLead={openHotLead}
+                  canOpenHotLead={(entry) => Boolean(profileForHotLead(entry))}
+                />
+              </details>
+            )}
+          </div>
         )}
 
         {tab === "templates" && (
-          <TemplatesView groups={templates} mutations={props.templateMutations} />
+          <div className="crm-tab-panel" role="tabpanel" id="crm-panel-templates" aria-labelledby="crm-tab-templates">
+            <TemplatesView
+              groups={templates}
+              mutations={props.templateMutations}
+              loading={props.templatesState?.loading}
+              loadError={props.templatesState?.error}
+            />
+          </div>
         )}
-
         {tab === "sent" && (
-          <SentView messages={sent} onRefresh={props.onSentRefresh} />
+          <div className="crm-tab-panel" role="tabpanel" id="crm-panel-sent" aria-labelledby="crm-tab-sent">
+            <SentView
+              messages={sent}
+              onRefresh={props.onSentRefresh}
+              loading={props.sentState?.loading}
+              error={props.sentState?.error}
+              partial={props.sentState?.partial}
+              limit={props.sentState?.limit}
+            />
+          </div>
         )}
-        {tab === "didnt-send" && <NotSentView />}
-        {tab === "paid-ads" && (
-          <ActionQueue
-            drafts={drafts}
-            pipeline={{
-              ...pipeline,
-              hot: pipeline.hot.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
-              followups: pipeline.followups.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
-              skipped: pipeline.skipped.filter((l) => matchesLeadsSourceFilter(l, paidAdsSourceId)),
-            }}
-            sourceFilter={paidAdsSourceId}
-            onDraftAction={props.onDraftAction}
-            onDraftActionComplete={props.onDraftActionComplete}
-            onEditTemplate={() => setTab("templates")}
-            onOpenHotLead={openHotLead}
-          />
+        {tab === "didnt-send" && (
+          <div className="crm-tab-panel" role="tabpanel" id="crm-panel-didnt-send" aria-labelledby="crm-tab-didnt-send">
+            <NotSentView />
+          </div>
         )}
       </div>
 
-      {activeProfile && (
+      {activeProfileFromLive && (
         <ProfileDrawer
-          profile={{ ...activeProfile, status: activeProfileStatus ?? activeProfile.status }}
+          key={`${activeProfileFromLive.id}:${activeProfileFromLive.sourceId || ""}:${activeProfileFromLive.threadId || ""}`}
+          profile={activeProfileFromLive}
+          draft={activeDraft}
           onClose={() => setActiveProfile(null)}
-          onStatusChange={handleStatusChange}
+          onStatusChange={updateStatus}
+          onFavoriteChange={props.onProfileFavoriteChange ? handleFavoriteChange : undefined}
+          onDraftAction={props.onDraftAction}
+          onDraftActionComplete={props.onDraftActionComplete}
+          draftSendNotices={draftSendNotices}
+          onEditTemplate={() => { setActiveProfile(null); setTab("templates"); }}
         />
       )}
     </main>

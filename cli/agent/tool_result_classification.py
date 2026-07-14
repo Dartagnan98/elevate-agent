@@ -38,14 +38,15 @@ def classify_tool_failure(tool_name: str, result: Any) -> tuple[bool, str]:
     except Exception:
         data = None
 
-    if tool_name == "terminal":
+    if tool_name in {"terminal", "process"}:
         if isinstance(data, dict):
             exit_code = data.get("exit_code")
             if exit_code is not None and exit_code != 0:
                 return True, f" [exit {exit_code}]"
-        # Some terminal failures (for example foreground timeouts) do not
-        # include an exit code. Let the shared top-level error/status checks
-        # classify those instead of silently marking them successful.
+        # Some terminal/process failures do not include an exit code. Let the
+        # shared top-level error/status checks classify those instead of
+        # silently marking them successful. A process wait/poll result with a
+        # non-zero exit is the terminal command's authoritative outcome too.
 
     if isinstance(data, dict):
         if (
@@ -58,7 +59,14 @@ def classify_tool_failure(tool_name: str, result: Any) -> tuple[bool, str]:
         if (
             data.get("success") is False
             or data.get("error")
-            or status in {"cancelled", "canceled", "error", "failed", "interrupted"}
+            or status in {
+                "cancelled",
+                "canceled",
+                "error",
+                "failed",
+                "interrupted",
+                "killed",
+            }
         ):
             return True, " [error]"
         return False, ""

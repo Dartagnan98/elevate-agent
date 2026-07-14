@@ -22,6 +22,7 @@ export interface GatewayTranscriptMessage {
   message_id?: string
   name?: string
   role: 'assistant' | 'system' | 'tool' | 'user'
+  status?: 'complete' | 'error' | 'interrupted' | 'needs_input' | 'pending'
   text?: string
 }
 
@@ -184,7 +185,7 @@ export interface PromptSubmitResponse {
   recovered?: boolean
   started?: boolean
   status?: 'duplicate' | 'sign_in_required' | 'streaming'
-  terminal_status?: 'complete' | 'error' | 'interrupted'
+  terminal_status?: 'complete' | 'error' | 'interrupted' | 'needs_input' | 'pending'
   user_message_id?: string
 }
 
@@ -435,12 +436,12 @@ export type GatewayEvent =
   | { payload: { request_id: string }; session_id?: string; type: 'sudo.request' }
   | { payload: { env_var: string; prompt: string; request_id: string }; session_id?: string; type: 'secret.request' }
   | {
-      payload: { error?: string; status: 'complete' | 'error'; task_id: string; text: string }
+      payload: { error?: string; status: 'complete' | 'error' | 'needs_input' | 'pending'; task_id: string; text: string }
       session_id?: string
       type: 'background.complete'
     }
   | {
-      payload: { error?: string; status: 'complete' | 'error'; text: string }
+      payload: { error?: string; status: 'complete' | 'error' | 'needs_input' | 'pending'; text: string }
       session_id?: string
       type: 'btw.complete'
     }
@@ -458,7 +459,7 @@ export type GatewayEvent =
         message_id?: string
         reasoning?: string
         rendered?: string
-        status?: 'complete' | 'error' | 'interrupted'
+        status?: 'complete' | 'error' | 'interrupted' | 'needs_input' | 'pending'
         text?: string
         usage?: Usage
       }

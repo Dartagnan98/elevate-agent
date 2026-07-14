@@ -43,6 +43,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+MINI_SWE_FINAL_OUTPUT_SENTINEL = "MINI_SWE_AGENT_FINAL_OUTPUT"
+
+
+def _has_successful_completion_sentinel(result: Dict[str, Any]) -> bool:
+    """Return true only for a successful command with a dedicated marker line."""
+    if result.get("exit_code") != 0:
+        return False
+    output = result.get("output")
+    if not isinstance(output, str):
+        return False
+    return MINI_SWE_FINAL_OUTPUT_SENTINEL in output.splitlines()
+
+
 def _effective_temperature_for_model(
     model: str,
     base_url: Optional[str] = None,
@@ -93,7 +106,8 @@ TERMINAL_TOOL_DEFINITION = {
 - Install tools with apt-get or pip as needed
 
 **Completion:**
-- When task is complete, output: echo "MINI_SWE_AGENT_FINAL_OUTPUT" followed by your result
+- After the task succeeds, run: echo "MINI_SWE_AGENT_FINAL_OUTPUT"
+- The marker must be on its own output line; put any summary on another line
 """,
         "parameters": {
             "type": "object",
@@ -440,7 +454,9 @@ class MiniSWERunner:
 When you need to run commands, use the 'terminal' tool with your bash command.
 
 **Important:**
-- When you have completed the task successfully, run: echo "MINI_SWE_AGENT_FINAL_OUTPUT" followed by a summary
+- When you have completed the task successfully, run: echo "MINI_SWE_AGENT_FINAL_OUTPUT"
+- Keep that marker on its own output line; put any summary on another line
+- Plain text alone never marks this action run complete; verify through the terminal
 - Be concise and efficient in your approach
 - Install any needed tools with apt-get or pip
 - Avoid interactive commands (no vim, nano, less, etc.)
@@ -474,12 +490,35 @@ Complete the user's task step by step."""
                     if fixed_temperature is not None:
                         api_kwargs["temperature"] = fixed_temperature
 
-                    response = self.client.chat.completions.create(**api_kwargs)
+                    from agent.auxiliary_client import _validate_llm_response
+
+                    response = _validate_llm_response(
+                        self.client.chat.completions.create(**api_kwargs),
+                        "mini_swe",
+                    )
                 except Exception as e:
                     self.logger.error(f"API call failed: {e}")
                     break
                 
                 assistant_message = response.choices[0].message
+                response_finish_reason = getattr(
+                    response.choices[0], "finish_reason", None
+                )
+                normalized_finish_reason = (
+                    response_finish_reason.strip().lower()
+                    if isinstance(response_finish_reason, str)
+                    else ""
+                )
+                if (
+                    assistant_message.tool_calls
+                    and normalized_finish_reason not in {"stop", "tool_calls"}
+                ):
+                    self.logger.error(
+                        "Refusing tool execution from non-terminal provider "
+                        "response (finish_reason=%s)",
+                        normalized_finish_reason or "missing",
+                    )
+                    break
                 
                 # Log assistant response
                 if assistant_message.content:
@@ -487,6 +526,37 @@ Complete the user's task step by step."""
                 
                 # Check for tool calls
                 if assistant_message.tool_calls:
+                    parsed_tool_calls = []
+                    invalid_tool_batch = False
+                    for tc in assistant_message.tool_calls:
+                        if tc.function.name != "terminal":
+                            self.logger.error(
+                                "Refusing unexpected mini-SWE tool '%s'",
+                                tc.function.name,
+                            )
+                            invalid_tool_batch = True
+                            break
+                        try:
+                            args = json.loads(tc.function.arguments)
+                        except (json.JSONDecodeError, TypeError):
+                            args = None
+                        if not isinstance(args, dict):
+                            self.logger.error(
+                                "Refusing terminal tool with non-object arguments"
+                            )
+                            invalid_tool_batch = True
+                            break
+                        command = args.get("command")
+                        if not isinstance(command, str) or not command.strip():
+                            self.logger.error(
+                                "Refusing terminal tool without a command"
+                            )
+                            invalid_tool_batch = True
+                            break
+                        parsed_tool_calls.append((tc, args))
+                    if invalid_tool_batch:
+                        break
+
                     print(f"🔧 Tool calls: {len(assistant_message.tool_calls)}")
                     
                     # Add assistant message with tool calls
@@ -507,13 +577,8 @@ Complete the user's task step by step."""
                     })
                     
                     # Execute each tool call
-                    for tc in assistant_message.tool_calls:
-                        try:
-                            args = json.loads(tc.function.arguments)
-                        except json.JSONDecodeError:
-                            args = {}
-                        
-                        command = args.get("command", "echo 'No command provided'")
+                    for tc, args in parsed_tool_calls:
+                        command = args["command"]
                         timeout = args.get("timeout", self.command_timeout)
                         
                         print(f"   📞 terminal: {command[:60]}...")
@@ -531,7 +596,7 @@ Complete the user's task step by step."""
                         }, ensure_ascii=False)
                         
                         # Check for task completion signal
-                        if "MINI_SWE_AGENT_FINAL_OUTPUT" in result["output"]:
+                        if _has_successful_completion_sentinel(result):
                             print("   ✅ Task completion signal detected!")
                             completed = True
                         
@@ -550,17 +615,38 @@ Complete the user's task step by step."""
                         break
                 
                 else:
-                    # No tool calls - final response
-                    final_response = assistant_message.content or ""
+                    # A plain-text stop cannot prove that an action run succeeded.
+                    if normalized_finish_reason != "stop":
+                        self.logger.warning(
+                            "Provider returned non-terminal final text "
+                            "(finish_reason=%s); refusing completion",
+                            normalized_finish_reason or "missing",
+                        )
+                        continue
+                    candidate_response = (
+                        assistant_message.content.strip()
+                        if isinstance(assistant_message.content, str)
+                        else ""
+                    )
+                    if not candidate_response:
+                        self.logger.warning(
+                            "Provider returned an empty terminal response; "
+                            "refusing to mark the mini-SWE task complete"
+                        )
+                        continue
+                    final_response = candidate_response
                     messages.append({
                         "role": "assistant",
                         "content": final_response
                     })
-                    completed = True
-                    print("🎉 Agent finished (no more tool calls)")
+                    self.logger.warning(
+                        "Provider ended the mini-SWE action run without a "
+                        "verified successful completion sentinel; marking it "
+                        "incomplete"
+                    )
                     break
             
-            if api_call_count >= self.max_iterations:
+            if not completed and api_call_count >= self.max_iterations:
                 print(f"⚠️  Reached max iterations ({self.max_iterations})")
         
         finally:
@@ -615,7 +701,16 @@ Complete the user's task step by step."""
                     f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     f.flush()
                     
-                    print(f"✅ Task {i} completed (api_calls={result['api_calls']})")
+                    if result["completed"]:
+                        status_icon = "✅"
+                        status_label = "completed"
+                    else:
+                        status_icon = "⚠️"
+                        status_label = "incomplete"
+                    print(
+                        f"{status_icon} Task {i} {status_label} "
+                        f"(api_calls={result['api_calls']})"
+                    )
                     
                 except Exception as e:
                     self.logger.error(f"Error on task {i}: {e}")

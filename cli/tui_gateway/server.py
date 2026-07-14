@@ -21,7 +21,13 @@ from typing import Any, Optional
 
 from agent.cwd import safe_getcwd
 from agent.memory_manager import sanitize_context
-from agent.result_outcome import agent_result_error, agent_result_succeeded
+from agent.result_outcome import (
+    agent_result_context_overflow,
+    agent_result_error,
+    agent_result_needs_input,
+    agent_result_pending,
+    agent_result_succeeded,
+)
 from elevate_constants import get_elevate_home
 from elevate_cli.env_loader import load_elevate_dotenv
 from tui_gateway.transport import (
@@ -142,6 +148,14 @@ _EMPTY_MODEL_FAILURE = (
     "The model returned no response after multiple retries, so this turn "
     "did not complete. Please retry."
 )
+_PENDING_WORK_MESSAGE = (
+    "Work is still pending. Completion has not been verified yet."
+)
+_PENDING_WORK_WARNING = (
+    "This turn is pending, not complete. Return to this session to check its status."
+)
+_NEEDS_INPUT_MESSAGE = "I need more information before I can continue."
+_NEEDS_INPUT_WARNING = "This turn is waiting for your input, not complete."
 
 
 def _normalize_empty_terminal_history(
@@ -175,16 +189,58 @@ def _normalize_empty_terminal_history(
     return normalized
 
 
+def _stamp_terminal_history_status(
+    messages: list, status: str, assistant_message_id: str
+) -> list:
+    """Persist non-success terminal truth on the final assistant message."""
+    normalized = list(messages)
+    for index in range(len(normalized) - 1, -1, -1):
+        message = normalized[index]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        replacement = dict(message)
+        replacement["finish_reason"] = status
+        replacement.setdefault("client_message_id", assistant_message_id)
+        normalized[index] = replacement
+        return normalized
+    return normalized
+
+
 def _agent_terminal_payload(result: Any, **extra: Any) -> dict:
     """Build a truthful terminal event for background agent work."""
     succeeded = agent_result_succeeded(result)
+    needs_input = agent_result_needs_input(result)
+    pending = agent_result_pending(result)
     text = (
         str(result.get("final_response") or result.get("error") or "")
         if isinstance(result, dict)
         else str(result or "")
     )
-    payload = {**extra, "status": "complete" if succeeded else "error", "text": text}
-    if not succeeded:
+    if needs_input and not text.strip():
+        text = _NEEDS_INPUT_MESSAGE
+    elif pending and not text.strip():
+        text = _PENDING_WORK_MESSAGE
+    payload = {
+        **extra,
+        "status": (
+            "needs_input"
+            if needs_input
+            else "pending"
+            if pending
+            else "complete"
+            if succeeded
+            else "error"
+        ),
+        "text": text,
+    }
+    if needs_input:
+        payload["warning"] = _NEEDS_INPUT_WARNING
+    elif pending:
+        payload["warning"] = _PENDING_WORK_WARNING
+        obligations = result.get("pending_tool_obligations")
+        if isinstance(obligations, list):
+            payload["pending_tool_obligations"] = obligations
+    elif not succeeded:
         payload["error"] = agent_result_error(result)
         if not payload["text"]:
             payload["text"] = payload["error"]
@@ -1105,7 +1161,17 @@ def _set_session_context(session_key: str) -> list:
     try:
         from gateway.session_context import set_session_vars
 
-        return set_session_vars(session_key=session_key)
+        # Desktop chat runs through tui_gateway, not gateway/run.py. Stamp an
+        # explicit platform so tools never mistake this turn for a routable
+        # Telegram/Slack watcher lane (or silently fall back to stale process
+        # environment). ``chat_id`` is the durable session key for diagnostics;
+        # automatic terminal completion delivery is intentionally refused at
+        # the tool boundary until it is restart-durable.
+        return set_session_vars(
+            platform="tui",
+            chat_id=session_key,
+            session_key=session_key,
+        )
     except Exception:
         return []
 
@@ -1667,7 +1733,7 @@ def _record_tui_turn_usage(
         (usage_after or {}).get("provider") or row_result.get("provider") or ""
     )
     row_result["status"] = status or "error"
-    row_result["failed"] = row_result["status"] != "complete"
+    row_result["failed"] = row_result["status"] in {"error", "interrupted"}
     if error_type:
         row_result["error_type"] = error_type
 
@@ -2385,6 +2451,19 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     return info
 
 
+def _reset_tui_context_overflow_session(sid: str, session: dict, db) -> None:
+    """Clear oversized replay state while preserving terminal idempotency."""
+    session_key = str(session.get("session_key") or "")
+    if not session_key:
+        raise ValueError("cannot reset context overflow without a session key")
+    db.replace_messages(
+        session_key,
+        [],
+        preserve_prompt_receipts=True,
+    )
+    _reset_session_agent(sid, session)
+
+
 def _make_agent(
     sid: str,
     key: str,
@@ -2931,6 +3010,19 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if not display.strip():
             continue
         entry = {"role": role, "text": display}
+        if role == "assistant":
+            finish_reason = str(m.get("finish_reason") or "").strip().lower()
+            if finish_reason in {"cancelled", "canceled", "interrupted"}:
+                entry["status"] = "interrupted"
+            elif finish_reason in {"error", "failed", "failure"}:
+                entry["status"] = "error"
+            elif finish_reason in {"needs_input", "waiting_input"}:
+                entry["status"] = "needs_input"
+            elif finish_reason in {"incomplete", "pending"}:
+                # ``run_agent`` persists async-obligation turns with
+                # finish_reason=incomplete. Preserve that unresolved truth on
+                # resume instead of hydrating it as a successful answer.
+                entry["status"] = "pending"
         if _stable_id(m):
             entry["message_id"] = _stable_id(m)
         messages.append(entry)
@@ -4728,9 +4820,24 @@ def _make_async_delegate_sink(sid: str, session: dict):
 
     def _sink(payload: dict) -> None:
         try:
-            results = payload.get("results") if isinstance(payload, dict) else None
-            results = results or []
-            task_id = str((payload or {}).get("task_id") or "")
+            if not isinstance(payload, dict):
+                logger.warning("ignoring malformed async delegate completion (sid=%s)", sid)
+                return
+            raw_results = payload.get("results")
+            task_id = str(payload.get("task_id") or "").strip()
+            if (
+                not task_id
+                or not isinstance(raw_results, list)
+                or not raw_results
+                or any(
+                    not isinstance(result, dict)
+                    or not str(result.get("status") or "").strip()
+                    for result in raw_results
+                )
+            ):
+                logger.warning("ignoring malformed async delegate completion (sid=%s)", sid)
+                return
+            results = raw_results
             summary_text = _format_delegate_completion(results)
 
             # 1) Flip any still-running subagent dots to done/error so the
@@ -4758,7 +4865,11 @@ def _make_async_delegate_sink(sid: str, session: dict):
             # 2) Lightweight ping so the client can release any lingering
             #    "working" affordance for this delegation (no text — the result
             #    arrives via the wake turn below, not as a dumped bubble).
-            _emit("delegate.complete", sid, {"task_id": task_id})
+            _emit(
+                "delegate.complete",
+                sid,
+                {"task_id": task_id, "status": "complete"},
+            )
 
             # 3) Park the result, then watch for idle. If the user is mid-turn
             #    (or hits send right now), THEIR turn drains the parked result
@@ -4995,14 +5106,26 @@ def _(rid, params: dict) -> dict:
             turn_ids["assistant"] = str(
                 receipt.get("assistant_message_id") or turn_ids["assistant"]
             )
-            if receipt_status in {"complete", "error", "interrupted"}:
+            if receipt_status in {
+                "complete",
+                "deferred",
+                "error",
+                "interrupted",
+                "waiting_input",
+            }:
                 return _ok(
                     rid,
                     {
                         "status": "duplicate",
                         "duplicate": True,
                         "started": False,
-                        "terminal_status": receipt_status,
+                        "terminal_status": (
+                            "pending"
+                            if receipt_status == "deferred"
+                            else "needs_input"
+                            if receipt_status == "waiting_input"
+                            else receipt_status
+                        ),
                         "user_message_id": turn_ids["user"],
                         "message_id": turn_ids["assistant"],
                     },
@@ -5069,6 +5192,7 @@ def _(rid, params: dict) -> dict:
         turn_latency_ms = None
         turn_usage_result = None
         turn_usage_error_type = ""
+        reset_context_after_turn = False
         try:
             claimed = db.claim_prompt_receipt(
                 session_key,
@@ -5300,11 +5424,28 @@ def _(rid, params: dict) -> dict:
                     status = (
                         "interrupted"
                         if result.get("interrupted")
-                        else "error" if not agent_result_succeeded(result)
+                        else "needs_input"
+                        if agent_result_needs_input(result)
+                        else "pending"
+                        if agent_result_pending(result)
+                        else "error"
+                        if not agent_result_succeeded(result)
                         else "complete"
                     )
+                    if status in {"needs_input", "pending"} and (
+                        not isinstance(raw, str) or not raw.strip()
+                    ):
+                        raw = (
+                            _NEEDS_INPUT_MESSAGE
+                            if status == "needs_input"
+                            else _PENDING_WORK_MESSAGE
+                        )
                     result_messages = result.get("messages")
-                    empty_terminal = status != "interrupted" and (
+                    empty_terminal = status not in {
+                        "interrupted",
+                        "needs_input",
+                        "pending",
+                    } and (
                         not isinstance(raw, str)
                         or not raw.strip()
                         or raw.strip() == "(empty)"
@@ -5317,6 +5458,26 @@ def _(rid, params: dict) -> dict:
                                 result_messages, turn_ids["assistant"]
                             )
                     if isinstance(result_messages, list):
+                        if status in {"needs_input", "pending"}:
+                            result_messages = _stamp_terminal_history_status(
+                                result_messages,
+                                status,
+                                turn_ids["assistant"],
+                            )
+                            if hasattr(db, "update_message_finish_reason"):
+                                try:
+                                    db.update_message_finish_reason(
+                                        session_key,
+                                        turn_ids["assistant"],
+                                        status,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "terminal history status persistence failed "
+                                        "session=%s message=%s",
+                                        session_key,
+                                        turn_ids["assistant"],
+                                    )
                         with session["history_lock"]:
                             current_version = int(session.get("history_version", 0))
                             if current_version == current_history_version:
@@ -5352,8 +5513,20 @@ def _(rid, params: dict) -> dict:
                     status = terminal["status"]
                 receipt_terminal_status = status
 
+                if isinstance(result, dict) and agent_result_context_overflow(result):
+                    reset_context_after_turn = True
+                    raw = (raw or "") + (
+                        "\n\nSession auto-reset: this conversation exceeded the model "
+                        "context and could not be recovered safely. Your next "
+                        "message will start with a clean conversation."
+                    )
+
                 followup = None
-                if isinstance(result, dict) and status != "interrupted":
+                if (
+                    isinstance(result, dict)
+                    and status != "interrupted"
+                    and not reset_context_after_turn
+                ):
                     followup = (
                         result.get("pending_steer")
                         or result.get("pending_soft_interrupt")
@@ -5375,6 +5548,25 @@ def _(rid, params: dict) -> dict:
                     payload["reasoning"] = last_reasoning
                 if status_note:
                     payload["warning"] = status_note
+                if status == "needs_input":
+                    payload["warning"] = " ".join(
+                        part
+                        for part in (status_note, _NEEDS_INPUT_WARNING)
+                        if part
+                    )
+                elif status == "pending":
+                    payload["warning"] = " ".join(
+                        part
+                        for part in (status_note, _PENDING_WORK_WARNING)
+                        if part
+                    )
+                    obligations = (
+                        result.get("pending_tool_obligations")
+                        if isinstance(result, dict)
+                        else None
+                    )
+                    if isinstance(obligations, list):
+                        payload["pending_tool_obligations"] = obligations
                 rendered = render_message(raw, cols)
                 if rendered:
                     payload["rendered"] = rendered
@@ -5556,7 +5748,17 @@ def _(rid, params: dict) -> dict:
                         session_key,
                         receipt_user_id,
                         owner_id=_PROMPT_EXECUTION_OWNER,
-                        status=receipt_terminal_status,
+                        # Receipt ``pending`` means not-yet-executed and is
+                        # restart-recoverable. Use a distinct terminal state
+                        # for a turn that intentionally ended with async work,
+                        # otherwise a restart would rerun the original prompt.
+                        status=(
+                            "deferred"
+                            if receipt_terminal_status == "pending"
+                            else "waiting_input"
+                            if receipt_terminal_status == "needs_input"
+                            else receipt_terminal_status
+                        ),
                     ):
                         logger.error(
                             "prompt receipt terminalization lost ownership "
@@ -5569,6 +5771,14 @@ def _(rid, params: dict) -> dict:
                         "prompt receipt terminalization failed session=%s message=%s",
                         session_key,
                         receipt_user_id,
+                    )
+            if reset_context_after_turn:
+                try:
+                    _reset_tui_context_overflow_session(sid, session, db)
+                except Exception:
+                    logger.exception(
+                        "TUI context-overflow reset failed session=%s",
+                        session_key,
                     )
             with _prompt_claims_lock:
                 _active_prompt_claims.pop(claim_key, None)

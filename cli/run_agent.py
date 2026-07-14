@@ -179,6 +179,81 @@ from agent.trajectory import (
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 
 
+_GEMINI_DIAGNOSTIC_ENUM = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_GEMINI_DIAGNOSTIC_UNSPECIFIED_ENUMS = {
+    "UNSPECIFIED",
+    "BLOCK_REASON_UNSPECIFIED",
+    "FINISH_REASON_UNSPECIFIED",
+}
+_GEMINI_DIAGNOSTIC_PART_KINDS = (
+    "text",
+    "thought_text",
+    "function_call",
+    "thought_signature",
+    "other",
+)
+_GEMINI_DIAGNOSTIC_COUNT_FIELDS = (
+    "candidate_count",
+    "usable_part_count",
+    "prompt_tokens",
+    "candidate_tokens",
+    "thought_tokens",
+    "cached_tokens",
+    "total_tokens",
+)
+
+
+def _allowlisted_gemini_diagnostic(value: Any) -> Optional[Dict[str, Any]]:
+    """Filter native Gemini diagnostics before they cross into shared logs."""
+    if not isinstance(value, dict):
+        return None
+
+    def _enum(field: str) -> str:
+        if field not in value:
+            return "UNSPECIFIED"
+        raw = value.get(field)
+        if not isinstance(raw, str):
+            return "INVALID"
+        normalized = raw.strip().upper()
+        if not normalized:
+            return "INVALID"
+        if normalized in _GEMINI_DIAGNOSTIC_UNSPECIFIED_ENUMS:
+            return "UNSPECIFIED"
+        if _GEMINI_DIAGNOSTIC_ENUM.fullmatch(normalized):
+            return normalized
+        return "INVALID"
+
+    def _count(raw: Any) -> int:
+        if isinstance(raw, bool):
+            return 0
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    raw_part_counts = value.get("part_counts")
+    if not isinstance(raw_part_counts, dict):
+        raw_part_counts = {}
+    diagnostic: Dict[str, Any] = {
+        "finish_reason": _enum("finish_reason"),
+        "prompt_block_reason": _enum("prompt_block_reason"),
+        "part_counts": {
+            kind: _count(raw_part_counts.get(kind))
+            for kind in _GEMINI_DIAGNOSTIC_PART_KINDS
+        },
+    }
+    for field in _GEMINI_DIAGNOSTIC_COUNT_FIELDS:
+        diagnostic[field] = _count(value.get(field))
+    return diagnostic
+
+
+def _empty_response_retry_delay(attempt: int) -> float:
+    return min(
+        jittered_backoff(attempt, base_delay=0.5, max_delay=2.0),
+        2.0,
+    )
+
+
 
 class _SafeWriter:
     """Transparent stdio wrapper that catches OSError/ValueError from broken pipes.
@@ -389,6 +464,7 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
         return False
 
     reserved_paths: list[Path] = []
+    seen_actions = set()
     for tool_call in tool_calls:
         tool_name = tool_call.function.name
         try:
@@ -407,6 +483,15 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
                 type(function_args).__name__,
             )
             return False
+
+        fingerprint = _tool_action_fingerprint(tool_name, function_args)
+        if fingerprint in seen_actions:
+            # Duplicate side effects must not execute twice, but they also
+            # must not disappear. Route through sequential execution so the
+            # duplicate call ID receives a paired classified error.
+            return False
+        if fingerprint is not None:
+            seen_actions.add(fingerprint)
 
         if tool_name in _PATH_SCOPED_TOOLS:
             scoped_path = _extract_parallel_scope_path(tool_name, function_args)
@@ -434,10 +519,12 @@ def _extract_parallel_scope_path(tool_name: str, function_args: dict) -> Path | 
 
     expanded = Path(raw_path).expanduser()
     if expanded.is_absolute():
-        return Path(os.path.abspath(str(expanded)))
+        return expanded.resolve(strict=False)
 
-    # Avoid resolve(); the file may not exist yet.
-    return Path(os.path.abspath(str(Path.cwd() / expanded)))
+    # ``strict=False`` still resolves every existing parent symlink while
+    # allowing the final target to be new. That prevents two aliases of the
+    # same future output from being scheduled concurrently.
+    return (Path.cwd() / expanded).resolve(strict=False)
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
@@ -445,8 +532,15 @@ def _paths_overlap(left: Path, right: Path) -> bool:
     left_parts = left.parts
     right_parts = right.parts
     if not left_parts or not right_parts:
-        # Empty paths shouldn't reach here (guarded upstream), but be safe.
+        # ``Path("")`` normalizes to ``Path(".")`` and may physically resolve
+        # to the same cwd. It is still an absent tool path, not an attributable
+        # output target, so reject it before the same-file check.
         return bool(left_parts) == bool(right_parts) and bool(left_parts)
+    try:
+        if left.exists() and right.exists() and os.path.samefile(left, right):
+            return True
+    except OSError:
+        pass
     common_len = min(len(left_parts), len(right_parts))
     return left_parts[:common_len] == right_parts[:common_len]
 
@@ -636,6 +730,1817 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
         tool_name, raw_stripped[:80],
     )
     return "{}"
+
+
+def _parse_tool_arguments_object(arguments: Any) -> dict:
+    """Parse a tool argument payload without inventing an empty object."""
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str) or not arguments.strip():
+        raise ValueError("Tool arguments must be a non-empty JSON object")
+    parsed = json.loads(arguments)
+    if not isinstance(parsed, dict):
+        raise ValueError("Tool arguments must decode to a JSON object")
+    return parsed
+
+
+def _tool_action_fingerprint(
+    tool_name: Any,
+    function_args: Any,
+) -> Optional[tuple[str, str]]:
+    """Return a stable identity for one requested tool action.
+
+    Name casing/outer whitespace and JSON object key order are transport
+    details, not different actions. Non-object arguments are deliberately not
+    fingerprinted because retry success must never be inferred from malformed
+    input.
+    """
+    normalized_name = str(tool_name or "").strip().lower()
+    if not normalized_name or not isinstance(function_args, dict):
+        return None
+    try:
+        canonical_args = json.dumps(
+            function_args,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return None
+    return normalized_name, canonical_args
+
+
+def _tool_failure_recovery_fingerprint(
+    tool_name: Any,
+    function_args: Any,
+) -> Optional[tuple[str, str]]:
+    """Return action identity used only to clear prior tool failures.
+
+    A terminal background-notification refusal is legitimately recovered by a
+    foreground retry of the same command. Execution-control knobs do not
+    change that underlying action, but command/workdir/env do. Duplicate-call
+    suppression intentionally continues to use the stricter full fingerprint.
+    """
+    normalized_name = str(tool_name or "").strip().lower()
+    if normalized_name != "terminal":
+        return _tool_action_fingerprint(normalized_name, function_args)
+    if not isinstance(function_args, dict):
+        return None
+    recovery_args = {
+        "command": function_args.get("command"),
+        "workdir": function_args.get("workdir"),
+        "env": function_args.get("env"),
+    }
+    return _tool_action_fingerprint(normalized_name, recovery_args)
+
+
+def _pending_tool_transition(
+    tool_name: Any,
+    function_args: Any,
+    result_text: Any,
+) -> Optional[tuple[str, str, Dict[str, str]]]:
+    """Return an explicit pending/completed/failed transition for async tools."""
+    normalized_name = str(tool_name or "").strip().lower()
+    if not isinstance(result_text, str):
+        return None
+    try:
+        payload = json.loads(result_text.strip())
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    if normalized_name == "terminal":
+        args = function_args if isinstance(function_args, dict) else {}
+        session_id = str(payload.get("session_id") or "").strip()
+        output = str(payload.get("output") or "").strip().lower()
+        if (
+            args.get("background") is True
+            and session_id
+            and "background process started" in output
+        ):
+            key = f"process:{session_id}"
+            return (
+                "pending",
+                key,
+                {
+                    "tool": "terminal",
+                    "session_id": session_id,
+                    "status": "pending",
+                    "summary": f"terminal session {session_id} is still running",
+                },
+            )
+        return None
+
+    if normalized_name == "process":
+        args = function_args if isinstance(function_args, dict) else {}
+        action = str(args.get("action") or "").strip().lower()
+        session_id = str(
+            payload.get("session_id") or args.get("session_id") or ""
+        ).strip()
+        exit_code = payload.get("exit_code")
+        status = str(payload.get("status") or "").strip().lower()
+        observed_terminal_state = (
+            action in {"kill", "poll", "wait"}
+            and session_id
+            and (
+                status == "not_found"
+                or (action == "kill" and status == "killed")
+                or (
+                    exit_code is not None
+                    and status
+                    in {
+                        "already_exited",
+                        "complete",
+                        "completed",
+                        "exited",
+                        "success",
+                        "succeeded",
+                    }
+                )
+            )
+        )
+        if observed_terminal_state:
+            key = f"process:{session_id}"
+            return (
+                "completed",
+                key,
+                {
+                    "tool": "terminal",
+                    "session_id": session_id,
+                    "status": "completed",
+                    "summary": f"terminal session {session_id} completed",
+                },
+            )
+        return None
+
+    args = function_args if isinstance(function_args, dict) else {}
+
+    if normalized_name == "admin_deal":
+        action = str(args.get("action") or "").strip().lower()
+        run_id = str(
+            payload.get("completedRun")
+            or payload.get("completed_run")
+            or payload.get("run_id")
+            or args.get("run_id")
+            or ""
+        ).strip()
+        status = str(payload.get("status") or args.get("status") or "").strip().lower()
+        if action != "complete_run" or payload.get("success") is not True or not run_id:
+            return None
+        key = f"admin-run:{run_id}"
+        if status in {"queued", "running", "waiting_external", "waiting_human"}:
+            waiting = "waiting for human input" if status == "waiting_human" else "still running"
+            return (
+                "pending",
+                key,
+                {
+                    "tool": "admin_deal",
+                    "run_id": run_id,
+                    "status": status,
+                    "summary": f"admin deal run {run_id} is {waiting}",
+                },
+            )
+        if status in {"completed", "succeeded"}:
+            return (
+                "completed",
+                key,
+                {
+                    "tool": "admin_deal",
+                    "run_id": run_id,
+                    "status": status,
+                    "summary": f"admin deal run {run_id} reached terminal status {status}",
+                },
+            )
+        if status in {"cancelled", "failed", "skipped"}:
+            return (
+                "failed",
+                key,
+                {
+                    "tool": "admin_deal",
+                    "run_id": run_id,
+                    "status": status,
+                    "summary": f"admin deal run {run_id} ended with status {status}",
+                },
+            )
+        return None
+
+    if normalized_name == "cronjob":
+        action = str(args.get("action") or "").strip().lower()
+        job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
+        if action == "list" and not job and isinstance(payload.get("jobs"), list):
+            jobs = [item for item in payload["jobs"] if isinstance(item, dict)]
+            requested_id = str(args.get("job_id") or "").strip()
+            if requested_id:
+                job = next(
+                    (
+                        item
+                        for item in jobs
+                        if str(item.get("job_id") or item.get("id") or "").strip()
+                        == requested_id
+                    ),
+                    {},
+                )
+            elif len(jobs) == 1:
+                job = jobs[0]
+        job_id = str(job.get("job_id") or job.get("id") or args.get("job_id") or "").strip()
+        if (
+            action in {"run", "run_now", "trigger"}
+            and payload.get("success") is True
+            and job_id
+            and str(job.get("state") or "").strip().lower()
+            in {"queued", "running", "scheduled"}
+        ):
+            return (
+                "pending",
+                f"cronjob:{job_id}",
+                {
+                    "tool": "cronjob",
+                    "job_id": job_id,
+                    "status": "scheduled",
+                    "baseline_last_run_at": str(job.get("last_run_at") or ""),
+                    "summary": f"cron job {job_id} was scheduled but has not finished",
+                },
+            )
+        if action == "list" and payload.get("success") is True and job_id and job.get("last_run_at"):
+            last_status = str(job.get("last_status") or "").strip().lower()
+            key = f"cronjob:{job_id}"
+            if last_status in {"ok", "success", "succeeded"}:
+                return (
+                    "completed",
+                    key,
+                    {
+                        "tool": "cronjob",
+                        "job_id": job_id,
+                        "status": last_status,
+                        "observed_last_run_at": str(job.get("last_run_at") or ""),
+                        "summary": f"cron job {job_id} completed successfully",
+                    },
+                )
+            if last_status in {"cancelled", "canceled", "error", "failed"}:
+                return (
+                    "failed",
+                    key,
+                    {
+                        "tool": "cronjob",
+                        "job_id": job_id,
+                        "status": last_status,
+                        "observed_last_run_at": str(job.get("last_run_at") or ""),
+                        "summary": f"cron job {job_id} ended with status {last_status}",
+                    },
+                )
+        return None
+
+    if normalized_name == "agent_handoff":
+        action = str(args.get("action") or "create").strip().lower()
+        handoff = payload.get("handoff") if isinstance(payload.get("handoff"), dict) else {}
+        handoff_id = str(
+            handoff.get("id")
+            or handoff.get("handoffId")
+            or handoff.get("handoff_id")
+            or args.get("handoff_id")
+            or ""
+        ).strip()
+        status = str(handoff.get("status") or "").strip().lower()
+        if not handoff_id:
+            return None
+        key = f"handoff:{handoff_id}"
+        if action in {"create", "get"} and status in {
+            "queued",
+            "running",
+            "waiting_external",
+            "waiting_human",
+        }:
+            return (
+                "pending",
+                key,
+                {
+                    "tool": "agent_handoff",
+                    "handoff_id": handoff_id,
+                    "status": status,
+                    "summary": f"agent handoff {handoff_id} is {status}",
+                },
+            )
+        if status in {"completed", "succeeded"}:
+            return (
+                "completed",
+                key,
+                {
+                    "tool": "agent_handoff",
+                    "handoff_id": handoff_id,
+                    "status": status,
+                    "summary": f"agent handoff {handoff_id} reached terminal status {status}",
+                },
+            )
+        if status in {"cancelled", "failed", "skipped"}:
+            return (
+                "failed",
+                key,
+                {
+                    "tool": "agent_handoff",
+                    "handoff_id": handoff_id,
+                    "status": status,
+                    "summary": f"agent handoff {handoff_id} ended with status {status}",
+                },
+            )
+        return None
+
+    if normalized_name == "agent_bus":
+        action = str(args.get("action") or "").strip().lower()
+        agent_id = str(
+            args.get("target_agent_id")
+            or args.get("to_agent_id")
+            or args.get("agent_id")
+            or "all"
+        ).strip()
+        worker = payload.get("worker") if isinstance(payload.get("worker"), dict) else {}
+        if action in {"wake", "wake_agent"}:
+            wake = worker.get("wake") if isinstance(worker.get("wake"), dict) else {}
+            if payload.get("success") is True and wake.get("pending") is True:
+                return (
+                    "pending",
+                    f"agent-worker:{agent_id}",
+                    {
+                        "tool": "agent_bus",
+                        "agent_id": agent_id,
+                        "status": "pending",
+                        "summary": f"agent worker wake for {agent_id} is pending",
+                    },
+                )
+            return None
+        if action in {"run_queued_work", "tick", "drain"}:
+            drained = worker.get("drained") if isinstance(worker.get("drained"), dict) else {}
+            handoffs = int(drained.get("handoffs") or 0)
+            admin_runs = int(drained.get("adminRuns") or drained.get("admin_runs") or 0)
+            state = str(worker.get("state") or "").strip().lower()
+            wake = worker.get("wake") if isinstance(worker.get("wake"), dict) else {}
+            if payload.get("success") is True and (
+                handoffs or admin_runs or state in {"locked", "running"} or wake.get("pending") is True
+            ):
+                return (
+                    "pending",
+                    f"agent-work:{agent_id}",
+                    {
+                        "tool": "agent_bus",
+                        "agent_id": agent_id,
+                        "status": "running",
+                        "summary": (
+                            f"agent worker has ongoing work for {agent_id}; "
+                            f"{handoffs} handoff(s) and {admin_runs} admin run(s) were dispatched"
+                        ),
+                    },
+                )
+            return None
+        if action in {
+            "run_experiment",
+            "experiment_run",
+            "start_experiment",
+            "experiment_start",
+            "evaluate_experiment",
+            "experiment_evaluate",
+        }:
+            experiment = payload.get("experiment") if isinstance(payload.get("experiment"), dict) else {}
+            experiment_id = str(
+                experiment.get("id") or args.get("experiment_id") or args.get("id") or ""
+            ).strip()
+            status = str(experiment.get("status") or "").strip().lower()
+            if not experiment_id:
+                return None
+            key = f"experiment:{experiment_id}"
+            if status in {"queued", "running", "scheduled"}:
+                return (
+                    "pending",
+                    key,
+                    {
+                        "tool": "agent_bus",
+                        "experiment_id": experiment_id,
+                        "status": status,
+                        "summary": f"experiment {experiment_id} is {status}",
+                    },
+                )
+            if status in {"completed", "succeeded"}:
+                return (
+                    "completed",
+                    key,
+                    {
+                        "tool": "agent_bus",
+                        "experiment_id": experiment_id,
+                        "status": status,
+                        "summary": f"experiment {experiment_id} reached terminal status {status}",
+                    },
+                )
+            if status in {"cancelled", "failed"}:
+                return (
+                    "failed",
+                    key,
+                    {
+                        "tool": "agent_bus",
+                        "experiment_id": experiment_id,
+                        "status": status,
+                        "summary": f"experiment {experiment_id} ended with status {status}",
+                    },
+                )
+        return None
+
+    if normalized_name != "delegate_task":
+        return None
+
+    status = str(payload.get("status") or "").strip().lower()
+    child_id = str(
+        payload.get("task_id")
+        or payload.get("child_task_id")
+        or payload.get("run_id")
+        or ""
+    ).strip()
+    if not child_id:
+        return None
+    if status in {
+        "accepted",
+        "dispatched",
+        "in_progress",
+        "pending",
+        "queued",
+        "running",
+        "started",
+        "waiting",
+        "waiting_external",
+    }:
+        key = f"delegate:{child_id}"
+        return (
+            "pending",
+            key,
+            {
+                "tool": "delegate_task",
+                "task_id": child_id,
+                "status": "pending",
+                "summary": f"delegate_task child {child_id} is still running",
+            },
+        )
+    if status in {"complete", "completed", "done", "succeeded", "success"}:
+        key = f"delegate:{child_id}"
+        return (
+            "completed",
+            key,
+            {
+                "tool": "delegate_task",
+                "task_id": child_id,
+                "status": "completed",
+                "summary": f"delegate_task child {child_id} completed",
+            },
+        )
+    if status in {"cancelled", "canceled", "error", "failed"}:
+        key = f"delegate:{child_id}"
+        return (
+            "failed",
+            key,
+            {
+                "tool": "delegate_task",
+                "task_id": child_id,
+                "status": status,
+                "summary": f"delegate_task child {child_id} ended with status {status}",
+            },
+        )
+    return None
+
+
+_ACTION_OBLIGATION_LABELS = {
+    "create_document": "document creation",
+    "deal_update": "deal update",
+    "send": "message delivery",
+    "upload": "upload",
+}
+
+
+_ACTION_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _action_request_body(user_message: Any) -> Optional[str]:
+    """Normalize a genuine user action request or reject conversational input."""
+    if not isinstance(user_message, str):
+        return None
+    text = re.sub(r"\s+", " ", user_message).strip().lower()
+    if not text:
+        return None
+    if text.startswith(
+        (
+            "[automated",
+            "[internal",
+            "[system",
+            "<automated",
+            "<internal",
+            "<system",
+            "⟦subagent-result",
+        )
+    ):
+        return None
+
+    if re.match(r"^(?:how|what|why|when|where|which|who)\b", text):
+        return None
+    if re.match(
+        r"^(?:should|can|could|would|do|did|have|has|is|are|was|were)\s+"
+        r"(?:i|we)\b",
+        text,
+    ):
+        return None
+    if re.match(r"^(?:should|did|have|has|is|are|was|were)\b", text):
+        return None
+    if re.match(r"^do\b", text) and (
+        "?" in text
+        or re.search(r"\b(?:need|require|contain|include)\b", text)
+    ):
+        return None
+    if re.match(r"^(?:can|could|would|will)\b", text) and not re.match(
+        r"^(?:can|could|would|will)\s+you\b",
+        text,
+    ):
+        return None
+    if re.match(r"^(?:tell|show|explain|walk)\b.*\b(?:how|what|whether)\b", text):
+        return None
+
+    body = text
+    for _ in range(2):
+        conversational_prefix = re.match(
+            r"^(?:all\s+right|alright|great|okay|ok|perfect|sure|thanks|"
+            r"thank\s+you|yeah|yep|yes)\b[\s,;:!.\-]*",
+            body,
+        )
+        if not conversational_prefix:
+            break
+        body = body[conversational_prefix.end():].strip()
+
+    request_leaders = (
+        r"^please\s+",
+        r"^(?:can|could|would|will)\s+you\s+(?:please\s+)?",
+        r"^i\s+(?:need|want)\s+you\s+to\s+",
+        r"^let(?:'|’)s\s+",
+        r"^go\s+ahead\s+and\s+",
+    )
+    for _ in range(3):
+        stripped_leader = False
+        for leader in request_leaders:
+            stripped = re.sub(leader, "", body, count=1)
+            if stripped != body:
+                body = stripped.strip()
+                stripped_leader = True
+                break
+        if not stripped_leader:
+            break
+    return body or None
+
+
+def _unverified_action_failure_text(obligation: str) -> str:
+    label = _ACTION_OBLIGATION_LABELS.get(obligation, "requested")
+    return (
+        f"The requested {label} action was not completed because no "
+        "successful relevant tool or artifact result verified it."
+    )
+
+
+def _classify_action_obligation(
+    user_message: Any,
+) -> Optional[str]:
+    """Identify narrow genuine-user requests that require mutation evidence.
+
+    This is deliberately conservative. Advice, questions, and drafts that can
+    be returned directly in chat stay outside the gate. Automated wake/context
+    messages are explicitly excluded so resumed user turns remain protected.
+    """
+    body = _action_request_body(user_message)
+    if body is None:
+        return None
+
+    document_artifact = re.search(
+        r"\b(?:cps|doc|docs|document|documents|docx|file|form|forms|"
+        r"contract|contracts|agreement|offer|paperwork|pdf|pdfs|"
+        r"signing\s+package|transaction\s+(?:docs|documents|package))\b",
+        body,
+    )
+
+    # Drafting/wording requests can be fulfilled in the answer itself. Write
+    # is exempt only when it is wording, not when the request explicitly names
+    # a persisted file/document/path.
+    if re.match(r"^(?:compose|draft|preview)\b", body):
+        return None
+    if re.match(r"^write\b", body):
+        persisted_write = bool(
+            re.search(r"\b(?:download|file|pdf|document|docx|path|save)\b", body)
+            or re.search(r"(?:^|\s)(?:/|~\/|[a-z]:\\)", body)
+        )
+        return "create_document" if document_artifact and persisted_write else None
+
+    # "Send me the summary/status" normally asks for the answer in this chat,
+    # not an external side effect. An explicit channel/delivery mechanism still
+    # requires proof.
+    if re.match(
+        r"^send\s+(?:me|us)\s+(?:the\s+)?(?:latest\s+)?"
+        r"(?:deal\s+)?(?:details|information|overview|status|summary|update)\b",
+        body,
+    ) and not re.search(
+        r"\b(?:email|gmail|slack|sms|telegram|text|via|whatsapp)\b",
+        body,
+    ):
+        return None
+
+    passive_external_send = re.search(
+        r"\b(?:delivered|emailed|forwarded|sent|texted)\s+to\s+"
+        r"(?!(?:here|me|us|you)\b)\S+",
+        body,
+    )
+    if passive_external_send and re.search(
+        r"\b(?:agreement|contract|document|email|file|follow-up|form|message|"
+        r"package|pdf|summary)\b",
+        body,
+    ):
+        return "send"
+
+    if re.search(
+        r"\b(?:agreement|contract|document|file|form|package|pdf)\b"
+        r".{0,30}\bneeds?\s+(?:to\s+be\s+)?(?:delivered|emailed|sent|sending|forwarded)\b",
+        body,
+    ):
+        return "send"
+
+    if re.match(
+        r"^(?:send|e-?mail|text|forward|deliver|notify)\b",
+        body,
+    ):
+        return "send"
+
+    if re.match(r"^(?:attach|publish|upload)\b", body):
+        return "upload"
+
+    if document_artifact and re.match(
+        r"^(?:build|complete|create|do|fill(?:\s+out)?|finish|generate|get|make|"
+        r"prepare|produce|put\s+together|run|start)\b",
+        body,
+    ):
+        return "create_document"
+
+    if re.match(r"^close\s+out\s+(?:the\s+)?admin\s+run\b", body):
+        return "deal_update"
+
+    if re.match(r"^update\s+(?:me|us)\b", body):
+        return None
+    deal_surface = re.search(
+        r"\b(?:admin\s+run|board|checklist|crm|deal|lead|listing|transaction|stage)\b",
+        body,
+    )
+    if deal_surface and re.match(
+        r"^(?:add|assign|change|close(?:\s+out)?|mark|move|record|remove|reopen|save|set|update)\b",
+        body,
+    ):
+        return "deal_update"
+    return None
+
+
+def _explicit_action_count(text: str, object_pattern: str) -> Optional[int]:
+    count_token = r"(?:[1-9]|10|" + "|".join(_ACTION_COUNT_WORDS) + r")"
+    match = re.search(
+        rf"\b(?P<count>{count_token})\s+(?:separate\s+|distinct\s+)?"
+        rf"(?:{object_pattern})\b",
+        text,
+    )
+    if not match:
+        return None
+    raw_count = match.group("count")
+    try:
+        return int(raw_count)
+    except ValueError:
+        return _ACTION_COUNT_WORDS.get(raw_count)
+
+
+def _named_document_targets(user_message: Any) -> list[str]:
+    """Extract only high-confidence acronym lists naming multiple forms.
+
+    Requiring at least two joined acronyms immediately before a plural document
+    noun avoids treating an uppercase province or street address as another
+    requested form.
+    """
+    if not isinstance(user_message, str):
+        return []
+    excluded = {
+        "AND",
+        "DOC",
+        "DOCS",
+        "DOCX",
+        "EMAIL",
+        "PDF",
+        "PDFS",
+        "SMS",
+    }
+    target_list = re.search(
+        r"(?P<targets>\b[A-Z][A-Z0-9-]{1,}"
+        r"(?:\s*(?:,|&|\band\b)\s*[A-Z][A-Z0-9-]{1,})+)"
+        r"\s+(?i:pdfs|forms|documents|docs|files|contracts|agreements)\b",
+        user_message,
+    )
+    if target_list is None:
+        return []
+    targets: list[str] = []
+    for token in re.findall(r"\b[A-Z][A-Z0-9-]{1,}\b", target_list.group("targets")):
+        normalized = token.strip("-").lower()
+        if token in excluded or not normalized or normalized in targets:
+            continue
+        targets.append(normalized)
+    return targets
+
+
+def _document_action_scope(user_message: Any, body: str) -> str:
+    """Limit document names/counts to the create/attach clause."""
+    source = user_message if isinstance(user_message, str) else body
+    start = re.search(
+        r"\b(?:attach|build|complete|create|fill(?:\s+out)?|finish|generate|"
+        r"make|prepare|produce|put\s+together|upload|write)\b",
+        source,
+        flags=re.IGNORECASE,
+    )
+    scoped = source[start.start():] if start else source
+    end = re.search(
+        r"(?:[,;]\s*|\s+(?:and|then)\s+)"
+        r"(?=(?:attach|publish|upload|send|e-?mail|forward|deliver|notify|"
+        r"text|add|assign|change|close|mark|move|record|remove|reopen|save|"
+        r"set|update)\b)",
+        scoped,
+        flags=re.IGNORECASE,
+    )
+    return scoped[:end.start()] if end else scoped
+
+
+def _action_kind_positions(body: str, primary: Optional[str]) -> Dict[str, int]:
+    """Find every explicit mutation kind while leaving advice/drafts ungated."""
+    positions: Dict[str, int] = {}
+
+    create_match = re.search(
+        r"\b(?:build|complete|create|fill(?:\s+out)?|finish|generate|make|"
+        r"prepare|produce|put\s+together|write)\b.{0,100}"
+        r"\b(?:cps|doc|docs|document|documents|docx|file|files|form|forms|"
+        r"contract|contracts|agreement|agreements|offer|paperwork|pdf|pdfs|"
+        r"signing\s+package|transaction\s+(?:docs|documents|package))\b",
+        body,
+    )
+    if create_match and not re.match(r"^(?:compose|draft|preview)\b", body):
+        positions["create_document"] = create_match.start()
+
+    upload_match = re.search(r"\b(?:attach|publish|upload)\b", body)
+    if upload_match:
+        positions["upload"] = upload_match.start()
+
+    send_match = re.search(
+        r"\b(?:send|forward|deliver|notify)\b|"
+        r"(?:^|[,;]|\b(?:and|then)\b)\s*(?:e-?mail|text)\b",
+        body,
+    )
+    if send_match:
+        positions["send"] = send_match.start()
+
+    deal_match = re.search(
+        r"\b(?:add|assign|change|close(?:\s+out)?|mark|move|record|remove|"
+        r"reopen|save|set|update)\b.{0,80}"
+        r"\b(?:admin\s+run|board|checklist|crm|deal|lead|listing|"
+        r"transaction|stage)\b",
+        body,
+    )
+    if deal_match:
+        positions["deal_update"] = deal_match.start()
+
+    if primary and primary not in positions:
+        positions[primary] = 0
+    return positions
+
+
+def _classify_action_obligations(user_message: Any) -> list[Dict[str, Any]]:
+    """Build a fail-closed ledger for every requested physical action.
+
+    One entry represents one independently verifiable side effect. Ambiguous
+    plural document/attachment requests deliberately require at least two
+    distinct artifacts rather than letting one file stand in for an unknown
+    collection.
+    """
+    body = _action_request_body(user_message)
+    if body is None:
+        return []
+    primary = _classify_action_obligation(user_message)
+    if primary is None and re.match(
+        r"^send\s+(?:me|us)\s+(?:the\s+)?(?:latest\s+)?"
+        r"(?:deal\s+)?(?:details|information|overview|status|summary|update)\b",
+        body,
+    ) and not re.search(
+        r"\b(?:email|gmail|slack|sms|telegram|text|via|whatsapp)\b",
+        body,
+    ):
+        return []
+    positions = _action_kind_positions(body, primary)
+    if not positions:
+        return []
+
+    document_scope = _document_action_scope(user_message, body)
+    # Explicit output paths are authoritative even when the shared document
+    # object appears after a later verb ("create and send two PDFs at ...").
+    # Named acronym targets remain clause-scoped to avoid address/province
+    # words becoming phantom forms.
+    paths = _requested_artifact_paths(user_message)
+    named_targets = _named_document_targets(user_message)
+    document_count = _explicit_action_count(
+        document_scope.lower(),
+        r"(?:pdfs?|documents?|docs?|files?|forms?|contracts?|agreements?)",
+    ) or _explicit_action_count(
+        body,
+        r"(?:pdfs?|documents?|docs?|files?|forms?|contracts?|agreements?)",
+    ) or 1
+    if paths:
+        document_count = max(document_count, len(paths))
+    if named_targets:
+        document_count = max(document_count, len(named_targets))
+    if re.search(
+        r"\b(?:pdfs|documents|docs|files|forms|contracts|agreements)\b",
+        body,
+    ):
+        document_count = max(document_count, 2)
+
+    entries: list[Dict[str, Any]] = []
+    ordered_kinds = sorted(positions, key=lambda kind: positions[kind])
+    for kind in ordered_kinds:
+        count = 1
+        targets: list[Optional[str]] = []
+        entry_paths: list[Optional[Path]] = []
+        if kind == "create_document":
+            count = document_count
+            entry_paths = list(paths[:count])
+            if not paths:
+                targets = list(named_targets[:count])
+        elif kind == "upload":
+            upload_count = _explicit_action_count(
+                body,
+                r"(?:listing\s+)?(?:attachments?|uploads?|pdfs?|documents?|"
+                r"docs?|files?|forms?|photos?|images?|pictures?)",
+            ) or 1
+            refers_to_created_set = bool(
+                re.search(
+                    r"\b(?:attach|upload)\s+(?:all\s+of\s+)?"
+                    r"(?:both|them|these|those|the\s+(?:documents|files|forms|pdfs))\b",
+                    body,
+                )
+            )
+            if refers_to_created_set or re.search(
+                r"\b(?:attach|upload)\b.{0,50}"
+                r"\b(?:pdfs|documents|docs|files|forms|photos|images|pictures)\b",
+                body,
+            ):
+                upload_count = max(upload_count, document_count, 2)
+            if paths:
+                upload_count = max(upload_count, len(paths))
+            count = upload_count
+            entry_paths = list(paths[:count])
+            if not paths and (refers_to_created_set or named_targets):
+                targets = list(named_targets[:count])
+        elif kind == "send":
+            count = _explicit_action_count(
+                body,
+                r"(?:emails?|messages?|texts?|notifications?|deliveries?)",
+            ) or 1
+            if re.search(
+                r"\b(?:send|forward|deliver|notify|e-?mail|text)\b.{0,50}"
+                r"\b(?:emails|messages|texts|notifications|deliveries)\b",
+                body,
+            ):
+                count = max(count, 2)
+
+        while len(entry_paths) < count:
+            entry_paths.append(None)
+        while len(targets) < count:
+            targets.append(None)
+        for index in range(count):
+            path = entry_paths[index]
+            target = targets[index]
+            entries.append(
+                {
+                    "id": f"{kind}:{index + 1}",
+                    "kind": kind,
+                    "target": target,
+                    "path": str(path) if path is not None else None,
+                    "verified": False,
+                    "evidence": None,
+                }
+            )
+    return entries
+
+
+def _action_ledger_label(entries: list[Dict[str, Any]]) -> str:
+    if len(entries) == 1:
+        return _ACTION_OBLIGATION_LABELS.get(entries[0]["kind"], "requested")
+    return "requested actions"
+
+
+def _unverified_action_ledger_failure_text(entries: list[Dict[str, Any]]) -> str:
+    if len(entries) <= 1:
+        kind = entries[0]["kind"] if entries else ""
+        return _unverified_action_failure_text(kind)
+    missing: list[str] = []
+    for kind in _ACTION_OBLIGATION_LABELS:
+        required = [entry for entry in entries if entry["kind"] == kind]
+        if not required:
+            continue
+        verified = sum(bool(entry["verified"]) for entry in required)
+        if verified != len(required):
+            missing.append(
+                f"{_ACTION_OBLIGATION_LABELS[kind]} ({verified}/{len(required)} verified)"
+            )
+    missing_text = "; ".join(missing) or "requested action evidence"
+    return (
+        "The requested actions were not completed because every requested "
+        "side effect was not verified by a distinct successful tool or physical "
+        f"artifact result. Missing: {missing_text}."
+    )
+
+
+def _action_response_needs_input(content: Any) -> bool:
+    """Recognize a truthful clarification/approval/blocker response."""
+    if not isinstance(content, str):
+        return False
+    text = re.sub(r"\s+", " ", content).strip().lower()
+    if not text:
+        return False
+    if "?" in text and re.match(
+        r"^(?:can|could|may|should|what|which|who|where|when)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\bplease\s+(?:approve|choose|confirm|provide|select|share|specify)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        r"\b(?:need|require|missing)\b.{0,100}\b(?:address|approval|"
+        r"confirmation|contact|date|deal\s+id|destination|details|document|"
+        r"email|file|information|listing\s+id|name|path|permission|phone|"
+        r"province|recipient|selection|target)\b",
+        text,
+    ):
+        return True
+    if re.search(r"\bbefore\s+i\s+can\b", text):
+        return True
+    if (
+        re.search(
+            r"\b(?:cannot|can't|unable\s+to|not\s+able\s+to)\b.{0,100}"
+            r"\b(?:complete|create|deliver|proceed|send|update|upload)\b",
+            text,
+        )
+        and re.search(
+            r"\b(?:address|approval|confirmation|contact|details|document|"
+            r"email|file|information|name|path|permission|phone|recipient|"
+            r"selection|target)\b",
+            text,
+        )
+        and re.search(r"\b(?:need|provide|share|specify|until|without)\b", text)
+    ):
+        return True
+    return False
+
+
+_DOCUMENT_ARTIFACT_SUFFIXES = {
+    ".csv",
+    ".doc",
+    ".docx",
+    ".md",
+    ".odt",
+    ".pdf",
+    ".rtf",
+    ".txt",
+    ".xlsx",
+}
+_DOCUMENT_ARTIFACT_SUFFIX_PATTERN = "|".join(
+    re.escape(suffix.lstrip("."))
+    for suffix in sorted(_DOCUMENT_ARTIFACT_SUFFIXES)
+)
+_DOCX_MAX_ARCHIVE_ENTRIES = 2048
+_DOCX_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+_DOCX_MAX_XML_BYTES = 16 * 1024 * 1024
+_DOCX_MAX_MEDIA_BYTES = 96 * 1024 * 1024
+_DOCX_MAX_MEDIA_PART_BYTES = 32 * 1024 * 1024
+
+# Explicit paths in a user request are also used to bind uploads to the exact
+# file the realtor named.  Uploads legitimately include listing photos,
+# archives, emails, and office files that are not document-generation outputs.
+_REQUESTED_ARTIFACT_SUFFIXES = _DOCUMENT_ARTIFACT_SUFFIXES | {
+    ".bmp",
+    ".eml",
+    ".gif",
+    ".heic",
+    ".htm",
+    ".html",
+    ".ics",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".msg",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".webp",
+    ".xls",
+    ".zip",
+}
+_REQUESTED_ARTIFACT_SUFFIX_PATTERN = "|".join(
+    re.escape(suffix.lstrip("."))
+    for suffix in sorted(_REQUESTED_ARTIFACT_SUFFIXES)
+)
+
+
+def _resolved_artifact_path(raw_path: Any) -> Optional[Path]:
+    if isinstance(raw_path, os.PathLike):
+        raw_path = os.fspath(raw_path)
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    try:
+        return Path(raw_path.strip()).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _requested_artifact_paths(user_message: Any) -> list[Path]:
+    if not isinstance(user_message, str):
+        return []
+    raw_paths: list[str] = []
+    quoted_spans: list[tuple[int, int]] = []
+    for match in re.finditer(
+        rf"(?P<quote>[\"'])(?P<path>[^\"'\r\n]+\."
+        rf"(?:{_REQUESTED_ARTIFACT_SUFFIX_PATTERN}))(?P=quote)",
+        user_message,
+        flags=re.IGNORECASE,
+    ):
+        raw_paths.append(match.group("path"))
+        quoted_spans.append(match.span())
+    for match in re.finditer(
+        rf"(?:^|\s)(?P<path>[^\s\"'<>]+\."
+        rf"(?:{_REQUESTED_ARTIFACT_SUFFIX_PATTERN}))"
+        r"(?=$|\s|[,;:!?)}\]])",
+        user_message,
+        flags=re.IGNORECASE,
+    ):
+        if any(start <= match.start("path") < end for start, end in quoted_spans):
+            continue
+        raw_paths.append(
+            match.group("path").lstrip("([{").rstrip(".,;:!?)]}")
+        )
+
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in raw_paths:
+        resolved = _resolved_artifact_path(raw_path)
+        if (
+            resolved is None
+            or resolved.suffix.lower() not in _REQUESTED_ARTIFACT_SUFFIXES
+            or resolved in seen
+        ):
+            continue
+        seen.add(resolved)
+        paths.append(resolved)
+    return paths
+
+
+def _requested_artifact_path(user_message: Any) -> Optional[Path]:
+    paths = _requested_artifact_paths(user_message)
+    return paths[0] if paths else None
+
+
+def _validate_document_artifact(
+    raw_path: Any,
+    user_message: Any = None,
+    *,
+    expected_bytes: Optional[int] = None,
+    baseline: Optional[Dict[str, Any]] = None,
+    require_fresh: bool = False,
+) -> bool:
+    """Physically verify a nonempty document artifact and known formats.
+
+    ``require_fresh`` is the completion-truth boundary.  A successful tool
+    response is not proof that it created a document: the exact candidate path
+    must have been snapshotted before the call and be new or content-changed
+    afterward.  This prevents a stale PDF left by an earlier run from satisfying
+    the current user's request.
+    """
+    path = _resolved_artifact_path(raw_path)
+    if path is None:
+        return False
+    requested_paths = _requested_artifact_paths(user_message)
+    if requested_paths and path not in requested_paths:
+        return False
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if not path.is_file() or size <= 0:
+        return False
+    if expected_bytes is not None and expected_bytes != size:
+        return False
+
+    if require_fresh:
+        if not isinstance(baseline, dict):
+            return False
+        if baseline.get("path") != str(path):
+            return False
+        current = _document_artifact_snapshot(path)
+        if (
+            not current.get("exists")
+            or not current.get("is_file")
+            or not current.get("sha256")
+        ):
+            return False
+        if baseline.get("exists"):
+            # A rewrite/replacement with identical bytes is still stale
+            # evidence. Existing artifacts verify a new request only when
+            # their content digest actually changes during this call.
+            if not baseline.get("sha256") or (
+                baseline.get("sha256") == current.get("sha256")
+            ):
+                return False
+
+    request_text = str(user_message or "").lower()
+    expected_suffix = None
+    if re.search(r"\bpdf\b", request_text):
+        expected_suffix = ".pdf"
+    elif re.search(r"\bdocx\b|\bword\s+document\b", request_text):
+        expected_suffix = ".docx"
+    suffix = path.suffix.lower()
+    if expected_suffix and suffix != expected_suffix:
+        return False
+    if suffix not in _DOCUMENT_ARTIFACT_SUFFIXES:
+        return False
+
+    if suffix == ".pdf":
+        try:
+            import fitz
+
+            with fitz.open(path) as document:
+                if document.page_count < 1:
+                    return False
+                for page_index in range(min(document.page_count, 5)):
+                    page = document.load_page(page_index)
+                    if page.get_text("text").strip() or page.get_images(full=True):
+                        return True
+                    if (
+                        page.get_drawings()
+                        or any(page.widgets() or ())
+                        or page.first_annot
+                    ):
+                        return True
+                    preview = page.get_pixmap(
+                        matrix=fitz.Matrix(0.2, 0.2),
+                        alpha=False,
+                    )
+                    samples = preview.samples
+                    if samples and min(samples) != max(samples):
+                        return True
+                return False
+        except Exception:
+            return False
+
+    if suffix == ".docx":
+        try:
+            import zipfile
+            from xml.etree import ElementTree
+
+            with zipfile.ZipFile(path) as archive:
+                infos = archive.infolist()
+                if not infos or len(infos) > _DOCX_MAX_ARCHIVE_ENTRIES:
+                    return False
+                names = [info.filename for info in infos]
+                if len(set(names)) != len(names):
+                    return False
+                if any(info.flag_bits & 0x1 for info in infos):
+                    return False
+                if sum(info.file_size for info in infos) > _DOCX_MAX_UNCOMPRESSED_BYTES:
+                    return False
+                info_by_name = {info.filename: info for info in infos}
+                if (
+                    "[Content_Types].xml" not in info_by_name
+                    or "word/document.xml" not in info_by_name
+                ):
+                    return False
+                document_info = info_by_name["word/document.xml"]
+                if (
+                    document_info.is_dir()
+                    or document_info.file_size <= 0
+                    or document_info.file_size > _DOCX_MAX_XML_BYTES
+                ):
+                    return False
+                media_infos = [
+                    info
+                    for info in infos
+                    if info.filename.startswith("word/media/") and not info.is_dir()
+                ]
+                if any(
+                    info.file_size <= 0
+                    or info.file_size > _DOCX_MAX_MEDIA_PART_BYTES
+                    for info in media_infos
+                ):
+                    return False
+                if sum(info.file_size for info in media_infos) > _DOCX_MAX_MEDIA_BYTES:
+                    return False
+                if archive.testzip() is not None:
+                    return False
+                document_xml = archive.read(document_info)
+                try:
+                    document_root = ElementTree.fromstring(document_xml)
+                except ElementTree.ParseError:
+                    return False
+                visible_text = " ".join(
+                    text
+                    for text in document_root.itertext()
+                    if isinstance(text, str)
+                )
+                has_text = bool(re.search(r"[A-Za-z0-9]", visible_text))
+                has_media = bool(media_infos)
+                return has_text or has_media
+        except (OSError, KeyError, zipfile.BadZipFile):
+            return False
+    return True
+
+
+_ARTIFACT_OUTPUT_PATH_KEYS = frozenset(
+    {
+        "artifact_path",
+        "artifactPath",
+        "download_path",
+        "downloadPath",
+        "file_path",
+        "filePath",
+        "output_file",
+        "output_path",
+        "outputFile",
+        "outputPath",
+        "path",
+        "save_path",
+        "savePath",
+    }
+)
+_ARTIFACT_HASH_LIMIT_BYTES = 64 * 1024 * 1024
+_ARTIFACT_SOURCE_SCAN_LIMIT = 64 * 1024
+_ARTIFACT_SOURCE_PATH_LIMIT = 32
+_PHYSICAL_ARTIFACT_TOOL_NAMES = frozenset(
+    {"execute_code", "patch", "terminal", "write_file"}
+)
+
+
+def _document_artifact_snapshot(raw_path: Any) -> Dict[str, Any]:
+    """Return stable physical state for one exact candidate artifact path."""
+    path = _resolved_artifact_path(raw_path)
+    state: Dict[str, Any] = {
+        "path": str(path) if path is not None else None,
+        "exists": False,
+        "is_file": False,
+        "size": None,
+        "mtime_ns": None,
+        "ctime_ns": None,
+        "device": None,
+        "inode": None,
+        "sha256": None,
+    }
+    if path is None:
+        return state
+    try:
+        stat = path.stat()
+    except OSError:
+        return state
+    state.update(
+        {
+            "exists": True,
+            "is_file": path.is_file(),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+        }
+    )
+    if not state["is_file"]:
+        return state
+    if stat.st_size > _ARTIFACT_HASH_LIMIT_BYTES:
+        state["too_large"] = True
+        return state
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as artifact_file:
+            for chunk in iter(lambda: artifact_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return state
+    try:
+        final_stat = path.stat()
+    except OSError:
+        return state
+    if (
+        final_stat.st_dev != stat.st_dev
+        or final_stat.st_ino != stat.st_ino
+        or final_stat.st_size != stat.st_size
+        or final_stat.st_mtime_ns != stat.st_mtime_ns
+    ):
+        state["changed_during_snapshot"] = True
+        return state
+    state["sha256"] = digest.hexdigest()
+    return state
+
+
+def _artifact_paths_from_mapping(value: Any) -> set[Path]:
+    """Extract explicit output-like document paths without guessing inputs."""
+    paths: set[Path] = set()
+
+    def visit(item: Any, parent_key: Optional[str] = None) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                visit(child, str(key))
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child, parent_key)
+            return
+        if parent_key not in _ARTIFACT_OUTPUT_PATH_KEYS:
+            return
+        path = _resolved_artifact_path(item)
+        if path is not None and path.suffix.lower() in _DOCUMENT_ARTIFACT_SUFFIXES:
+            paths.add(path)
+
+    visit(value)
+    return paths
+
+
+def _artifact_paths_from_tool_source(
+    tool_name: Any,
+    function_args: Any,
+) -> set[Path]:
+    """Extract bounded literal document paths from terminal/code source text."""
+    name = str(tool_name or "").strip().lower()
+    if name not in {"terminal", "execute_code"}:
+        return set()
+    args = function_args if isinstance(function_args, dict) else {}
+    source_key = "command" if name == "terminal" else "code"
+    source = args.get(source_key)
+    if (
+        not isinstance(source, str)
+        or not source.strip()
+        or len(source) > _ARTIFACT_SOURCE_SCAN_LIMIT
+    ):
+        return set()
+    base = _resolved_artifact_path(args.get("workdir")) or Path.cwd().resolve(
+        strict=False
+    )
+    raw_paths: list[str] = []
+    quoted_spans: list[tuple[int, int]] = []
+    for match in re.finditer(
+        rf"(?P<quote>[\"'])(?P<path>[^\"'\r\n]+\."
+        rf"(?:{_DOCUMENT_ARTIFACT_SUFFIX_PATTERN}))(?P=quote)",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        raw_paths.append(match.group("path"))
+        quoted_spans.append(match.span())
+    for match in re.finditer(
+        rf"(?:^|\s)(?P<path>[^\s\"'<>]+\."
+        rf"(?:{_DOCUMENT_ARTIFACT_SUFFIX_PATTERN}))"
+        r"(?=$|\s|[,;:!?)}\]])",
+        source,
+        flags=re.IGNORECASE,
+    ):
+        if any(start <= match.start("path") < end for start, end in quoted_spans):
+            continue
+        raw_paths.append(
+            match.group("path").lstrip("([{").rstrip(".,;:!?)]}")
+        )
+
+    paths: set[Path] = set()
+    for raw_path in raw_paths:
+        try:
+            candidate = Path(raw_path).expanduser()
+            if not candidate.is_absolute():
+                candidate = base / candidate
+            candidate = candidate.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate.suffix.lower() not in _DOCUMENT_ARTIFACT_SUFFIXES:
+            continue
+        paths.add(candidate)
+        if len(paths) >= _ARTIFACT_SOURCE_PATH_LIMIT:
+            break
+    return paths
+
+
+def _capture_document_artifact_baselines(
+    tool_name: Any,
+    function_args: Any,
+    user_message: Any,
+) -> Dict[str, Dict[str, Any]]:
+    """Snapshot exact output candidates immediately before a tool runs."""
+    name = str(tool_name or "").strip().lower()
+    if name not in _PHYSICAL_ARTIFACT_TOOL_NAMES:
+        return {}
+    args = function_args if isinstance(function_args, dict) else {}
+    candidates = _artifact_paths_from_mapping(args)
+    candidates.update(_artifact_paths_from_tool_source(name, args))
+    candidates.update(_requested_artifact_paths(user_message))
+    return {
+        str(path): _document_artifact_snapshot(path)
+        for path in candidates
+    }
+
+
+def _tool_call_mentions_artifact_path(
+    name: str,
+    args: Dict[str, Any],
+    path: Path,
+) -> bool:
+    """Require terminal/code attribution to name the exact output path."""
+    return path in _artifact_paths_from_tool_source(name, args)
+
+
+def _fresh_document_artifact_from_tool(
+    tool_name: str,
+    args: Dict[str, Any],
+    payload: Any,
+    user_message: Any,
+    baselines: Optional[Dict[str, Dict[str, Any]]],
+) -> bool:
+    """Verify a fresh document produced by a supported physical adapter."""
+    if not isinstance(baselines, dict) or not baselines:
+        return False
+
+    name = tool_name.strip().lower()
+    if name not in _PHYSICAL_ARTIFACT_TOOL_NAMES:
+        return False
+    candidate_paths = _artifact_paths_from_mapping(args)
+    candidate_paths.update(_artifact_paths_from_tool_source(name, args))
+    candidate_paths.update(_requested_artifact_paths(user_message))
+
+    if name in {"write_file", "patch"}:
+        candidate_paths = {
+            path
+            for path in candidate_paths
+            if path == _resolved_artifact_path(args.get("path"))
+        }
+
+    expected_bytes = None
+    if name == "write_file" and isinstance(payload, dict):
+        value = payload.get("bytes_written")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return False
+        expected_bytes = value
+    if name == "patch" and (
+        not isinstance(payload, dict) or payload.get("success") is not True
+    ):
+        return False
+    if name == "terminal" and isinstance(payload, dict):
+        try:
+            if int(payload.get("exit_code", 1)) != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    if name == "execute_code" and (
+        not isinstance(payload, dict)
+        or str(payload.get("status") or "").strip().lower() != "success"
+    ):
+        return False
+
+    for path in candidate_paths:
+        if name in {"terminal", "execute_code"} and not _tool_call_mentions_artifact_path(
+            name,
+            args,
+            path,
+        ):
+            continue
+        baseline = baselines.get(str(path))
+        if _validate_document_artifact(
+            str(path),
+            user_message,
+            expected_bytes=expected_bytes if name == "write_file" else None,
+            baseline=baseline,
+            require_fresh=True,
+        ):
+            return True
+    return False
+
+
+def _validate_admin_deal_upload_artifact(
+    raw_path: Any,
+    kind: Any,
+    user_message: Any,
+) -> bool:
+    """Validate the exact physical attachment accepted by the deal boundary.
+
+    Document creation remains deliberately narrower, but realtor uploads also
+    include listing photos and ZIP bundles.  Reuse the data-layer validator so
+    the completion gate and the persisted deal gate cannot disagree about
+    which physical file is valid.
+    """
+    path = _resolved_artifact_path(raw_path)
+    if path is None:
+        return False
+    requested_paths = _requested_artifact_paths(user_message)
+    if requested_paths and path not in requested_paths:
+        return False
+    try:
+        from elevate_cli.data.deals import (
+            _validate_deal_attachment_kind,
+            _validated_deal_attachment_path,
+        )
+
+        canonical = _validated_deal_attachment_path(str(path))
+        canonical_path = _resolved_artifact_path(canonical)
+        if canonical_path is None or canonical_path != path:
+            return False
+        _validate_deal_attachment_kind(str(kind or ""), canonical_path)
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _admin_deal_attachment_verified(
+    args: Dict[str, Any],
+    payload: Any,
+    user_message: Any,
+) -> bool:
+    if (
+        str(args.get("action") or "").strip().lower() != "attach"
+        or not isinstance(payload, dict)
+        or payload.get("success") is not True
+        or not str(args.get("deal_id") or "").strip()
+        or not str(args.get("kind") or "").strip()
+    ):
+        return False
+    raw_path = args.get("file_path") or args.get("filePath")
+    attachment = payload.get("attachment")
+    if not isinstance(attachment, dict):
+        return False
+    returned_path = attachment.get("filePath") or attachment.get("file_path")
+    if _resolved_artifact_path(raw_path) != _resolved_artifact_path(returned_path):
+        return False
+    return _validate_admin_deal_upload_artifact(
+        raw_path,
+        args.get("kind"),
+        user_message,
+    )
+
+
+def _tool_satisfies_action_obligation(
+    obligation: Optional[str],
+    tool_name: Any,
+    function_args: Any,
+    result_text: Any,
+    user_message: Any = None,
+    artifact_baselines: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bool:
+    """Return whether a successful tool result is relevant action evidence."""
+    if not obligation:
+        return False
+    name = str(tool_name or "").strip().lower()
+    args = function_args if isinstance(function_args, dict) else {}
+    if not name or not isinstance(result_text, str):
+        return False
+    try:
+        payload = json.loads(result_text.strip())
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "").strip().lower()
+        if (
+            payload.get("success") is False
+            or payload.get("error")
+            or status
+            in {"cancelled", "canceled", "error", "failed", "interrupted"}
+        ):
+            return False
+
+    if obligation == "send":
+        action = str(args.get("action") or "send").strip().lower()
+        if name == "send_message":
+            return (
+                action == "send"
+                and isinstance(payload, dict)
+                and payload.get("success") is True
+                and not payload.get("dry_run")
+                and not payload.get("preview")
+                and str(payload.get("status") or "").strip().lower()
+                not in {"accepted", "pending", "preview", "queued", "scheduled"}
+            )
+        return False
+
+    if obligation == "create_document":
+        return _fresh_document_artifact_from_tool(
+            name,
+            args,
+            payload,
+            user_message,
+            artifact_baselines,
+        )
+
+    if obligation == "upload":
+        if name == "admin_deal":
+            return _admin_deal_attachment_verified(args, payload, user_message)
+        return False
+
+    if obligation == "deal_update":
+        action = str(args.get("action") or "").strip().lower()
+        if name == "admin_deal":
+            if action == "attach":
+                return _admin_deal_attachment_verified(
+                    args,
+                    payload,
+                    user_message,
+                )
+            return action in {
+                "advance",
+                "complete_run",
+                "move",
+                "set_checklist",
+                "set_fields",
+            } and (
+                isinstance(payload, dict)
+                and payload.get("success") is True
+                and bool(str(args.get("deal_id") or "").strip())
+            )
+        if name == "lead_status":
+            return action in {"classify", "follow_up", "heat", "set"} and (
+                isinstance(payload, dict)
+                and payload.get("success") is True
+                and bool(str(args.get("contact_id") or "").strip())
+            )
+        return False
+    return False
+
+
+def _ledger_entry_verification_message(
+    entry: Dict[str, Any],
+    user_message: Any,
+) -> Any:
+    """Scope explicit multi-path verification to the ledger entry being checked."""
+    raw_path = entry.get("path")
+    if not raw_path:
+        return user_message
+    suffix = Path(str(raw_path)).suffix.lower().lstrip(".") or "document"
+    if entry.get("kind") == "upload":
+        return f'Attach the {suffix} document at "{raw_path}"'
+    return f'Create the {suffix} document at "{raw_path}"'
+
+
+def _ledger_evidence_resource(
+    entry: Dict[str, Any],
+    tool_name: Any,
+    function_args: Any,
+    result_text: Any,
+) -> Optional[str]:
+    """Return the physical/logical resource identity changed by one tool call."""
+    kind = str(entry.get("kind") or "")
+    name = str(tool_name or "").strip().lower()
+    args = function_args if isinstance(function_args, dict) else {}
+    try:
+        payload = json.loads(result_text) if isinstance(result_text, str) else None
+    except Exception:
+        payload = None
+    if kind in {"create_document", "upload"}:
+        raw_path = entry.get("path")
+        if not raw_path:
+            raw_path = (
+                args.get("path")
+                if kind == "create_document"
+                else args.get("file_path") or args.get("filePath")
+            )
+        path = _resolved_artifact_path(raw_path)
+        return f"{kind}:path:{path}" if path is not None else None
+    if kind == "send":
+        message_id = None
+        if isinstance(payload, dict):
+            message_id = payload.get("message_id") or payload.get("messageId")
+        if message_id:
+            return f"send:message:{message_id}"
+    if kind == "deal_update":
+        action = str(args.get("action") or "").strip().lower()
+        entity_id = (
+            args.get("deal_id")
+            or args.get("contact_id")
+            or args.get("run_id")
+        )
+        if entity_id:
+            return f"deal_update:{name}:{action}:{entity_id}"
+    fingerprint = _tool_action_fingerprint(name, args)
+    if fingerprint is None:
+        return None
+    fingerprint_digest = hashlib.sha256(fingerprint[1].encode("utf-8")).hexdigest()
+    return f"{kind}:tool:{fingerprint[0]}:{fingerprint_digest[:16]}"
+
+
+def _ledger_entry_matches_resource(
+    entry: Dict[str, Any],
+    tool_name: Any,
+    function_args: Any,
+) -> bool:
+    args = function_args if isinstance(function_args, dict) else {}
+    kind = str(entry.get("kind") or "")
+    name = str(tool_name or "").strip().lower()
+    raw_path = (
+        args.get("path")
+        if kind == "create_document"
+        else args.get("file_path") or args.get("filePath")
+    )
+    path = _resolved_artifact_path(raw_path)
+    expected_path = _resolved_artifact_path(entry.get("path"))
+    if expected_path is not None:
+        if path is not None and expected_path != path:
+            return False
+        if path is None and not (
+            kind == "create_document" and name in {"execute_code", "terminal"}
+        ):
+            return False
+
+    target = str(entry.get("target") or "").strip().lower()
+    if not target:
+        return True
+    searchable_parts = [
+        str(path.stem if path is not None else ""),
+        str(args.get("kind") or ""),
+        str(args.get("form") or args.get("form_name") or ""),
+        str(args.get("name") or args.get("title") or ""),
+        str(args.get("command") or args.get("code") or ""),
+    ]
+    searchable = re.sub(r"[^a-z0-9]+", " ", " ".join(searchable_parts).lower())
+    normalized_target = re.sub(r"[^a-z0-9]+", " ", target).strip()
+    return bool(normalized_target and normalized_target in searchable)
+
+
+def _record_action_ledger_evidence(
+    entries: list[Dict[str, Any]],
+    consumed_tool_fingerprints: set[tuple[str, str]],
+    consumed_evidence_resources: set[str],
+    tool_name: Any,
+    function_args: Any,
+    result_text: Any,
+    user_message: Any,
+    artifact_baselines: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> bool:
+    """Record distinct verified side effects without double-counting resources.
+
+    A terminal/code call may physically create several explicitly requested
+    files, so it can satisfy multiple document entries when every path has its
+    own fresh baseline. Other adapters and non-document actions remain one
+    side effect per call.
+    """
+    fingerprint = _tool_action_fingerprint(tool_name, function_args)
+    if fingerprint is None or fingerprint in consumed_tool_fingerprints:
+        return False
+    name = str(tool_name or "").strip().lower()
+    allow_multi_document = name in {"execute_code", "terminal"}
+    verified_any = False
+    for entry in entries:
+        if entry.get("verified") or not _ledger_entry_matches_resource(
+            entry,
+            tool_name,
+            function_args,
+        ):
+            continue
+        scoped_message = _ledger_entry_verification_message(entry, user_message)
+        if not _tool_satisfies_action_obligation(
+            entry.get("kind"),
+            tool_name,
+            function_args,
+            result_text,
+            scoped_message,
+            artifact_baselines,
+        ):
+            continue
+        resource = _ledger_evidence_resource(
+            entry,
+            tool_name,
+            function_args,
+            result_text,
+        )
+        if resource is None or resource in consumed_evidence_resources:
+            continue
+        entry["verified"] = True
+        entry["evidence"] = {
+            "tool": fingerprint[0],
+            "fingerprint": fingerprint[1],
+            "resource": resource,
+        }
+        consumed_evidence_resources.add(resource)
+        verified_any = True
+        if not (
+            allow_multi_document
+            and str(entry.get("kind") or "") == "create_document"
+        ):
+            break
+    if verified_any:
+        consumed_tool_fingerprints.add(fingerprint)
+    return verified_any
 
 
 def _strip_non_ascii(text: str) -> str:
@@ -5839,52 +7744,38 @@ class AIAgent:
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
-        """Truncate excess delegate_task calls to max_concurrent_children.
+        """Preserve delegate calls so excess requests receive paired errors.
 
         The delegate_tool caps the task list inside a single call, but the
         model can emit multiple separate delegate_task tool_calls in one
-        turn.  This truncates the excess, preserving all non-delegate calls.
+        turn. The sequential executor enforces the limit and returns an error
+        result for each excess request. Silently deleting calls here loses the
+        requested action and lets later prose falsely claim it completed.
 
-        Returns the original list if no truncation was needed.
+        Always returns the original list so assistant calls and tool results
+        stay protocol-paired.
         """
         from tools.delegate_tool import _get_max_concurrent_children
         max_children = _get_max_concurrent_children()
         delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
         if delegate_count <= max_children:
             return tool_calls
-        kept_delegates = 0
-        truncated = []
-        for tc in tool_calls:
-            if tc.function.name == "delegate_task":
-                if kept_delegates < max_children:
-                    truncated.append(tc)
-                    kept_delegates += 1
-            else:
-                truncated.append(tc)
         logger.warning(
-            "Truncated %d excess delegate_task call(s) to enforce "
-            "max_concurrent_children=%d limit",
+            "Deferring %d excess delegate_task call(s) to paired tool errors "
+            "because max_concurrent_children=%d",
             delegate_count - max_children, max_children,
         )
-        return truncated
+        return tool_calls
 
     @staticmethod
     def _deduplicate_tool_calls(tool_calls: list) -> list:
-        """Remove duplicate (tool_name, arguments) pairs within a single turn.
+        """Preserve duplicate calls so suppression gets a paired result.
 
-        Only the first occurrence of each unique pair is kept.
-        Returns the original list if no duplicates were found.
+        The sequential executor runs the first exact action and emits a
+        classified error for every duplicate call ID. Returning a shortened
+        list here would erase requested actions from durable history.
         """
-        seen: set = set()
-        unique: list = []
-        for tc in tool_calls:
-            key = (tc.function.name, tc.function.arguments)
-            if key not in seen:
-                seen.add(key)
-                unique.append(tc)
-            else:
-                logger.warning("Removed duplicate tool call: %s", tc.function.name)
-        return unique if len(unique) < len(tool_calls) else tool_calls
+        return tool_calls
 
     def _repair_tool_call(self, tool_name: str) -> str | None:
         """Attempt to repair a mismatched tool name before aborting.
@@ -6380,27 +8271,110 @@ class AIAgent:
 
         active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
         max_stream_retries = 1
-        has_tool_calls = False
         first_delta_fired = False
         # Accumulate streamed text so we can recover if get_final_response()
         # returns empty output (e.g. chatgpt.com backend-api sends
         # response.incomplete instead of response.completed).
         self._codex_streamed_text_parts: list = []
         for attempt in range(max_stream_retries + 1):
+            has_tool_calls = False
+            self._codex_streamed_text_parts = []
+            pending_stream_callbacks: list[tuple[str, str]] = []
             collected_output_items: list = []
             # Captured off the terminal stream event so the codex/ChatGPT backend's
             # token usage survives the get_final_response()=None recovery path —
             # otherwise token accounting is silently lost (chat_sessions totals,
             # turn_usage, and analytics all stay 0).
             _final_usage = None
+            terminal_event_type = None
+            terminal_event_response = None
+            terminal_event_conflict = False
+            post_terminal_output = False
+
+            def _codex_response_status(value: Any) -> str:
+                status = getattr(value, "status", None)
+                if status is None and isinstance(value, dict):
+                    status = value.get("status")
+                return status.strip().lower() if isinstance(status, str) else ""
+
+            def _has_confirmed_completed_terminal() -> bool:
+                return (
+                    terminal_event_type == "response.completed"
+                    and terminal_event_response is not None
+                    and not terminal_event_conflict
+                    and not post_terminal_output
+                    and _codex_response_status(terminal_event_response)
+                    == "completed"
+                )
+
+            def _return_with_accepted_callbacks(response: Any):
+                """Publish deltas only after the complete response validates.
+
+                Stream callbacks feed UI and TTS and cannot be retracted.  A
+                Responses endpoint may emit useful-looking deltas before a
+                failed/incomplete terminal or a malformed output item, so keep
+                them private until both the terminal and normalized response
+                prove the candidate is usable.
+                """
+                nonlocal first_delta_fired
+                callbacks_accepted = False
+                if _has_confirmed_completed_terminal():
+                    try:
+                        normalized = self._get_transport().normalize_response(
+                            response
+                        )
+                        callbacks_accepted = normalized.finish_reason in {
+                            "stop",
+                            "tool_calls",
+                            "length",
+                        }
+                    except Exception:
+                        callbacks_accepted = False
+
+                if callbacks_accepted:
+                    for callback_kind, callback_value in pending_stream_callbacks:
+                        if not first_delta_fired:
+                            first_delta_fired = True
+                            if on_first_delta:
+                                try:
+                                    on_first_delta()
+                                except Exception:
+                                    pass
+                        if callback_kind == "text":
+                            self._fire_stream_delta(callback_value)
+                        else:
+                            self._fire_reasoning_delta(callback_value)
+                elif pending_stream_callbacks:
+                    try:
+                        response._elevate_stream_output_withheld = True
+                    except Exception:
+                        pass
+                pending_stream_callbacks.clear()
+                return response
 
             def _recover_none_output_final_response(exc: Exception):
                 if not isinstance(exc, TypeError) or "'NoneType' object is not iterable" not in str(exc):
                     return None
-                assembled = "".join(self._codex_streamed_text_parts)
-                if not collected_output_items and not (assembled and not has_tool_calls):
+                if not _has_confirmed_completed_terminal():
                     return None
-                output_items = list(collected_output_items)
+                assembled = "".join(self._codex_streamed_text_parts)
+                existing_output = getattr(
+                    terminal_event_response,
+                    "output",
+                    None,
+                )
+                if existing_output is None and isinstance(
+                    terminal_event_response,
+                    dict,
+                ):
+                    existing_output = terminal_event_response.get("output")
+                output_items = (
+                    list(existing_output)
+                    if isinstance(existing_output, list) and existing_output
+                    else list(collected_output_items)
+                )
+                if not output_items and not (assembled and not has_tool_calls):
+                    return None
                 if not output_items and assembled and not has_tool_calls:
                     output_items = [SimpleNamespace(
                         type="message",
@@ -6413,13 +8387,14 @@ class AIAgent:
                     "from stream events (%d streamed chars). %s",
                     len(output_items), len(assembled), self._client_log_context(),
                 )
-                return SimpleNamespace(
-                    status="completed",
-                    model=api_kwargs.get("model"),
-                    output=output_items,
-                    output_text=assembled,
-                    usage=_final_usage,
-                )
+                recovered = terminal_event_response
+                if isinstance(recovered, dict):
+                    recovered = SimpleNamespace(**recovered)
+                recovered.output = output_items
+                recovered.output_text = assembled
+                if getattr(recovered, "usage", None) is None:
+                    recovered.usage = _final_usage
+                return recovered
 
             try:
                 with active_client.responses.stream(**api_kwargs) as stream:
@@ -6428,20 +8403,32 @@ class AIAgent:
                         if self._interrupt_requested:
                             break
                         event_type = getattr(event, "type", "")
+                        is_terminal_event = event_type in {
+                            "response.completed",
+                            "response.incomplete",
+                            "response.failed",
+                        }
+                        if terminal_event_type is not None:
+                            if is_terminal_event:
+                                terminal_event_conflict = True
+                                continue
+                            if (
+                                event_type.startswith("response.output")
+                                or event_type.startswith("response.content_part")
+                                or event_type.startswith("response.reasoning")
+                                or "function_call" in event_type
+                            ):
+                                post_terminal_output = True
+                                continue
                         # Fire callbacks on text content deltas (suppress during tool calls)
                         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
                             delta_text = getattr(event, "delta", "")
                             if delta_text:
                                 self._codex_streamed_text_parts.append(delta_text)
                             if delta_text and not has_tool_calls:
-                                if not first_delta_fired:
-                                    first_delta_fired = True
-                                    if on_first_delta:
-                                        try:
-                                            on_first_delta()
-                                        except Exception:
-                                            pass
-                                self._fire_stream_delta(delta_text)
+                                pending_stream_callbacks.append(
+                                    ("text", delta_text)
+                                )
                         # Track tool calls to suppress text streaming
                         elif "function_call" in event_type:
                             has_tool_calls = True
@@ -6449,7 +8436,9 @@ class AIAgent:
                         elif "reasoning" in event_type and "delta" in event_type:
                             reasoning_text = getattr(event, "delta", "")
                             if reasoning_text:
-                                self._fire_reasoning_delta(reasoning_text)
+                                pending_stream_callbacks.append(
+                                    ("reasoning", reasoning_text)
+                                )
                         # Collect completed output items — some backends
                         # (chatgpt.com/backend-api/codex) stream valid items
                         # via response.output_item.done but the SDK's
@@ -6461,8 +8450,10 @@ class AIAgent:
                         # Capture token usage off the terminal event (completed
                         # AND the non-completed ones) so accounting survives the
                         # output=None recovery path; still log the non-completed.
-                        elif event_type in ("response.completed", "response.incomplete", "response.failed"):
+                        elif is_terminal_event:
                             resp_obj = getattr(event, "response", None)
+                            terminal_event_type = event_type
+                            terminal_event_response = resp_obj
                             _ev_usage = getattr(resp_obj, "usage", None) if resp_obj else None
                             if _ev_usage is not None:
                                 _final_usage = _ev_usage
@@ -6476,13 +8467,39 @@ class AIAgent:
                                     sum(len(p) for p in self._codex_streamed_text_parts),
                                     self._client_log_context(),
                                 )
+                    if terminal_event_conflict or post_terminal_output:
+                        raise RuntimeError(
+                            "Codex Responses stream emitted output or a second "
+                            "terminal event after completion"
+                        )
+                    if self._interrupt_requested:
+                        raise InterruptedError(
+                            "Codex Responses stream interrupted before completion"
+                        )
                     try:
-                        final_response = stream.get_final_response()
+                        sdk_final_response = stream.get_final_response()
                     except TypeError as exc:
                         recovered_response = _recover_none_output_final_response(exc)
                         if recovered_response is None:
                             raise
-                        return recovered_response
+                        return _return_with_accepted_callbacks(
+                            recovered_response
+                        )
+                    if not _has_confirmed_completed_terminal():
+                        raise RuntimeError(
+                            "Codex Responses stream ended without an exact "
+                            "response.completed terminal"
+                        )
+                    if _codex_response_status(sdk_final_response) != "completed":
+                        raise RuntimeError(
+                            "Codex Responses SDK final response disagreed with "
+                            "the completed terminal event"
+                        )
+                    # The terminal event is authoritative. Do not let an SDK
+                    # accumulator promote output that arrived under an
+                    # incomplete/failed event or otherwise disagrees with the
+                    # terminal envelope.
+                    final_response = terminal_event_response
                     # PATCH: ChatGPT Codex backend streams valid output items
                     # but get_final_response() can return an empty output list
                     # or SDK 2.24.0 can surface output=None. Backfill from
@@ -6494,7 +8511,12 @@ class AIAgent:
                         )
                         if recovered_response is not None:
                             return recovered_response
-                    if isinstance(_out, list) and not _out:
+                    if (
+                        isinstance(_out, list)
+                        and not _out
+                        and _has_confirmed_completed_terminal()
+                        and _codex_response_status(final_response) == "completed"
+                    ):
                         if collected_output_items:
                             final_response.output = list(collected_output_items)
                             logger.debug(
@@ -6520,11 +8542,11 @@ class AIAgent:
                             final_response.usage = _final_usage
                         except Exception:
                             pass
-                    return final_response
+                    return _return_with_accepted_callbacks(final_response)
             except TypeError as exc:
                 recovered_response = _recover_none_output_final_response(exc)
                 if recovered_response is not None:
-                    return recovered_response
+                    return _return_with_accepted_callbacks(recovered_response)
                 raise
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:
@@ -6544,7 +8566,10 @@ class AIAgent:
                 return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
             except RuntimeError as exc:
                 err_text = str(exc)
-                missing_completed = "response.completed" in err_text
+                missing_completed = (
+                    "response.completed" in err_text
+                    and terminal_event_type is None
+                )
                 if missing_completed and attempt < max_stream_retries:
                     logger.debug(
                         "Responses stream closed before completion (attempt %s/%s); retrying. %s",
@@ -6575,7 +8600,10 @@ class AIAgent:
         if not hasattr(stream_or_response, "__iter__"):
             return stream_or_response
 
+        terminal_event_type = None
         terminal_response = None
+        terminal_conflict = False
+        post_terminal_output = False
         collected_output_items: list = []
         collected_text_deltas: list = []
         try:
@@ -6584,6 +8612,27 @@ class AIAgent:
                 event_type = getattr(event, "type", None)
                 if not event_type and isinstance(event, dict):
                     event_type = event.get("type")
+
+                is_terminal_event = event_type in {
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                }
+                if terminal_event_type is not None:
+                    if is_terminal_event:
+                        terminal_conflict = True
+                        continue
+                    if (
+                        isinstance(event_type, str)
+                        and (
+                            event_type.startswith("response.output")
+                            or event_type.startswith("response.content_part")
+                            or event_type.startswith("response.reasoning")
+                            or "function_call" in event_type
+                        )
+                    ):
+                        post_terminal_output = True
+                    continue
 
                 # Collect output items and text deltas for backfill
                 if event_type == "response.output_item.done":
@@ -6599,34 +8648,13 @@ class AIAgent:
                     if delta:
                         collected_text_deltas.append(delta)
 
-                if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
+                if not is_terminal_event:
                     continue
 
+                terminal_event_type = event_type
                 terminal_response = getattr(event, "response", None)
                 if terminal_response is None and isinstance(event, dict):
                     terminal_response = event.get("response")
-                if terminal_response is not None:
-                    # Backfill empty output from collected stream events
-                    _out = getattr(terminal_response, "output", None)
-                    if isinstance(_out, list) and not _out:
-                        if collected_output_items:
-                            terminal_response.output = list(collected_output_items)
-                            logger.debug(
-                                "Codex fallback stream: backfilled %d output items",
-                                len(collected_output_items),
-                            )
-                        elif collected_text_deltas:
-                            assembled = "".join(collected_text_deltas)
-                            terminal_response.output = [SimpleNamespace(
-                                type="message", role="assistant",
-                                status="completed",
-                                content=[SimpleNamespace(type="output_text", text=assembled)],
-                            )]
-                            logger.debug(
-                                "Codex fallback stream: synthesized from %d deltas (%d chars)",
-                                len(collected_text_deltas), len(assembled),
-                            )
-                    return terminal_response
         finally:
             close_fn = getattr(stream_or_response, "close", None)
             if callable(close_fn):
@@ -6635,9 +8663,48 @@ class AIAgent:
                 except Exception:
                     pass
 
-        if terminal_response is not None:
-            return terminal_response
-        raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
+        if terminal_conflict or post_terminal_output:
+            raise RuntimeError(
+                "Codex fallback stream emitted output or a second terminal "
+                "event after completion"
+            )
+        status = getattr(terminal_response, "status", None)
+        if status is None and isinstance(terminal_response, dict):
+            status = terminal_response.get("status")
+        normalized_status = (
+            status.strip().lower() if isinstance(status, str) else ""
+        )
+        if (
+            terminal_event_type != "response.completed"
+            or terminal_response is None
+            or normalized_status != "completed"
+        ):
+            raise RuntimeError(
+                "Codex fallback stream ended without an exact completed terminal"
+            )
+
+        # Backfill only after EOF proves the completed event was unique and no
+        # later output tried to mutate the accepted response.
+        _out = getattr(terminal_response, "output", None)
+        if isinstance(_out, list) and not _out:
+            if collected_output_items:
+                terminal_response.output = list(collected_output_items)
+                logger.debug(
+                    "Codex fallback stream: backfilled %d output items",
+                    len(collected_output_items),
+                )
+            elif collected_text_deltas:
+                assembled = "".join(collected_text_deltas)
+                terminal_response.output = [SimpleNamespace(
+                    type="message", role="assistant",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text=assembled)],
+                )]
+                logger.debug(
+                    "Codex fallback stream: synthesized from %d deltas (%d chars)",
+                    len(collected_text_deltas), len(assembled),
+                )
+        return terminal_response
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider != "openai-codex":
@@ -7224,10 +9291,11 @@ class AIAgent:
         - anthropic_messages: client.messages.stream() via Anthropic SDK
         - codex_responses: delegates to _run_codex_stream (already streaming)
 
-        Fires stream_delta_callback and _stream_callback for each text token.
-        Tool-call turns suppress the callback — only text-only final responses
-        stream to the consumer.  Returns a SimpleNamespace that mimics the
-        non-streaming response shape so the rest of the agent loop is unchanged.
+        Buffers candidate callbacks until the provider emits an accepted
+        terminal response, then publishes them in order.  Rejected, incomplete,
+        or interrupted streams publish nothing.  Returns a SimpleNamespace that
+        mimics the non-streaming response shape so the rest of the agent loop is
+        unchanged.
 
         Falls back to _interruptible_api_call on provider errors indicating
         streaming is not supported.
@@ -7249,6 +9317,7 @@ class AIAgent:
             result = {"response": None, "error": None}
             first_delta_fired = {"done": False}
             deltas_were_sent = {"yes": False}
+            callback_buffer: list[tuple[str, str]] = []
 
             def _fire_first():
                 if not first_delta_fired["done"] and on_first_delta:
@@ -7279,25 +9348,59 @@ class AIAgent:
                         raise
 
                     def _on_text(text):
-                        _fire_first()
-                        self._fire_stream_delta(text)
-                        deltas_were_sent["yes"] = True
+                        callback_buffer.append(("text", text))
 
                     def _on_tool(name):
-                        _fire_first()
-                        self._fire_tool_gen_started(name)
+                        if isinstance(name, str) and name.strip():
+                            callback_buffer.append(("tool", name.strip()))
 
                     def _on_reasoning(text):
-                        _fire_first()
-                        self._fire_reasoning_delta(text)
+                        callback_buffer.append(("reasoning", text))
 
-                    result["response"] = stream_converse_with_callbacks(
+                    response = stream_converse_with_callbacks(
                         raw_response,
                         on_text_delta=_on_text if self._has_stream_consumers() else None,
                         on_tool_start=_on_tool,
                         on_reasoning_delta=_on_reasoning if self.reasoning_callback or self.stream_delta_callback else None,
                         on_interrupt_check=lambda: self._interrupt_requested,
                     )
+                    if self._interrupt_requested:
+                        raise InterruptedError(
+                            "Agent interrupted before Bedrock stream completion"
+                        )
+                    normalized = self._get_transport().normalize_response(
+                        response
+                    )
+                    callbacks_accepted = normalized.finish_reason in {
+                        "stop",
+                        "tool_calls",
+                        "length",
+                    }
+                    accepted_tool_names = {
+                        call.name for call in (normalized.tool_calls or [])
+                    }
+                    if callbacks_accepted:
+                        for callback_kind, callback_value in callback_buffer:
+                            if (
+                                callback_kind == "tool"
+                                and callback_value not in accepted_tool_names
+                            ):
+                                continue
+                            _fire_first()
+                            if callback_kind == "text":
+                                self._fire_stream_delta(callback_value)
+                                deltas_were_sent["yes"] = True
+                            elif callback_kind == "reasoning":
+                                self._fire_reasoning_delta(callback_value)
+                            else:
+                                self._fire_tool_gen_started(callback_value)
+                    elif callback_buffer:
+                        try:
+                            response._elevate_stream_output_withheld = True
+                        except Exception:
+                            pass
+                    callback_buffer.clear()
+                    result["response"] = response
                 except Exception as e:
                     result["error"] = e
 
@@ -7313,7 +9416,12 @@ class AIAgent:
                 raise result["error"]
             return result["response"]
 
-        result = {"response": None, "error": None, "partial_tool_names": []}
+        result = {
+            "response": None,
+            "error": None,
+            "partial_tool_names": [],
+            "buffered_output_present": False,
+        }
         request_client_holder = {"client": None}
         first_delta_fired = {"done": False}
         deltas_were_sent = {"yes": False}  # Track if any deltas were fired (for fallback)
@@ -7333,6 +9441,7 @@ class AIAgent:
         def _call_chat_completions():
             """Stream a chat completions response."""
             import httpx as _httpx
+            result["partial_tool_names"] = []
             # Per-provider / per-model request_timeout_seconds (from config.yaml)
             # wins over the ELEVATE_API_TIMEOUT env default if the user set it.
             _provider_timeout_cfg = get_provider_request_timeout(self.provider, self.model)
@@ -7396,12 +9505,72 @@ class AIAgent:
             role = "assistant"
             reasoning_parts: list = []
             usage_obj = None
+            gemini_diagnostic = None
+            gemini_rejection_diagnostic = None
+            stream_terminal_seen = False
+            # Provider deltas are provisional. UI, TTS, and tool-start
+            # callbacks cannot be retracted if a later terminal frame says
+            # content_filter/error/incomplete, so publish them transactionally
+            # only after the complete response validates.
+            stream_callback_buffer: list[tuple[str, str]] = []
+
+            def _emit_stream_event(kind: str, value: str) -> None:
+                if kind == "text":
+                    _fire_first_delta()
+                    self._fire_stream_delta(value)
+                    deltas_were_sent["yes"] = True
+                elif kind == "reasoning":
+                    _fire_first_delta()
+                    self._fire_reasoning_delta(value)
+                elif kind == "tool":
+                    _fire_first_delta()
+                    self._fire_tool_gen_started(value)
+                    if value not in result["partial_tool_names"]:
+                        result["partial_tool_names"].append(value)
+                elif kind == "suppressed_content":
+                    if self.stream_delta_callback:
+                        try:
+                            self.stream_delta_callback(value)
+                            self._record_streamed_assistant_text(value)
+                        except Exception:
+                            pass
+
+            def _emit_or_buffer_stream_event(kind: str, value: str) -> None:
+                stream_callback_buffer.append((kind, value))
+                result["buffered_output_present"] = True
+
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
                 self._touch_activity("receiving stream response")
 
                 if self._interrupt_requested:
-                    break
+                    raise InterruptedError(
+                        "Agent interrupted before chat stream completion"
+                    )
+
+                chunk_gemini_diagnostic = _allowlisted_gemini_diagnostic(
+                    getattr(chunk, "_elevate_gemini_diagnostic", None)
+                )
+                terminal_seen_before_chunk = stream_terminal_seen
+                chunk_gemini_rejected = False
+                if chunk_gemini_diagnostic is not None:
+                    chunk_gemini_rejected = bool(
+                        chunk_gemini_diagnostic["prompt_block_reason"]
+                        != "UNSPECIFIED"
+                        or chunk_gemini_diagnostic["finish_reason"]
+                        not in {"UNSPECIFIED", "STOP", "MAX_TOKENS"}
+                    )
+                    if chunk_gemini_rejected:
+                        # Rejection is monotonic for the response.  Providers
+                        # must not be able to clear an earlier prompt/candidate
+                        # block by sending a later accepted STOP frame.
+                        if gemini_rejection_diagnostic is None:
+                            gemini_rejection_diagnostic = (
+                                chunk_gemini_diagnostic
+                            )
+                        gemini_diagnostic = gemini_rejection_diagnostic
+                    elif gemini_rejection_diagnostic is None:
+                        gemini_diagnostic = chunk_gemini_diagnostic
 
                 if not chunk.choices:
                     if hasattr(chunk, "model") and chunk.model:
@@ -7409,26 +9578,47 @@ class AIAgent:
                     # Usage comes in the final chunk with empty choices
                     if hasattr(chunk, "usage") and chunk.usage:
                         usage_obj = chunk.usage
+                    if chunk_gemini_rejected or (
+                        chunk_gemini_diagnostic is not None
+                        and chunk_gemini_diagnostic["finish_reason"]
+                        != "UNSPECIFIED"
+                    ):
+                        stream_terminal_seen = True
                     continue
 
                 delta = chunk.choices[0].delta
                 if hasattr(chunk, "model") and chunk.model:
                     model_name = chunk.model
 
+                # Once a terminal frame or any rejection has arrived, freeze
+                # candidate output.  We still consume later frames for usage
+                # accounting and for a fail-closed rejection diagnostic.
+                discard_chunk_output = (
+                    terminal_seen_before_chunk or chunk_gemini_rejected
+                )
+
+                if discard_chunk_output:
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage_obj = chunk.usage
+                    if chunk_gemini_rejected or (
+                        chunk_gemini_diagnostic is not None
+                        and chunk_gemini_diagnostic["finish_reason"]
+                        != "UNSPECIFIED"
+                    ) or chunk.choices[0].finish_reason:
+                        stream_terminal_seen = True
+                    continue
+
                 # Accumulate reasoning content
                 reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                 if reasoning_text:
                     reasoning_parts.append(reasoning_text)
-                    _fire_first_delta()
-                    self._fire_reasoning_delta(reasoning_text)
+                    _emit_or_buffer_stream_event("reasoning", reasoning_text)
 
                 # Accumulate text content — fire callback only when no tool calls
                 if delta and delta.content:
                     content_parts.append(delta.content)
                     if not tool_calls_acc:
-                        _fire_first_delta()
-                        self._fire_stream_delta(delta.content)
-                        deltas_were_sent["yes"] = True
+                        _emit_or_buffer_stream_event("text", delta.content)
                     else:
                         # Tool calls suppress regular content streaming (avoids
                         # displaying chatty "I'll use the tool..." text alongside
@@ -7441,12 +9631,9 @@ class AIAgent:
                         # reasoning display.  Non-reasoning text is harmlessly
                         # suppressed by the CLI's _stream_delta when the stream
                         # box is already closed (tool boundary flush).
-                        if self.stream_delta_callback:
-                            try:
-                                self.stream_delta_callback(delta.content)
-                                self._record_streamed_assistant_text(delta.content)
-                            except Exception:
-                                pass
+                        _emit_or_buffer_stream_event(
+                            "suppressed_content", delta.content
+                        )
 
                 # Accumulate tool call deltas — notify display on first name
                 if delta and delta.tool_calls:
@@ -7503,8 +9690,9 @@ class AIAgent:
                         name = entry["function"]["name"]
                         if name and idx not in tool_gen_notified:
                             tool_gen_notified.add(idx)
-                            _fire_first_delta()
-                            self._fire_tool_gen_started(name)
+                            _emit_or_buffer_stream_event("tool", name)
+                            if name not in result["partial_tool_names"]:
+                                result["partial_tool_names"].append(name)
                             # Record the partial tool-call name so the outer
                             # stub-builder can surface a user-visible warning
                             # if streaming dies before this tool's arguments
@@ -7512,29 +9700,59 @@ class AIAgent:
                             # during tool-call JSON generation lets the stub
                             # at line ~6107 return `tool_calls=None`, silently
                             # discarding the attempted action.
-                            result["partial_tool_names"].append(name)
 
                 if chunk.choices[0].finish_reason:
                     finish_reason = chunk.choices[0].finish_reason
+                    stream_terminal_seen = True
+                elif (
+                    chunk_gemini_diagnostic is not None
+                    and chunk_gemini_diagnostic["finish_reason"]
+                    != "UNSPECIFIED"
+                ):
+                    stream_terminal_seen = True
 
                 # Usage in the final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage_obj = chunk.usage
 
-            # Build mock response matching non-streaming shape
-            full_content = "".join(content_parts) or None
+            gemini_response_rejected = gemini_rejection_diagnostic is not None
+            provider_finish_rejected = finish_reason in {
+                "content_filter",
+                "error",
+            }
+            response_rejected = (
+                gemini_response_rejected or provider_finish_rejected
+            )
+            rejected_output_present = bool(
+                content_parts
+                or reasoning_parts
+                or tool_calls_acc
+                or stream_callback_buffer
+            )
+
+            # Build mock response matching non-streaming shape.  Rejected
+            # responses retain only content-free diagnostics and usage.
+            full_content = (
+                None if response_rejected else "".join(content_parts) or None
+            )
             mock_tool_calls = None
-            has_truncated_tool_args = False
-            if tool_calls_acc:
+            invalid_tool_batch = False
+            if (
+                not response_rejected
+                and tool_calls_acc
+                and finish_reason in {None, "stop", "tool_calls"}
+            ):
                 mock_tool_calls = []
                 for idx in sorted(tool_calls_acc):
                     tc = tool_calls_acc[idx]
                     arguments = tc["function"]["arguments"]
-                    if arguments and arguments.strip():
-                        try:
-                            json.loads(arguments)
-                        except json.JSONDecodeError:
-                            has_truncated_tool_args = True
+                    name = tc["function"]["name"]
+                    try:
+                        _parse_tool_arguments_object(arguments)
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        invalid_tool_batch = True
+                    if not isinstance(name, str) or not name.strip():
+                        invalid_tool_batch = True
                     mock_tool_calls.append(SimpleNamespace(
                         id=tc["id"],
                         type=tc["type"],
@@ -7545,12 +9763,104 @@ class AIAgent:
                         ),
                     ))
 
-            stream_terminal_received = finish_reason is not None
-            effective_finish_reason = finish_reason or "incomplete"
-            if has_truncated_tool_args:
-                effective_finish_reason = "length"
+            gemini_prompt_blocked = bool(
+                gemini_diagnostic
+                and gemini_diagnostic["prompt_block_reason"]
+                != "UNSPECIFIED"
+            )
+            gemini_candidate_rejected = bool(
+                gemini_diagnostic
+                and gemini_diagnostic["finish_reason"]
+                not in {"UNSPECIFIED", "STOP", "MAX_TOKENS"}
+            )
+            stream_terminal_received = (
+                stream_terminal_seen
+                or finish_reason is not None
+                or gemini_prompt_blocked
+                or gemini_candidate_rejected
+            )
+            if gemini_prompt_blocked:
+                effective_finish_reason = "content_filter"
+            elif gemini_candidate_rejected:
+                effective_finish_reason = (
+                    "content_filter"
+                    if gemini_diagnostic["finish_reason"]
+                    in {
+                        "SAFETY",
+                        "RECITATION",
+                        "BLOCKLIST",
+                        "PROHIBITED_CONTENT",
+                        "SPII",
+                        "IMAGE_SAFETY",
+                        "IMAGE_PROHIBITED_CONTENT",
+                        "IMAGE_RECITATION",
+                    }
+                    else "error"
+                )
+            else:
+                effective_finish_reason = finish_reason or "incomplete"
+            if invalid_tool_batch and not response_rejected:
+                mock_tool_calls = None
+                # A malformed batch attached to an accepted terminal frame is
+                # a provider error.  If the stream simply ended mid-JSON with
+                # no terminal frame, preserve truncation intent separately;
+                # the incomplete-stream marker still prevents execution or a
+                # false successful completion.
+                effective_finish_reason = (
+                    "error" if stream_terminal_received else "length"
+                )
+                response_rejected = True
+                full_content = None
 
-            full_reasoning = "".join(reasoning_parts) or None
+            stream_output_withheld = False
+            if gemini_diagnostic is not None:
+                callbacks_accepted = bool(
+                    not response_rejected
+                    and not invalid_tool_batch
+                    and gemini_diagnostic["prompt_block_reason"]
+                    == "UNSPECIFIED"
+                    and gemini_diagnostic["finish_reason"]
+                    in {"STOP", "MAX_TOKENS"}
+                    and effective_finish_reason
+                    in {"stop", "tool_calls", "length"}
+                )
+            else:
+                callbacks_accepted = bool(
+                    not response_rejected
+                    and not invalid_tool_batch
+                    and stream_terminal_received
+                    and effective_finish_reason
+                    in {"stop", "tool_calls", "length"}
+                )
+            if callbacks_accepted:
+                for event_kind, event_value in stream_callback_buffer:
+                    # A truncated response may expose partial text, but a tool
+                    # card is not real unless an executable batch was accepted.
+                    if (
+                        event_kind == "tool"
+                        and mock_tool_calls is None
+                    ):
+                        continue
+                    _emit_stream_event(event_kind, event_value)
+            else:
+                stream_output_withheld = bool(
+                    stream_callback_buffer
+                    or content_parts
+                    or reasoning_parts
+                    or tool_calls_acc
+                )
+            stream_callback_buffer.clear()
+
+            if response_rejected:
+                stream_output_withheld = (
+                    stream_output_withheld or rejected_output_present
+                )
+
+            full_reasoning = (
+                None
+                if response_rejected
+                else "".join(reasoning_parts) or None
+            )
             mock_message = SimpleNamespace(
                 role=role,
                 content=full_content,
@@ -7572,17 +9882,20 @@ class AIAgent:
                     if stream_terminal_received
                     else "Provider stream ended without a terminal frame."
                 ),
+                _elevate_gemini_diagnostic=gemini_diagnostic,
+                _elevate_stream_output_withheld=stream_output_withheld,
+                _elevate_had_tool_intent=bool(tool_calls_acc),
             )
 
         def _call_anthropic():
             """Stream an Anthropic Messages API response.
 
-            Fires delta callbacks for real-time token delivery, but returns
-            the native Anthropic Message object from get_final_message() so
-            the rest of the agent loop (validation, tool extraction, etc.)
-            works unchanged.
+            Returns the native Anthropic Message object from
+            get_final_message(). Candidate callbacks remain private until the
+            terminal message normalizes to an accepted result.
             """
             has_tool_use = False
+            callback_buffer: list[tuple[str, str]] = []
 
             # Reset stale-stream timer for this attempt
             last_chunk_time["t"] = time.time()
@@ -7608,9 +9921,12 @@ class AIAgent:
                         if block and getattr(block, "type", None) == "tool_use":
                             has_tool_use = True
                             tool_name = getattr(block, "name", None)
-                            if tool_name:
-                                _fire_first_delta()
-                                self._fire_tool_gen_started(tool_name)
+                            if isinstance(tool_name, str) and tool_name.strip():
+                                tool_name = tool_name.strip()
+                                callback_buffer.append(("tool", tool_name))
+                                result["buffered_output_present"] = True
+                                if tool_name not in result["partial_tool_names"]:
+                                    result["partial_tool_names"].append(tool_name)
 
                     elif event_type == "content_block_delta":
                         delta = getattr(event, "delta", None)
@@ -7619,17 +9935,61 @@ class AIAgent:
                             if delta_type == "text_delta":
                                 text = getattr(delta, "text", "")
                                 if text and not has_tool_use:
-                                    _fire_first_delta()
-                                    self._fire_stream_delta(text)
-                                    deltas_were_sent["yes"] = True
+                                    callback_buffer.append(("text", text))
+                                    result["buffered_output_present"] = True
                             elif delta_type == "thinking_delta":
                                 thinking_text = getattr(delta, "thinking", "")
                                 if thinking_text:
-                                    _fire_first_delta()
-                                    self._fire_reasoning_delta(thinking_text)
+                                    callback_buffer.append(
+                                        ("reasoning", thinking_text)
+                                    )
+                                    result["buffered_output_present"] = True
 
-                # Return the native Anthropic Message for downstream processing
-                return stream.get_final_message()
+                if self._interrupt_requested:
+                    raise InterruptedError(
+                        "Agent interrupted before Anthropic stream completion"
+                    )
+
+                final_message = stream.get_final_message()
+                try:
+                    normalized = self._get_transport().normalize_response(
+                        final_message,
+                        strip_tool_prefix=self._is_anthropic_oauth,
+                    )
+                    callbacks_accepted = normalized.finish_reason in {
+                        "stop",
+                        "tool_calls",
+                        "length",
+                    }
+                    accepted_tool_names = {
+                        call.name for call in (normalized.tool_calls or [])
+                    }
+                except Exception:
+                    callbacks_accepted = False
+                    accepted_tool_names = set()
+
+                if callbacks_accepted:
+                    for callback_kind, callback_value in callback_buffer:
+                        if (
+                            callback_kind == "tool"
+                            and callback_value not in accepted_tool_names
+                        ):
+                            continue
+                        _fire_first_delta()
+                        if callback_kind == "text":
+                            self._fire_stream_delta(callback_value)
+                            deltas_were_sent["yes"] = True
+                        elif callback_kind == "reasoning":
+                            self._fire_reasoning_delta(callback_value)
+                        else:
+                            self._fire_tool_gen_started(callback_value)
+                elif callback_buffer:
+                    try:
+                        final_message._elevate_stream_output_withheld = True
+                    except Exception:
+                        pass
+                callback_buffer.clear()
+                return final_message
 
         def _call():
             import httpx as _httpx
@@ -7990,6 +10350,12 @@ class AIAgent:
                 except Exception:
                     pass
                 raise SteerCutInterrupt("Steer cut the in-flight streaming API call")
+        # The worker can observe the interrupt and exit between the final
+        # ``is_alive`` check and the body of the polling loop.  Recheck after
+        # join so that race cannot turn a cancelled request into an ordinary
+        # incomplete response.
+        if self._interrupt_requested:
+            raise InterruptedError("Agent interrupted during streaming API call")
         if result["error"] is not None:
             if deltas_were_sent["yes"]:
                 # Streaming failed AFTER some tokens were already delivered to
@@ -8054,6 +10420,36 @@ class AIAgent:
                     )],
                     usage=None,
                     _elevate_stream_incomplete_error=str(result["error"]),
+                )
+            if result.get("buffered_output_present"):
+                # Provisional output existed but was never published because no
+                # accepted terminal frame arrived. Return a structured
+                # incomplete response so the main loop can report/recover
+                # cleanly without exposing or persisting unaccepted content.
+                partial_names = list(result.get("partial_tool_names") or [])
+                detail = str(result["error"])
+                if partial_names:
+                    detail += (
+                        "; incomplete tool request(s) were not executed: "
+                        + ", ".join(partial_names[:3])
+                    )
+                return SimpleNamespace(
+                    id="withheld-incomplete-stream",
+                    model=getattr(self, "model", "unknown"),
+                    choices=[SimpleNamespace(
+                        index=0,
+                        message=SimpleNamespace(
+                            role="assistant",
+                            content=None,
+                            tool_calls=None,
+                            reasoning_content=None,
+                        ),
+                        finish_reason="incomplete",
+                    )],
+                    usage=None,
+                    _elevate_stream_incomplete_error=detail,
+                    _elevate_stream_output_withheld=True,
+                    _elevate_had_tool_intent=bool(partial_names),
                 )
             raise result["error"]
         return result["response"]
@@ -9141,9 +11537,18 @@ class AIAgent:
                 }
                 if _flush_temperature is not None:
                     api_kwargs["temperature"] = _flush_temperature
-                from agent.auxiliary_client import _get_task_timeout
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(
-                    **api_kwargs, timeout=_get_task_timeout("flush_memories")
+                from agent.auxiliary_client import (
+                    _get_task_timeout,
+                    _validate_llm_response,
+                )
+                response = _validate_llm_response(
+                    self._ensure_primary_openai_client(
+                        reason="flush_memories"
+                    ).chat.completions.create(
+                        **api_kwargs,
+                        timeout=_get_task_timeout("flush_memories"),
+                    ),
+                    "flush_memories",
                 )
 
             # Extract tool calls from the response, handling all API formats
@@ -9411,7 +11816,7 @@ class AIAgent:
         )
         return compressed, new_system_prompt
 
-    def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
         Dispatches to concurrent execution only for batches that look
@@ -9422,14 +11827,18 @@ class AIAgent:
 
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
+        # Batch-local observations are populated only at the exact
+        # _detect_tool_failure call sites. The conversation loop consumes them
+        # after dispatch without changing this method's three-argument API.
+        self._last_tool_batch_outcomes = []
         try:
             if not _should_parallelize_tool_batch(tool_calls):
                 return self._execute_tool_calls_sequential(
-                    assistant_message, messages, effective_task_id, api_call_count
+                    assistant_message, messages, effective_task_id
                 )
 
             return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id, api_call_count
+                assistant_message, messages, effective_task_id
             )
         finally:
             self._executing_tools = False
@@ -9595,7 +12004,7 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
-    def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
         Results are collected in the original tool-call order and appended to
@@ -9619,19 +12028,37 @@ class AIAgent:
         parsed_calls = []  # list of (tool_call, function_name, function_args)
         for tool_call in tool_calls:
             function_name = tool_call.function.name
+            try:
+                function_args = _parse_tool_arguments_object(
+                    tool_call.function.arguments
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logging.warning(
+                    "Refusing tool batch with invalid arguments for %s: %s",
+                    function_name,
+                    exc,
+                )
+                for candidate in tool_calls:
+                    is_invalid = candidate is tool_call
+                    messages.append({
+                        "role": "tool",
+                        "content": (
+                            f"Error: invalid tool arguments for {function_name}: {exc}"
+                            if is_invalid
+                            else "Skipped: another tool call in this batch had invalid arguments."
+                        ),
+                        "tool_call_id": candidate.id,
+                    })
+                return
+            parsed_calls.append((tool_call, function_name, function_args))
 
+        artifact_baselines_by_call: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for tool_call, function_name, function_args in parsed_calls:
             # Reset nudge counters
             if function_name == "memory":
                 self._turns_since_memory = 0
             elif function_name == "skill_manage":
                 self._iters_since_skill = 0
-
-            try:
-                function_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError:
-                function_args = {}
-            if not isinstance(function_args, dict):
-                function_args = {}
 
             # Checkpoint for file-mutating tools
             if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
@@ -9655,7 +12082,17 @@ class AIAgent:
                 except Exception:
                     pass
 
-            parsed_calls.append((tool_call, function_name, function_args))
+            # Capture the exact physical candidate state before any worker in
+            # this concurrent batch starts.  Independent tool batches cannot
+            # share an overlapping artifact path, so this is the attributable
+            # pre-call baseline for each result.
+            artifact_baselines_by_call[tool_call.id] = (
+                _capture_document_artifact_baselines(
+                    function_name,
+                    function_args,
+                    getattr(self, "_active_action_user_message", None),
+                )
+            )
 
         # ── Logging / callbacks ──────────────────────────────────────────
         tool_names_str = ", ".join(name for _, name, _ in parsed_calls)
@@ -9848,6 +12285,22 @@ class AIAgent:
             else:
                 function_name, function_args, function_result, tool_duration, is_error = r
             function_result_text = _multimodal_text_summary(function_result)
+            detected_failure, failure_suffix = _detect_tool_failure(
+                function_name,
+                function_result_text,
+            )
+            batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
+            if isinstance(batch_outcomes, list):
+                batch_outcomes.append(
+                    (
+                        function_name,
+                        function_args,
+                        detected_failure,
+                        failure_suffix,
+                        function_result_text,
+                        artifact_baselines_by_call.get(tc.id, {}),
+                    )
+                )
 
             if is_error:
                 result_preview = function_result_text[:200] if len(function_result_text) > 200 else function_result_text
@@ -9942,9 +12395,47 @@ class AIAgent:
             if hasattr(self, "_apply_pending_soft_interrupts_to_tool_results"):
                 self._apply_pending_soft_interrupts_to_tool_results(messages, num_tools)
 
-    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
-        for i, tool_call in enumerate(assistant_message.tool_calls, 1):
+        parsed_calls = []
+        for tool_call in assistant_message.tool_calls:
+            try:
+                function_args = _parse_tool_arguments_object(
+                    tool_call.function.arguments
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logging.warning(
+                    "Refusing tool batch with invalid arguments for %s: %s",
+                    tool_call.function.name,
+                    exc,
+                )
+                for candidate in assistant_message.tool_calls:
+                    is_invalid = candidate is tool_call
+                    messages.append({
+                        "role": "tool",
+                        "content": (
+                            f"Error: invalid tool arguments for "
+                            f"{tool_call.function.name}: {exc}"
+                            if is_invalid
+                            else "Skipped: another tool call in this batch had invalid arguments."
+                        ),
+                        "tool_call_id": candidate.id,
+                    })
+                return
+            parsed_calls.append((tool_call, function_args))
+
+        delegate_limit = 0
+        if any(
+            tool_call.function.name == "delegate_task"
+            for tool_call, _ in parsed_calls
+        ):
+            from tools.delegate_tool import _get_max_concurrent_children
+
+            delegate_limit = _get_max_concurrent_children()
+        delegate_calls_seen = 0
+        seen_action_fingerprints = set()
+
+        for i, (tool_call, function_args) in enumerate(parsed_calls, 1):
             # SAFETY: check interrupt BEFORE starting each tool.
             # If the user sent "stop" during a previous tool's execution,
             # do NOT start any more tools -- skip them all immediately.
@@ -9964,23 +12455,40 @@ class AIAgent:
 
             function_name = tool_call.function.name
 
-            try:
-                function_args = json.loads(tool_call.function.arguments)
-            except json.JSONDecodeError as e:
-                logging.warning(f"Unexpected JSON error after validation: {e}")
-                function_args = {}
-            if not isinstance(function_args, dict):
-                function_args = {}
-
             # Check plugin hooks for a block directive before executing.
             _block_msg: Optional[str] = None
-            try:
-                from elevate_cli.plugins import get_pre_tool_call_block_message
-                _block_msg = get_pre_tool_call_block_message(
-                    function_name, function_args, task_id=effective_task_id or "",
+            action_fingerprint = _tool_action_fingerprint(
+                function_name,
+                function_args,
+            )
+            if action_fingerprint in seen_action_fingerprints:
+                _block_msg = (
+                    "duplicate tool action was suppressed for safety. The "
+                    "first matching call ran; this call did not execute. "
+                    "Retry this exact action in a later tool batch only if it "
+                    "must run again."
                 )
-            except Exception:
-                pass
+            elif action_fingerprint is not None:
+                seen_action_fingerprints.add(action_fingerprint)
+
+            if _block_msg is None and function_name == "delegate_task":
+                delegate_calls_seen += 1
+                if delegate_calls_seen > delegate_limit:
+                    _block_msg = (
+                        "delegate_task was not started because this model "
+                        f"batch exceeded max_concurrent_children={delegate_limit}. "
+                        "Retry this exact delegation in a later tool batch."
+                    )
+            if _block_msg is None:
+                try:
+                    from elevate_cli.plugins import get_pre_tool_call_block_message
+                    _block_msg = get_pre_tool_call_block_message(
+                        function_name,
+                        function_args,
+                        task_id=effective_task_id or "",
+                    )
+                except Exception:
+                    pass
 
             # Plan mode (read-only): mirror of the concurrent-path gate. When
             # the session is in plan mode, block state-changing tools at the
@@ -10063,6 +12571,16 @@ class AIAgent:
                         )
                 except Exception:
                     pass  # never block tool execution
+
+            artifact_baselines = (
+                _capture_document_artifact_baselines(
+                    function_name,
+                    function_args,
+                    getattr(self, "_active_action_user_message", None),
+                )
+                if _block_msg is None
+                else {}
+            )
 
             tool_start_time = time.time()
 
@@ -10259,7 +12777,22 @@ class AIAgent:
 
             # Log tool errors to the persistent error log so [error] tags
             # in the UI always have a corresponding detailed entry on disk.
-            _is_error_result, _ = _detect_tool_failure(function_name, function_result_text)
+            _is_error_result, _failure_suffix = _detect_tool_failure(
+                function_name,
+                function_result_text,
+            )
+            batch_outcomes = getattr(self, "_last_tool_batch_outcomes", None)
+            if isinstance(batch_outcomes, list):
+                batch_outcomes.append(
+                    (
+                        function_name,
+                        function_args,
+                        _is_error_result,
+                        _failure_suffix,
+                        function_result_text,
+                        artifact_baselines,
+                    )
+                )
             if _is_error_result:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
             else:
@@ -10377,6 +12910,15 @@ class AIAgent:
         """Request a summary when max iterations are reached. Returns the final response text."""
         print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
 
+        def _terminal_summary_text(normalized_response: Any) -> str:
+            finish = getattr(normalized_response, "finish_reason", None)
+            if not (
+                isinstance(finish, str)
+                and finish.strip().lower() == "stop"
+            ):
+                return ""
+            return (getattr(normalized_response, "content", None) or "").strip()
+
         summary_request = (
             "You've reached the maximum number of tool-calling iterations allowed. "
             "Please provide a final response summarizing what you've found and accomplished so far, "
@@ -10456,7 +12998,7 @@ class AIAgent:
                 summary_response = self._run_codex_stream(codex_kwargs)
                 _ct_sum = self._get_transport()
                 _cnr_sum = _ct_sum.normalize_response(summary_response)
-                final_response = (_cnr_sum.content or "").strip()
+                final_response = _terminal_summary_text(_cnr_sum)
             else:
                 summary_kwargs = {
                     "model": self.model,
@@ -10491,11 +13033,18 @@ class AIAgent:
                                    preserve_dots=self._anthropic_preserve_dots())
                     summary_response = self._anthropic_messages_create(_ant_kw)
                     _summary_result = _tsum.normalize_response(summary_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = (_summary_result.content or "").strip()
+                    final_response = _terminal_summary_text(_summary_result)
                 else:
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                    from agent.auxiliary_client import _validate_llm_response
+
+                    summary_response = _validate_llm_response(
+                        self._ensure_primary_openai_client(
+                            reason="iteration_limit_summary"
+                        ).chat.completions.create(**summary_kwargs),
+                        "iteration_limit_summary",
+                    )
                     _summary_result = self._get_transport().normalize_response(summary_response)
-                    final_response = (_summary_result.content or "").strip()
+                    final_response = _terminal_summary_text(_summary_result)
 
             if final_response:
                 if "<think>" in final_response:
@@ -10512,7 +13061,7 @@ class AIAgent:
                     retry_response = self._run_codex_stream(codex_kwargs)
                     _ct_retry = self._get_transport()
                     _cnr_retry = _ct_retry.normalize_response(retry_response)
-                    final_response = (_cnr_retry.content or "").strip()
+                    final_response = _terminal_summary_text(_cnr_retry)
                 elif self.api_mode == "anthropic_messages":
                     _tretry = self._get_transport()
                     _ant_kw2 = _tretry.build_kwargs(model=self.model, messages=api_messages, tools=None,
@@ -10521,7 +13070,7 @@ class AIAgent:
                                     preserve_dots=self._anthropic_preserve_dots())
                     retry_response = self._anthropic_messages_create(_ant_kw2)
                     _retry_result = _tretry.normalize_response(retry_response, strip_tool_prefix=self._is_anthropic_oauth)
-                    final_response = (_retry_result.content or "").strip()
+                    final_response = _terminal_summary_text(_retry_result)
                 else:
                     summary_kwargs = {
                         "model": self.model,
@@ -10534,9 +13083,16 @@ class AIAgent:
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                    from agent.auxiliary_client import _validate_llm_response
+
+                    summary_response = _validate_llm_response(
+                        self._ensure_primary_openai_client(
+                            reason="iteration_limit_summary_retry"
+                        ).chat.completions.create(**summary_kwargs),
+                        "iteration_limit_summary",
+                    )
                     _retry_result = self._get_transport().normalize_response(summary_response)
-                    final_response = (_retry_result.content or "").strip()
+                    final_response = _terminal_summary_text(_retry_result)
 
                 if final_response:
                     if "<think>" in final_response:
@@ -10779,6 +13335,19 @@ class AIAgent:
 
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
+        # Delegated and scheduled goals still represent user-requested work and
+        # need the same completion proof. Only explicit wrapper content is
+        # excluded inside _classify_action_obligation.
+        action_obligation = _classify_action_obligation(original_user_message)
+        action_obligation_ledger = _classify_action_obligations(
+            original_user_message
+        )
+        if action_obligation is None and action_obligation_ledger:
+            action_obligation = str(action_obligation_ledger[0]["kind"])
+        # Tool executors keep their public three-argument API; this turn-local
+        # value lets both sequential and concurrent paths snapshot the user's
+        # exact requested artifact path immediately before each physical call.
+        self._active_action_user_message = original_user_message
 
         # Detect a user correction this turn. When the user corrects the
         # agent, force a skill review afterward regardless of the iteration
@@ -11072,12 +13641,211 @@ class AIAgent:
         failed = False
         partial = False
         failure_error = None
+        sticky_tool_execution_failure = None
+        # Normal tool-result failures are recoverable only by a later model
+        # batch retrying the exact same action successfully. Keep this ledger
+        # local to run_conversation so a new user turn always starts clean.
+        unresolved_tool_failures: Dict[tuple[str, str], str] = {}
+        # Malformed arguments and unoffered tools have no executable canonical
+        # action to retry exactly. Their rejection therefore cannot be cleared
+        # inside this user turn by a merely same-name or unrelated success.
+        unfingerprintable_tool_failures: Dict[str, str] = {}
+        pending_tool_obligations: Dict[str, Dict[str, str]] = {}
+        action_obligation_satisfied = False
+        consumed_action_tool_fingerprints: set[tuple[str, str]] = set()
+        consumed_action_evidence_resources: set[str] = set()
+        action_obligation_failure = None
+        action_obligation_needs_input = None
+
+        def _record_rejected_tool_call(
+            tool_name: Any,
+            raw_args: Any,
+            rejection_text: str,
+            *,
+            allow_fingerprint: bool,
+        ) -> None:
+            is_failure, failure_suffix = _detect_tool_failure(
+                str(tool_name or ""),
+                rejection_text,
+            )
+            if not is_failure:
+                return
+
+            normalized_name = str(tool_name or "").strip().lower() or "unknown_tool"
+            fingerprint = None
+            if allow_fingerprint:
+                try:
+                    parsed_args = _parse_tool_arguments_object(raw_args)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    parsed_args = None
+                if parsed_args is not None:
+                    fingerprint = _tool_failure_recovery_fingerprint(
+                        normalized_name,
+                        parsed_args,
+                    )
+
+            failure_label = f"{normalized_name}{failure_suffix or ' [error]'}"
+            if fingerprint is None:
+                unfingerprintable_tool_failures[normalized_name] = failure_label
+            else:
+                unresolved_tool_failures[fingerprint] = failure_label
+
+        def _record_tool_batch_outcomes() -> None:
+            nonlocal action_obligation_satisfied
+            successful_actions = set()
+            failed_actions: Dict[tuple[str, str], str] = {}
+            completed_obligations = set()
+            pending_obligations: Dict[str, Dict[str, str]] = {}
+            for outcome in list(
+                getattr(self, "_last_tool_batch_outcomes", None) or []
+            ):
+                try:
+                    (
+                        tool_name,
+                        function_args,
+                        is_failure,
+                        failure_suffix,
+                        result_text,
+                        *extra,
+                    ) = outcome
+                except (TypeError, ValueError):
+                    continue
+                artifact_baselines = extra[0] if extra else None
+                fingerprint = _tool_failure_recovery_fingerprint(
+                    tool_name,
+                    function_args,
+                )
+                if fingerprint is None:
+                    continue
+                pending_transition = _pending_tool_transition(
+                    tool_name,
+                    function_args,
+                    result_text,
+                )
+                prior_obligation = None
+                if pending_transition is not None:
+                    transition, obligation_key, obligation = pending_transition
+                    if transition == "pending":
+                        pending_obligations[obligation_key] = obligation
+                    else:
+                        prior_obligation = pending_tool_obligations.get(obligation_key)
+                        stale_cron_observation = bool(
+                            prior_obligation
+                            and prior_obligation.get("tool") == "cronjob"
+                            and obligation.get("tool") == "cronjob"
+                            and prior_obligation.get("baseline_last_run_at")
+                            == obligation.get("observed_last_run_at")
+                        )
+                        if stale_cron_observation:
+                            pending_transition = None
+                        else:
+                            completed_obligations.add(obligation_key)
+                normalized_name = str(tool_name or "").strip().lower()
+                action = str(
+                    function_args.get("action")
+                    if isinstance(function_args, dict)
+                    else ""
+                ).strip().lower()
+                direct_async_mutation = bool(
+                    (normalized_name == "admin_deal" and action == "complete_run")
+                    or (
+                        normalized_name == "agent_handoff"
+                        and action in {"create", "complete"}
+                    )
+                    or (
+                        normalized_name == "agent_bus"
+                        and action
+                        in {
+                            "evaluate_experiment",
+                            "experiment_evaluate",
+                            "experiment_run",
+                            "experiment_start",
+                            "run_experiment",
+                            "start_experiment",
+                        }
+                    )
+                    or normalized_name == "delegate_task"
+                )
+                transition_failed = bool(
+                    pending_transition is not None
+                    and pending_transition[0] == "failed"
+                    and (
+                        prior_obligation is not None
+                        or pending_obligations.get(pending_transition[1]) is not None
+                        or direct_async_mutation
+                    )
+                )
+                if is_failure or transition_failed:
+                    failed_actions[fingerprint] = (
+                        f"{fingerprint[0]}"
+                        + (
+                            failure_suffix
+                            or (
+                                f" [async {pending_transition[2].get('status', 'failed')}]"
+                                if transition_failed
+                                else " [error]"
+                            )
+                        )
+                    )
+                elif not (
+                    pending_transition is not None
+                    and pending_transition[0] == "pending"
+                ):
+                    successful_actions.add(fingerprint)
+                    if _record_action_ledger_evidence(
+                        action_obligation_ledger,
+                        consumed_action_tool_fingerprints,
+                        consumed_action_evidence_resources,
+                        tool_name,
+                        function_args,
+                        result_text,
+                        original_user_message,
+                        artifact_baselines,
+                    ):
+                        action_obligation_satisfied = all(
+                            bool(entry.get("verified"))
+                            for entry in action_obligation_ledger
+                        )
+
+            # Success clears only an older failure for the same fingerprint.
+            # Apply failures after successes so a sibling success in this same
+            # batch can never erase a failure that happened alongside it.
+            for fingerprint in successful_actions:
+                unresolved_tool_failures.pop(fingerprint, None)
+            unresolved_tool_failures.update(failed_actions)
+            for obligation_key in completed_obligations:
+                pending_tool_obligations.pop(obligation_key, None)
+            pending_tool_obligations.update(pending_obligations)
+
+        def _active_tool_failure_summary() -> Optional[str]:
+            parts = []
+            if sticky_tool_execution_failure:
+                parts.append(sticky_tool_execution_failure)
+            if unresolved_tool_failures:
+                parts.append("; ".join(unresolved_tool_failures.values()))
+            if unfingerprintable_tool_failures:
+                parts.append(
+                    "; ".join(unfingerprintable_tool_failures.values())
+                )
+            return "; ".join(parts) or None
+
+        def _active_tool_pending_summary() -> Optional[str]:
+            if not pending_tool_obligations:
+                return None
+            return "; ".join(
+                obligation["summary"]
+                for obligation in pending_tool_obligations.values()
+            )
+
         steer_cut = False
         codex_ack_continuations = 0
+        action_obligation_continuations = 0
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_prefix = ""
         compression_attempts = 0
+        force_gemini_nonstream_once = False
+        gemini_nonstream_empty_attempted = False
         _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
 
         def _terminal_result(
@@ -11089,6 +13857,14 @@ class AIAgent:
             result_messages: Optional[List[Dict[str, Any]]] = None,
             compression_exhausted: bool = False,
         ) -> Dict[str, Any]:
+            active_tool_failure = _active_tool_failure_summary()
+            if active_tool_failure:
+                partial = True
+                if active_tool_failure not in error:
+                    error = (
+                        f"{error}; unresolved tool failure: "
+                        f"{active_tool_failure}"
+                    )
             _drop_trailing_empty_response_scaffolding(messages)
             finish_reason = "interrupted" if interrupted_result else "error"
             terminal_message = {
@@ -11132,7 +13908,7 @@ class AIAgent:
                 "messages": returned_messages,
                 "api_calls": api_call_count,
                 "completed": False,
-                "failed": not interrupted_result,
+                "failed": bool(active_tool_failure) or not interrupted_result,
                 "partial": partial,
                 "interrupted": interrupted_result,
                 "error": error,
@@ -11803,10 +14579,19 @@ class AIAgent:
                             self.thinking_callback("")
 
                     _use_streaming = True
+                    _force_gemini_nonstream_this_attempt = (
+                        force_gemini_nonstream_once
+                        and self.provider
+                        in {"gemini", "google-gemini-cli"}
+                    )
+                    if force_gemini_nonstream_once:
+                        force_gemini_nonstream_once = False
+                    if _force_gemini_nonstream_this_attempt:
+                        _use_streaming = False
                     # Provider signaled "stream not supported" on a previous
                     # attempt — switch to non-streaming for the rest of this
                     # session instead of re-failing every retry.
-                    if getattr(self, "_disable_streaming", False):
+                    elif getattr(self, "_disable_streaming", False):
                         _use_streaming = False
                     elif not self._has_stream_consumers():
                         # No display/TTS consumer. Still prefer streaming for
@@ -12096,16 +14881,29 @@ class AIAgent:
                     # Check finish_reason before proceeding
                     if self.api_mode == "codex_responses":
                         status = getattr(response, "status", None)
+                        normalized_status = (
+                            status.strip().lower()
+                            if isinstance(status, str)
+                            else ""
+                        )
                         incomplete_details = getattr(response, "incomplete_details", None)
                         incomplete_reason = None
                         if isinstance(incomplete_details, dict):
                             incomplete_reason = incomplete_details.get("reason")
                         else:
                             incomplete_reason = getattr(incomplete_details, "reason", None)
-                        if status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
-                            finish_reason = "length"
-                        else:
+                        if normalized_status == "completed":
                             finish_reason = "stop"
+                        elif normalized_status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
+                            finish_reason = "length"
+                        elif normalized_status in {
+                            "queued",
+                            "in_progress",
+                            "incomplete",
+                        }:
+                            finish_reason = "incomplete"
+                        else:
+                            finish_reason = "error"
                     elif self.api_mode == "anthropic_messages":
                         _tfr = self._get_transport()
                         finish_reason = _tfr.map_finish_reason(response.stop_reason)
@@ -12123,13 +14921,65 @@ class AIAgent:
                             response, "_elevate_stream_incomplete_error", None
                         )
                         if _stream_incomplete_error:
+                            stream_gemini_diagnostic = (
+                                _allowlisted_gemini_diagnostic(
+                                    getattr(
+                                        response,
+                                        "_elevate_gemini_diagnostic",
+                                        None,
+                                    )
+                                )
+                            )
+                            if stream_gemini_diagnostic is not None:
+                                logger.warning(
+                                    "Native Gemini stream ended without a "
+                                    "terminal response: %s",
+                                    json.dumps(
+                                        stream_gemini_diagnostic,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                )
                             partial_text = self._strip_think_blocks(
                                 str(getattr(assistant_message, "content", "") or "")
                             ).strip()
-                            stream_error = (
-                                "The provider stream ended before the response "
-                                "completed; partial text was preserved."
-                            )
+                            if self._interrupt_requested:
+                                output_was_withheld = bool(
+                                    getattr(
+                                        response,
+                                        "_elevate_stream_output_withheld",
+                                        False,
+                                    )
+                                )
+                                interrupted_partial = (
+                                    "" if output_was_withheld else partial_text
+                                )
+                                stream_error = (
+                                    "Operation interrupted before the provider "
+                                    "completed its response."
+                                )
+                                _turn_exit_reason = (
+                                    "interrupted_incomplete_provider_stream"
+                                )
+                                return _terminal_result(
+                                    interrupted_partial or stream_error,
+                                    error=stream_error,
+                                    interrupted_result=True,
+                                    partial=bool(interrupted_partial),
+                                )
+                            if getattr(
+                                response, "_elevate_had_tool_intent", False
+                            ):
+                                stream_error = (
+                                    "The provider stream ended before an "
+                                    "incomplete tool request finished; no tool "
+                                    "action was executed."
+                                )
+                            else:
+                                stream_error = (
+                                    "The provider stream ended before the response "
+                                    "completed; partial text was preserved."
+                                )
                             return _terminal_result(
                                 partial_text or stream_error,
                                 error=stream_error,
@@ -12167,7 +15017,13 @@ class AIAgent:
                         _trunc_msg = _trunc_result
 
                         _trunc_content = getattr(_trunc_msg, "content", None) if _trunc_msg else None
-                        _trunc_has_tool_calls = bool(getattr(_trunc_msg, "tool_calls", None)) if _trunc_msg else False
+                        _trunc_provider_data = (
+                            getattr(_trunc_result, "provider_data", None) or {}
+                        )
+                        _trunc_has_tool_calls = bool(
+                            (getattr(_trunc_msg, "tool_calls", None) if _trunc_msg else None)
+                            or _trunc_provider_data.get("had_tool_intent")
+                        )
 
                         # ── Detect thinking-budget exhaustion ──────────────
                         # When the model spends ALL output tokens on reasoning
@@ -13680,6 +16536,156 @@ class AIAgent:
                 normalized = _transport.normalize_response(response, **_normalize_kwargs)
                 assistant_message = normalized
                 finish_reason = normalized.finish_reason
+
+                gemini_response_diagnostic = _allowlisted_gemini_diagnostic(
+                    getattr(response, "_elevate_gemini_diagnostic", None)
+                )
+                if gemini_response_diagnostic is not None:
+                    prompt_block_reason = gemini_response_diagnostic[
+                        "prompt_block_reason"
+                    ]
+                    candidate_finish_reason = gemini_response_diagnostic[
+                        "finish_reason"
+                    ]
+                    stopped_subject = None
+                    stopped_reason = None
+                    stopped_verb = None
+                    if prompt_block_reason != "UNSPECIFIED":
+                        stopped_subject = "request"
+                        stopped_reason = prompt_block_reason
+                        stopped_verb = "blocked"
+                    elif candidate_finish_reason not in {
+                        "STOP",
+                        "UNSPECIFIED",
+                        "MAX_TOKENS",
+                    }:
+                        stopped_subject = "response"
+                        stopped_reason = candidate_finish_reason
+                        stopped_verb = "rejected"
+                    if stopped_reason:
+                        logger.warning(
+                            "Native Gemini rejected a response before tool "
+                            "execution: %s",
+                            json.dumps(
+                                gemini_response_diagnostic,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ),
+                        )
+                        _turn_exit_reason = (
+                            f"provider_{stopped_verb}_{stopped_subject}"
+                            f"({stopped_reason})"
+                        )
+                        stopped_text = (
+                            f"The AI provider {stopped_verb} this "
+                            f"{stopped_subject} ({stopped_reason}); no response "
+                            "or tool action was accepted."
+                        )
+                        return _terminal_result(
+                            stopped_text,
+                            error=stopped_text,
+                        )
+
+                _normalized_provider_data = (
+                    getattr(normalized, "provider_data", None) or {}
+                )
+                if (
+                    finish_reason == "error"
+                    and _normalized_provider_data.get("had_tool_intent")
+                ):
+                    raw_finish_reason = None
+                    if self.api_mode == "chat_completions":
+                        try:
+                            raw_finish_reason = response.choices[0].finish_reason
+                        except (AttributeError, IndexError, TypeError):
+                            pass
+                    reason_label = (
+                        raw_finish_reason.strip().lower()
+                        if isinstance(raw_finish_reason, str)
+                        and raw_finish_reason.strip()
+                        else "missing"
+                    )
+                    logger.warning(
+                        "Provider returned tool intent without an accepted "
+                        "terminal finish reason (%s); refusing execution",
+                        reason_label,
+                    )
+                    _turn_exit_reason = (
+                        "provider_incomplete_tool_call"
+                        f"({reason_label})"
+                    )
+                    stopped_text = (
+                        "The AI provider returned an incomplete tool request "
+                        f"({reason_label}); no tool action was executed."
+                    )
+                    return _terminal_result(stopped_text, error=stopped_text)
+
+                if finish_reason in {"content_filter", "error"}:
+                    logger.warning(
+                        "Provider rejected a response before tool execution "
+                        "(finish_reason=%s)",
+                        finish_reason,
+                    )
+                    _turn_exit_reason = (
+                        f"provider_rejected_response({finish_reason})"
+                    )
+                    stopped_text = (
+                        "The AI provider rejected this response "
+                        f"({finish_reason}); no response or tool action was "
+                        "accepted."
+                    )
+                    return _terminal_result(stopped_text, error=stopped_text)
+
+                if (
+                    finish_reason == "tool_calls"
+                    and not getattr(assistant_message, "tool_calls", None)
+                ):
+                    _turn_exit_reason = "provider_missing_tool_call"
+                    stopped_text = (
+                        "The AI provider reported a completed tool request "
+                        "without supplying a tool call; no action was executed."
+                    )
+                    return _terminal_result(stopped_text, error=stopped_text)
+
+                if getattr(assistant_message, "tool_calls", None):
+                    tool_finish_reason = finish_reason
+                    if self.api_mode == "chat_completions":
+                        # ChatCompletionsTransport historically defaults a
+                        # missing raw finish reason to "stop".  Inspect the
+                        # provider envelope directly so malformed/incomplete
+                        # tool-bearing responses cannot inherit that default
+                        # and execute actions.
+                        try:
+                            tool_finish_reason = (
+                                response.choices[0].finish_reason
+                            )
+                        except (AttributeError, IndexError, TypeError):
+                            tool_finish_reason = None
+                    normalized_tool_finish = (
+                        tool_finish_reason.strip().lower()
+                        if isinstance(tool_finish_reason, str)
+                        else ""
+                    )
+                    if normalized_tool_finish not in {"stop", "tool_calls"}:
+                        reason_label = normalized_tool_finish or "missing"
+                        logger.warning(
+                            "Provider returned tool calls without an accepted "
+                            "terminal finish reason (%s); refusing execution",
+                            reason_label,
+                        )
+                        _turn_exit_reason = (
+                            "provider_incomplete_tool_call"
+                            f"({reason_label})"
+                        )
+                        stopped_text = (
+                            "The AI provider returned an incomplete tool "
+                            f"request ({reason_label}); no tool action was "
+                            "executed."
+                        )
+                        return _terminal_result(
+                            stopped_text,
+                            error=stopped_text,
+                        )
                 
                 # Normalize content to string — some OpenAI-compatible servers
                 # (llama-server, etc.) return content as a dict or list instead
@@ -13882,14 +16888,29 @@ class AIAgent:
                         messages.append(assistant_msg)
                         for tc in assistant_message.tool_calls:
                             if tc.function.name not in self.valid_tool_names:
-                                content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
+                                content = (
+                                    f"Error: Tool '{tc.function.name}' does not "
+                                    f"exist. Available tools: {available}"
+                                )
+                                allow_fingerprint = False
                             else:
-                                content = "Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
+                                content = (
+                                    "Error: Skipped because another tool call "
+                                    "in this turn used an invalid name. Please "
+                                    "retry this exact tool call."
+                                )
+                                allow_fingerprint = True
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc.id,
                                 "content": content,
                             })
+                            _record_rejected_tool_call(
+                                tc.function.name,
+                                tc.function.arguments,
+                                content,
+                                allow_fingerprint=allow_fingerprint,
+                            )
                         continue
                     # Reset retry counter on successful tool call validation
                     self._invalid_tool_retries = 0
@@ -13897,24 +16918,68 @@ class AIAgent:
                     # Validate tool call arguments are valid JSON
                     # Handle empty strings as empty objects (common model quirk)
                     invalid_json_args = []
+                    invalid_json_syntax_names = set()
                     for tc in assistant_message.tool_calls:
                         args = tc.function.arguments
-                        if isinstance(args, (dict, list)):
+                        if isinstance(args, dict):
                             tc.function.arguments = json.dumps(args)
+                            continue
+                        if isinstance(args, list):
+                            tc.function.arguments = json.dumps(args)
+                            invalid_json_args.append((
+                                tc.function.name,
+                                "Tool arguments must be a JSON object, not a list",
+                            ))
                             continue
                         if args is not None and not isinstance(args, str):
                             tc.function.arguments = str(args)
                             args = tc.function.arguments
-                        # Treat empty/whitespace strings as empty object
+                        # Missing/blank arguments are not a confirmed empty
+                        # object.  Providers must emit an explicit ``{}`` for
+                        # a no-argument tool.
                         if not args or not args.strip():
-                            tc.function.arguments = "{}"
+                            invalid_json_args.append((
+                                tc.function.name,
+                                "Tool arguments must be a non-empty JSON object",
+                            ))
                             continue
                         try:
-                            json.loads(args)
+                            parsed_args = _parse_tool_arguments_object(args)
                         except json.JSONDecodeError as e:
                             invalid_json_args.append((tc.function.name, str(e)))
+                            invalid_json_syntax_names.add(tc.function.name)
+                            continue
+                        except ValueError as e:
+                            invalid_json_args.append((
+                                tc.function.name,
+                                str(e),
+                            ))
                     
                     if invalid_json_args:
+                        invalid_names = {name for name, _ in invalid_json_args}
+                        for rejected_call in assistant_message.tool_calls:
+                            if rejected_call.function.name in invalid_names:
+                                rejected_error = next(
+                                    error
+                                    for name, error in invalid_json_args
+                                    if name == rejected_call.function.name
+                                )
+                                rejection_text = (
+                                    "Error: Invalid JSON arguments. "
+                                    f"{rejected_error}"
+                                )
+                            else:
+                                rejection_text = (
+                                    "Error: Skipped because another tool call "
+                                    "in this response had invalid JSON."
+                                )
+                            _record_rejected_tool_call(
+                                rejected_call.function.name,
+                                rejected_call.function.arguments,
+                                rejection_text,
+                                allow_fingerprint=True,
+                            )
+
                         # Check if the invalid JSON is due to truncation rather
                         # than a model formatting mistake.  Routers sometimes
                         # rewrite finish_reason from "length" to "tool_calls",
@@ -13924,7 +16989,7 @@ class AIAgent:
                         _truncated = any(
                             not (tc.function.arguments or "").rstrip().endswith(("}", "]"))
                             for tc in assistant_message.tool_calls
-                            if tc.function.name in {n for n, _ in invalid_json_args}
+                            if tc.function.name in invalid_json_syntax_names
                         )
                         if _truncated:
                             self._vprint(
@@ -13963,7 +17028,6 @@ class AIAgent:
                             messages.append(recovery_assistant)
                             
                             # Respond with tool error results for each tool call
-                            invalid_names = {name for name, _ in invalid_json_args}
                             for tc in assistant_message.tool_calls:
                                 if tc.function.name in invalid_names:
                                     err = next(e for n, e in invalid_json_args if n == tc.function.name)
@@ -13973,7 +17037,10 @@ class AIAgent:
                                         f"Please retry with valid JSON."
                                     )
                                 else:
-                                    tool_result = "Skipped: other tool call in this response had invalid JSON."
+                                    tool_result = (
+                                        "Error: Skipped because another tool "
+                                        "call in this response had invalid JSON."
+                                    )
                                 messages.append({
                                     "role": "tool",
                                     "tool_call_id": tc.id,
@@ -14035,7 +17102,8 @@ class AIAgent:
                     # call success as a fresh start.
                     if _had_prefill:
                         self._thinking_prefill_retries = 0
-                        self._empty_content_retries = 0
+                    self._empty_content_retries = 0
+                    gemini_nonstream_empty_attempted = False
                     # Successful tool execution — reset the post-tool nudge
                     # flag so it can fire again if the model goes empty on
                     # a LATER tool round.
@@ -14056,7 +17124,10 @@ class AIAgent:
                         except Exception:
                             pass
 
-                    self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                    self._execute_tool_calls(
+                        assistant_message, messages, effective_task_id
+                    )
+                    _record_tool_batch_outcomes()
 
                     # Reset per-turn retry counters after successful tool
                     # execution so a single truncation doesn't poison the
@@ -14405,17 +17476,78 @@ class AIAgent:
                             _has_structured
                             and self._thinking_prefill_retries >= 2
                         )
+                        gemini_diagnostic = None
+                        if _truly_empty:
+                            gemini_diagnostic = _allowlisted_gemini_diagnostic(
+                                getattr(
+                                    response,
+                                    "_elevate_gemini_diagnostic",
+                                    None,
+                                )
+                            )
+                            if gemini_diagnostic is not None:
+                                logger.warning(
+                                    "Native Gemini returned an empty response: %s",
+                                    json.dumps(
+                                        gemini_diagnostic,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                )
+
                         if _truly_empty and (not _has_structured or _prefill_exhausted) and self._empty_content_retries < 3:
                             self._empty_content_retries += 1
+                            use_nonstream_retry = (
+                                self.provider
+                                in {"gemini", "google-gemini-cli"}
+                                and _use_streaming
+                                and not gemini_nonstream_empty_attempted
+                                and gemini_diagnostic is not None
+                                and gemini_diagnostic["finish_reason"] == "STOP"
+                                and gemini_diagnostic["prompt_block_reason"]
+                                == "UNSPECIFIED"
+                                and gemini_diagnostic["usable_part_count"] == 0
+                            )
+                            if use_nonstream_retry:
+                                gemini_nonstream_empty_attempted = True
+                                force_gemini_nonstream_once = True
+
+                            wait_time = _empty_response_retry_delay(
+                                self._empty_content_retries
+                            )
                             logger.warning(
                                 "Empty response (no content or reasoning) — "
-                                "retry %d/3 (model=%s)",
-                                self._empty_content_retries, self.model,
+                                "retry %d/3 in %.1fs (model=%s, mode=%s)",
+                                self._empty_content_retries,
+                                wait_time,
+                                self.model,
+                                "nonstream-once" if use_nonstream_retry else "default",
                             )
                             self._emit_status(
-                                f"⚠️ Empty response from model — retrying "
+                                f"⚠️ Empty response from model — retrying in "
+                                f"{wait_time:.1f}s "
                                 f"({self._empty_content_retries}/3)"
+                                + (
+                                    " without streaming once"
+                                    if use_nonstream_retry
+                                    else ""
+                                )
                             )
+
+                            sleep_end = time.monotonic() + wait_time
+                            while time.monotonic() < sleep_end:
+                                if self._interrupt_requested:
+                                    interrupt_text = (
+                                        "Operation interrupted during empty-response "
+                                        "retry wait."
+                                    )
+                                    return _terminal_result(
+                                        interrupt_text,
+                                        error=interrupt_text,
+                                        interrupted_result=True,
+                                    )
+                                remaining = sleep_end - time.monotonic()
+                                time.sleep(min(0.2, max(0.0, remaining)))
                             continue
 
                         # ── Exhausted retries — try fallback provider ──
@@ -14492,6 +17624,86 @@ class AIAgent:
                     self._empty_content_retries = 0
                     self._thinking_prefill_retries = 0
 
+                    # A narrow class of genuine-user mutation requests cannot be
+                    # completed by prose alone. Give the model two bounded
+                    # chances to execute, then fail deterministically instead
+                    # of accepting a third unsupported completion claim.
+                    active_tool_failure = _active_tool_failure_summary()
+                    active_tool_pending = _active_tool_pending_summary()
+                    if (
+                        action_obligation
+                        and not action_obligation_satisfied
+                        and not active_tool_failure
+                        and not active_tool_pending
+                    ):
+                        action_label = _action_ledger_label(
+                            action_obligation_ledger
+                        )
+                        compound_action = len(action_obligation_ledger) > 1
+                        if _action_response_needs_input(final_response):
+                            model_clarification = self._strip_think_blocks(
+                                final_response
+                            ).strip()
+                            if compound_action:
+                                action_obligation_needs_input = (
+                                    "The requested actions are not complete and "
+                                    "need input or approval before they can "
+                                    f"proceed.\n\n{model_clarification}"
+                                ).strip()
+                            else:
+                                action_obligation_needs_input = (
+                                    f"The requested {action_label} action is not "
+                                    "complete and needs input or approval before "
+                                    f"it can proceed.\n\n{model_clarification}"
+                                ).strip()
+                        elif action_obligation_continuations < 2:
+                            action_obligation_continuations += 1
+                            interim_msg = self._build_assistant_message(
+                                assistant_message,
+                                "incomplete",
+                            )
+                            interim_msg["content"] = (
+                                "The requested actions have not all been verified "
+                                "yet; execution is still required."
+                                if compound_action
+                                else (
+                                    f"The requested {action_label} action has not "
+                                    "been verified yet; execution is still required."
+                                )
+                            )
+                            interim_msg["finish_reason"] = "incomplete"
+                            messages.append(interim_msg)
+                            self._emit_interim_assistant_message(interim_msg)
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "[System: Execute every requested action "
+                                        "now with the appropriate tools. Do not "
+                                        "claim completion until distinct successful "
+                                        "tool or artifact evidence verifies every "
+                                        "ledger entry.]"
+                                        if compound_action
+                                        else (
+                                            "[System: Execute the requested "
+                                            f"{action_label} action now with the "
+                                            "appropriate tool. Do not claim completion "
+                                            "until a successful relevant tool result or "
+                                            "artifact verifies it.]"
+                                        )
+                                    ),
+                                }
+                            )
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            continue
+                        else:
+                            action_obligation_failure = (
+                                _unverified_action_ledger_failure_text(
+                                    action_obligation_ledger
+                                )
+                            )
+
                     # Codex's intermediate-ack heuristic (workspace plans). Kept
                     # codex-only and ungated to preserve existing behavior.
                     _codex_ack_continue = (
@@ -14514,6 +17726,8 @@ class AIAgent:
                     if (
                         self.valid_tool_names
                         and codex_ack_continuations < 2
+                        and not action_obligation_failure
+                        and not action_obligation_needs_input
                         and (_codex_ack_continue or _skill_stall_continue)
                     ):
                         codex_ack_continuations += 1
@@ -14542,8 +17756,42 @@ class AIAgent:
                     
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
+                    active_tool_failure = _active_tool_failure_summary()
+                    active_tool_pending = _active_tool_pending_summary()
+                    if active_tool_failure:
+                        model_follow_up = final_response
+                        final_response = (
+                            "The task did not complete because tool execution "
+                            f"failed: {active_tool_failure}"
+                        )
+                        if model_follow_up:
+                            final_response += (
+                                "\n\nThe model's follow-up was not treated as "
+                                f"proof of completion: {model_follow_up}"
+                            )
+                    elif active_tool_pending:
+                        final_response = (
+                            "Work is still running and completion "
+                            f"has not been verified: {active_tool_pending}."
+                        )
+                    elif action_obligation_failure:
+                        final_response = action_obligation_failure
+                    elif action_obligation_needs_input:
+                        final_response = action_obligation_needs_input
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+                    if active_tool_failure:
+                        final_msg["content"] = final_response
+                        final_msg["finish_reason"] = "error"
+                    elif active_tool_pending:
+                        final_msg["content"] = final_response
+                        final_msg["finish_reason"] = "incomplete"
+                    elif action_obligation_failure:
+                        final_msg["content"] = final_response
+                        final_msg["finish_reason"] = "error"
+                    elif action_obligation_needs_input:
+                        final_msg["content"] = final_response
+                        final_msg["finish_reason"] = "needs_input"
 
                     # Private retry scaffolding is provider-only context. A
                     # recovered final answer replaces it in durable history.
@@ -14602,9 +17850,34 @@ class AIAgent:
                         continue
 
                     messages.append(final_msg)
-                    
-                    _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
-                    if not self.quiet_mode:
+
+                    if active_tool_failure:
+                        failed = True
+                        partial = True
+                        failure_error = active_tool_failure
+                        _turn_exit_reason = "tool_execution_failed"
+                    elif active_tool_pending:
+                        partial = True
+                        _turn_exit_reason = "tool_execution_pending"
+                    elif action_obligation_failure:
+                        failed = True
+                        partial = True
+                        failure_error = action_obligation_failure
+                        _turn_exit_reason = "action_obligation_unverified"
+                    elif action_obligation_needs_input:
+                        partial = True
+                        _turn_exit_reason = "action_obligation_needs_input"
+                    else:
+                        _turn_exit_reason = (
+                            f"text_response(finish_reason={finish_reason})"
+                        )
+                    if (
+                        not self.quiet_mode
+                        and not active_tool_failure
+                        and not active_tool_pending
+                        and not action_obligation_failure
+                        and not action_obligation_needs_input
+                    ):
                         self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
                     break
                 
@@ -14620,6 +17893,7 @@ class AIAgent:
                 # If an assistant message with tool_calls was already appended,
                 # the API expects a role="tool" result for every tool_call_id.
                 # Fill in error results for any that weren't answered yet.
+                tool_turn_exception = False
                 for idx in range(len(messages) - 1, -1, -1):
                     msg = messages[idx]
                     if not isinstance(msg, dict):
@@ -14627,6 +17901,7 @@ class AIAgent:
                     if msg.get("role") == "tool":
                         continue
                     if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        tool_turn_exception = True
                         answered_ids = {
                             m["tool_call_id"]
                             for m in messages[idx + 1:]
@@ -14642,6 +17917,20 @@ class AIAgent:
                                 }
                                 messages.append(err_msg)
                     break
+
+                if tool_turn_exception:
+                    # A later model sentence cannot prove that a failed tool
+                    # action happened. Keep the synthetic tool error so the
+                    # model can explain/recover, but make failure monotonic for
+                    # this user turn.
+                    sticky_tool_execution_failure = error_msg
+                    failed = True
+                    partial = True
+                    failure_error = error_msg
+                    _turn_exit_reason = "tool_execution_exception"
+                    self._emit_status(
+                        "❌ Tool execution failed — this turn cannot be marked complete"
+                    )
                 
                 # Non-tool errors don't need a synthetic message injected.
                 # The error is already printed to the user (line above), and
@@ -14696,6 +17985,49 @@ class AIAgent:
             final_response = self._handle_max_iterations(messages, api_call_count)
             failed = True
 
+        # Any _detect_tool_failure result left unresolved at turn exit is
+        # authoritative. Prose, summaries, or an unrelated successful tool
+        # cannot promote the turn back to complete.
+        active_tool_failure = _active_tool_failure_summary()
+        if active_tool_failure:
+            failed = True
+            partial = True
+            failure_error = active_tool_failure
+        active_tool_pending = _active_tool_pending_summary()
+        if active_tool_pending:
+            partial = True
+        if (
+            action_obligation
+            and not action_obligation_satisfied
+            and not active_tool_failure
+            and not active_tool_pending
+            and not action_obligation_needs_input
+            and not interrupted
+        ):
+            action_obligation_failure = (
+                action_obligation_failure
+                or _unverified_action_ledger_failure_text(
+                    action_obligation_ledger
+                )
+            )
+            final_response = action_obligation_failure
+            failed = True
+            partial = True
+            failure_error = action_obligation_failure
+            _turn_exit_reason = "action_obligation_unverified"
+            _drop_trailing_empty_response_scaffolding(messages)
+            if messages and messages[-1].get("role") == "assistant":
+                messages[-1]["content"] = final_response
+                messages[-1]["finish_reason"] = "error"
+            else:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": final_response,
+                        "finish_reason": "error",
+                    }
+                )
+
         if interrupted and final_response:
             _drop_trailing_empty_response_scaffolding(messages)
             if not (
@@ -14713,9 +18045,10 @@ class AIAgent:
         # Determine if conversation completed successfully
         completed = (
             final_response is not None
-            and api_call_count < self.max_iterations
             and not failed
             and not interrupted
+            and not active_tool_pending
+            and not action_obligation_needs_input
         )
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
@@ -14777,7 +18110,7 @@ class AIAgent:
         # Fired once per turn after the tool-calling loop completes.
         # Plugins can use this to persist conversation data (e.g. sync
         # to an external memory system).
-        if final_response and not interrupted and not failed:
+        if final_response and completed:
             try:
                 from elevate_cli.plugins import invoke_hook as _invoke_hook
                 _invoke_hook(
@@ -14796,7 +18129,7 @@ class AIAgent:
         # (drafted, read docs, researched) without a formal admin_deal update,
         # record an activity marker so the board's freshness reflects the work.
         # Self-gated to real-estate accounts; never raises.
-        if not interrupted and not failed:
+        if completed:
             try:
                 from agent.turn_attribution import (
                     attribute_turn_safely,
@@ -14840,6 +18173,8 @@ class AIAgent:
             "turn_exit_reason": _turn_exit_reason,
             "failed": failed,
             "partial": partial,
+            "pending": bool(active_tool_pending),
+            "needs_input": bool(action_obligation_needs_input),
             "interrupted": interrupted,
             "response_previewed": getattr(self, "_response_was_previewed", False),
             "model": self.model,
@@ -14860,6 +18195,39 @@ class AIAgent:
         }
         if failed:
             result["error"] = failure_error or final_response
+        if pending_tool_obligations:
+            result["pending_tool_obligations"] = [
+                {
+                    key: value
+                    for key, value in obligation.items()
+                    if key != "summary"
+                }
+                for obligation in pending_tool_obligations.values()
+            ]
+        if action_obligation:
+            result["action_obligation"] = {
+                "kind": action_obligation,
+                "verified": action_obligation_satisfied,
+            }
+            if len(action_obligation_ledger) > 1:
+                result["action_obligations"] = [
+                    {
+                        "id": entry["id"],
+                        "kind": entry["kind"],
+                        "target": entry.get("target"),
+                        "path": entry.get("path"),
+                        "verified": bool(entry.get("verified")),
+                        "evidence": (
+                            {
+                                "tool": entry["evidence"].get("tool"),
+                                "resource": entry["evidence"].get("resource"),
+                            }
+                            if isinstance(entry.get("evidence"), dict)
+                            else None
+                        ),
+                    }
+                    for entry in action_obligation_ledger
+                ]
         # If a /steer landed after the final assistant turn (no more tool
         # batches to drain into), hand it back to the caller so it can be
         # delivered as the next user turn instead of being silently lost.

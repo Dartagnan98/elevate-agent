@@ -6,6 +6,7 @@ import { useState, useCallback, useEffect } from "react";
 import { api } from "../../../../lib/api";
 import { clauseLibrary } from "../cps/cps-libraries";
 import ClausePickerModal from "./clause-picker-modal";
+import { kitErrorMessage, requireKitResponse, runKitRequests } from "./kit-http";
 
 type AnyObj = Record<string, any>;
 
@@ -100,6 +101,7 @@ export default function OfferKitWizard({
   const [manualCollapse, setManualCollapse] = useState<boolean | null>(null);
   const collapsed = manualCollapse !== null ? manualCollapse : (currentStage ?? 0) !== 1;
   const setCollapsed = setManualCollapse;
+  const [kitError, setKitError] = useState("");
 
   // ── clause selection (Step 3) ──
   const allClauses: AnyObj[] = (clauseLibrary.clauses as AnyObj[]) || [];
@@ -148,7 +150,10 @@ export default function OfferKitWizard({
   useEffect(() => {
     const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
     fetch("/api/admin/clause-library", { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.json())
+      .then(async (response) => {
+        await requireKitResponse(response, "Could not load the saved clause library");
+        return response.json();
+      })
       .then((d) => {
         const f = (d && d.folders) || {};
         setWfFolders([
@@ -157,7 +162,9 @@ export default function OfferKitWizard({
           { key: "system", label: "System Clauses", clauses: f.system || [] },
         ]);
       })
-      .catch(() => {});
+      .catch((error) => {
+        setKitError(kitErrorMessage(error, "Could not load the saved clause library."));
+      });
   }, []);
   const clauseFolders = wfFolders || [
     { key: "personal", label: "Personal Clauses", clauses: [] },
@@ -193,18 +200,27 @@ export default function OfferKitWizard({
   const [builtMsg, setBuiltMsg] = useState("");
   const buildKit = useCallback(async () => {
     const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
-    setBuilding(true); setBuiltMsg("");
+    setBuilding(true); setBuiltMsg(""); setKitError("");
     try {
       // Make sure the current subject selection is saved before we assemble it.
-      await api.setAdminDealToggle(dealId, "cpsClauses", Array.from(selectedClauses) as any).catch(() => {});
-      await api.setAdminDealToggle(dealId, "cpsCustomClauses", customClauses as any).catch(() => {});
-      await fetch(`/api/admin/deals/${dealId}/offer-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } });
+      await api.setAdminDealToggle(dealId, "cpsClauses", Array.from(selectedClauses) as any);
+      await api.setAdminDealToggle(dealId, "cpsCustomClauses", customClauses as any);
       const enabled = KIT_FORMS.filter((f) => f.required || (kitForms[f.id] ?? KIT_FORM_DEFAULTS[f.id] ?? true)).map((f) => f.id);
-      for (const id of enabled) {
-        await fetch(`/api/admin/deals/${dealId}/kit-doc/${id}/generate`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }).catch(() => {});
-      }
+      await runKitRequests([
+        {
+          request: () => fetch(`/api/admin/deals/${dealId}/offer-kit/build`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }),
+          fallback: "Could not build the offer kit",
+        },
+        ...enabled.map((id) => ({
+          request: () => fetch(`/api/admin/deals/${dealId}/kit-doc/${id}/generate`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } }),
+          fallback: `Could not generate ${KIT_FORMS.find((form) => form.id === id)?.label || id}`,
+        })),
+      ]);
       setBuiltMsg(`✓ Built ${enabled.length} documents into the kit`);
       onUpdate?.();
+    } catch (error) {
+      setBuiltMsg("");
+      setKitError(kitErrorMessage(error, "The offer kit could not be built. Check the province document pack, then try again."));
     } finally { setBuilding(false); }
   }, [dealId, kitForms, onUpdate, selectedClauses, customClauses]);
 
@@ -223,17 +239,29 @@ export default function OfferKitWizard({
     window.open(`${externalOrigin}/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}?token=${encodeURIComponent(tok())}&v=${Date.now()}${download ? "&download=1" : ""}`, "_blank", "noopener,noreferrer");
   }, [dealId]);
   const approveKitDoc = useCallback(async (docId: string, status: string) => {
-    await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/approve`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ status }) }).catch(() => {});
-    onUpdate?.();
+    setKitError("");
+    try {
+      const response = await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/approve`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
+      await requireKitResponse(response, "Could not update document approval");
+      onUpdate?.();
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The document approval could not be saved."));
+    }
   }, [dealId, onUpdate]);
   const saveKitField = useCallback((docId: string, key: string, value: string) => {
-    fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/field`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) }).catch(() => {});
+    setKitError("");
+    void fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/field`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ key, value }) })
+      .then((response) => requireKitResponse(response, "Could not save the document field"))
+      .catch((error) => setKitError(kitErrorMessage(error, "The document field could not be saved.")));
   }, [dealId]);
   const generateKitDoc = useCallback(async (docId: string) => {
-    setGeneratingKit(docId);
+    setGeneratingKit(docId); setKitError("");
     try {
-      await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
+      const response = await fetch(`/api/admin/deals/${dealId}/kit-doc/${encodeURIComponent(docId)}/generate`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" } });
+      await requireKitResponse(response, "Could not generate the document");
       onUpdate?.();
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The PDF could not be generated. Check the province document pack, then try again."));
     } finally { setGeneratingKit(null); }
   }, [dealId, onUpdate]);
 
@@ -247,23 +275,31 @@ export default function OfferKitWizard({
     { id: "subject-removal", label: "Subject Removal / Notice of Fulfillment" },
   ].filter((f) => !builtIds.has(f.id));
   const addCatalogForm = useCallback(async (templateId: string, name: string) => {
-    setAddingForm(true);
+    setAddingForm(true); setKitError("");
     try {
-      await fetch(`/api/admin/deals/${dealId}/kit-doc/add`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ templateId, name }) });
+      const response = await fetch(`/api/admin/deals/${dealId}/kit-doc/add`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ templateId, name }) });
+      await requireKitResponse(response, "Could not add the form");
       onUpdate?.();
-    } finally { setAddingForm(false); setAddFormOpen(false); }
+      setAddFormOpen(false);
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The form could not be added to this kit."));
+    } finally { setAddingForm(false); }
   }, [dealId, onUpdate]);
   const uploadForm = useCallback(async (file: File) => {
-    setAddingForm(true);
+    setAddingForm(true); setKitError("");
     try {
       const buf = await file.arrayBuffer();
       let bin = "";
       const bytes = new Uint8Array(buf);
       for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
       const contentB64 = btoa(bin);
-      await fetch(`/api/admin/deals/${dealId}/kit-doc/add`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ filename: file.name, contentB64 }) });
+      const response = await fetch(`/api/admin/deals/${dealId}/kit-doc/add`, { method: "POST", headers: { Authorization: `Bearer ${tok()}`, "Content-Type": "application/json" }, body: JSON.stringify({ filename: file.name, contentB64 }) });
+      await requireKitResponse(response, "Could not upload the form");
       onUpdate?.();
-    } finally { setAddingForm(false); setAddFormOpen(false); }
+      setAddFormOpen(false);
+    } catch (error) {
+      setKitError(kitErrorMessage(error, "The PDF could not be added to this kit."));
+    } finally { setAddingForm(false); }
   }, [dealId, onUpdate]);
 
   const mls = (extra.mlsNumber as string) || (extra.mls as string) || "";
@@ -291,13 +327,20 @@ export default function OfferKitWizard({
     const num = mlsInput.trim();
     if (!num) return;
     const token = (window as unknown as { __ELEVATE_SESSION_TOKEN__?: string }).__ELEVATE_SESSION_TOKEN__ || "";
-    setPulling(true);
-    await api.setAdminDealToggle(dealId, "mlsNumber", num).catch(() => {});
-    await fetch(`/api/admin/deals/${dealId}/pull-listing`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ mls: num }),
-    }).catch(() => {});
+    setPulling(true); setKitError("");
+    try {
+      await api.setAdminDealToggle(dealId, "mlsNumber", num);
+      const response = await fetch(`/api/admin/deals/${dealId}/pull-listing`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ mls: num }),
+      });
+      await requireKitResponse(response, "Could not start the property-document pull");
+    } catch (error) {
+      setPulling(false);
+      setKitError(kitErrorMessage(error, "The property documents could not be pulled. Check the forms connection, then try again."));
+      return;
+    }
     // The pull is a browser scrape (a few minutes). Poll the deal so the fields
     // fill in when it finishes, then stop.
     let ticks = 0;
@@ -684,6 +727,11 @@ export default function OfferKitWizard({
       <div style={{ padding: "18px 22px 20px" }}>
         <div style={{ fontWeight: 800, fontSize: 13, letterSpacing: 0.6, color: INK }}>BUILD OFFER KIT · STEP {step} OF 4</div>
         <div style={{ marginTop: 12 }}>{Stepper}</div>
+        {kitError && (
+          <div role="alert" aria-live="polite" style={{ margin: "12px 0", border: "1px solid #e4b5a5", background: "#fff4ef", color: "#7a321f", borderRadius: 9, padding: "11px 13px", fontSize: 13, fontWeight: 600 }}>
+            {kitError}
+          </div>
+        )}
         {step === 1 ? Step1 : step === 2 ? Step2 : step === 3 ? Step3 : step === 4 ? Step4 : Placeholder}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18 }}>
           {step > 1 ? (

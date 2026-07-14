@@ -5,6 +5,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 
 def test_generated_thread_draft_uses_active_outreach_template(monkeypatch):
     from elevate_cli import outreach_db
@@ -442,3 +444,160 @@ def test_approve_atomic_records_template_attempt_and_enqueue_payload(tmp_path, m
     assert enqueue["attempt_id"] == "attempt-1"
     assert enqueue["payload"]["template_id"] == "tpl-1"
     assert enqueue["payload"]["attempt_id"] == "attempt-1"
+
+
+def test_approve_dispatch_claims_exact_queue_row_without_global_tick(monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import sender
+    from elevate_cli import source_connectors as sc
+
+    dispatched = []
+    monkeypatch.delenv("ELEVATE_APPROVE_AUTO_TICK", raising=False)
+    monkeypatch.setattr(
+        outreach_db,
+        "get_send_by_id",
+        lambda queue_id: {"id": queue_id, "channel": "sms", "status": "queued"},
+    )
+    monkeypatch.setattr(sender, "apple_messages_outbound_enabled", lambda config=None: True)
+    monkeypatch.setattr(
+        outreach_db,
+        "claim_send_by_id",
+        lambda queue_id: {
+            "id": queue_id,
+            "channel": "sms",
+            "attempts": 0,
+            "payload": {"draft_text": "Exact row"},
+        },
+    )
+    monkeypatch.setattr(sender, "dispatch_one", lambda row: dispatched.append(row) or row)
+    monkeypatch.setattr(
+        sender,
+        "tick",
+        lambda **_kwargs: pytest.fail("approve must not drain the global queue"),
+    )
+
+    class InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("threading.Thread", InlineThread)
+
+    sc._fire_approve_tick("task-1", "queue-selected")
+
+    assert [row["id"] for row in dispatched] == ["queue-selected"]
+
+
+def test_exact_approve_dispatch_does_not_claim_sms_after_toggle_turns_off(monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import sender
+    from elevate_cli import source_connectors as sc
+
+    monkeypatch.delenv("ELEVATE_APPROVE_AUTO_TICK", raising=False)
+    monkeypatch.delenv("ELEVATE_OUTREACH_SANDBOX", raising=False)
+    monkeypatch.setattr(
+        outreach_db,
+        "get_send_by_id",
+        lambda queue_id: {"id": queue_id, "channel": "sms", "status": "queued"},
+    )
+    monkeypatch.setattr(sender, "apple_messages_outbound_enabled", lambda config=None: False)
+    monkeypatch.setattr(
+        outreach_db,
+        "claim_send_by_id",
+        lambda _queue_id: pytest.fail("disabled SMS row must remain unclaimed"),
+    )
+    monkeypatch.setattr(
+        sender,
+        "dispatch_one",
+        lambda _row: pytest.fail("disabled SMS row must not dispatch"),
+    )
+
+    class InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("threading.Thread", InlineThread)
+
+    sc._fire_approve_tick("task-sms", "queue-sms")
+
+
+def test_crm_sms_approval_is_held_by_profile_outbound_switch(tmp_path, monkeypatch):
+    from elevate_cli import outreach_db
+    from elevate_cli import source_connectors as sc
+
+    source_root = tmp_path / "sources"
+    source_dir = source_root / "crm"
+    source_dir.mkdir(parents=True)
+    (source_dir / "tasks.jsonl").write_text(
+        json.dumps({
+            "task_id": "crm-text-task",
+            "channel": "imessage",
+            "phone": "+16045550123",
+            "draft_text": "Hi Ava",
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+    profile_config = {"profile": "beta-realtor"}
+    seen_configs = []
+    monkeypatch.setattr(sc, "get_source_root_info", lambda config=None: {"sourceRoot": str(source_root)})
+    monkeypatch.setattr(outreach_db, "get_pending_send", lambda *_args: None)
+    monkeypatch.setattr(
+        sc,
+        "get_apple_messages_directions",
+        lambda config=None: seen_configs.append(config)
+        or {"inbound": True, "outbound": False},
+    )
+    monkeypatch.setattr(
+        outreach_db,
+        "approve_pending_send",
+        lambda *_args, **_kwargs: pytest.fail("held approval must not release a DB row"),
+    )
+    monkeypatch.setattr(
+        sc,
+        "_approve_atomic",
+        lambda *_args, **_kwargs: pytest.fail("held approval must not enqueue"),
+    )
+    monkeypatch.setattr(
+        sc,
+        "_fire_approve_tick",
+        lambda *_args, **_kwargs: pytest.fail("held approval must not dispatch"),
+    )
+    monkeypatch.delenv("ELEVATE_OUTREACH_SANDBOX", raising=False)
+
+    result = sc.update_source_task_state(
+        "crm",
+        "crm-text-task",
+        "approve",
+        config=profile_config,
+        return_inbox=False,
+    )
+
+    assert result == {
+        "ok": False,
+        "held": True,
+        "reason": "apple_messages_outbound_disabled",
+    }
+    assert seen_configs == [profile_config]
+    state = json.loads((source_dir / "ui-state.json").read_text(encoding="utf-8"))
+    assert state["tasks"]["crm-text-task"]["status"] == "pending"
+
+
+def test_crm_task_channel_uses_recipient_backed_transport_evidence():
+    from elevate_cli import source_connectors as sc
+
+    assert sc._channel_for_task("crm", {"channel": "imessage", "phone": "+16045550123"}) == "sms"
+    assert sc._channel_for_task("crm", {"template_channel": "email", "email": "lead@example.com"}) == "email"
+    assert sc._channel_for_task("crm", {"channel": "instagram dm", "social_handle": "@lead"}) == "social_dm"
+
+
+def test_crm_task_channel_does_not_guess_external_delivery_from_contact_alone():
+    from elevate_cli import source_connectors as sc
+
+    assert sc._channel_for_task("crm", {"phone": "+16045550123"}) == "crm_note"
+    assert sc._channel_for_task("crm", {"channel": "crm note", "phone": "+16045550123"}) == "crm_note"

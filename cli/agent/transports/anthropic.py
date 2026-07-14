@@ -94,6 +94,8 @@ class AnthropicTransport(ProviderTransport):
         reasoning_parts = []
         reasoning_details = []
         tool_calls = []
+        saw_tool_use_block = False
+        invalid_tool_batch = False
 
         for block in response.content:
             if block.type == "text":
@@ -104,6 +106,11 @@ class AnthropicTransport(ProviderTransport):
                 if isinstance(block_dict, dict):
                     reasoning_details.append(block_dict)
             elif block.type == "tool_use":
+                saw_tool_use_block = True
+                block_input = getattr(block, "input", None)
+                if not isinstance(block_input, dict):
+                    invalid_tool_batch = True
+                    continue
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
                     name = name[len(_MCP_PREFIX):]
@@ -111,13 +118,37 @@ class AnthropicTransport(ProviderTransport):
                     ToolCall(
                         id=block.id,
                         name=name,
-                        arguments=json.dumps(block.input),
+                        arguments=json.dumps(block_input),
                     )
                 )
 
-        finish_reason = self._STOP_REASON_MAP.get(response.stop_reason, "stop")
+        # Never infer completion from a missing or future stop reason.  A
+        # tool_use block is only executable when Anthropic explicitly closes
+        # the turn with stop_reason="tool_use"; callers treat "error" as a
+        # terminal rejection before any tool action is dispatched.
+        finish_reason = self._STOP_REASON_MAP.get(
+            getattr(response, "stop_reason", None),
+            "error",
+        )
+        if invalid_tool_batch:
+            tool_calls = []
+            finish_reason = "error"
+        elif (
+            getattr(response, "stop_reason", None) == "tool_use"
+            and not saw_tool_use_block
+        ):
+            finish_reason = "error"
+        elif (
+            saw_tool_use_block
+            and getattr(response, "stop_reason", None) != "tool_use"
+        ):
+            tool_calls = []
+            if finish_reason == "stop":
+                finish_reason = "error"
 
         provider_data = {}
+        if saw_tool_use_block:
+            provider_data["had_tool_intent"] = True
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
 
@@ -170,7 +201,7 @@ class AnthropicTransport(ProviderTransport):
 
     def map_finish_reason(self, raw_reason: str) -> str:
         """Map Anthropic stop_reason to OpenAI finish_reason."""
-        return self._STOP_REASON_MAP.get(raw_reason, "stop")
+        return self._STOP_REASON_MAP.get(raw_reason, "error")
 
 
 # Auto-register on import
