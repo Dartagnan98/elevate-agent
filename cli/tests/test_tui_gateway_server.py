@@ -373,7 +373,8 @@ def test_tui_session_context_is_explicit_and_session_keyed():
         assert get_session_env("ELEVATE_SESSION_PLATFORM") == "tui"
         assert get_session_env("ELEVATE_SESSION_CHAT_ID") == "session-key-1"
         assert get_session_env("ELEVATE_SESSION_KEY") == "session-key-1"
-        assert get_session_env("ELEVATE_SESSION_MESSAGE_ID") == "user-turn-1"
+        assert get_session_env("ELEVATE_SESSION_CORRELATION_ID") == "user-turn-1"
+        assert get_session_env("ELEVATE_SESSION_MESSAGE_ID") == ""
     finally:
         server._clear_session_context(tokens)
 
@@ -2838,7 +2839,7 @@ def test_prompt_submit_crash_after_receipt_recovers_once(monkeypatch, tmp_path):
 
             calls["runs"] += 1
             calls["correlation_ids"].append(
-                get_session_env("ELEVATE_SESSION_MESSAGE_ID")
+                get_session_env("ELEVATE_SESSION_CORRELATION_ID")
             )
             calls["policies"].append(get_current_execution_policy())
             calls["policy_revisions"].append(

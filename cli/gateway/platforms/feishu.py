@@ -50,7 +50,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import itertools
 import json
 import logging
 import mimetypes
@@ -127,6 +126,10 @@ FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
+from gateway.approval_callback import (
+    is_approval_callback_nonce,
+    mint_approval_callback_nonce,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1451,10 +1454,12 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Exec approval button state (approval_id → {session_key, message_id, chat_id})
-        self._approval_state: Dict[int, Dict[str, str]] = {}
+        # Exec approval button state (opaque nonce → exact request and
+        # delivery context).  It is deliberately process-local: after restart,
+        # old cards are stale rather than able to alias a reset integer ID.
+        self._approval_state: Dict[str, Dict[str, str]] = {}
         self._approval_state_lock = threading.Lock()
-        self._approval_counter = itertools.count(1)
+        self._approval_callback_nonces: set[str] = set()
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
@@ -1832,8 +1837,13 @@ class FeishuAdapter(BasePlatformAdapter):
         if not request_id:
             return SendResult(success=False, error="Approval request identity missing")
 
+        approval_id = ""
         try:
-            approval_id = next(self._approval_counter)
+            with self._approval_state_lock:
+                approval_id = mint_approval_callback_nonce(
+                    set(self._approval_state) | self._approval_callback_nonces
+                )
+                self._approval_callback_nonces.add(approval_id)
             cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
 
             def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
@@ -1893,6 +1903,9 @@ class FeishuAdapter(BasePlatformAdapter):
             if result.success:
                 with self._approval_state_lock:
                     self._approval_state[approval_id] = {
+                        "actor_id": str(
+                            (metadata or {}).get("approval_actor_id") or ""
+                        ).strip(),
                         "session_key": session_key,
                         "request_id": request_id,
                         "message_id": result.message_id or "",
@@ -1902,6 +1915,10 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[Feishu] send_exec_approval failed: %s", exc)
             return SendResult(success=False, error=str(exc))
+        finally:
+            if approval_id:
+                with self._approval_state_lock:
+                    self._approval_callback_nonces.discard(approval_id)
 
     @staticmethod
     def _build_resolved_approval_card(*, choice: str, user_name: str) -> Dict[str, Any]:
@@ -2509,19 +2526,34 @@ class FeishuAdapter(BasePlatformAdapter):
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Resolve authoritatively before building the callback response."""
         approval_id = action_value.get("approval_id")
-        if approval_id is None:
+        if not is_approval_callback_nonce(approval_id):
             logger.debug("[Feishu] Card action missing approval_id, ignoring")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         choice = _APPROVAL_CHOICE_MAP.get(action_value.get("elevate_action"), "deny")
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
+        actor_ids = tuple(
+            value
+            for value in (
+                open_id,
+                str(getattr(operator, "user_id", "") or ""),
+                str(getattr(operator, "union_id", "") or ""),
+            )
+            if value
+        )
+        context = getattr(event, "context", None)
+        chat_id = str(getattr(context, "open_chat_id", "") or "")
+        message_id = str(getattr(context, "open_message_id", "") or "")
         user_name = self._get_cached_sender_name(open_id) or open_id
 
         resolution_status, resolved_choice = self._resolve_approval_now(
             approval_id,
             choice,
             user_name,
+            actor_ids=actor_ids,
+            chat_id=chat_id,
+            message_id=message_id,
         )
         with self._approval_state_lock:
             retryable = approval_id in self._approval_state
@@ -2547,13 +2579,37 @@ class FeishuAdapter(BasePlatformAdapter):
         return response
 
     def _resolve_approval_now(
-        self, approval_id: Any, choice: str, user_name: str
+        self,
+        approval_id: Any,
+        choice: str,
+        user_name: str,
+        *,
+        actor_ids: Sequence[str] = (),
+        chat_id: str = "",
+        message_id: str = "",
     ) -> tuple[str, Optional[str]]:
         """Resolve one exact request and consume local state only on success."""
         with self._approval_state_lock:
             state = self._approval_state.get(approval_id)
             if not state:
                 logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
+                return "stale", None
+            expected_actor_id = str(state.get("actor_id") or "").strip()
+            callback_actor_ids = {
+                str(value).strip() for value in actor_ids if str(value).strip()
+            }
+            expected_chat_id = str(state.get("chat_id") or "")
+            expected_message_id = str(state.get("message_id") or "")
+            if (
+                (expected_actor_id and expected_actor_id not in callback_actor_ids)
+                or (expected_chat_id and chat_id != expected_chat_id)
+                or (expected_message_id and message_id != expected_message_id)
+            ):
+                logger.warning(
+                    "Feishu approval callback context did not match its delivery "
+                    "(approval=%s)",
+                    approval_id,
+                )
                 return "stale", None
             try:
                 from tools.approval import resolve_gateway_approval
@@ -2569,13 +2625,18 @@ class FeishuAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
                 return "error", None
-            if count <= 0:
+            valid_count = (
+                isinstance(count, int)
+                and not isinstance(count, bool)
+            )
+            if not valid_count or count != 1:
                 logger.warning(
-                    "Feishu approval request was stale or not confirmed "
-                    "(session=%s, request=%s)",
-                    state["session_key"],
-                    request_id,
+                    "Feishu approval request was stale or returned an invalid "
+                    "resolver count (session=%s, request=%s, count=%s)",
+                    state["session_key"], request_id, count,
                 )
+                if valid_count and count > 1:
+                    self._approval_state.pop(approval_id, None)
                 return "stale", None
 
             self._approval_state.pop(approval_id, None)
@@ -2597,9 +2658,25 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         return "resolved", display_choice
 
-    async def _resolve_approval(self, approval_id: Any, choice: str, user_name: str) -> None:
+    async def _resolve_approval(
+        self,
+        approval_id: Any,
+        choice: str,
+        user_name: str,
+        *,
+        actor_id: str = "",
+        chat_id: str = "",
+        message_id: str = "",
+    ) -> None:
         """Async compatibility wrapper used by adapter tests and older callers."""
-        self._resolve_approval_now(approval_id, choice, user_name)
+        self._resolve_approval_now(
+            approval_id,
+            choice,
+            user_name,
+            actor_ids=(actor_id,) if actor_id else (),
+            chat_id=chat_id,
+            message_id=message_id,
+        )
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
         """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""

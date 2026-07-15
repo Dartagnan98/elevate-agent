@@ -13615,6 +13615,15 @@ class GatewayRunner:
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
         _status_thread_metadata = _progress_metadata
+        _status_approval_metadata = dict(_status_thread_metadata or {})
+        _approval_actor_id = str(source.user_id or "").strip()
+        if _approval_actor_id:
+            # Interactive approval controls are bound to the user whose
+            # accepted turn produced them.  Keep this identity off ordinary
+            # status/progress sends; only approval-capable adapters receive it.
+            _status_approval_metadata["approval_actor_id"] = _approval_actor_id
+        if not _status_approval_metadata:
+            _status_approval_metadata = None
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -14069,7 +14078,7 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=_status_approval_metadata,
                                 request_id=request_id,
                             ),
                             _loop_for_step,

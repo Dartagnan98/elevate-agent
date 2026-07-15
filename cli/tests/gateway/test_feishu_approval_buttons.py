@@ -58,6 +58,7 @@ def _make_adapter() -> FeishuAdapter:
 def _make_card_action_data(
     action_value: dict,
     chat_id: str = "oc_12345",
+    message_id: str = "message-1",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
 ) -> SimpleNamespace:
@@ -65,7 +66,10 @@ def _make_card_action_data(
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
+            context=SimpleNamespace(
+                open_chat_id=chat_id,
+                open_message_id=message_id,
+            ),
             operator=SimpleNamespace(open_id=open_id),
             action=SimpleNamespace(
                 tag="button",
@@ -81,13 +85,27 @@ def _close_submitted_coro(coro, _loop):
     return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
 
 
-def _seed_approval(adapter: FeishuAdapter, approval_id: int) -> None:
-    adapter._approval_state[approval_id] = {
+def _approval_nonce(value: int) -> str:
+    return f"{value:016x}"
+
+
+def _seed_approval(
+    adapter: FeishuAdapter,
+    approval_id: int,
+    *,
+    actor_id: str = "",
+    chat_id: str = "oc_12345",
+    message_id: str | None = None,
+) -> str:
+    nonce = _approval_nonce(approval_id)
+    adapter._approval_state[nonce] = {
+        "actor_id": actor_id,
         "session_key": f"session-{approval_id}",
         "request_id": f"request-{approval_id}",
-        "message_id": f"message-{approval_id}",
-        "chat_id": "oc_12345",
+        "message_id": message_id or "message-1",
+        "chat_id": chat_id,
     }
+    return nonce
 
 
 # ===========================================================================
@@ -202,10 +220,34 @@ class TestFeishuExecApproval:
         assert len(adapter._approval_state) == 1
         approval_id = list(adapter._approval_state.keys())[0]
         state = adapter._approval_state[approval_id]
+        assert state["actor_id"] == ""
         assert state["session_key"] == "my-session-key"
         assert state["request_id"] == "request-feishu"
         assert state["message_id"] == "msg_002"
         assert state["chat_id"] == "oc_12345"
+
+    @pytest.mark.asyncio
+    async def test_stores_originating_actor_identity(self):
+        adapter = _make_adapter()
+        response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_actor"),
+        )
+        with patch.object(
+            adapter,
+            "_feishu_send_with_retry",
+            new_callable=AsyncMock,
+            return_value=response,
+        ):
+            await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="echo actor",
+                session_key="actor-session",
+                metadata={"approval_actor_id": "ou_owner"},
+                request_id="request-actor",
+            )
+
+        assert next(iter(adapter._approval_state.values()))["actor_id"] == "ou_owner"
 
     @pytest.mark.asyncio
     async def test_not_connected(self):
@@ -260,6 +302,73 @@ class TestFeishuExecApproval:
         assert len(adapter._approval_state) == 2
         ids = list(adapter._approval_state.keys())
         assert ids[0] != ids[1]
+        assert all(len(approval_id) == 16 for approval_id in ids)
+
+    @pytest.mark.asyncio
+    async def test_restart_does_not_reuse_old_card_identity(self):
+        adapter = _make_adapter()
+        response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_restart"),
+        )
+        with patch.object(
+            adapter,
+            "_feishu_send_with_retry",
+            new_callable=AsyncMock,
+            return_value=response,
+        ) as send:
+            await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="echo restart",
+                session_key="restart-session",
+                request_id="request-restart",
+            )
+
+        card = json.loads(send.await_args.kwargs["payload"])
+        approval_id = card["elements"][1]["actions"][0]["value"]["approval_id"]
+        restarted = _make_adapter()
+        restarted._loop = MagicMock(is_closed=MagicMock(return_value=False))
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": approval_id},
+            message_id="msg_restart",
+        )
+
+        with patch("tools.approval.resolve_gateway_approval") as resolve:
+            restarted._on_card_action_trigger(data)
+
+        resolve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_nonce_mint_retries_a_live_collision(self):
+        adapter = _make_adapter()
+        response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_collision"),
+        )
+        colliding = "A" * 16
+        fresh = "B" * 16
+        adapter._approval_state[colliding] = {}
+
+        with (
+            patch.object(
+                adapter,
+                "_feishu_send_with_retry",
+                new_callable=AsyncMock,
+                return_value=response,
+            ),
+            patch(
+                "gateway.approval_callback.secrets.token_urlsafe",
+                side_effect=[colliding, fresh],
+            ),
+        ):
+            await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="echo collision",
+                session_key="collision-session",
+                request_id="request-collision",
+            )
+
+        assert fresh in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_interactive_prompt_without_identity_fails_closed(self):
@@ -283,7 +392,9 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_once(self):
         adapter = _make_adapter()
-        adapter._approval_state[1] = {
+        approval_id = _approval_nonce(1)
+        adapter._approval_state[approval_id] = {
+            "actor_id": "ou_norbert",
             "session_key": "agent:main:feishu:group:oc_12345",
             "request_id": "request-once",
             "message_id": "msg_001",
@@ -291,19 +402,28 @@ class TestResolveApproval:
         }
 
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(1, "once", "Norbert")
+            await adapter._resolve_approval(
+                approval_id,
+                "once",
+                "Norbert",
+                actor_id="ou_norbert",
+                chat_id="oc_12345",
+                message_id="msg_001",
+            )
 
         mock_resolve.assert_called_once_with(
             "agent:main:feishu:group:oc_12345",
             "once",
             request_id="request-once",
         )
-        assert 1 not in adapter._approval_state
+        assert approval_id not in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_resolves_deny(self):
         adapter = _make_adapter()
-        adapter._approval_state[2] = {
+        approval_id = _approval_nonce(2)
+        adapter._approval_state[approval_id] = {
+            "actor_id": "ou_alice",
             "session_key": "some-session",
             "request_id": "request-deny",
             "message_id": "msg_002",
@@ -311,7 +431,14 @@ class TestResolveApproval:
         }
 
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(2, "deny", "Alice")
+            await adapter._resolve_approval(
+                approval_id,
+                "deny",
+                "Alice",
+                actor_id="ou_alice",
+                chat_id="oc_12345",
+                message_id="msg_002",
+            )
 
         mock_resolve.assert_called_once_with(
             "some-session",
@@ -322,7 +449,9 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_session(self):
         adapter = _make_adapter()
-        adapter._approval_state[3] = {
+        approval_id = _approval_nonce(3)
+        adapter._approval_state[approval_id] = {
+            "actor_id": "ou_bob",
             "session_key": "sess-3",
             "request_id": "request-session",
             "message_id": "msg_003",
@@ -330,7 +459,14 @@ class TestResolveApproval:
         }
 
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(3, "session", "Bob")
+            await adapter._resolve_approval(
+                approval_id,
+                "session",
+                "Bob",
+                actor_id="ou_bob",
+                chat_id="oc_99",
+                message_id="msg_003",
+            )
 
         mock_resolve.assert_called_once_with(
             "sess-3",
@@ -341,7 +477,9 @@ class TestResolveApproval:
     @pytest.mark.asyncio
     async def test_resolves_always(self):
         adapter = _make_adapter()
-        adapter._approval_state[4] = {
+        approval_id = _approval_nonce(4)
+        adapter._approval_state[approval_id] = {
+            "actor_id": "ou_carol",
             "session_key": "sess-4",
             "request_id": "request-always",
             "message_id": "msg_004",
@@ -349,7 +487,14 @@ class TestResolveApproval:
         }
 
         with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(4, "always", "Carol")
+            await adapter._resolve_approval(
+                approval_id,
+                "always",
+                "Carol",
+                actor_id="ou_carol",
+                chat_id="oc_55",
+                message_id="msg_004",
+            )
 
         mock_resolve.assert_called_once_with(
             "sess-4",
@@ -362,7 +507,9 @@ class TestResolveApproval:
         adapter = _make_adapter()
 
         with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
-            await adapter._resolve_approval(99, "once", "Nobody")
+            await adapter._resolve_approval(
+                _approval_nonce(99), "once", "Nobody"
+            )
 
         mock_resolve.assert_not_called()
 
@@ -425,7 +572,9 @@ class TestCardActionCallbackResponse:
     def test_drops_action_when_loop_not_ready(self, _patch_callback_card_types):
         adapter = _make_adapter()
         adapter._loop = None
-        data = _make_card_action_data({"elevate_action": "approve_once", "approval_id": 1})
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": _approval_nonce(1)}
+        )
 
         with patch("asyncio.run_coroutine_threadsafe") as mock_submit:
             response = adapter._on_card_action_trigger(data)
@@ -436,11 +585,11 @@ class TestCardActionCallbackResponse:
 
     def test_returns_card_for_approve_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
-        _seed_approval(adapter, 1)
+        approval_id = _seed_approval(adapter, 1)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
-            {"elevate_action": "approve_once", "approval_id": 1},
+            {"elevate_action": "approve_once", "approval_id": approval_id},
             open_id="ou_bob",
         )
         adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
@@ -455,15 +604,15 @@ class TestCardActionCallbackResponse:
         assert card["header"]["template"] == "green"
         assert "Approved once" in card["header"]["title"]["content"]
         assert "Bob" in card["elements"][0]["content"]
-        assert 1 not in adapter._approval_state
+        assert approval_id not in adapter._approval_state
 
     def test_returns_card_for_deny_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
-        _seed_approval(adapter, 2)
+        approval_id = _seed_approval(adapter, 2)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
-            {"elevate_action": "deny", "approval_id": 2},
+            {"elevate_action": "deny", "approval_id": approval_id},
         )
 
         with patch("tools.approval.resolve_gateway_approval", return_value=1):
@@ -473,6 +622,83 @@ class TestCardActionCallbackResponse:
         card = response.card.data
         assert card["header"]["template"] == "red"
         assert "Denied" in card["header"]["title"]["content"]
+
+    @pytest.mark.parametrize(
+        ("actor_id", "chat_id", "message_id"),
+        [
+            ("", "oc_12345", "message-1"),
+            ("ou_other", "oc_12345", "message-1"),
+            ("ou_owner", "", "message-1"),
+            ("ou_owner", "oc_other", "message-1"),
+            ("ou_owner", "oc_12345", ""),
+            ("ou_owner", "oc_12345", "message-other"),
+        ],
+    )
+    def test_callback_must_match_bound_actor_chat_and_message(
+        self,
+        _patch_callback_card_types,
+        actor_id,
+        chat_id,
+        message_id,
+    ):
+        adapter = _make_adapter()
+        approval_id = _seed_approval(adapter, 20, actor_id="ou_owner")
+        adapter._loop = MagicMock(is_closed=MagicMock(return_value=False))
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": approval_id},
+            open_id=actor_id,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+
+        with patch("tools.approval.resolve_gateway_approval") as resolve:
+            response = adapter._on_card_action_trigger(data)
+
+        resolve.assert_not_called()
+        assert approval_id in adapter._approval_state
+        card = response.card.data
+        assert card["header"]["template"] == "orange"
+        assert "not confirmed" in card["elements"][0]["content"].lower()
+
+    def test_duplicate_click_resolves_exactly_once(self, _patch_callback_card_types):
+        adapter = _make_adapter()
+        approval_id = _seed_approval(adapter, 21, actor_id="ou_owner")
+        adapter._loop = MagicMock(is_closed=MagicMock(return_value=False))
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": approval_id},
+            open_id="ou_owner",
+        )
+
+        with patch(
+            "tools.approval.resolve_gateway_approval", return_value=1
+        ) as resolve:
+            first = adapter._on_card_action_trigger(data)
+            second = adapter._on_card_action_trigger(data)
+
+        resolve.assert_called_once_with(
+            "session-21", "once", request_id="request-21"
+        )
+        assert "Approved once" in first.card.data["header"]["title"]["content"]
+        assert "Approval Request Stale" in second.card.data["header"]["title"]["content"]
+
+    def test_non_exact_resolver_count_never_reports_success(
+        self, _patch_callback_card_types
+    ):
+        adapter = _make_adapter()
+        approval_id = _seed_approval(adapter, 22, actor_id="ou_owner")
+        adapter._loop = MagicMock(is_closed=MagicMock(return_value=False))
+        data = _make_card_action_data(
+            {"elevate_action": "approve_once", "approval_id": approval_id},
+            open_id="ou_owner",
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", return_value=2):
+            response = adapter._on_card_action_trigger(data)
+
+        assert approval_id not in adapter._approval_state
+        card = response.card.data
+        assert card["header"]["template"] == "orange"
+        assert "Approved once" not in card["header"]["title"]["content"]
 
     def test_ignores_missing_approval_id(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -501,11 +727,11 @@ class TestCardActionCallbackResponse:
 
     def test_falls_back_to_open_id_when_name_not_cached(self, _patch_callback_card_types):
         adapter = _make_adapter()
-        _seed_approval(adapter, 3)
+        approval_id = _seed_approval(adapter, 3)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
-            {"elevate_action": "approve_session", "approval_id": 3},
+            {"elevate_action": "approve_session", "approval_id": approval_id},
             open_id="ou_unknown",
         )
 
@@ -517,11 +743,11 @@ class TestCardActionCallbackResponse:
 
     def test_ignores_expired_cached_name(self, _patch_callback_card_types):
         adapter = _make_adapter()
-        _seed_approval(adapter, 4)
+        approval_id = _seed_approval(adapter, 4)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
-            {"elevate_action": "approve_once", "approval_id": 4},
+            {"elevate_action": "approve_once", "approval_id": approval_id},
             open_id="ou_expired",
         )
         adapter._sender_name_cache["ou_expired"] = ("Old Name", 1)
@@ -549,7 +775,7 @@ class TestCardActionCallbackResponse:
             clear=False,
         ):
             card = FeishuAdapter._build_pending_approval_card(
-                approval_id=7,
+                approval_id=_approval_nonce(7),
                 retryable=True,
                 resolution_error=True,
             )
@@ -562,11 +788,11 @@ class TestCardActionCallbackResponse:
         self, _patch_callback_card_types, resolver_result
     ):
         adapter = _make_adapter()
-        _seed_approval(adapter, 5)
+        approval_id = _seed_approval(adapter, 5)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         data = _make_card_action_data(
-            {"elevate_action": "approve_once", "approval_id": 5},
+            {"elevate_action": "approve_once", "approval_id": approval_id},
         )
         effect = (
             {"side_effect": resolver_result}
@@ -577,7 +803,7 @@ class TestCardActionCallbackResponse:
         with patch("tools.approval.resolve_gateway_approval", **effect):
             response = adapter._on_card_action_trigger(data)
 
-        assert 5 in adapter._approval_state
+        assert approval_id in adapter._approval_state
         card = response.card.data
         assert card["header"]["template"] == "orange"
         status = card["elements"][0]["content"].lower()

@@ -63,6 +63,10 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.approval_callback import (
+    is_approval_callback_nonce,
+    mint_approval_callback_nonce,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -394,8 +398,12 @@ class TelegramAdapter(BasePlatformAdapter):
         self._dm_topics_config: List[Dict[str, Any]] = self.config.extra.get("dm_topics", [])
         # Interactive model picker state per chat
         self._model_picker_state: Dict[str, dict] = {}
-        # Approval button state: message_id → session_key
-        self._approval_state: Dict[int, Dict[str, str]] = {}
+        # Approval button state: opaque callback nonce → exact request and
+        # delivery context.  This intentionally remains live-process state;
+        # after a restart, old buttons fail closed instead of aliasing a new
+        # request through a reset integer counter.
+        self._approval_state: Dict[str, Dict[str, str]] = {}
+        self._approval_callback_nonces: set[str] = set()
         # The primary application is separate from ``_agent_apps``.  Keep its
         # signed agent identity explicit so a revoked specialist cannot hide
         # outside the entitlement refresh loop.
@@ -1906,6 +1914,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if not request_id:
             return SendResult(success=False, error="Approval request identity missing")
 
+        approval_id = ""
         try:
             cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
             text = (
@@ -1917,13 +1926,10 @@ class TelegramAdapter(BasePlatformAdapter):
             # Resolve thread context for thread replies
             thread_id = self._metadata_thread_id(metadata)
 
-            # We'll use the message_id as part of callback_data to look up session_key
-            # Send a placeholder first, then update — or use a counter.
-            # Simpler: use a monotonic counter to generate short IDs.
-            import itertools
-            if not hasattr(self, "_approval_counter"):
-                self._approval_counter = itertools.count(1)
-            approval_id = next(self._approval_counter)
+            approval_id = mint_approval_callback_nonce(
+                set(self._approval_state) | self._approval_callback_nonces
+            )
+            self._approval_callback_nonces.add(approval_id)
 
             try:
                 from elevate_cli.beta_provider_policy import beta_provider_policy_active
@@ -1964,6 +1970,9 @@ class TelegramAdapter(BasePlatformAdapter):
 
             # Bind this platform interaction to the exact central queue entry.
             self._approval_state[approval_id] = {
+                "actor_id": str((metadata or {}).get("approval_actor_id") or "").strip(),
+                "chat_id": str(chat_id),
+                "message_id": str(msg.message_id),
                 "request_id": request_id,
                 "session_key": session_key,
                 "agent_id": str((metadata or {}).get("agent_id") or "").strip(),
@@ -1973,6 +1982,9 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
+        finally:
+            if approval_id:
+                self._approval_callback_nonces.discard(approval_id)
 
     async def send_model_picker(
         self,
@@ -2315,9 +2327,8 @@ class TelegramAdapter(BasePlatformAdapter):
             parts = data.split(":", 2)
             if len(parts) == 3:
                 choice = parts[1]  # once, session, always, deny
-                try:
-                    approval_id = int(parts[2])
-                except (ValueError, IndexError):
+                approval_id = parts[2]
+                if not is_approval_callback_nonce(approval_id):
                     await query.answer(text="Invalid approval data.")
                     return
 
@@ -2335,6 +2346,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 if not approval_state:
                     await query.answer(
                         text="This approval is no longer active; no decision was applied."
+                    )
+                    return
+
+                callback_chat_id = str(
+                    getattr(getattr(query, "message", None), "chat_id", "") or ""
+                )
+                callback_message_id = str(
+                    getattr(getattr(query, "message", None), "message_id", "") or ""
+                )
+                expected_actor_id = str(approval_state.get("actor_id") or "").strip()
+                if (
+                    callback_chat_id != str(approval_state.get("chat_id") or "")
+                    or callback_message_id
+                    != str(approval_state.get("message_id") or "")
+                    or (expected_actor_id and caller_id != expected_actor_id)
+                ):
+                    await query.answer(
+                        text="This approval does not match this user or message; no decision was applied."
                     )
                     return
 
@@ -2379,13 +2408,21 @@ class TelegramAdapter(BasePlatformAdapter):
                         text="Decision check failed. No command was approved; try again."
                     )
                     return
-                if count <= 0:
+                valid_count = (
+                    isinstance(count, int)
+                    and not isinstance(count, bool)
+                )
+                if not valid_count or count != 1:
                     logger.warning(
-                        "Telegram approval request was stale or not confirmed "
-                        "(session=%s, request=%s)",
-                        session_key,
-                        request_id,
+                        "Telegram approval request was stale or returned an invalid "
+                        "resolver count (session=%s, request=%s, count=%s)",
+                        session_key, request_id, count,
                     )
+                    if valid_count and count > 1:
+                        # An exact request resolver must never return more than
+                        # one.  Consume the local handle to prevent a retry
+                        # after this anomalous terminal response.
+                        self._approval_state.pop(approval_id, None)
                     await query.answer(
                         text=(
                             "Decision not confirmed; no command was approved. "

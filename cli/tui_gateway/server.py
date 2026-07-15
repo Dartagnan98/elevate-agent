@@ -1228,7 +1228,7 @@ def _set_session_context(session_key: str, *, correlation_id: str = "") -> list:
             platform="tui",
             chat_id=session_key,
             session_key=session_key,
-            message_id=correlation_id,
+            correlation_id=correlation_id,
         )
     except Exception:
         return []
