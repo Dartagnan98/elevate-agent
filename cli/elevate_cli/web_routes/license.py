@@ -91,8 +91,21 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
     async def get_license_status():
         from elevate_cli import license as lic_mod
 
-        lic = lic_mod.load()
+        if lic_mod._exact_realtor_beta_active():
+            try:
+                lic = lic_mod.read_verified_beta_license_snapshot(
+                    require_current=True,
+                )
+            except lic_mod.LicenseError:
+                lic = None
+        else:
+            lic = lic_mod.load()
         if not lic:
+            status_text = (
+                "Not signed in. Sign in to Realtor Beta."
+                if lic_mod._exact_realtor_beta_active()
+                else lic_mod.status_text()
+            )
             return {
                 "authenticated": False,
                 "email": None,
@@ -101,7 +114,7 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
                 "entitlements": [],
                 "expires_at": None,
                 "expired": True,
-                "status_text": lic_mod.status_text(),
+                "status_text": status_text,
                 "packs": dashboard_access_status().get("packs", {}),
             }
         return {

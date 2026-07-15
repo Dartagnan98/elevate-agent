@@ -152,6 +152,44 @@ def _assert_profile_unchanged(protected_profile: dict[str, Any]) -> None:
     assert protected_profile["profile_env"].is_symlink()
 
 
+def test_exact_beta_status_never_reports_historical_snapshot_signed_in(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    historical = license_mod.License(
+        access_token="expired-access",
+        refresh_token="historical-refresh",
+        license_id="license-1",
+        tier="pro",
+        email="agent@example.test",
+        expires_at=1,
+        entitlements=["real_estate_admin"],
+        entitlement_assertion="historical-signed-assertion",
+    )
+    monkeypatch.setattr(license_mod, "load", lambda: historical)
+
+    def reject_historical(*, require_current: bool):
+        assert require_current is True
+        raise license_mod.LicenseError(
+            "expired",
+            code="beta_entitlement_assertion_not_current",
+        )
+
+    monkeypatch.setattr(
+        license_mod,
+        "read_verified_beta_license_snapshot",
+        reject_historical,
+    )
+
+    response = client.get("/api/license/status")
+
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is False
+    assert response.json()["entitlements"] == []
+    assert "Subscribed" not in response.json()["status_text"]
+
+
 @pytest.mark.parametrize(
     ("route", "payload"),
     [

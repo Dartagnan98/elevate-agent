@@ -873,6 +873,11 @@ def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
     )
     assert web_auth.license_signed_in(license_path=license_mod.LICENSE_PATH) is False
     assert dashboard_access_status()["packs"]["realEstateAny"] is False
+    from tui_gateway import server as tui_server
+
+    monkeypatch.setattr(tui_server, "_LICENSE_PATH", license_mod.LICENSE_PATH)
+    monkeypatch.setattr(tui_server, "_SIGN_IN_BYPASS", True)
+    assert tui_server._license_signed_in() is False
 
     refreshed_payload = _signed_payload(
         access_token="refreshed-access",
@@ -892,6 +897,7 @@ def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
     assert refreshed.access_token == "refreshed-access"
     assert refreshed.entitlements == ["real_estate_admin"]
     assert web_auth.license_signed_in(license_path=license_mod.LICENSE_PATH) is True
+    assert tui_server._license_signed_in() is True
     assert dashboard_access_status()["packs"]["realEstateAdmin"] is True
     assert dashboard_access_status()["packs"]["realEstateSales"] is False
 
@@ -1169,6 +1175,53 @@ def test_exact_beta_late_refresh_rejection_does_not_erase_new_signed_session(
 
     assert exc_info.value.code == "beta_license_revoked"
     assert license_mod.load() == newer
+
+
+def test_exact_beta_late_401_preserves_newer_signed_historical_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    stale = _beta_license(
+        access_token="stale-access",
+        refresh_token="stale-refresh",
+    )
+    license_mod.save(stale)
+    newer_payload = _signed_payload(
+        access_token="newer-expired-access",
+        refresh_token="newer-expired-refresh",
+        expires_at=int(time.time()) - 120,
+    )
+    newer = license_mod._beta_license_from_mapping(
+        newer_payload,
+        require_current=False,
+    )
+
+    class _HistoricalRaceClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _FailedResponse:
+            assert json == {"refresh_token": "stale-refresh"}
+            license_mod._atomic_beta_replace(
+                license_mod.json.dumps(newer.to_dict()).encode("utf-8")
+            )
+            return _FailedResponse(401)
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _HistoricalRaceClient(),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as exc_info:
+        license_mod.refresh(stale)
+
+    assert exc_info.value.code == "beta_license_revoked"
+    assert license_mod.load() == newer
+    assert dashboard_access_status()["packs"]["realEstateAny"] is False
 
 
 def test_exact_beta_losing_concurrent_save_does_not_erase_new_signed_session(
