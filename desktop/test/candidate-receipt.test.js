@@ -462,6 +462,35 @@ test("CLI packaging hashes canonicalize copied modes but still bind file bytes",
   );
 });
 
+test("CLI packaging excludes generated build, dist, and tool-cache trees", (t) => {
+  const root = temporaryDirectory(t);
+  const source = path.join(root, "source");
+  const packaged = path.join(root, "packaged");
+  for (const directory of [source, packaged]) {
+    fs.mkdirSync(path.join(directory, "elevate_cli"), { recursive: true });
+    fs.writeFileSync(path.join(directory, "elevate_cli", "main.py"), "APPROVED = True\n");
+  }
+  for (const generated of ["build", "dist", ".ruff_cache"]) {
+    fs.mkdirSync(path.join(source, generated, "nested"), { recursive: true });
+    fs.writeFileSync(path.join(source, generated, "nested", "stale.bin"), generated);
+  }
+
+  assert.deepEqual(
+    hashTree(source, { mode: "cli-packaging" }),
+    hashTree(packaged, { mode: "cli-packaging" }),
+  );
+
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, "..", "package.json"), "utf8"),
+  );
+  const cliResource = packageJson.build.extraResources.find(
+    (resource) => resource.from === "../cli",
+  );
+  for (const pattern of ["!build/**", "!dist/**", "!.ruff_cache/**"]) {
+    assert.equal(cliResource.filter.includes(pattern), true, `missing CLI packaging exclusion: ${pattern}`);
+  }
+});
+
 test("packaged CLI permission policy rejects writable or noncanonical output", (t) => {
   const root = temporaryDirectory(t);
   const nested = path.join(root, "nested");

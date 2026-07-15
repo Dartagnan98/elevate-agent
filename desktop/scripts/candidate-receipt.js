@@ -207,9 +207,9 @@ function excludedByMode(relativePath, mode) {
   if (mode === "cli-packaging") {
     if (relativePath === path.join("elevate_cli", "web_dist") || relativePath.startsWith(`${path.join("elevate_cli", "web_dist")}${path.sep}`)) return true;
     const excludedTop = new Set([
-      "web", "ui-tui", "venv", ".venv", "tests", "docs", "docker", "nix", "plans",
+      "web", "ui-tui", "venv", ".venv", "tests", "build", "dist", "docs", "docker", "nix", "plans",
       "website", "packaging", "datagen-config-examples", "temp_vision_images", "scripts", "assets",
-      ".git", ".pytest_cache",
+      ".git", ".pytest_cache", ".ruff_cache",
     ]);
     if (excludedTop.has(parts[0])) return true;
     if (/\.(db|db-shm|db-wal|sqlite|sqlite3)$/.test(name) || name.endsWith(".egg-info")) return true;
