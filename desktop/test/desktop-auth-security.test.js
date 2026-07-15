@@ -497,7 +497,7 @@ test("stale Beta refresh cannot resurrect a snapshot cleared by another process"
   }
 });
 
-test("newer explicit Beta login supersedes an older background refresh", async () => {
+test("explicit Beta login waits for an older refresh and then supersedes it", async () => {
   const state = profile();
   const refreshResponse = deferred();
   const loginResponse = deferred();
@@ -527,15 +527,102 @@ test("newer explicit Beta login supersedes an older background refresh", async (
     });
     refreshResponse.resolve(response(refreshed));
 
-    const discardedRefresh = await refresh;
-    assert.equal(discardedRefresh.refresh_token, initial.refresh_token);
-    assert.equal(auth.readLicense().refresh_token, initial.refresh_token);
+    const completedRefresh = await refresh;
+    assert.equal(completedRefresh.refresh_token, refreshed.refresh_token);
+    assert.equal(auth.readLicense().refresh_token, refreshed.refresh_token);
 
     loginResponse.resolve(response(signedIn));
     const loginResult = await login;
     assert.equal(loginResult.ok, true);
     assert.equal(auth.readLicense().refresh_token, signedIn.refresh_token);
     assert.deepEqual(auth.readLicense().entitlements, ["real_estate_admin"]);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("hung Beta sign-in is bounded and releases background refresh", async () => {
+  const state = profile();
+  let calls = 0;
+  try {
+    const initial = successfulPayload(["real_estate_sales"]);
+    const refreshed = successfulPayload(["real_estate_admin"]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      authRequestTimeoutMs: 10,
+      fetchImpl: async (_url, options) => {
+        calls += 1;
+        if (calls > 1) return response(refreshed);
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    const login = await auth.performLogin({
+      email: "agent@example.test",
+      password: "password",
+    });
+    assert.equal(login.ok, false);
+    assert.equal(login.code, "beta_auth_upstream_unavailable");
+
+    const next = await auth.refreshLicense(auth.readLicense());
+    assert.equal(next.refresh_token, refreshed.refresh_token);
+    assert.deepEqual(next.entitlements, ["real_estate_admin"]);
+    assert.equal(calls, 2);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("hung Beta refresh is bounded and a later retry can recover", async () => {
+  const state = profile();
+  let calls = 0;
+  try {
+    const initial = successfulPayload(["real_estate_sales"]);
+    const refreshed = successfulPayload(["real_estate_admin"]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      authRequestTimeoutMs: 10,
+      fetchImpl: async (_url, options) => {
+        calls += 1;
+        if (calls > 1) return response(refreshed);
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    await assert.rejects(
+      auth.refreshLicense(auth.readLicense()),
+      (error) => error.code === "beta_auth_upstream_unavailable",
+    );
+    assert.equal(auth.readLicense().refresh_token, initial.refresh_token);
+
+    const next = await auth.refreshLicense(auth.readLicense());
+    assert.equal(next.refresh_token, refreshed.refresh_token);
+    assert.deepEqual(next.entitlements, ["real_estate_admin"]);
+    assert.equal(calls, 2);
   } finally {
     state.cleanup();
   }

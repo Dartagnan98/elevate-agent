@@ -38,6 +38,7 @@ function createDesktopAuth({
   home = os.homedir(),
   profileRoot = path.dirname(licensePath),
   accessRefreshMarginMs = 5 * 60 * 1000,
+  authRequestTimeoutMs = 15_000,
   fetchImpl = globalThis.fetch,
   fsImpl = fs,
   env = process.env,
@@ -57,6 +58,23 @@ function createDesktopAuth({
 
   function storeError(code, message) {
     return new DesktopAuthError(code, message);
+  }
+
+  function betaRequestAbort() {
+    if (!isBeta) return { signal: undefined, cancel() {} };
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Number.isFinite(authRequestTimeoutMs) && authRequestTimeoutMs > 0
+        ? authRequestTimeoutMs
+        : 15_000,
+    );
+    return {
+      signal: controller.signal,
+      cancel() {
+        clearTimeout(timeout);
+      },
+    };
   }
 
   function preflightLicenseStore({ writable = true } = {}) {
@@ -542,6 +560,7 @@ function createDesktopAuth({
     const attemptedRefreshToken = license.refresh_token;
     const operationSequence = isBeta ? ++sessionOperationSequence : 0;
     const startingRevision = licenseRevision;
+    const abort = betaRequestAbort();
     let writeAttempted = false;
     if (isBeta) {
       const current = readLicense();
@@ -561,7 +580,7 @@ function createDesktopAuth({
       const res = await fetchImpl(`${effectiveHqBaseUrl}/api/license/refresh`, {
         method: "POST",
         headers: request.headers,
-        ...(isBeta ? { redirect: "error" } : {}),
+        ...(isBeta ? { redirect: "error", signal: abort.signal } : {}),
         body: JSON.stringify({ refresh_token: attemptedRefreshToken }),
       });
       if (!res.ok) {
@@ -660,6 +679,8 @@ function createDesktopAuth({
         );
       }
       return null;
+    } finally {
+      abort.cancel();
     }
   }
 
@@ -722,9 +743,17 @@ function createDesktopAuth({
     let requestId = "preflight";
     let operationSequence = 0;
     let registeredLogin = false;
+    let abort = { signal: undefined, cancel() {} };
     let startingRefreshToken = null;
     let startingRevision = licenseRevision;
     try {
+      if (isBeta && refreshInFlight) {
+        try {
+          await refreshInFlight;
+        } catch {
+          // A failed refresh must not prevent an explicit sign-in attempt.
+        }
+      }
       preflightLicenseStore({ writable: true });
       if (isBeta) {
         const current = readLicense();
@@ -734,12 +763,13 @@ function createDesktopAuth({
         registeredLogin = true;
         operationSequence = ++sessionOperationSequence;
       }
+      abort = betaRequestAbort();
       const request = hqJsonRequestHeaders("auth-login");
       requestId = request.requestId;
       const res = await fetchImpl(`${effectiveHqBaseUrl}/api/auth/login`, {
         method: "POST",
         headers: request.headers,
-        ...(isBeta ? { redirect: "error" } : {}),
+        ...(isBeta ? { redirect: "error", signal: abort.signal } : {}),
         body: JSON.stringify({
           email: String(email).trim().toLowerCase(),
           password,
@@ -823,6 +853,7 @@ function createDesktopAuth({
             : `Could not reach ${effectiveHqBaseUrl}. Check your connection and try again.`,
       };
     } finally {
+      abort.cancel();
       if (registeredLogin) loginInFlight -= 1;
     }
   }
