@@ -30,8 +30,8 @@ function createMenu({
         },
         {
           label: "Sign Out",
-          click: () => {
-            clearLicense();
+          click: async () => {
+            await clearLicense();
             if (mainWindow() && !mainWindow().isDestroyed()) {
               loadAppPath(startPath);
             }

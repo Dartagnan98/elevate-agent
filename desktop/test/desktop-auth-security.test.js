@@ -13,6 +13,7 @@ const {
   ENTITLEMENT_ASSERTION,
   tokenHash,
 } = require("../src/entitlement-assertion");
+const { createRefreshPendingStore } = require("../src/refresh-pending");
 
 const log = { info() {}, warn() {} };
 const entitlementKeys = crypto.generateKeyPairSync("ed25519");
@@ -46,6 +47,14 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for test state");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function profile() {
   const sandbox = fs.mkdtempSync(
     path.join(fs.realpathSync(os.tmpdir()), "elevate-desktop-auth-"),
@@ -63,13 +72,15 @@ function profile() {
   };
 }
 
-function successfulPayload(entitlements = []) {
+function successfulPayload(entitlements = [], { refreshToken, expiresAt } = {}) {
   const now = Math.floor(Date.now() / 1000);
-  const accessToken = token(now + 3600);
-  const refreshToken = `refresh-${crypto.randomUUID()}`;
+  const expiry = expiresAt === undefined ? now + 3600 : expiresAt;
+  const issuedAt = expiry - 3600;
+  const accessToken = token(expiry);
+  const signedRefreshToken = refreshToken || crypto.randomBytes(32).toString("base64url");
   const payload = {
     access_token: accessToken,
-    refresh_token: refreshToken,
+    refresh_token: signedRefreshToken,
     email: "agent@example.test",
     license_id: "license-1",
     tier: "pro",
@@ -89,18 +100,18 @@ function successfulPayload(entitlements = []) {
     email: payload.email,
     tier: payload.tier,
     entitlements: payload.entitlements,
-    iat: now,
-    nbf: now,
-    exp: now + 3600,
+    iat: issuedAt,
+    nbf: issuedAt,
+    exp: expiry,
     jti: crypto.randomUUID(),
     ath: tokenHash(accessToken),
-    rth: tokenHash(refreshToken),
+    rth: tokenHash(signedRefreshToken),
   })).toString("base64url");
   const input = `${header}.${claims}`;
   payload.entitlement_assertion = `${input}.${crypto
     .sign(null, Buffer.from(input, "ascii"), entitlementKeys.privateKey)
     .toString("base64url")}`;
-  payload.expires_at = now + 3600;
+  payload.expires_at = expiry;
   return payload;
 }
 
@@ -111,10 +122,6 @@ test("exact Beta desktop login and refresh ignore attacker backend and verify at
     "real_estate_admin",
     "real_estate_sales",
   ]);
-  const payloads = [
-    initialPayload,
-    successfulPayload([]),
-  ];
   try {
     const auth = createDesktopAuth({
       log,
@@ -130,7 +137,12 @@ test("exact Beta desktop login and refresh ignore attacker backend and verify at
           body: JSON.parse(options.body),
           redirect: options.redirect,
         });
-        return response(payloads.shift());
+        const body = JSON.parse(options.body);
+        return response(
+          url.endsWith("/api/license/refresh")
+            ? successfulPayload([], { refreshToken: body.next_refresh_token })
+            : initialPayload,
+        );
       },
     });
 
@@ -160,6 +172,13 @@ test("exact Beta desktop login and refresh ignore attacker backend and verify at
     );
     assert.ok(calls.every((call) => !call.url.includes("attacker.example.test")));
     assert.ok(calls.every((call) => call.redirect === "error"));
+    assert.deepEqual(Object.keys(calls[1].body).sort(), [
+      "next_refresh_token",
+      "refresh_attempt_id",
+      "refresh_token",
+    ]);
+    assert.equal(calls[1].body.refresh_token, initialPayload.refresh_token);
+    assert.equal(refreshed.refresh_token, calls[1].body.next_refresh_token);
   } finally {
     state.cleanup();
   }
@@ -409,6 +428,7 @@ test("exact Beta desktop single-flights concurrent refreshes", async () => {
   const state = profile();
   const pending = deferred();
   let calls = 0;
+  let successor = null;
   try {
     const initial = successfulPayload(["real_estate_sales"]);
     fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
@@ -419,8 +439,9 @@ test("exact Beta desktop single-flights concurrent refreshes", async () => {
       entitlementKeyset,
       profileRoot: state.root,
       licensePath: state.licensePath,
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
         calls += 1;
+        successor = JSON.parse(options.body).next_refresh_token;
         return pending.promise;
       },
     });
@@ -429,9 +450,10 @@ test("exact Beta desktop single-flights concurrent refreshes", async () => {
     const first = auth.refreshLicense(current);
     const second = auth.refreshLicense(current);
     assert.equal(first, second);
+    await waitFor(() => calls === 1);
     assert.equal(calls, 1);
 
-    pending.resolve(response(successfulPayload([])));
+    pending.resolve(response(successfulPayload([], { refreshToken: successor })));
     const [one, two] = await Promise.all([first, second]);
     assert.deepEqual(one, two);
     assert.deepEqual(one.entitlements, []);
@@ -441,7 +463,7 @@ test("exact Beta desktop single-flights concurrent refreshes", async () => {
   }
 });
 
-test("stale Beta refresh rejection cannot clear a newer valid snapshot", async () => {
+test("a login mutation waits behind refresh and is never erased by its 401", async () => {
   const state = profile();
   const pending = deferred();
   try {
@@ -458,13 +480,57 @@ test("stale Beta refresh rejection cannot clear a newer valid snapshot", async (
     });
 
     const refresh = auth.refreshLicense(auth.readLicense());
-    const newer = auth.writeLicense(successfulPayload(["real_estate_admin"]));
+    await waitFor(() => fs.existsSync(path.join(state.root, ".license-refresh-pending.json")));
+    let mutationFinished = false;
+    const mutation = auth.writeLicense(successfulPayload(["real_estate_admin"]))
+      .then((value) => {
+        mutationFinished = true;
+        return value;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(mutationFinished, false);
     pending.resolve(response({}, 401));
 
-    const result = await refresh;
-    assert.equal(result.refresh_token, newer.refresh_token);
-    assert.deepEqual(result.entitlements, ["real_estate_admin"]);
+    await assert.rejects(refresh, (error) => error.code === "beta_license_revoked");
+    const newer = await mutation;
     assert.deepEqual(auth.readLicense(), newer);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("public Beta writer uses snapshot CAS and clears superseded retry state", async () => {
+  const state = profile();
+  try {
+    const initial = successfulPayload(["real_estate_sales"]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+    });
+    const expected = auth.readLicense();
+    const pendingStore = createRefreshPendingStore({ root: state.root });
+    await pendingStore.withLock(async () => {
+      pendingStore.create({
+        licenseId: expected.license_id,
+        currentRefreshToken: expected.refresh_token,
+      });
+    });
+    const newer = successfulPayload(["real_estate_admin"]);
+
+    const persisted = await auth.writeLicense(newer, { expected });
+
+    assert.deepEqual(auth.readLicense(), persisted);
+    assert.equal(fs.existsSync(pendingStore.markerPath), false);
+    await assert.rejects(
+      auth.writeLicense(expected),
+      (error) => error.code === "beta_auth_superseded",
+    );
+    assert.deepEqual(auth.readLicense(), persisted);
   } finally {
     state.cleanup();
   }
@@ -487,11 +553,22 @@ test("stale Beta refresh cannot resurrect a snapshot cleared by another process"
     });
 
     const refresh = auth.refreshLicense(auth.readLicense());
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+    await waitFor(() => fs.existsSync(markerPath));
     fs.unlinkSync(state.licensePath);
-    pending.resolve(response(successfulPayload(["real_estate_admin"])));
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    const rejected = assert.rejects(
+      refresh,
+      (error) => error.code === "beta_license_snapshot_invalid",
+    );
+    pending.resolve(response(successfulPayload(
+      ["real_estate_admin"],
+      { refreshToken: marker.successor_refresh_token },
+    )));
 
-    assert.equal(await refresh, null);
+    await rejected;
     assert.equal(fs.existsSync(state.licensePath), false);
+    assert.equal(fs.existsSync(markerPath), true);
   } finally {
     state.cleanup();
   }
@@ -503,8 +580,8 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
   const loginResponse = deferred();
   try {
     const initial = successfulPayload(["real_estate_sales"]);
-    const refreshed = successfulPayload(["real_estate_marketing"]);
     const signedIn = successfulPayload(["real_estate_admin"]);
+    let refreshSuccessor = null;
     fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
     const auth = createDesktopAuth({
       log,
@@ -513,11 +590,13 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
       entitlementKeyset,
       profileRoot: state.root,
       licensePath: state.licensePath,
-      fetchImpl: async (url) => (
-        url.endsWith("/api/license/refresh")
-          ? refreshResponse.promise
-          : loginResponse.promise
-      ),
+      fetchImpl: async (url, options) => {
+        if (url.endsWith("/api/license/refresh")) {
+          refreshSuccessor = JSON.parse(options.body).next_refresh_token;
+          return refreshResponse.promise;
+        }
+        return loginResponse.promise;
+      },
     });
 
     const refresh = auth.refreshLicense(auth.readLicense());
@@ -525,6 +604,11 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
       email: "agent@example.test",
       password: "new-password",
     });
+    await waitFor(() => refreshSuccessor !== null);
+    const refreshed = successfulPayload(
+      ["real_estate_marketing"],
+      { refreshToken: refreshSuccessor },
+    );
     refreshResponse.resolve(response(refreshed));
 
     const completedRefresh = await refresh;
@@ -544,6 +628,7 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
 test("hung Beta sign-in is bounded and releases background refresh", async () => {
   const state = profile();
   let calls = 0;
+  let successor = null;
   try {
     const initial = successfulPayload(["real_estate_sales"]);
     const refreshed = successfulPayload(["real_estate_admin"]);
@@ -556,9 +641,16 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
       profileRoot: state.root,
       licensePath: state.licensePath,
       authRequestTimeoutMs: 10,
-      fetchImpl: async (_url, options) => {
+      fetchImpl: async (url, options) => {
         calls += 1;
-        if (calls > 1) return response(refreshed);
+        if (calls > 1) {
+          const body = JSON.parse(options.body);
+          successor = body.next_refresh_token;
+          return response(successfulPayload(
+            refreshed.entitlements,
+            { refreshToken: body.next_refresh_token },
+          ));
+        }
         return new Promise((_resolve, reject) => {
           options.signal.addEventListener(
             "abort",
@@ -577,7 +669,7 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
     assert.equal(login.code, "beta_auth_upstream_unavailable");
 
     const next = await auth.refreshLicense(auth.readLicense());
-    assert.equal(next.refresh_token, refreshed.refresh_token);
+    assert.equal(next.refresh_token, successor);
     assert.deepEqual(next.entitlements, ["real_estate_admin"]);
     assert.equal(calls, 2);
   } finally {
@@ -588,6 +680,7 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
 test("hung Beta refresh is bounded and a later retry can recover", async () => {
   const state = profile();
   let calls = 0;
+  let successor = null;
   try {
     const initial = successfulPayload(["real_estate_sales"]);
     const refreshed = successfulPayload(["real_estate_admin"]);
@@ -602,7 +695,14 @@ test("hung Beta refresh is bounded and a later retry can recover", async () => {
       authRequestTimeoutMs: 10,
       fetchImpl: async (_url, options) => {
         calls += 1;
-        if (calls > 1) return response(refreshed);
+        if (calls > 1) {
+          const body = JSON.parse(options.body);
+          successor = body.next_refresh_token;
+          return response(successfulPayload(
+            refreshed.entitlements,
+            { refreshToken: body.next_refresh_token },
+          ));
+        }
         return new Promise((_resolve, reject) => {
           options.signal.addEventListener(
             "abort",
@@ -620,9 +720,183 @@ test("hung Beta refresh is bounded and a later retry can recover", async () => {
     assert.equal(auth.readLicense().refresh_token, initial.refresh_token);
 
     const next = await auth.refreshLicense(auth.readLicense());
-    assert.equal(next.refresh_token, refreshed.refresh_token);
+    assert.equal(next.refresh_token, successor);
     assert.deepEqual(next.entitlements, ["real_estate_admin"]);
     assert.equal(calls, 2);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("expired signed B replays the exact durable A/B/I triplet", async () => {
+  const state = profile();
+  try {
+    const pendingStore = createRefreshPendingStore({ root: state.root });
+    let pending;
+    await pendingStore.withLock(async () => {
+      pending = pendingStore.create({
+        licenseId: "license-1",
+        currentRefreshToken: Buffer.alloc(32, 0x41).toString("base64url"),
+        createdAt: Math.floor(Date.now() / 1000) - 7200,
+      });
+    });
+    const expired = successfulPayload([], {
+      refreshToken: pending.successor_refresh_token,
+      expiresAt: Math.floor(Date.now() / 1000) - 120,
+    });
+    fs.writeFileSync(state.licensePath, JSON.stringify(expired), { mode: 0o600 });
+    const calls = [];
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push(body);
+        return response(successfulPayload(
+          ["real_estate_admin"],
+          { refreshToken: body.next_refresh_token },
+        ));
+      },
+    });
+
+    const fresh = await auth.refreshLicense(auth.readLicense());
+
+    assert.deepEqual(calls, [{
+      refresh_token: pending.current_refresh_token,
+      next_refresh_token: pending.successor_refresh_token,
+      refresh_attempt_id: pending.attempt_id,
+    }]);
+    assert.equal(fresh.refresh_token, pending.successor_refresh_token);
+    assert.deepEqual(fresh.entitlements, ["real_estate_admin"]);
+    assert.equal(fs.existsSync(pendingStore.markerPath), false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("signed successor mismatch retains A/B/I and exact retry recovers", async () => {
+  const state = profile();
+  const bodies = [];
+  try {
+    const initial = successfulPayload(["real_estate_sales"]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (_url, options) => {
+        const body = JSON.parse(options.body);
+        bodies.push(body);
+        return response(successfulPayload(
+          ["real_estate_admin"],
+          {
+            refreshToken: bodies.length === 1
+              ? Buffer.alloc(32, 0x43).toString("base64url")
+              : body.next_refresh_token,
+          },
+        ));
+      },
+    });
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+
+    await assert.rejects(
+      auth.refreshLicense(auth.readLicense()),
+      (error) => error.code === "beta_refresh_successor_mismatch",
+    );
+    assert.equal(auth.readLicense().refresh_token, initial.refresh_token);
+    assert.equal(fs.existsSync(markerPath), true);
+
+    const recovered = await auth.refreshLicense(auth.readLicense());
+
+    assert.deepEqual(bodies[0], bodies[1]);
+    assert.equal(recovered.refresh_token, bodies[0].next_refresh_token);
+    assert.deepEqual(recovered.entitlements, ["real_estate_admin"]);
+    assert.equal(fs.existsSync(markerPath), false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+for (const stateKind of ["successor", "newer"]) {
+  test(`signed ${stateKind} state cleans marker without network`, async () => {
+    const state = profile();
+    try {
+      const pendingStore = createRefreshPendingStore({ root: state.root });
+      let pending;
+      await pendingStore.withLock(async () => {
+        pending = pendingStore.create({
+          licenseId: "license-1",
+          currentRefreshToken: Buffer.alloc(32, 0x41).toString("base64url"),
+        });
+      });
+      const current = successfulPayload([], {
+        refreshToken: stateKind === "successor"
+          ? pending.successor_refresh_token
+          : Buffer.alloc(32, 0x43).toString("base64url"),
+      });
+      fs.writeFileSync(state.licensePath, JSON.stringify(current), { mode: 0o600 });
+      const auth = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async () => {
+          throw new Error("signed local state should resolve before network");
+        },
+      });
+
+      const resolved = await auth.refreshLicense(auth.readLicense());
+
+      assert.equal(resolved.refresh_token, current.refresh_token);
+      assert.equal(fs.existsSync(pendingStore.markerPath), false);
+    } finally {
+      state.cleanup();
+    }
+  });
+}
+
+test("ambiguous Beta 4xx retains marker and never falls back to v1", async () => {
+  const state = profile();
+  const calls = [];
+  try {
+    const initial = successfulPayload([]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (_url, options) => {
+        calls.push(JSON.parse(options.body));
+        return response({}, 400);
+      },
+    });
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+
+    await assert.rejects(
+      auth.refreshLicense(auth.readLicense()),
+      (error) => error.code === "beta_refresh_protocol_rejected",
+    );
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(Object.keys(calls[0]).sort(), [
+      "next_refresh_token",
+      "refresh_attempt_id",
+      "refresh_token",
+    ]);
+    assert.equal(auth.readLicense().refresh_token, initial.refresh_token);
+    assert.equal(fs.existsSync(markerPath), true);
   } finally {
     state.cleanup();
   }
@@ -718,4 +992,77 @@ test("desktop main pins exact Beta HQ identity instead of mutable environment", 
     source,
     /RELEASE_PROFILE\.isBeta\s*\? SIGNED_HQ_BASE_URL\s*:\s*process\.env\.ELEVATE_BACKEND_URL \|\| SIGNED_HQ_BASE_URL/,
   );
+});
+
+test("Stable write and clear preserve their synchronous return contract", () => {
+  const sandbox = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "elevate-stable-auth-"));
+  const licensePath = path.join(sandbox, "license.json");
+  try {
+    const auth = createDesktopAuth({
+      log,
+      hqBaseUrl: "https://stable.example.test",
+      isBeta: false,
+      profileRoot: sandbox,
+      licensePath,
+      entitlementKeyset,
+    });
+    const license = {
+      access_token: token(),
+      refresh_token: "stable-refresh",
+      license_id: "stable-license",
+      tier: "pro",
+      email: "stable@example.test",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      entitlements: [],
+    };
+
+    const written = auth.writeLicense(license);
+    assert.equal(written, license);
+    assert.equal(typeof written?.then, "undefined");
+    const cleared = auth.clearLicense();
+    assert.equal(typeof cleared?.then, "undefined");
+    assert.equal(fs.existsSync(licensePath), false);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("Stable refresh keeps the legacy v1 request shape", async () => {
+  const sandbox = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "elevate-stable-refresh-"));
+  const licensePath = path.join(sandbox, "license.json");
+  const calls = [];
+  try {
+    const auth = createDesktopAuth({
+      log,
+      hqBaseUrl: "https://stable.example.test",
+      isBeta: false,
+      profileRoot: sandbox,
+      licensePath,
+      entitlementKeyset,
+      fetchImpl: async (_url, options) => {
+        calls.push(JSON.parse(options.body));
+        return response({
+          access_token: token(),
+          refresh_token: "stable-next",
+        });
+      },
+    });
+    const current = {
+      access_token: token(),
+      refresh_token: "stable-current",
+      license_id: "stable-license",
+      tier: "pro",
+      email: "stable@example.test",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      entitlements: [],
+    };
+    auth.writeLicense(current);
+
+    const refreshed = await auth.refreshLicense(current);
+
+    assert.deepEqual(calls, [{ refresh_token: "stable-current" }]);
+    assert.equal(refreshed.refresh_token, "stable-next");
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });

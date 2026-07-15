@@ -8,8 +8,13 @@ const {
   productionKeyset,
   verifyEntitlementAssertion,
 } = require("./entitlement-assertion");
+const {
+  RefreshPendingError,
+  createRefreshPendingStore,
+} = require("./refresh-pending");
 
 const SIGNED_HQ_BASE_URL = "https://api.elevationrealestatehq.com";
+const SIGNED_SUBJECT = Symbol("signed-entitlement-subject");
 
 class DesktopAuthError extends Error {
   constructor(code, message) {
@@ -44,6 +49,9 @@ function createDesktopAuth({
   env = process.env,
   processImpl = process,
   entitlementKeyset = productionKeyset(),
+  refreshLockTimeoutMs = 30_000,
+  refreshLockfPath = "/usr/bin/lockf",
+  spawnImpl,
 }) {
   const effectiveHqBaseUrl = (
     isBeta ? SIGNED_HQ_BASE_URL : hqBaseUrl || SIGNED_HQ_BASE_URL
@@ -55,6 +63,16 @@ function createDesktopAuth({
   let loginInFlight = 0;
   let refreshInFlight = null;
   let sessionOperationSequence = 0;
+  const refreshPending = isBeta
+    ? createRefreshPendingStore({
+        root: resolvedProfileRoot,
+        fsImpl,
+        processImpl,
+        ...(spawnImpl ? { spawnImpl } : {}),
+        lockfPath: refreshLockfPath,
+        lockTimeoutMs: refreshLockTimeoutMs,
+      })
+    : null;
 
   function storeError(code, message) {
     return new DesktopAuthError(code, message);
@@ -298,6 +316,12 @@ function createDesktopAuth({
     license.tier = claims.tier;
     license.entitlements = [...claims.entitlements];
     license.expires_at = claims.exp;
+    Object.defineProperty(license, SIGNED_SUBJECT, {
+      value: claims.sub,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
     return license;
   }
 
@@ -388,6 +412,44 @@ function createDesktopAuth({
     }
   }
 
+  function readBetaLicenseStrict({ current = false } = {}) {
+    preflightLicenseStore({ writable: false });
+    let license;
+    try {
+      license = readLicenseUnchecked();
+    } catch (err) {
+      if (err instanceof DesktopAuthError) throw err;
+      throw storeError(
+        "beta_license_snapshot_invalid",
+        "The Realtor Beta account snapshot is missing or unreadable.",
+      );
+    }
+    preflightLicenseStore({ writable: false });
+    return validateCompleteLicense(license, { current });
+  }
+
+  function sameSignedSnapshot(left, right) {
+    return Boolean(
+      left &&
+      right &&
+      left.access_token === right.access_token &&
+      left.refresh_token === right.refresh_token &&
+      left.license_id === right.license_id &&
+      left.entitlement_assertion === right.entitlement_assertion &&
+      left[SIGNED_SUBJECT] === right[SIGNED_SUBJECT]
+    );
+  }
+
+  function sameSignedIdentity(left, right) {
+    return Boolean(
+      left &&
+      right &&
+      left.license_id === right.license_id &&
+      left.email === right.email &&
+      left[SIGNED_SUBJECT] === right[SIGNED_SUBJECT]
+    );
+  }
+
   function atomicBetaReplace(bytes) {
     const tempPath = path.join(
       resolvedProfileRoot,
@@ -425,7 +487,7 @@ function createDesktopAuth({
     }
   }
 
-  function writeLicense(license) {
+  function writeLicenseUnlocked(license) {
     if (!isBeta) {
       fsImpl.mkdirSync(path.dirname(licensePath), { recursive: true });
       fsImpl.writeFileSync(licensePath, JSON.stringify(license, null, 2), { mode: 0o600 });
@@ -451,7 +513,7 @@ function createDesktopAuth({
       try {
         // Never restore the previous paid snapshot after HQ returned a newer
         // one: that older state may be exactly what HQ just revoked.
-        clearLicense();
+        clearLicenseUnlocked();
       } catch {
         throw storeError(
           "beta_license_persistence_failed",
@@ -466,7 +528,35 @@ function createDesktopAuth({
     }
   }
 
-  function clearLicense() {
+  function persistBetaRefreshSnapshot(license, expected, guard) {
+    validateCompleteLicense(license, { current: true });
+    const current = readBetaLicenseStrict({ current: false });
+    if (!sameSignedSnapshot(current, expected)) return current;
+    try {
+      guard.assertHeld();
+      atomicBetaReplace(Buffer.from(JSON.stringify(license, null, 2)));
+      preflightLicenseStore({ writable: false });
+      const persisted = readBetaLicenseStrict({ current: true });
+      if (JSON.stringify(persisted) !== JSON.stringify(license)) {
+        throw storeError(
+          "beta_license_persistence_mismatch",
+          "Realtor Beta could not verify its saved refresh snapshot.",
+        );
+      }
+      licenseRevision += 1;
+      return persisted;
+    } catch (err) {
+      // Never clear A or B here. A/B/I is the recovery record after HQ may
+      // have rotated, and a verified B may already be durably installed.
+      if (err instanceof DesktopAuthError) throw err;
+      throw storeError(
+        "beta_license_persistence_failed",
+        "Realtor Beta could not durably save its refreshed account snapshot.",
+      );
+    }
+  }
+
+  function clearLicenseUnlocked() {
     if (!isBeta) {
       try {
         fsImpl.unlinkSync(licensePath);
@@ -508,6 +598,81 @@ function createDesktopAuth({
       );
     }
     return true;
+  }
+
+  function writeLicense(license, options) {
+    if (!isBeta) return writeLicenseUnlocked(license);
+    const expected = options?.expected ?? null;
+    preflightLicenseStore({ writable: true });
+    return refreshPending
+      .withLock(async (guard) => {
+        guard.assertHeld();
+        validateCompleteLicense(license, { current: true });
+        const pending = refreshPending.read();
+        const current = fsImpl.existsSync(resolvedLicensePath)
+          ? readBetaLicenseStrict({ current: false })
+          : null;
+        if (!current) {
+          if (expected) {
+            throw storeError(
+              "beta_auth_superseded",
+              "A newer Realtor Beta session removed this account snapshot.",
+            );
+          }
+        } else if (!sameSignedSnapshot(current, license)) {
+          if (!expected) {
+            throw storeError(
+              "beta_auth_superseded",
+              "A newer Realtor Beta session replaced this account snapshot.",
+            );
+          }
+          validateCompleteLicense(expected, { current: false });
+          if (!sameSignedSnapshot(current, expected)) {
+            throw storeError(
+              "beta_auth_superseded",
+              "A newer Realtor Beta session replaced this account snapshot.",
+            );
+          }
+        }
+        guard.assertHeld();
+        const persisted = writeLicenseUnlocked(license);
+        if (
+          pending &&
+          !(
+            persisted.license_id === pending.license_id &&
+            persisted.refresh_token === pending.current_refresh_token
+          )
+        ) {
+          guard.assertHeld();
+          refreshPending.remove();
+        }
+        return persisted;
+      })
+      .catch((err) => {
+        if (err instanceof RefreshPendingError) {
+          throw storeError(err.code, err.message);
+        }
+        throw err;
+      });
+  }
+
+  function clearLicense() {
+    if (!isBeta) return clearLicenseUnlocked();
+    preflightLicenseStore({ writable: true });
+    return refreshPending
+      .withLock(async (guard) => {
+        guard.assertHeld();
+        const pending = refreshPending.read();
+        const cleared = clearLicenseUnlocked();
+        if (pending) refreshPending.remove();
+        return cleared;
+      })
+      .catch((err) => {
+        if (err instanceof RefreshPendingError) {
+          throw storeError(err.code, err.message);
+        }
+        throw err;
+      });
   }
 
   function hqJsonRequestHeaders(scope) {
@@ -555,7 +720,174 @@ function createDesktopAuth({
     };
   }
 
+  async function refreshBetaLicenseOnce(license) {
+    if (!license || !license.refresh_token) return null;
+    ++sessionOperationSequence;
+    let requestId = "preflight";
+    try {
+      preflightLicenseStore({ writable: true });
+      return await refreshPending.withLock(async (guard) => {
+        preflightLicenseStore({ writable: true });
+        let current = readBetaLicenseStrict({ current: false });
+        let pending = refreshPending.read();
+
+        if (pending) {
+          if (
+            current.license_id !== pending.license_id ||
+            ![
+              pending.current_refresh_token,
+              pending.successor_refresh_token,
+            ].includes(current.refresh_token)
+          ) {
+            guard.assertHeld();
+            refreshPending.remove();
+            return current;
+          }
+          if (current.refresh_token === pending.successor_refresh_token) {
+            try {
+              validateCompleteLicense(current, { current: true });
+            } catch (err) {
+              if (
+                !(err instanceof DesktopAuthError) ||
+                err.code !== "beta_entitlement_assertion_expired"
+              ) {
+                throw err;
+              }
+              // Historical signed B needs the exact A/B/I replay to mint a
+              // fresh assertion; it must not strand the durable marker.
+            }
+            if (Number(current.expires_at) * 1000 > Date.now()) {
+              guard.assertHeld();
+              refreshPending.remove();
+              return current;
+            }
+          }
+        } else {
+          if (!sameSignedSnapshot(current, license)) return current;
+          pending = refreshPending.create({
+            licenseId: current.license_id,
+            currentRefreshToken: current.refresh_token,
+          });
+        }
+
+        const abort = betaRequestAbort();
+        try {
+          guard.assertHeld();
+          const request = hqJsonRequestHeaders("license-refresh");
+          requestId = request.requestId;
+          const res = await fetchImpl(`${effectiveHqBaseUrl}/api/license/refresh`, {
+            method: "POST",
+            headers: request.headers,
+            redirect: "error",
+            signal: abort.signal,
+            body: JSON.stringify({
+              refresh_token: pending.current_refresh_token,
+              next_refresh_token: pending.successor_refresh_token,
+              refresh_attempt_id: pending.attempt_id,
+            }),
+          });
+
+          if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            log.warn(
+              `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
+            );
+            if (res.status === 401 || res.status === 402) {
+              const latest = readBetaLicenseStrict({ current: false });
+              if (!sameSignedSnapshot(latest, current)) {
+                guard.assertHeld();
+                refreshPending.remove();
+                return latest;
+              }
+              guard.assertHeld();
+              clearLicenseUnlocked();
+              refreshPending.remove();
+              throw storeError(
+                "beta_license_revoked",
+                "The Realtor Beta account session was revoked. Sign in again.",
+              );
+            }
+            if (res.status >= 400 && res.status < 500) {
+              throw storeError(
+                "beta_refresh_protocol_rejected",
+                "Elevation HQ rejected the recoverable refresh protocol. " +
+                  "The existing session and retry state were preserved; " +
+                  "Realtor Beta will not downgrade this attempt.",
+              );
+            }
+            throw storeError(
+              "beta_auth_upstream_failed",
+              `Elevation HQ could not refresh the account session (${res.status}).`,
+            );
+          }
+
+          const data = await responseJson(res);
+          if (!data || !data.access_token || !data.refresh_token) {
+            throw storeError(
+              "beta_license_response_invalid",
+              "Elevation HQ returned an incomplete refresh response.",
+            );
+          }
+          const next = licenseFromResponse(data);
+          if (!sameSignedIdentity(current, next)) {
+            throw storeError(
+              "beta_entitlement_response_mismatch",
+              "The refreshed Realtor Beta account changed signed identity.",
+            );
+          }
+          if (next.refresh_token !== pending.successor_refresh_token) {
+            throw storeError(
+              "beta_refresh_successor_mismatch",
+              "Elevation HQ returned a refresh token that did not match " +
+                "the protected Beta refresh attempt.",
+            );
+          }
+
+          const latest = readBetaLicenseStrict({ current: false });
+          if (!sameSignedSnapshot(latest, current)) {
+            if (
+              latest.license_id === pending.license_id &&
+              latest.refresh_token === pending.successor_refresh_token
+            ) {
+              validateCompleteLicense(latest, { current: true });
+            }
+            guard.assertHeld();
+            refreshPending.remove();
+            return latest;
+          }
+
+          const persisted = persistBetaRefreshSnapshot(next, current, guard);
+          if (!sameSignedSnapshot(persisted, next)) {
+            guard.assertHeld();
+            refreshPending.remove();
+            return persisted;
+          }
+          guard.assertHeld();
+          refreshPending.remove();
+          log.info(`[license] refresh succeeded request_id=${requestId}`);
+          return persisted;
+        } finally {
+          abort.cancel();
+        }
+      });
+    } catch (err) {
+      const failure = err instanceof RefreshPendingError
+        ? storeError(err.code, err.message)
+        : err;
+      const code = failure && failure.code ? ` code=${failure.code}` : "";
+      log.warn(
+        `[license] refresh threw request_id=${requestId}${code}: ${failure && failure.message ? failure.message : failure}`,
+      );
+      if (failure instanceof DesktopAuthError) throw failure;
+      throw storeError(
+        "beta_auth_upstream_unavailable",
+        "Elevation HQ could not be reached to refresh the account session.",
+      );
+    }
+  }
+
   async function refreshLicenseOnce(license) {
+    if (isBeta) return refreshBetaLicenseOnce(license);
     if (!license || !license.refresh_token) return null;
     const attemptedRefreshToken = license.refresh_token;
     const operationSequence = isBeta ? ++sessionOperationSequence : 0;
@@ -595,7 +927,7 @@ function createDesktopAuth({
             operationSequence,
           );
           if (state.superseded) return state.current;
-          clearLicense();
+          await clearLicense();
           throw storeError(
             "beta_license_revoked",
             "The Realtor Beta account session was revoked. Sign in again.",
@@ -641,7 +973,7 @@ function createDesktopAuth({
         if (state.superseded) return state.current;
       }
       writeAttempted = true;
-      const persisted = writeLicense(next);
+      const persisted = await writeLicense(next);
       log.info(`[license] refresh succeeded request_id=${requestId}`);
       return persisted;
     } catch (err) {
@@ -661,7 +993,7 @@ function createDesktopAuth({
         if (state.superseded && !writeAttempted) return state.current;
         if (successfulResponseReceived) {
           try {
-            clearLicense();
+            await clearLicense();
           } catch (invalidateError) {
             if (invalidateError instanceof DesktopAuthError) {
               throw invalidateError;
@@ -830,11 +1162,34 @@ function createDesktopAuth({
           error: "A newer account session replaced this sign-in attempt.",
         };
       }
-      const persisted = writeLicense(license);
+      let persisted;
+      if (isBeta) {
+        persisted = await refreshPending.withLock(async (guard) => {
+          guard.assertHeld();
+          const pending = refreshPending.read();
+          if (betaLoginSuperseded({
+            operationSequence,
+            startingRefreshToken,
+            startingRevision,
+          }).superseded) {
+            throw storeError(
+              "beta_auth_superseded",
+              "A newer account session replaced this sign-in attempt.",
+            );
+          }
+          const saved = writeLicenseUnlocked(license);
+          if (pending) refreshPending.remove();
+          return saved;
+        });
+      } else {
+        persisted = writeLicenseUnlocked(license);
+      }
       log.info(`[auth] login succeeded request_id=${requestId}`);
       return { ok: true, activation_complete: true, license: persisted };
     } catch (err) {
-      const failure = err;
+      const failure = err instanceof RefreshPendingError
+        ? storeError(err.code, err.message)
+        : err;
       const code = failure && failure.code
         ? failure.code
         : isBeta

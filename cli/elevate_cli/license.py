@@ -702,10 +702,8 @@ def _atomic_beta_replace(data: bytes | None) -> None:
         os.close(dir_fd)
 
 
-def _invalidate_beta_snapshot(message: str) -> None:
-    """Remove all local paid state, raising typed if removal is unverified."""
-    if not _exact_realtor_beta_active():
-        return
+def _invalidate_beta_snapshot_unlocked(message: str) -> None:
+    """Remove local paid state while the caller owns the refresh lock."""
     try:
         _atomic_beta_replace(None)
     except Exception as exc:
@@ -715,18 +713,39 @@ def _invalidate_beta_snapshot(message: str) -> None:
         ) from exc
 
 
-def _invalidate_beta_snapshot_if_matches(lic: License, message: str) -> bool:
-    """Remove only the Beta snapshot that produced a rejected refresh.
+def _invalidate_beta_snapshot(message: str) -> None:
+    """Remove all local paid state under the shared mutation lock."""
+    if not _exact_realtor_beta_active():
+        return
+    from elevate_cli import refresh_pending
+
+    try:
+        preflight_beta_license_store(require_writable=True)
+        root = _beta_profile_root().expanduser().absolute()
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            pending = refresh_pending.read_pending(root)
+            lock_guard.assert_held()
+            _invalidate_beta_snapshot_unlocked(message)
+            if pending is not None:
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _invalidate_beta_snapshot_if_matches_unlocked(
+    lic: License,
+    message: str,
+) -> bool:
+    """Remove only a matching snapshot while the caller owns the lock.
 
     Another process may already have rotated and persisted a new signed token
     pair.  A late 401 for the old pair must never erase that newer session.
     """
-    if not _exact_realtor_beta_active():
-        return False
     try:
         current = read_verified_beta_license_snapshot(require_current=False)
     except LicenseError:
-        _invalidate_beta_snapshot(message)
+        _invalidate_beta_snapshot_unlocked(message)
         return True
     if (
         current.access_token != lic.access_token
@@ -734,8 +753,81 @@ def _invalidate_beta_snapshot_if_matches(lic: License, message: str) -> bool:
         or current.entitlement_assertion != lic.entitlement_assertion
     ):
         return False
-    _invalidate_beta_snapshot(message)
+    _invalidate_beta_snapshot_unlocked(message)
     return True
+
+
+def _invalidate_beta_snapshot_if_matches(lic: License, message: str) -> bool:
+    """Remove a matching snapshot under the shared mutation lock."""
+    if not _exact_realtor_beta_active():
+        return False
+    from elevate_cli import refresh_pending
+
+    try:
+        preflight_beta_license_store(require_writable=True)
+        with refresh_pending.refresh_lock(
+            _beta_profile_root().expanduser().absolute()
+        ) as lock_guard:
+            root = _beta_profile_root().expanduser().absolute()
+            pending = refresh_pending.read_pending(root)
+            lock_guard.assert_held()
+            removed = _invalidate_beta_snapshot_if_matches_unlocked(lic, message)
+            if removed and pending is not None:
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+            return removed
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _same_beta_snapshot(left: License, right: License) -> bool:
+    """Compare the signed state that authorizes one refresh mutation."""
+    return (
+        left.access_token == right.access_token
+        and left.refresh_token == right.refresh_token
+        and left.license_id == right.license_id
+        and left.entitlement_assertion == right.entitlement_assertion
+        and left.subject == right.subject
+    )
+
+
+def _persist_beta_refresh_snapshot(
+    lic: License,
+    *,
+    expected: License,
+    lock_guard: Any,
+) -> License | None:
+    """Persist verified refresh state without erasing A on an ambiguous fault.
+
+    ``save()`` deliberately invalidates incomplete login responses. Refresh v2
+    has a different recovery rule: once HQ may have rotated A to B, the durable
+    A/B/I marker must survive every local persistence or verification failure.
+    """
+    _validate_complete_beta_license(lic, require_current=True)
+    current = read_verified_beta_license_snapshot(require_current=False)
+    if not _same_beta_snapshot(current, expected):
+        return current
+    payload = json.dumps(lic.to_dict(), indent=2).encode("utf-8")
+    try:
+        lock_guard.assert_held()
+        _atomic_beta_replace(payload)
+        persisted = read_verified_beta_license_snapshot(require_current=True)
+        if persisted.to_dict() != lic.to_dict():
+            raise LicenseError(
+                "Realtor Beta could not verify its saved refresh snapshot.",
+                code="beta_license_persistence_mismatch",
+            )
+        # The local paid-access mirror is part of completion. If it fails, B
+        # and the marker remain; the next process resumes from signed B.
+        sync_license_entitlements(persisted)
+        return persisted
+    except LicenseError:
+        raise
+    except Exception as exc:
+        raise LicenseError(
+            "Realtor Beta could not durably save its refreshed account snapshot.",
+            code="beta_license_persistence_failed",
+        ) from exc
 
 
 def sync_license_entitlements(lic: License) -> None:
@@ -839,32 +931,81 @@ def load() -> Optional[License]:
         return None
 
 
-def save(lic: License) -> None:
-    if _exact_realtor_beta_active():
-        _validate_complete_beta_license(lic, require_current=True)
-        preflight_beta_license_store(require_writable=True)
-        payload = json.dumps(lic.to_dict(), indent=2).encode("utf-8")
-        try:
-            _atomic_beta_replace(payload)
-            persisted = read_verified_beta_license_snapshot(require_current=True)
-            if persisted.to_dict() != lic.to_dict():
-                raise LicenseError(
-                    "Realtor Beta could not verify its saved account snapshot.",
-                    code="beta_license_persistence_mismatch",
-                )
-        except Exception as exc:
-            # Once HQ has returned a new authoritative snapshot, restoring old
-            # paid grants would fail open if this response revoked them.
-            _invalidate_beta_snapshot_if_matches(
-                lic,
-                "Realtor Beta could not save or invalidate its account snapshot."
-            )
-            if isinstance(exc, LicenseError):
-                raise
+def _save_exact_beta_unlocked(lic: License) -> None:
+    _validate_complete_beta_license(lic, require_current=True)
+    preflight_beta_license_store(require_writable=True)
+    payload = json.dumps(lic.to_dict(), indent=2).encode("utf-8")
+    try:
+        _atomic_beta_replace(payload)
+        persisted = read_verified_beta_license_snapshot(require_current=True)
+        if persisted.to_dict() != lic.to_dict():
             raise LicenseError(
-                "Realtor Beta could not save its account snapshot.",
-                code="beta_license_persistence_failed",
-            ) from exc
+                "Realtor Beta could not verify its saved account snapshot.",
+                code="beta_license_persistence_mismatch",
+            )
+    except Exception as exc:
+        # Once HQ has returned a new authoritative snapshot, restoring old
+        # paid grants would fail open if this response revoked them.
+        _invalidate_beta_snapshot_if_matches_unlocked(
+            lic,
+            "Realtor Beta could not save or invalidate its account snapshot."
+        )
+        if isinstance(exc, LicenseError):
+            raise
+        raise LicenseError(
+            "Realtor Beta could not save its account snapshot.",
+            code="beta_license_persistence_failed",
+        ) from exc
+
+
+def save(lic: License, *, expected: License | None = None) -> None:
+    if _exact_realtor_beta_active():
+        from elevate_cli import refresh_pending
+
+        try:
+            preflight_beta_license_store(require_writable=True)
+            with refresh_pending.refresh_lock(
+                _beta_profile_root().expanduser().absolute()
+            ) as lock_guard:
+                root = _beta_profile_root().expanduser().absolute()
+                lock_guard.assert_held()
+                pending = refresh_pending.read_pending(root)
+                current: License | None = None
+                if LICENSE_PATH.exists() or LICENSE_PATH.is_symlink():
+                    current = read_verified_beta_license_snapshot(
+                        require_current=False
+                    )
+                if current is None:
+                    if expected is not None:
+                        raise LicenseError(
+                            "A newer Realtor Beta session removed this account snapshot.",
+                            code="beta_auth_superseded",
+                        )
+                elif not _same_beta_snapshot(current, lic):
+                    if expected is None:
+                        raise LicenseError(
+                            "A newer Realtor Beta session replaced this account snapshot.",
+                            code="beta_auth_superseded",
+                        )
+                    _validate_complete_beta_license(
+                        expected,
+                        require_current=False,
+                    )
+                    if not _same_beta_snapshot(current, expected):
+                        raise LicenseError(
+                            "A newer Realtor Beta session replaced this account snapshot.",
+                            code="beta_auth_superseded",
+                        )
+                lock_guard.assert_held()
+                _save_exact_beta_unlocked(lic)
+                if pending is not None and not (
+                    lic.license_id == pending.license_id
+                    and lic.refresh_token == pending.current_refresh_token
+                ):
+                    lock_guard.assert_held()
+                    refresh_pending.remove_pending(root)
+        except refresh_pending.RefreshPendingError as exc:
+            raise LicenseError(str(exc), code=exc.code) from exc
         return
     LICENSE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = LICENSE_PATH.with_suffix(".json.tmp")
@@ -881,10 +1022,25 @@ def save(lic: License) -> None:
 
 def clear() -> bool:
     if _exact_realtor_beta_active():
-        preflight_beta_license_store(require_writable=True)
-        existed = LICENSE_PATH.exists()
-        _atomic_beta_replace(None)
-        return existed
+        from elevate_cli import refresh_pending
+
+        try:
+            preflight_beta_license_store(require_writable=True)
+            with refresh_pending.refresh_lock(
+                _beta_profile_root().expanduser().absolute()
+            ) as lock_guard:
+                root = _beta_profile_root().expanduser().absolute()
+                pending = refresh_pending.read_pending(root)
+                preflight_beta_license_store(require_writable=True)
+                existed = LICENSE_PATH.exists()
+                lock_guard.assert_held()
+                _atomic_beta_replace(None)
+                if pending is not None:
+                    lock_guard.assert_held()
+                    refresh_pending.remove_pending(root)
+                return existed
+        except refresh_pending.RefreshPendingError as exc:
+            raise LicenseError(str(exc), code=exc.code) from exc
     if LICENSE_PATH.exists():
         LICENSE_PATH.unlink()
         return True
@@ -950,20 +1106,42 @@ def _license_from_auth_response(
 
 
 def _persist_authenticated_license(lic: License) -> None:
+    if _exact_realtor_beta_active():
+        from elevate_cli import refresh_pending
+
+        try:
+            preflight_beta_license_store(require_writable=True)
+            with refresh_pending.refresh_lock(
+                _beta_profile_root().expanduser().absolute()
+            ) as lock_guard:
+                root = _beta_profile_root().expanduser().absolute()
+                pending = refresh_pending.read_pending(root)
+                lock_guard.assert_held()
+                _save_exact_beta_unlocked(lic)
+                try:
+                    # Completion and the final signed readback remain inside
+                    # the same mutation order as refresh/login/device writes.
+                    sync_license_entitlements(lic)
+                    persisted = read_verified_beta_license_snapshot(require_current=True)
+                    if persisted.to_dict() != lic.to_dict():
+                        raise LicenseError(
+                            "A newer Realtor Beta session superseded activation.",
+                            code="beta_auth_superseded",
+                        )
+                    if pending is not None:
+                        lock_guard.assert_held()
+                        refresh_pending.remove_pending(root)
+                except Exception:
+                    _invalidate_beta_snapshot_if_matches_unlocked(
+                        lic,
+                        "Realtor Beta could not roll back incomplete activation."
+                    )
+                    raise
+        except refresh_pending.RefreshPendingError as exc:
+            raise LicenseError(str(exc), code=exc.code) from exc
+        return
     save(lic)
-    try:
-        sync_license_entitlements(lic)
-    except Exception:
-        # A Beta login/refresh is not complete unless the just-written
-        # snapshot can drive the exact same local access decision. Removing it
-        # makes the failure Core-only instead of leaving a half-activated paid
-        # session behind.
-        if _exact_realtor_beta_active():
-            _invalidate_beta_snapshot_if_matches(
-                lic,
-                "Realtor Beta could not roll back incomplete activation."
-            )
-        raise
+    sync_license_entitlements(lic)
 
 
 def _accept_authenticated_response(
@@ -1130,13 +1308,153 @@ def login_with_code(email: str, code: str, device_label: Optional[str] = None) -
     return _accept_hq_response(resp, email=email)
 
 
+def _refresh_exact_beta(lic: License) -> License:
+    """Recoverable exact-Beta A -> B refresh under the shared process lock."""
+    from elevate_cli import refresh_pending
+
+    _validate_complete_beta_license(lic, require_current=False)
+    root = _beta_profile_root().expanduser().absolute()
+    preflight_beta_license_store(require_writable=True)
+
+    try:
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            preflight_beta_license_store(require_writable=True)
+            current = read_verified_beta_license_snapshot(require_current=False)
+            pending = refresh_pending.read_pending(root)
+
+            if pending is not None:
+                # A newer signed identity/session proves this attempt was
+                # superseded. Remove only the old marker, never the new state.
+                if (
+                    current.license_id != pending.license_id
+                    or current.refresh_token
+                    not in (
+                        pending.current_refresh_token,
+                        pending.successor_refresh_token,
+                    )
+                ):
+                    lock_guard.assert_held()
+                    refresh_pending.remove_pending(root)
+                    return current
+                if current.refresh_token == pending.successor_refresh_token:
+                    # Crash/restart after durable B but before marker removal.
+                    try:
+                        _validate_complete_beta_license(current, require_current=True)
+                    except LicenseError as exc:
+                        if exc.code != "beta_entitlement_assertion_not_current":
+                            raise
+                        # Historical signed B still proves durable persistence,
+                        # but needs an exact A/B/I replay for a fresh assertion.
+                    else:
+                        sync_license_entitlements(current)
+                        lock_guard.assert_held()
+                        refresh_pending.remove_pending(root)
+                        _reset_fail_count()
+                        return current
+            else:
+                if not _same_beta_snapshot(current, lic):
+                    return current
+                lock_guard.assert_held()
+                pending = refresh_pending.create_pending(
+                    root,
+                    license_id=current.license_id,
+                    current_refresh_token=current.refresh_token,
+                )
+
+            # A matching marker is the sole request authority. The exact same
+            # triplet is reused after timeouts, discarded responses, and 5xx.
+            base_url = backend_url()
+            lock_guard.assert_held()
+            resp = _post_hq(
+                base_url,
+                "/api/license/refresh",
+                {
+                    "refresh_token": pending.current_refresh_token,
+                    "next_refresh_token": pending.successor_refresh_token,
+                    "refresh_attempt_id": pending.attempt_id,
+                },
+            )
+
+            if resp.status_code in (401, 402):
+                latest = read_verified_beta_license_snapshot(require_current=False)
+                if not _same_beta_snapshot(latest, current):
+                    lock_guard.assert_held()
+                    refresh_pending.remove_pending(root)
+                    return latest
+                # These two statuses are the only definitive revocation lane.
+                # Ambiguous 4xx, transport errors, and 5xx retain A/B/I.
+                lock_guard.assert_held()
+                _atomic_beta_replace(None)
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+                _reset_fail_count()
+                message = (
+                    "Subscription inactive — license revoked. Contact Elevation Real Estate HQ."
+                    if resp.status_code == 402
+                    else "Refresh token rejected. Sign in to Realtor Beta again."
+                )
+                raise LicenseError(message, code="beta_license_revoked")
+
+            if not resp.is_success:
+                if 400 <= resp.status_code < 500:
+                    raise LicenseError(
+                        "Elevation HQ rejected the recoverable refresh protocol. "
+                        "The existing session and retry state were preserved; "
+                        "Realtor Beta will not downgrade this attempt.",
+                        code="beta_refresh_protocol_rejected",
+                    )
+                raise LicenseError(
+                    f"Refresh failed ({resp.status_code}): {resp.text[:200]}",
+                    code="beta_auth_upstream_failed",
+                )
+
+            data = _response_json(resp)
+            next_license = _license_from_auth_response(
+                data,
+                email=current.email,
+                existing=current,
+            )
+            if next_license.refresh_token != pending.successor_refresh_token:
+                raise LicenseError(
+                    "Elevation HQ returned a refresh token that did not match "
+                    "the protected Beta refresh attempt.",
+                    code="beta_refresh_successor_mismatch",
+                )
+
+            latest = read_verified_beta_license_snapshot(require_current=False)
+            if not _same_beta_snapshot(latest, current):
+                if (
+                    latest.license_id == pending.license_id
+                    and latest.refresh_token == pending.successor_refresh_token
+                ):
+                    _validate_complete_beta_license(latest, require_current=True)
+                    sync_license_entitlements(latest)
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+                return latest
+
+            persisted = _persist_beta_refresh_snapshot(
+                next_license,
+                expected=current,
+                lock_guard=lock_guard,
+            )
+            if persisted is None:
+                raise LicenseError(
+                    "A newer Realtor Beta account session superseded this refresh.",
+                    code="beta_refresh_superseded",
+                )
+            lock_guard.assert_held()
+            refresh_pending.remove_pending(root)
+            _reset_fail_count()
+            return persisted
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
 def refresh(lic: License) -> License:
     """POST /api/license/refresh. Rotates the refresh token."""
     if _exact_realtor_beta_active():
-        # A cryptographically valid historical assertion may use its bound
-        # refresh token, but cannot grant local access while expired. Every
-        # successful response must replace it with a new current assertion.
-        _validate_complete_beta_license(lic, require_current=False)
+        return _refresh_exact_beta(lic)
     base_url = backend_url()
     resp = _post_hq(
         base_url,

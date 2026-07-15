@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import stat
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +73,11 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
+CANONICAL_REFRESH_A = _b64url(b"A" * 32)
+CANONICAL_REFRESH_B = _b64url(b"B" * 32)
+CANONICAL_REFRESH_C = _b64url(b"C" * 32)
+
+
 def _signed_assertion(
     *,
     access_token: str,
@@ -114,7 +120,7 @@ def _signed_assertion(
 def _signed_payload(
     *,
     access_token: str | None = None,
-    refresh_token: str = "refresh-secret",
+    refresh_token: str = CANONICAL_REFRESH_A,
     license_id: str = "license-1",
     email: str = "agent@example.test",
     tier: str = "pro",
@@ -175,7 +181,18 @@ class _SuccessClient:
 
     def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
         self._calls.append(url)
-        return _SuccessResponse(self._payload)
+        payload = self._payload
+        if url.endswith("/api/license/refresh") and "next_refresh_token" in json:
+            payload = _signed_payload(
+                access_token=payload["access_token"],
+                refresh_token=json["next_refresh_token"],
+                license_id=payload["license_id"],
+                email=payload["email"],
+                tier=payload["tier"],
+                entitlements=payload["entitlements"],
+                expires_at=payload["expires_at"],
+            )
+        return _SuccessResponse(payload)
 
 
 class _SequenceClient:
@@ -410,7 +427,7 @@ def test_exact_beta_terminal_backend_override_is_typed_atomic_and_never_used(
     assert profile_env.is_symlink()
 
 
-def test_exact_beta_refresh_sends_refresh_token_only_to_signed_backend(
+def test_exact_beta_refresh_sends_recoverable_triplet_only_to_signed_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -418,8 +435,6 @@ def test_exact_beta_refresh_sends_refresh_token_only_to_signed_backend(
     monkeypatch.setenv("ELEVATE_BACKEND_URL", ATTACKER_BACKEND)
     monkeypatch.setattr(license_mod, "BACKEND_URL", ATTACKER_BACKEND)
     license_path = tmp_path / "license.json"
-    license_path.write_bytes(b'{"refresh_token":"existing"}\n')
-    license_path.chmod(0o600)
     monkeypatch.setattr(license_mod, "LICENSE_PATH", license_path)
     monkeypatch.setattr(license_mod, "_beta_profile_root", lambda: license_path.parent)
     calls: list[dict[str, Any]] = []
@@ -429,17 +444,26 @@ def test_exact_beta_refresh_sends_refresh_token_only_to_signed_backend(
         lambda **kwargs: _RecordingClient(calls, **kwargs),
     )
     lic = _beta_license(access_token="current-access")
+    license_mod.save(lic)
     before_bytes = license_path.read_bytes()
 
-    with pytest.raises(license_mod.LicenseError, match="Refresh failed"):
+    with pytest.raises(license_mod.LicenseError) as caught:
         license_mod.refresh(lic)
 
-    assert calls == [
-        {
-            "url": f"{license_mod.DEFAULT_BACKEND}/api/license/refresh",
-            "json": {"refresh_token": "refresh-secret"},
-        }
-    ]
+    assert caught.value.code == "beta_auth_upstream_failed"
+    assert len(calls) == 1
+    assert calls[0]["url"] == f"{license_mod.DEFAULT_BACKEND}/api/license/refresh"
+    assert calls[0]["json"]["refresh_token"] == CANONICAL_REFRESH_A
+    assert set(calls[0]["json"]) == {
+        "refresh_token",
+        "next_refresh_token",
+        "refresh_attempt_id",
+    }
+    from elevate_cli import refresh_pending
+
+    assert refresh_pending.canonical_token32(calls[0]["json"]["next_refresh_token"])
+    assert refresh_pending.canonical_token32(calls[0]["json"]["refresh_attempt_id"])
+    assert (license_path.parent / refresh_pending.MARKER_NAME).exists()
     assert not calls[0]["url"].startswith(ATTACKER_BACKEND)
     assert license_path.read_bytes() == before_bytes
     assert license_mod.BACKEND_URL == ATTACKER_BACKEND
@@ -593,7 +617,7 @@ def test_exact_beta_atomic_verification_fault_invalidates_previous_snapshot(
     monkeypatch.setattr(license_mod, "_atomic_beta_replace", corrupt_first_write)
 
     with pytest.raises(license_mod.LicenseError):
-        license_mod.save(new)
+        license_mod.save(new, expected=old)
 
     assert calls == 2
     assert not license_mod.LICENSE_PATH.exists()
@@ -732,7 +756,7 @@ def test_exact_beta_every_token_auth_flow_rejects_incomplete_entitlement_success
         "tier": "pro",
     }
     stale = _beta_license(
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
         license_id="stale-license",
         entitlements=["real_estate_sales"],
     )
@@ -758,7 +782,7 @@ def test_exact_beta_device_link_rejects_incomplete_approved_snapshot(
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     monkeypatch.setattr(license_mod.time, "sleep", lambda _seconds: None)
     stale = _beta_license(
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
         license_id="stale-license",
         entitlements=["real_estate_sales"],
     )
@@ -805,7 +829,7 @@ def test_exact_beta_refresh_rejection_removes_stale_paid_snapshot(
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     stale = _beta_license(
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
         entitlements=["real_estate_sales"],
     )
     license_mod.save(stale)
@@ -830,7 +854,7 @@ def test_exact_beta_refresh_accepts_and_persists_only_rotated_signed_snapshot(
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     stale = _beta_license(
         access_token="stale-access",
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
         entitlements=["real_estate_sales"],
     )
     license_mod.save(stale)
@@ -849,9 +873,103 @@ def test_exact_beta_refresh_accepts_and_persists_only_rotated_signed_snapshot(
     rotated = license_mod.refresh(stale)
 
     assert rotated.access_token == "rotated-access"
-    assert rotated.refresh_token == "rotated-refresh"
+    assert rotated.refresh_token != CANONICAL_REFRESH_A
     assert rotated.entitlements == ["real_estate_admin"]
     assert license_mod.load() == rotated
+
+
+def test_exact_beta_verification_failure_retries_identical_triplet_and_requires_b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    stale = _beta_license(
+        access_token="stale-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_sales"],
+    )
+    license_mod.save(stale)
+    bodies: list[dict[str, Any]] = []
+
+    class _MismatchThenReplayClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            bodies.append(dict(json))
+            refresh_token = (
+                CANONICAL_REFRESH_C
+                if len(bodies) == 1
+                else json["next_refresh_token"]
+            )
+            return _SuccessResponse(
+                _signed_payload(
+                    access_token=f"replay-access-{len(bodies)}",
+                    refresh_token=refresh_token,
+                    entitlements=["real_estate_admin"],
+                )
+            )
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _MismatchThenReplayClient(),
+    )
+    from elevate_cli import refresh_pending
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.refresh(stale)
+    assert caught.value.code == "beta_refresh_successor_mismatch"
+    assert license_mod.load() == stale
+    assert (license_mod._beta_profile_root() / refresh_pending.MARKER_NAME).exists()
+
+    recovered = license_mod.refresh(stale)
+
+    assert bodies[0] == bodies[1]
+    assert recovered.refresh_token == bodies[0]["next_refresh_token"]
+    assert recovered.entitlements == ["real_estate_admin"]
+    assert not (license_mod._beta_profile_root() / refresh_pending.MARKER_NAME).exists()
+
+
+def test_stable_refresh_keeps_legacy_v1_request_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    current = license_mod.License(
+        access_token="stable-access",
+        refresh_token="stable-refresh",
+        license_id="stable-license",
+        tier="pro",
+        email="stable@example.test",
+        expires_at=int(time.time()) + 60,
+        entitlements=[],
+    )
+    calls: list[dict[str, Any]] = []
+
+    class _StableClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                {
+                    "access_token": _access_token(),
+                    "refresh_token": "stable-next",
+                }
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _StableClient())
+
+    refreshed = license_mod.refresh(current)
+
+    assert calls[0]["json"] == {"refresh_token": "stable-refresh"}
+    assert refreshed.refresh_token == "stable-next"
 
 
 def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
@@ -861,7 +979,7 @@ def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
     expired_at = int(time.time()) - 120
     expired_payload = _signed_payload(
         access_token="expired-access",
-        refresh_token="historical-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
         email="returning@example.test",
         entitlements=["real_estate_sales"],
         expires_at=expired_at,
@@ -907,6 +1025,124 @@ def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
     assert tui_server._license_signed_in() is True
     assert dashboard_access_status()["packs"]["realEstateAdmin"] is True
     assert dashboard_access_status()["packs"]["realEstateSales"] is False
+
+
+def test_exact_beta_expired_signed_successor_replays_pending_triplet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with refresh_pending.refresh_lock(license_mod._beta_profile_root()):
+        pending = refresh_pending.create_pending(
+            license_mod._beta_profile_root(),
+            license_id="license-1",
+            current_refresh_token=CANONICAL_REFRESH_A,
+            created_at=int(time.time()) - 7200,
+        )
+    expired_payload = _signed_payload(
+        access_token="expired-successor-access",
+        refresh_token=pending.successor_refresh_token,
+        expires_at=int(time.time()) - 120,
+    )
+    expired = license_mod._beta_license_from_mapping(
+        expired_payload,
+        require_current=False,
+    )
+    license_mod._atomic_beta_replace(json.dumps(expired.to_dict()).encode("utf-8"))
+    calls: list[dict[str, Any]] = []
+
+    class _ReplayClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                _signed_payload(
+                    access_token="fresh-successor-access",
+                    refresh_token=json["next_refresh_token"],
+                    entitlements=["real_estate_admin"],
+                )
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _ReplayClient())
+
+    fresh = license_mod.refresh(expired)
+
+    assert len(calls) == 1
+    assert calls[0]["json"] == {
+        "refresh_token": pending.current_refresh_token,
+        "next_refresh_token": pending.successor_refresh_token,
+        "refresh_attempt_id": pending.attempt_id,
+    }
+    assert fresh.refresh_token == pending.successor_refresh_token
+    assert fresh.access_token == "fresh-successor-access"
+    assert not (license_mod._beta_profile_root() / refresh_pending.MARKER_NAME).exists()
+
+
+@pytest.mark.parametrize("state", ["successor", "newer"])
+def test_exact_beta_signed_successor_or_newer_state_cleans_marker_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    with refresh_pending.refresh_lock(license_mod._beta_profile_root()):
+        pending = refresh_pending.create_pending(
+            license_mod._beta_profile_root(),
+            license_id="license-1",
+            current_refresh_token=CANONICAL_REFRESH_A,
+        )
+    token = (
+        pending.successor_refresh_token
+        if state == "successor"
+        else CANONICAL_REFRESH_C
+    )
+    current = _beta_license(refresh_token=token)
+    license_mod._atomic_beta_replace(json.dumps(current.to_dict()).encode("utf-8"))
+
+    class _NoNetwork:
+        def __enter__(self):
+            raise AssertionError("signed local state should resolve before network")
+
+    monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _NoNetwork())
+
+    assert license_mod.refresh(current) == current
+    assert not (license_mod._beta_profile_root() / refresh_pending.MARKER_NAME).exists()
+
+
+def test_exact_beta_ambiguous_4xx_retains_marker_without_v1_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    current = _beta_license(refresh_token=CANONICAL_REFRESH_A)
+    license_mod.save(current)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient(calls, status_code=400, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.refresh(current)
+
+    assert caught.value.code == "beta_refresh_protocol_rejected"
+    assert len(calls) == 1
+    assert set(calls[0]["json"]) == {
+        "refresh_token",
+        "next_refresh_token",
+        "refresh_attempt_id",
+    }
+    assert license_mod.load() == current
+    assert (license_mod._beta_profile_root() / refresh_pending.MARKER_NAME).exists()
 
 
 def test_exact_beta_device_link_accepts_only_signed_approved_snapshot(
@@ -1044,7 +1280,7 @@ def test_exact_beta_signed_reader_drives_web_tui_and_uncached_account_identity(
         license_id="license-2",
         email="second@example.test",
     )
-    license_mod.save(second)
+    license_mod.save(second, expected=first)
     assert elevate_constants.get_account_key() == (
         "acct_" + hashlib.sha1(second.email.encode()).hexdigest()[:16]
     )
@@ -1154,14 +1390,18 @@ def test_exact_beta_late_refresh_rejection_does_not_erase_new_signed_session(
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     stale = _beta_license(
         access_token="stale-access",
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
     )
     newer = _beta_license(
         access_token="new-access",
-        refresh_token="new-refresh",
+        refresh_token=CANONICAL_REFRESH_C,
         license_id="license-1",
     )
     license_mod.save(stale)
+
+    mutation_started = threading.Event()
+    mutation_finished = threading.Event()
+    mutation_thread: threading.Thread | None = None
 
     class _RacingClient:
         def __enter__(self):
@@ -1171,8 +1411,23 @@ def test_exact_beta_late_refresh_rejection_does_not_erase_new_signed_session(
             return None
 
         def post(self, _url: str, *, json: dict[str, Any]) -> _FailedResponse:
-            assert json == {"refresh_token": "stale-refresh"}
-            license_mod.save(newer)
+            nonlocal mutation_thread
+            assert json["refresh_token"] == CANONICAL_REFRESH_A
+            assert set(json) == {
+                "refresh_token",
+                "next_refresh_token",
+                "refresh_attempt_id",
+            }
+
+            def mutate() -> None:
+                mutation_started.set()
+                license_mod.save(newer)
+                mutation_finished.set()
+
+            mutation_thread = threading.Thread(target=mutate)
+            mutation_thread.start()
+            assert mutation_started.wait(1)
+            assert not mutation_finished.wait(0.05)
             return _FailedResponse(401)
 
     monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _RacingClient())
@@ -1181,6 +1436,42 @@ def test_exact_beta_late_refresh_rejection_does_not_erase_new_signed_session(
         license_mod.refresh(stale)
 
     assert exc_info.value.code == "beta_license_revoked"
+    assert mutation_thread is not None
+    mutation_thread.join(2)
+    assert mutation_finished.is_set()
+    assert license_mod.load() == newer
+
+
+def test_exact_beta_public_save_uses_snapshot_cas_and_clears_superseded_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    initial = _beta_license(
+        access_token="initial-access",
+        refresh_token=CANONICAL_REFRESH_A,
+    )
+    newer = _beta_license(
+        access_token="newer-access",
+        refresh_token=CANONICAL_REFRESH_C,
+    )
+    license_mod.save(initial)
+    root = license_mod._beta_profile_root()
+    with refresh_pending.refresh_lock(root):
+        refresh_pending.create_pending(
+            root,
+            license_id=initial.license_id,
+            current_refresh_token=initial.refresh_token,
+        )
+
+    license_mod.save(newer, expected=initial)
+
+    assert license_mod.load() == newer
+    assert not (root / refresh_pending.MARKER_NAME).exists()
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.save(initial)
+    assert caught.value.code == "beta_auth_superseded"
     assert license_mod.load() == newer
 
 
@@ -1190,12 +1481,12 @@ def test_exact_beta_late_401_preserves_newer_signed_historical_snapshot(
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     stale = _beta_license(
         access_token="stale-access",
-        refresh_token="stale-refresh",
+        refresh_token=CANONICAL_REFRESH_A,
     )
     license_mod.save(stale)
     newer_payload = _signed_payload(
         access_token="newer-expired-access",
-        refresh_token="newer-expired-refresh",
+        refresh_token=CANONICAL_REFRESH_C,
         expires_at=int(time.time()) - 120,
     )
     newer = license_mod._beta_license_from_mapping(
@@ -1211,7 +1502,7 @@ def test_exact_beta_late_401_preserves_newer_signed_historical_snapshot(
             return None
 
         def post(self, _url: str, *, json: dict[str, Any]) -> _FailedResponse:
-            assert json == {"refresh_token": "stale-refresh"}
+            assert json["refresh_token"] == CANONICAL_REFRESH_A
             license_mod._atomic_beta_replace(
                 license_mod.json.dumps(newer.to_dict()).encode("utf-8")
             )
@@ -1223,10 +1514,7 @@ def test_exact_beta_late_401_preserves_newer_signed_historical_snapshot(
         lambda **_kwargs: _HistoricalRaceClient(),
     )
 
-    with pytest.raises(license_mod.LicenseError) as exc_info:
-        license_mod.refresh(stale)
-
-    assert exc_info.value.code == "beta_license_revoked"
+    assert license_mod.refresh(stale) == newer
     assert license_mod.load() == newer
     assert dashboard_access_status()["packs"]["realEstateAny"] is False
 
