@@ -1,7 +1,7 @@
 "use strict";
 
-// Shared with cli/elevate_cli/refresh_pending.py. Keep names and schema exact:
-// both runtimes coordinate through the same BSD flock and durable marker.
+// Shared with cli/elevate_cli/refresh_pending.py. Keep names and schemas exact:
+// both runtimes coordinate through the same BSD flock and durable markers.
 const childProcess = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -9,6 +9,7 @@ const path = require("node:path");
 
 const LOCK_NAME = ".license-refresh.lock";
 const MARKER_NAME = ".license-refresh-pending.json";
+const DEVICE_MARKER_NAME = ".license-device-pending.json";
 const READY_LINE = "ELEVATE_REFRESH_LOCK_READY_V1\n";
 const MAX_MARKER_BYTES = 16 * 1024;
 const SCHEMA_KEYS = [
@@ -19,6 +20,15 @@ const SCHEMA_KEYS = [
   "operation",
   "schema",
   "successor_refresh_token",
+];
+const DEVICE_SCHEMA_KEYS = [
+  "created_at",
+  "device_code",
+  "initial_refresh_token",
+  "operation",
+  "recovery_attempt_id",
+  "recovery_refresh_token",
+  "schema",
 ];
 
 class RefreshPendingError extends Error {
@@ -99,6 +109,7 @@ function rejectTopLevelDuplicateKeys(text) {
   if (text[index] !== "{") throw new SyntaxError("marker is not an object");
   index += 1;
   const keys = new Set();
+  const sources = new Map();
   while (true) {
     index = skipWhitespace(text, index);
     if (text[index] === "}") break;
@@ -109,7 +120,9 @@ function rejectTopLevelDuplicateKeys(text) {
     index = skipWhitespace(text, parsed.end);
     if (text[index] !== ":") throw new SyntaxError("missing object colon");
     index = skipWhitespace(text, index + 1);
+    const valueStart = index;
     index = skipJsonValue(text, index);
+    sources.set(parsed.value, text.slice(valueStart, index).trim());
     index = skipWhitespace(text, index);
     if (text[index] === ",") {
       index += 1;
@@ -118,6 +131,58 @@ function rejectTopLevelDuplicateKeys(text) {
     if (text[index] === "}") break;
     throw new SyntaxError("invalid object separator");
   }
+  return sources;
+}
+
+function parseDevicePending(bytes) {
+  if (!bytes || bytes.length > MAX_MARKER_BYTES) {
+    throw new RefreshPendingError(
+      "beta_device_state_corrupt",
+      "The Realtor Beta pending Device authorization state is too large.",
+    );
+  }
+  let value;
+  let memberSources;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    memberSources = rejectTopLevelDuplicateKeys(text);
+    value = JSON.parse(text);
+  } catch (cause) {
+    const failure = new RefreshPendingError(
+      "beta_device_state_corrupt",
+      "The Realtor Beta pending Device authorization state is unreadable.",
+    );
+    failure.cause = cause;
+    throw failure;
+  }
+  const tokens = value && typeof value === "object"
+    ? [
+        value.device_code,
+        value.initial_refresh_token,
+        value.recovery_refresh_token,
+        value.recovery_attempt_id,
+      ]
+    : [];
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(DEVICE_SCHEMA_KEYS) ||
+    memberSources.get("schema") !== "1" ||
+    value.schema !== 1 ||
+    value.operation !== "device" ||
+    !/^(0|[1-9][0-9]*)$/.test(memberSources.get("created_at") || "") ||
+    !Number.isSafeInteger(value.created_at) ||
+    value.created_at < 0 ||
+    !tokens.every(canonicalToken32) ||
+    new Set(tokens).size !== tokens.length
+  ) {
+    throw new RefreshPendingError(
+      "beta_device_state_corrupt",
+      "The Realtor Beta pending Device authorization state failed validation.",
+    );
+  }
+  return Object.freeze({ ...value });
 }
 
 function createRefreshPendingStore({
@@ -131,6 +196,7 @@ function createRefreshPendingStore({
   const resolvedRoot = path.resolve(root);
   const lockPath = path.join(resolvedRoot, LOCK_NAME);
   const markerPath = path.join(resolvedRoot, MARKER_NAME);
+  const deviceMarkerPath = path.join(resolvedRoot, DEVICE_MARKER_NAME);
 
   function error(code, message, cause) {
     const failure = new RefreshPendingError(code, message);
@@ -148,24 +214,40 @@ function createRefreshPendingStore({
     }
   }
 
-  function validatePrivateFile(fd, artifact, { empty = false } = {}) {
+  function validatePrivateFile(
+    fd,
+    artifact,
+    {
+      empty = false,
+      stateLabel = "refresh",
+      unsafeCode = "beta_refresh_state_unsafe",
+    } = {},
+  ) {
     const stat = fsImpl.fstatSync(fd);
     if (
       !stat.isFile() ||
       stat.nlink !== 1 ||
-      (stat.mode & 0o777) !== 0o600 ||
+      (stat.mode & 0o7777) !== 0o600 ||
       (typeof processImpl.getuid === "function" && stat.uid !== processImpl.getuid()) ||
       (empty && stat.size !== 0)
     ) {
       throw error(
-        "beta_refresh_state_unsafe",
-        `Realtor Beta could not verify its private refresh ${artifact}.`,
+        unsafeCode,
+        `Realtor Beta could not verify its private ${stateLabel} ${artifact}.`,
       );
     }
     return stat;
   }
 
-  function verifyNamedFd(target, opened, artifact) {
+  function verifyNamedFd(
+    target,
+    opened,
+    artifact,
+    {
+      stateLabel = "refresh",
+      unsafeCode = "beta_refresh_state_unsafe",
+    } = {},
+  ) {
     const named = fsImpl.lstatSync(target);
     if (
       !named.isFile() ||
@@ -175,8 +257,8 @@ function createRefreshPendingStore({
       named.ino !== opened.ino
     ) {
       throw error(
-        "beta_refresh_state_unsafe",
-        `Realtor Beta could not verify its refresh ${artifact} path.`,
+        unsafeCode,
+        `Realtor Beta could not verify its ${stateLabel} ${artifact} path.`,
       );
     }
   }
@@ -394,7 +476,10 @@ function createRefreshPendingStore({
   }
 
   function openMarker() {
-    const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+    const flags =
+      fs.constants.O_RDONLY |
+      (fs.constants.O_NOFOLLOW || 0) |
+      (fs.constants.O_NONBLOCK || 0);
     let fd = null;
     try {
       try {
@@ -433,6 +518,57 @@ function createRefreshPendingStore({
     }
   }
 
+  function openDeviceMarker() {
+    const flags =
+      fs.constants.O_RDONLY |
+      (fs.constants.O_NOFOLLOW || 0) |
+      (fs.constants.O_NONBLOCK || 0);
+    let fd = null;
+    try {
+      try {
+        fd = fsImpl.openSync(deviceMarkerPath, flags);
+      } catch (err) {
+        if (err && err.code === "ENOENT") return null;
+        throw err;
+      }
+      const deviceOptions = {
+        stateLabel: "Device authorization",
+        unsafeCode: "beta_device_state_unsafe",
+      };
+      const opened = validatePrivateFile(fd, "marker", deviceOptions);
+      verifyNamedFd(deviceMarkerPath, opened, "marker", deviceOptions);
+      if (opened.size > MAX_MARKER_BYTES) {
+        throw error(
+          "beta_device_state_corrupt",
+          "The Realtor Beta pending Device authorization state is too large.",
+        );
+      }
+      return {
+        fd,
+        opened,
+        marker: parseDevicePending(fsImpl.readFileSync(fd)),
+      };
+    } catch (err) {
+      if (fd !== null) fsImpl.closeSync(fd);
+      if (err instanceof RefreshPendingError) throw err;
+      throw error(
+        "beta_device_state_unsafe",
+        "Realtor Beta could not safely read its pending Device authorization state.",
+        err,
+      );
+    }
+  }
+
+  function readDevice() {
+    const openedMarker = openDeviceMarker();
+    if (openedMarker === null) return null;
+    try {
+      return openedMarker.marker;
+    } finally {
+      fsImpl.closeSync(openedMarker.fd);
+    }
+  }
+
   function create({ licenseId, currentRefreshToken, createdAt = Math.floor(Date.now() / 1000) }) {
     if (
       typeof licenseId !== "string" ||
@@ -450,7 +586,7 @@ function createRefreshPendingStore({
         "The Realtor Beta pending refresh timestamp is invalid.",
       );
     }
-    if (read() !== null) {
+    if (read() !== null || readDevice() !== null) {
       throw error(
         "beta_refresh_state_conflict",
         "A Realtor Beta refresh attempt already exists.",
@@ -546,21 +682,162 @@ function createRefreshPendingStore({
     }
   }
 
+  function writeDevice({
+    deviceCode,
+    initialRefreshToken,
+    recoveryRefreshToken,
+    recoveryAttemptId,
+    createdAt = Math.floor(Date.now() / 1000),
+  }) {
+    const marker = parseDevicePending(Buffer.from(`${JSON.stringify({
+      schema: 1,
+      operation: "device",
+      device_code: deviceCode,
+      initial_refresh_token: initialRefreshToken,
+      recovery_refresh_token: recoveryRefreshToken,
+      recovery_attempt_id: recoveryAttemptId,
+      created_at: createdAt,
+    })}\n`, "utf8"));
+    if (readDevice() !== null || read() !== null) {
+      throw error(
+        "beta_device_state_conflict",
+        "A Realtor Beta credential transition already exists.",
+      );
+    }
+    const bytes = Buffer.from(`${JSON.stringify(marker)}\n`, "utf8");
+    const tempPath = path.join(
+      resolvedRoot,
+      `.license-device-pending-${crypto.randomUUID()}.tmp`,
+    );
+    let fd = null;
+    try {
+      fd = fsImpl.openSync(
+        tempPath,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_EXCL |
+          (fs.constants.O_NOFOLLOW || 0),
+        0o600,
+      );
+      let offset = 0;
+      while (offset < bytes.length) {
+        const written = fsImpl.writeSync(fd, bytes, offset, bytes.length - offset);
+        if (written <= 0) throw new Error("pending Device write made no progress");
+        offset += written;
+      }
+      fsImpl.fchmodSync(fd, 0o600);
+      fsImpl.fsyncSync(fd);
+      fsImpl.closeSync(fd);
+      fd = null;
+      fsImpl.renameSync(tempPath, deviceMarkerPath);
+      fsyncDirectory();
+      const persisted = readDevice();
+      if (!deviceMarkersEqual(persisted, marker)) {
+        throw error(
+          "beta_device_persistence_failed",
+          "Realtor Beta could not verify its pending Device authorization state.",
+        );
+      }
+      return persisted;
+    } catch (err) {
+      if (err instanceof RefreshPendingError) throw err;
+      throw error(
+        "beta_device_persistence_failed",
+        "Realtor Beta could not durably save its pending Device authorization state.",
+        err,
+      );
+    } finally {
+      if (fd !== null) fsImpl.closeSync(fd);
+      try {
+        fsImpl.unlinkSync(tempPath);
+      } catch {
+        // Rename removes the temporary path.
+      }
+    }
+  }
+
+  function deviceMarkersEqual(left, right) {
+    return Boolean(left) && Boolean(right) && DEVICE_SCHEMA_KEYS.every(
+      (key) => left[key] === right[key],
+    );
+  }
+
+  function normalizeExpectedDevice(expected) {
+    try {
+      if (
+        !expected ||
+        typeof expected !== "object" ||
+        Array.isArray(expected) ||
+        JSON.stringify(Object.keys(expected).sort()) !== JSON.stringify(DEVICE_SCHEMA_KEYS)
+      ) {
+        throw new TypeError("expected Device marker does not have the exact schema");
+      }
+      return parseDevicePending(Buffer.from(JSON.stringify(expected), "utf8"));
+    } catch (err) {
+      if (err instanceof RefreshPendingError) throw err;
+      throw error(
+        "beta_device_state_corrupt",
+        "The Realtor Beta expected Device authorization state is invalid.",
+        err,
+      );
+    }
+  }
+
+  function removeDevice(expected) {
+    const expectedMarker = normalizeExpectedDevice(expected);
+    let openedMarker = null;
+    try {
+      openedMarker = openDeviceMarker();
+      if (
+        openedMarker === null ||
+        !deviceMarkersEqual(openedMarker.marker, expectedMarker)
+      ) {
+        return false;
+      }
+      verifyNamedFd(deviceMarkerPath, openedMarker.opened, "marker", {
+        stateLabel: "Device authorization",
+        unsafeCode: "beta_device_state_unsafe",
+      });
+      fsImpl.unlinkSync(deviceMarkerPath);
+      if (fsImpl.existsSync(deviceMarkerPath)) {
+        throw new Error("pending Device removal could not be verified");
+      }
+      fsyncDirectory();
+      return true;
+    } catch (err) {
+      if (err instanceof RefreshPendingError) throw err;
+      throw error(
+        "beta_device_persistence_failed",
+        "Realtor Beta could not durably clear its pending Device authorization state.",
+        err,
+      );
+    } finally {
+      if (openedMarker !== null) fsImpl.closeSync(openedMarker.fd);
+    }
+  }
+
   return {
     create,
+    deviceMarkerPath,
     lockPath,
     markerPath,
+    parseDevice: parseDevicePending,
     read,
+    readDevice,
     remove,
+    removeDevice,
     withLock,
+    writeDevice,
   };
 }
 
 module.exports = {
+  DEVICE_MARKER_NAME,
   LOCK_NAME,
   MARKER_NAME,
   RefreshPendingError,
   canonicalToken32,
   createRefreshPendingStore,
   generateToken32,
+  parseDevicePending,
 };
