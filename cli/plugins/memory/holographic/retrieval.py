@@ -7,6 +7,7 @@ Jaccard similarity reranking and trust-weighted scoring.
 from __future__ import annotations
 
 import math
+import sqlite3
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -517,10 +518,12 @@ class FactRetriever:
         min_trust: float,
         limit: int,
     ) -> list[dict]:
-        """Get raw FTS5 candidates from the store.
+        """Get raw full-text-search candidates from the store.
 
-        Uses the store's database connection directly for FTS5 MATCH
-        with rank scoring. Normalizes FTS5 rank to [0, 1] range.
+        Postgres uses its ``tsvector`` index; legacy SQLite stores use FTS5
+        ``MATCH``.  The two query syntaxes are not interchangeable, so choose
+        the query family from the connection backend before running either.
+        Rank values from both backends are normalized to [0, 1].
         """
         def pg_candidates(search_query: str) -> list:
             """Use the Postgres tsvector index created by the memory migration."""
@@ -549,18 +552,11 @@ class FactRetriever:
             except Exception:
                 return []
 
-        rows = pg_candidates(query)
-        if not rows:
-            fallback_query = self._fallback_fts_query(query)
-            if fallback_query and fallback_query != query:
-                rows = pg_candidates(fallback_query)
-
-        # Build query - FTS5 rank is negative (lower = better match)
-        # We need to join facts_fts with facts to get all columns
-        if not rows:
+        def sqlite_candidates(search_query: str) -> list:
+            """Use the legacy SQLite FTS5 virtual table."""
             params: list = []
             where_clauses = ["facts_fts MATCH ?", "COALESCE(f.status, 'active') = 'active'"]
-            params.append(query)
+            params.append(search_query)
 
             if category:
                 where_clauses.append("f.category = ?")
@@ -582,18 +578,21 @@ class FactRetriever:
             params.append(limit)
 
             try:
-                rows = self.store._read_all(sql, params)
+                return self.store._read_all(sql, params)
             except Exception:
-                rows = []
+                return []
 
+        # MemoryStore is Postgres-backed today.  The isinstance check keeps
+        # direct/legacy SQLite stores working without ever sending Postgres an
+        # FTS5 MATCH expression after a legitimate empty result (or error).
+        is_sqlite = isinstance(getattr(self.store, "_conn", None), sqlite3.Connection)
+        candidates = sqlite_candidates if is_sqlite else pg_candidates
+
+        rows = candidates(query)
         if not rows:
             fallback_query = self._fallback_fts_query(query)
             if fallback_query and fallback_query != query:
-                fallback_params = [fallback_query, *params[1:]]
-                try:
-                    rows = self.store._read_all(sql, fallback_params)
-                except Exception:
-                    rows = []
+                rows = candidates(fallback_query)
 
         if not rows:
             return []
