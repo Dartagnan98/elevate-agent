@@ -131,6 +131,65 @@ class TestHandleFunctionCall:
         ):
             assert private_value not in caplog.text
 
+    def test_exact_beta_terminal_missing_identity_fails_closed(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+        with (
+            patch(
+                "tools.approval.get_current_execution_policy",
+                return_value=None,
+            ),
+            patch(
+                "tools.approval.get_current_execution_policy_revision",
+                return_value=-1,
+            ),
+            patch("model_tools.registry.dispatch") as dispatch,
+            patch("elevate_cli.plugins.invoke_hook", return_value=[]),
+        ):
+            result = handle_function_call(
+                "terminal",
+                {"command": "echo blocked"},
+                session_id="session-beta",
+                tool_call_id="call-beta",
+                skip_pre_tool_call_hook=True,
+            )
+
+        assert json.loads(result)["shadow_status"] == "effect_context_block"
+        dispatch.assert_not_called()
+
+    def test_stable_terminal_missing_identity_retains_legacy_fallback(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+        with (
+            patch(
+                "tools.approval.get_current_execution_policy",
+                return_value=None,
+            ),
+            patch(
+                "tools.approval.get_current_execution_policy_revision",
+                return_value=-1,
+            ),
+            patch(
+                "model_tools.registry.dispatch",
+                return_value='{"legacy":true}',
+            ) as dispatch,
+            patch("elevate_cli.plugins.invoke_hook", return_value=[]),
+        ):
+            result = handle_function_call(
+                "terminal",
+                {"command": "echo stable"},
+                session_id="session-stable",
+                tool_call_id="call-stable",
+                skip_pre_tool_call_hook=True,
+            )
+
+        assert result == '{"legacy":true}'
+        dispatch.assert_called_once()
+
     def test_unknown_tool_with_durable_identity_preserves_legacy_output(self):
         policy = ExecutionPolicy.for_mode("accepted-unknown", "read_only")
         token = set_current_execution_policy(policy, policy_revision=1)

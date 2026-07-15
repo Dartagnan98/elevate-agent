@@ -233,20 +233,34 @@ def test_exact_beta_gateway_resolver_reduces_affirmative_scope_to_once(
 
     db = SessionDB(tmp_path / "state.db")
     approval._initialize_approval_store(db)
+    policy = approval.ExecutionPolicy.for_mode("turn-beta-resolver", "default")
+    effect_context = approval.ApprovalEffectContext(
+        session_id="session-beta-resolver",
+        invocation_id="call-beta-resolver",
+        tool_name="terminal",
+        canonical_args_digest=approval._approval_sha256(
+            {"command": _DANGEROUS_COMMAND}
+        ),
+        accepted_policy=policy,
+        policy_revision=0,
+        declared_effects={"destructive"},
+    )
     session_tokens = set_session_vars(
         platform="gateway",
         chat_id=_SESSION_KEY,
         user_id="u1",
         session_key=_SESSION_KEY,
+        correlation_id="corr_" + "d" * 32,
     )
     policy_token = approval.set_current_execution_policy(
-        approval.ExecutionPolicy.for_mode("turn-beta-resolver", "default"),
+        policy,
         policy_revision=0,
     )
     try:
         entry = approval._ApprovalEntry(
             {"command": _DANGEROUS_COMMAND},
             grant_store=db,
+            effect_context=effect_context,
         )
         assert approval._prepare_durable_approval_grant(
             entry,

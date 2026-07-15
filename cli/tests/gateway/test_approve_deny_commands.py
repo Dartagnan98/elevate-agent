@@ -83,21 +83,33 @@ def _durable_beta_entry(db, session_key: str, command: str):
     from tools import approval
 
     approval._initialize_approval_store(db)
+    policy = approval.ExecutionPolicy.for_mode(f"turn-{command}", "default")
+    effect_context = approval.ApprovalEffectContext(
+        session_id=f"session-{command}",
+        invocation_id=f"call-{command}",
+        tool_name="terminal",
+        canonical_args_digest=approval._approval_sha256({"command": command}),
+        accepted_policy=policy,
+        policy_revision=0,
+        declared_effects={"destructive"},
+    )
     session_tokens = set_session_vars(
         platform="telegram",
         chat_id="c1",
         user_id="u1",
         session_key=session_key,
         message_id="m1",
+        correlation_id="corr_" + "b" * 32,
     )
     policy_token = approval.set_current_execution_policy(
-        approval.ExecutionPolicy.for_mode(f"turn-{command}", "default"),
+        policy,
         policy_revision=0,
     )
     try:
         entry = approval._ApprovalEntry(
             {"command": command},
             grant_store=db,
+            effect_context=effect_context,
         )
         assert approval._prepare_durable_approval_grant(
             entry,

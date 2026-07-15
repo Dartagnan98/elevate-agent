@@ -235,13 +235,14 @@ class PreparedToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ShadowToolExecution:
-    """Result of the non-enforcing atomic shadow execution primitive."""
+    """Result of one atomic prepared execution and its start decision."""
 
     prepared: PreparedToolCall
     result: Any
     started: bool
     start_generation: int
     stale_reason: Optional[str] = None
+    execution_error: Optional[str] = None
 
 
 def _validate_json_value(value: Any, path: str = "$") -> None:
@@ -809,12 +810,54 @@ class ToolRegistry:
                 stale_reason=stale_reason,
             )
 
+        approval_effect_context = None
+        if prepared.tool_name == "terminal":
+            try:
+                from elevate_cli.beta_provider_policy import (
+                    beta_provider_policy_active,
+                )
+
+                exact_beta = beta_provider_policy_active()
+            except Exception:
+                import os
+
+                exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+            if exact_beta:
+                authorization = prepared.authorization
+                if not authorization.allowed:
+                    return self._shadow_start_error(
+                        prepared,
+                        "effect_policy_block",
+                        "Terminal effect blocked by the accepted-turn policy: "
+                        f"{authorization.reason}",
+                    )
+                try:
+                    from tools.approval import (
+                        approval_effect_context_from_prepared,
+                    )
+
+                    approval_effect_context = (
+                        approval_effect_context_from_prepared(prepared)
+                    )
+                except Exception as exc:
+                    return self._shadow_start_error(
+                        prepared,
+                        "effect_context_block",
+                        "Terminal effect blocked because durable invocation "
+                        f"context is unavailable: {type(exc).__name__}",
+                    )
+
+        execution_error = None
         try:
             handler = prepared.captured_handler
             if handler is None:  # defensive; a valid entry always has one
                 raise RuntimeError("prepared call has no captured handler")
             args = prepared.thaw_args()
             handler_kwargs = prepared.thaw_handler_kwargs()
+            if approval_effect_context is not None:
+                handler_kwargs["_approval_effect_context"] = (
+                    approval_effect_context
+                )
             if prepared.captured_is_async:
                 from model_tools import _run_async
 
@@ -834,6 +877,7 @@ class ToolRegistry:
                 sanitized = _sanitize_tool_error(raw)
             except Exception:
                 sanitized = raw
+            execution_error = f"handler_exception:{type(exc).__name__}"
             result = json.dumps({"error": sanitized})
 
         return ShadowToolExecution(
@@ -841,6 +885,7 @@ class ToolRegistry:
             result=result,
             started=True,
             start_generation=start_generation,
+            execution_error=execution_error,
         )
 
     def execute_shadow(
@@ -852,11 +897,11 @@ class ToolRegistry:
         execution_policy: Any = _USE_CURRENT_EXECUTION_POLICY,
         handler_kwargs: Any = None,
     ) -> ShadowToolExecution:
-        """Exercise the atomic registry path without enforcing its decision.
+        """Exercise the atomic registry path with a frozen call snapshot.
 
-        Authorization is returned for observation only; even a denied call
-        executes after its registration identity and every handler input have
-        been revalidated from their prepared snapshots.
+        Stable retains observational authorization behavior. The exact-Beta
+        terminal registration is the deliberately narrow exception: denied or
+        incomplete effect context fails closed before its handler starts.
         """
         prepared = self._prepare_shadow_call(
             name,

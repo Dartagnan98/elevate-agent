@@ -14,6 +14,7 @@ Key design decisions:
 - Session source tagging ('cli', 'telegram', 'discord', etc.) for filtering
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -44,7 +45,7 @@ _PROCESS_IMPORT_PID = os.getpid()
 _PROCESS_START_ID = uuid.uuid4().hex
 _PROCESS_CREATE_TIME = psutil.Process(_PROCESS_IMPORT_PID).create_time()
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -288,6 +289,7 @@ CREATE TABLE IF NOT EXISTS approval_grants (
     session_id TEXT,
     root_correlation_id TEXT,
     turn_id TEXT NOT NULL,
+    invocation_id TEXT,
     tool_identity TEXT NOT NULL,
     command_digest TEXT NOT NULL,
     canonical_args_digest TEXT NOT NULL,
@@ -307,11 +309,55 @@ CREATE TABLE IF NOT EXISTS approval_grants (
     resolver_identity TEXT,
     resolver_context_json TEXT,
     resolved_at REAL,
-    resolution_reason TEXT
+    resolution_reason TEXT,
+    effect_state TEXT NOT NULL DEFAULT 'unclaimed'
+        CHECK (effect_state IN (
+            'unclaimed', 'claimed', 'succeeded', 'failed', 'unknown', 'expired'
+        )),
+    effect_claim_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_approval_grants_pending
 ON approval_grants(state, boot_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS approval_effect_receipts (
+    claim_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    grant_boot_id TEXT NOT NULL,
+    claim_boot_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    root_correlation_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    canonical_args_digest TEXT NOT NULL,
+    accepted_policy_digest TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    principal_id TEXT NOT NULL,
+    effect_set_json TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('claimed', 'succeeded', 'failed', 'unknown')),
+    claimed_at REAL NOT NULL,
+    completed_at REAL,
+    result_digest TEXT,
+    failure_code TEXT,
+    FOREIGN KEY(request_id) REFERENCES approval_grants(request_id),
+    UNIQUE(session_id, invocation_id),
+    CHECK (completed_at IS NULL OR completed_at >= claimed_at),
+    CHECK (
+        (status = 'claimed' AND completed_at IS NULL
+            AND result_digest IS NULL AND failure_code IS NULL)
+        OR (status = 'succeeded' AND completed_at IS NOT NULL
+            AND failure_code IS NULL)
+        OR (status = 'failed' AND completed_at IS NOT NULL
+            AND failure_code IS NOT NULL)
+        OR (status = 'unknown' AND completed_at IS NOT NULL
+            AND result_digest IS NULL AND failure_code IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_effect_receipts_status
+ON approval_effect_receipts(status, claim_boot_id, claimed_at);
 
 CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
@@ -2564,6 +2610,7 @@ class SessionDB:
         origin_message_id: Optional[str],
         created_at: float,
         expires_at: float,
+        invocation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Persist one pending Approval Grant before any user notification.
 
@@ -2585,6 +2632,18 @@ class SessionDB:
         for name, value in required.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} is required")
+        if invocation_id is not None and (
+            not isinstance(invocation_id, str) or not invocation_id.strip()
+        ):
+            raise ValueError("invocation_id must be a non-empty string")
+        if root_correlation_id is not None and (
+            not isinstance(root_correlation_id, str)
+            or not re.fullmatch(
+                r"(?:corr_|attempt_)[0-9a-f]{32}",
+                root_correlation_id,
+            )
+        ):
+            raise ValueError("root_correlation_id must be canonical opaque lineage")
         opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
         for name, value in (("request_id", request_id), ("boot_id", boot_id)):
             if not opaque_id_re.fullmatch(value):
@@ -2620,16 +2679,17 @@ class SessionDB:
 
         if not isinstance(accepted_policy, dict):
             raise TypeError("accepted_policy must be a dict")
-        from tools.approval import ExecutionPolicy
+        from tools.approval import ExecutionPolicy, authorize_effects
 
         restored_policy = ExecutionPolicy.from_dict(accepted_policy)
         if restored_policy.accepted_turn_id != turn_id:
             raise ValueError("approval turn_id must match accepted policy")
-        canonical_effects = sorted(
-            str(effect) for effect in restored_policy.allowed_effects
-        )
-        if sorted(set(effect_set)) != canonical_effects:
-            raise ValueError("approval effect_set must match accepted policy")
+        canonical_effects = sorted(set(effect_set))
+        authorization = authorize_effects(restored_policy, canonical_effects)
+        if not authorization.allowed:
+            raise ValueError(
+                "approval effects are not allowed by the accepted policy"
+            )
         accepted_policy_json = json.dumps(
             restored_policy.to_dict(),
             ensure_ascii=False,
@@ -2637,7 +2697,7 @@ class SessionDB:
             separators=(",", ":"),
         )
         effect_set_json = json.dumps(
-            sorted(set(effect_set)),
+            canonical_effects,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -2658,12 +2718,12 @@ class SessionDB:
             conn.execute(
                 "INSERT INTO approval_grants "
                 "(request_id, boot_id, session_key_digest, session_id, "
-                "root_correlation_id, turn_id, tool_identity, command_digest, "
+                "root_correlation_id, turn_id, invocation_id, tool_identity, command_digest, "
                 "canonical_args_digest, accepted_policy_json, policy_revision, "
                 "effect_set_json, allowed_actor_id, delivery_platform, "
                 "delivery_chat_id, delivery_thread_id, origin_message_id, "
                 "created_at, expires_at, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
                 (
                     request_id,
                     boot_id,
@@ -2671,6 +2731,7 @@ class SessionDB:
                     session_id,
                     root_correlation_id,
                     turn_id,
+                    invocation_id,
                     tool_identity,
                     command_digest,
                     canonical_args_digest,
@@ -2893,6 +2954,408 @@ class SessionDB:
                 (request_id,),
             ).fetchone()
         return self._decode_approval_grant(row) if row is not None else None
+
+    @staticmethod
+    def _decode_approval_effect_receipt(row: sqlite3.Row) -> Dict[str, Any]:
+        receipt = dict(row)
+        raw_effects = receipt.pop("effect_set_json", "[]")
+        try:
+            effects = json.loads(raw_effects)
+        except (json.JSONDecodeError, TypeError):
+            effects = None
+        receipt["effect_set"] = effects
+        return receipt
+
+    def claim_approval_effect(
+        self,
+        *,
+        request_id: str,
+        claim_id: str,
+        boot_id: str,
+        session_key_digest: str,
+        session_id: str,
+        root_correlation_id: str,
+        turn_id: str,
+        invocation_id: str,
+        tool_name: str,
+        command_digest: str,
+        canonical_args_digest: str,
+        accepted_policy: Dict[str, Any],
+        policy_revision: int,
+        principal_id: str,
+        effect_set: List[str],
+        expected_origin_message_id: Optional[str],
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim one approved effect invocation exactly once.
+
+        A successful return is the only authorization to cross the effect
+        boundary. Identity mismatch, expiry, replay, duplicate invocation, or
+        a non-approved grant returns ``None`` without claiming execution.
+        Storage errors raise so callers can distinguish fail-closed I/O from a
+        stale/duplicate request while still performing no effect.
+        """
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        digest_re = re.compile(r"^[0-9a-f]{64}$")
+        for name, value in (
+            ("request_id", request_id),
+            ("claim_id", claim_id),
+            ("boot_id", boot_id),
+        ):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        for name, value in (
+            ("session_key_digest", session_key_digest),
+            ("command_digest", command_digest),
+            ("canonical_args_digest", canonical_args_digest),
+        ):
+            if not isinstance(value, str) or not digest_re.fullmatch(value):
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+        for name, value in (
+            ("session_id", session_id),
+            ("turn_id", turn_id),
+            ("invocation_id", invocation_id),
+            ("tool_name", tool_name),
+            ("principal_id", principal_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        if not isinstance(root_correlation_id, str) or not re.fullmatch(
+            r"(?:corr_|attempt_)[0-9a-f]{32}",
+            root_correlation_id,
+        ):
+            raise ValueError("root_correlation_id must be canonical opaque lineage")
+        if (
+            isinstance(policy_revision, bool)
+            or not isinstance(policy_revision, int)
+            or policy_revision < 0
+        ):
+            raise ValueError("policy_revision must be a non-negative integer")
+        claimed_at = time.time() if now is None else float(now)
+        if not math.isfinite(claimed_at):
+            raise ValueError("claim timestamp must be finite")
+
+        from tools.approval import ExecutionPolicy, authorize_effects
+
+        restored_policy = ExecutionPolicy.from_dict(accepted_policy)
+        if restored_policy.accepted_turn_id != turn_id:
+            raise ValueError("effect claim turn must match accepted policy")
+        canonical_effects = sorted(set(effect_set))
+        if not canonical_effects or not all(
+            isinstance(effect, str) and effect.strip()
+            for effect in canonical_effects
+        ):
+            raise ValueError("effect_set must contain declared effects")
+        authorization = authorize_effects(restored_policy, canonical_effects)
+        if not authorization.allowed:
+            raise ValueError("effect claim exceeds the accepted policy")
+        accepted_policy_json = json.dumps(
+            restored_policy.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        accepted_policy_digest = hashlib.sha256(
+            accepted_policy_json.encode("utf-8")
+        ).hexdigest()
+        effect_set_json = json.dumps(
+            canonical_effects,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            if lease is None:
+                raise RuntimeError("Approval Grant boot lease is not active")
+            try:
+                active_boot = str(json.loads(lease["value"])["boot_id"])
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != boot_id:
+                return None
+
+            duplicate = conn.execute(
+                "SELECT claim_id FROM approval_effect_receipts "
+                "WHERE request_id = ? OR (session_id = ? AND invocation_id = ?) "
+                "LIMIT 1",
+                (request_id, session_id, invocation_id),
+            ).fetchone()
+            if duplicate is not None:
+                return None
+
+            row = conn.execute(
+                "SELECT * FROM approval_grants WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["expires_at"] <= claimed_at:
+                conn.execute(
+                    "UPDATE approval_grants SET effect_state = 'expired' "
+                    "WHERE request_id = ? AND effect_state = 'unclaimed'",
+                    (request_id,),
+                )
+                return None
+
+            try:
+                stored_effects = sorted(set(json.loads(row["effect_set_json"])))
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise RuntimeError("Approval Grant effect set is corrupt") from exc
+            identity_matches = (
+                row["state"] == "approved"
+                and row["decision"] == "once"
+                and row["effect_state"] == "unclaimed"
+                and row["boot_id"] == boot_id
+                and row["session_key_digest"] == session_key_digest
+                and (row["session_id"] or "") == session_id
+                and (row["root_correlation_id"] or "") == root_correlation_id
+                and (row["turn_id"] or "") == turn_id
+                and (row["invocation_id"] or "") == invocation_id
+                and row["tool_identity"] == tool_name
+                and row["command_digest"] == command_digest
+                and row["canonical_args_digest"] == canonical_args_digest
+                and row["accepted_policy_json"] == accepted_policy_json
+                and row["policy_revision"] == policy_revision
+                and row["allowed_actor_id"] == principal_id
+                and stored_effects == canonical_effects
+                and (row["origin_message_id"] or "")
+                == (expected_origin_message_id or "")
+            )
+            if not identity_matches:
+                return None
+
+            cursor = conn.execute(
+                "UPDATE approval_grants SET effect_state = 'claimed', "
+                "effect_claim_id = ? WHERE request_id = ? "
+                "AND state = 'approved' AND decision = 'once' "
+                "AND effect_state = 'unclaimed'",
+                (claim_id, request_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            conn.execute(
+                "INSERT INTO approval_effect_receipts "
+                "(claim_id, request_id, grant_boot_id, claim_boot_id, "
+                "session_id, root_correlation_id, turn_id, invocation_id, "
+                "tool_name, canonical_args_digest, accepted_policy_digest, "
+                "policy_revision, principal_id, effect_set_json, status, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?)",
+                (
+                    claim_id,
+                    request_id,
+                    row["boot_id"],
+                    boot_id,
+                    session_id,
+                    root_correlation_id,
+                    turn_id,
+                    invocation_id,
+                    tool_name,
+                    canonical_args_digest,
+                    accepted_policy_digest,
+                    policy_revision,
+                    principal_id,
+                    effect_set_json,
+                    claimed_at,
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM approval_effect_receipts WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+
+        row = self._execute_write(_do)
+        return self._decode_approval_effect_receipt(row) if row is not None else None
+
+    def complete_approval_effect(
+        self,
+        *,
+        claim_id: str,
+        request_id: str,
+        boot_id: str,
+        status: str,
+        result_digest: Optional[str],
+        failure_code: Optional[str],
+        completed_at: Optional[float] = None,
+    ) -> int:
+        """Durably finish one claimed effect without allowing replay."""
+        if status not in {"succeeded", "failed", "unknown"}:
+            raise ValueError("invalid approval effect completion status")
+        opaque_id_re = re.compile(r"^[0-9a-f]{32}$")
+        for name, value in (
+            ("claim_id", claim_id),
+            ("request_id", request_id),
+            ("boot_id", boot_id),
+        ):
+            if not isinstance(value, str) or not opaque_id_re.fullmatch(value):
+                raise ValueError(f"{name} must be an opaque 128-bit hex identifier")
+        if result_digest is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", result_digest
+        ):
+            raise ValueError("result_digest must be a SHA-256 hex digest")
+        if failure_code is not None and (
+            not isinstance(failure_code, str) or not failure_code.strip()
+        ):
+            raise ValueError("failure_code must be a non-empty string")
+        if failure_code is not None and not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,127}",
+            failure_code,
+        ):
+            raise ValueError("failure_code must be a content-free reason code")
+        if status == "succeeded" and failure_code is not None:
+            raise ValueError("successful effect receipts cannot have a failure code")
+        if status in {"failed", "unknown"} and failure_code is None:
+            raise ValueError(f"{status} effect receipts require a failure code")
+        if status == "unknown" and result_digest is not None:
+            raise ValueError("unknown effect receipts cannot claim a result digest")
+        finished_at = time.time() if completed_at is None else float(completed_at)
+        if not math.isfinite(finished_at):
+            raise ValueError("completion timestamp must be finite")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+            if active_boot != boot_id:
+                return 0
+            claimed = conn.execute(
+                "SELECT claimed_at FROM approval_effect_receipts "
+                "WHERE claim_id = ? AND request_id = ? "
+                "AND claim_boot_id = ? AND status = 'claimed'",
+                (claim_id, request_id, boot_id),
+            ).fetchone()
+            if claimed is None:
+                return 0
+            if finished_at < float(claimed["claimed_at"]):
+                raise ValueError("completion cannot precede effect claim")
+            receipt_cursor = conn.execute(
+                "UPDATE approval_effect_receipts SET status = ?, completed_at = ?, "
+                "result_digest = ?, failure_code = ? "
+                "WHERE claim_id = ? AND request_id = ? AND claim_boot_id = ? "
+                "AND status = 'claimed'",
+                (
+                    status,
+                    finished_at,
+                    result_digest,
+                    failure_code,
+                    claim_id,
+                    request_id,
+                    boot_id,
+                ),
+            )
+            if receipt_cursor.rowcount != 1:
+                return 0
+            grant_cursor = conn.execute(
+                "UPDATE approval_grants SET effect_state = ? "
+                "WHERE request_id = ? AND effect_claim_id = ? "
+                "AND effect_state = 'claimed'",
+                (status, request_id, claim_id),
+            )
+            if grant_cursor.rowcount != 1:
+                raise RuntimeError("Approval Grant effect receipt lost its grant")
+            return 1
+
+        return int(self._execute_write(_do))
+
+    def mark_prior_boot_approval_effects_unknown(
+        self,
+        current_boot_id: str,
+        *,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Terminalize crash-window claims from every older logical boot."""
+        if not isinstance(current_boot_id, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", current_boot_id
+        ):
+            raise ValueError("current_boot_id must be an opaque identifier")
+        completed_at = time.time() if now is None else float(now)
+        if not math.isfinite(completed_at):
+            raise ValueError("cleanup timestamp must be finite")
+
+        def _do(conn):
+            lease = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'approval_grants.active_boot'"
+            ).fetchone()
+            try:
+                active_boot = (
+                    str(json.loads(lease["value"])["boot_id"])
+                    if lease is not None
+                    else ""
+                )
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise RuntimeError("Approval Grant boot lease is corrupt") from exc
+            if active_boot != current_boot_id:
+                raise RuntimeError("Approval Grant boot lease changed")
+            rows = conn.execute(
+                "SELECT * FROM approval_effect_receipts "
+                "WHERE status = 'claimed' AND claim_boot_id <> ? "
+                "ORDER BY claimed_at",
+                (current_boot_id,),
+            ).fetchall()
+            terminal = []
+            for row in rows:
+                if completed_at < float(row["claimed_at"]):
+                    raise ValueError("cleanup cannot precede effect claim")
+                cursor = conn.execute(
+                    "UPDATE approval_effect_receipts SET status = 'unknown', "
+                    "completed_at = ?, failure_code = 'prior_boot_crash_window' "
+                    "WHERE claim_id = ? AND status = 'claimed' "
+                    "AND claim_boot_id <> ?",
+                    (completed_at, row["claim_id"], current_boot_id),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                grant_cursor = conn.execute(
+                    "UPDATE approval_grants SET effect_state = 'unknown' "
+                    "WHERE request_id = ? AND effect_claim_id = ? "
+                    "AND effect_state = 'claimed'",
+                    (row["request_id"], row["claim_id"]),
+                )
+                if grant_cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "Approval Grant crash cleanup lost its grant"
+                    )
+                updated = dict(row)
+                updated.update(
+                    status="unknown",
+                    completed_at=completed_at,
+                    failure_code="prior_boot_crash_window",
+                )
+                terminal.append(updated)
+            return terminal
+
+        return [
+            self._decode_approval_effect_receipt(row)
+            for row in self._execute_write(_do)
+        ]
+
+    def get_approval_effect_receipt(
+        self,
+        claim_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM approval_effect_receipts WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+        return (
+            self._decode_approval_effect_receipt(row)
+            if row is not None
+            else None
+        )
 
     @staticmethod
     def _canonical_prompt_policy(

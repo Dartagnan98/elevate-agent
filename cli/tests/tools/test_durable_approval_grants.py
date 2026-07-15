@@ -341,15 +341,26 @@ class _FailingResolverStore:
 
 
 def _run_guard_with_policy(callback, store):
+    policy = approval.ExecutionPolicy.for_mode("turn-integrated", "default")
+    effect_context = approval.ApprovalEffectContext(
+        session_id="session-integrated",
+        invocation_id="call-integrated",
+        tool_name="terminal",
+        canonical_args_digest=approval._approval_sha256({"command": _COMMAND}),
+        accepted_policy=policy,
+        policy_revision=1,
+        declared_effects={"destructive"},
+    )
     session_tokens = set_session_vars(
         platform="tui",
         chat_id=_SESSION_KEY,
         user_id="tui:local-user",
         session_key=_SESSION_KEY,
         message_id="origin-1",
+        correlation_id="corr_" + "a" * 32,
     )
     policy_token = approval.set_current_execution_policy(
-        approval.ExecutionPolicy.for_mode("turn-integrated", "default"),
+        policy,
         policy_revision=1,
     )
     try:
@@ -358,7 +369,11 @@ def _run_guard_with_policy(callback, store):
             callback,
             approval_store=store,
         )
-        return approval.check_all_command_guards(_COMMAND, "local")
+        return approval.check_all_command_guards(
+            _COMMAND,
+            "local",
+            approval_effect_context=effect_context,
+        )
     finally:
         approval.reset_current_execution_policy(policy_token)
         clear_session_vars(session_tokens)

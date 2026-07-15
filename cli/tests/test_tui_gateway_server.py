@@ -149,20 +149,37 @@ def test_exact_beta_approval_respond_requires_and_targets_request_id(
     approval_module._initialize_approval_store(db)
 
     def durable_entry(command: str):
+        policy = approval_module.ExecutionPolicy.for_mode(
+            f"turn-{command}",
+            "default",
+        )
+        effect_context = approval_module.ApprovalEffectContext(
+            session_id=f"session-{command}",
+            invocation_id=f"call-{command}",
+            tool_name="terminal",
+            canonical_args_digest=approval_module._approval_sha256(
+                {"command": command}
+            ),
+            accepted_policy=policy,
+            policy_revision=0,
+            declared_effects={"destructive"},
+        )
         session_tokens = set_session_vars(
             platform="tui",
             chat_id=session_key,
             user_id="tui:local-user",
             session_key=session_key,
+            correlation_id="corr_" + "c" * 32,
         )
         policy_token = approval_module.set_current_execution_policy(
-            approval_module.ExecutionPolicy.for_mode(f"turn-{command}", "default"),
+            policy,
             policy_revision=0,
         )
         try:
             entry = approval_module._ApprovalEntry(
                 {"command": command},
                 grant_store=db,
+                effect_context=effect_context,
             )
             assert approval_module._prepare_durable_approval_grant(
                 entry,

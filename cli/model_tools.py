@@ -795,6 +795,29 @@ def _coerce_boolean(value: str):
     return value
 
 
+def _exact_beta_terminal_call(function_name: str) -> bool:
+    if function_name != "terminal":
+        return False
+    try:
+        from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+        return beta_provider_policy_active()
+    except Exception:
+        return os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+
+def _beta_terminal_context_block(detail: str) -> str:
+    return json.dumps(
+        {
+            "error": (
+                "Terminal effect blocked because its durable invocation "
+                f"identity is {detail}. No command was run."
+            ),
+            "shadow_status": "effect_context_block",
+        }
+    )
+
+
 def _dispatch_model_registry_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -831,6 +854,8 @@ def _dispatch_model_registry_call(
             "registry shadow fallback: missing durable identity fields=%s",
             ",".join(missing),
         )
+        if _exact_beta_terminal_call(function_name):
+            return _beta_terminal_context_block("unavailable")
         return registry.dispatch(function_name, function_args, **handler_kwargs)
 
     # Hallucinated or stale tool names retain the exact legacy unknown-tool
@@ -848,6 +873,8 @@ def _dispatch_model_registry_call(
         )
     except (TypeError, ValueError):
         logger.debug("registry shadow fallback: invalid durable identity")
+        if _exact_beta_terminal_call(function_name):
+            return _beta_terminal_context_block("invalid")
         return registry.dispatch(function_name, function_args, **handler_kwargs)
 
     outcome = registry.execute_shadow(
@@ -858,17 +885,24 @@ def _dispatch_model_registry_call(
         handler_kwargs=handler_kwargs,
     )
     authorization = outcome.prepared.authorization
+    if getattr(outcome, "execution_error", None):
+        logger.info(
+            "registry shadow handler failed after start: status=%s",
+            outcome.execution_error,
+        )
     if authorization.allowed:
         logger.debug(
             "registry shadow authorization observed: allowed=true started=%s",
             outcome.started,
         )
     else:
+        enforced = _exact_beta_terminal_call(function_name) and not outcome.started
         logger.info(
             "registry shadow authorization observed: allowed=false reason=%s "
-            "started=%s enforcement=false",
+            "started=%s enforcement=%s",
             authorization.reason,
             outcome.started,
+            str(enforced).lower(),
         )
     return outcome.result
 

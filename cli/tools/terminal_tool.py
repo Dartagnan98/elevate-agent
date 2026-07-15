@@ -39,6 +39,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import time
 import threading
 import atexit
@@ -321,10 +322,71 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _check_all_guards(
+    command: str,
+    env_type: str,
+    *,
+    approval_effect_context=None,
+) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
-    return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback())
+    return _check_all_guards_impl(
+        command,
+        env_type,
+        approval_callback=_get_approval_callback(),
+        approval_effect_context=approval_effect_context,
+    )
+
+
+def _finish_approval_effect_claim(
+    claim,
+    *,
+    status: str,
+    result_identity=None,
+    failure_code: Optional[str] = None,
+) -> str:
+    """Return the durable terminal status; never turn receipt loss into success."""
+    from tools.approval import complete_approved_effect_claim
+
+    try:
+        if complete_approved_effect_claim(
+            claim,
+            status=status,
+            result_identity=result_identity,
+            failure_code=failure_code,
+        ):
+            return status
+    except Exception:
+        logger.error("Approval effect receipt persistence failed", exc_info=True)
+    if status != "unknown":
+        try:
+            if complete_approved_effect_claim(
+                claim,
+                status="unknown",
+                failure_code="final_receipt_unavailable",
+            ):
+                return "unknown"
+        except Exception:
+            logger.error(
+                "Approval effect unknown-state persistence failed",
+                exc_info=True,
+            )
+    return "unknown"
+
+
+def _approval_effect_unknown_result() -> str:
+    return json.dumps(
+        {
+            "output": "",
+            "exit_code": -1,
+            "status": "effect_outcome_unknown",
+            "error": (
+                "The approved command may have started, but Elevate could not "
+                "durably prove its final outcome. Do not retry it automatically; "
+                "inspect the target state first."
+            ),
+        },
+        ensure_ascii=False,
+    )
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -1704,6 +1766,8 @@ def terminal_tool(
     pty: bool = False,
     notify_on_complete: bool = False,
     watch_patterns: Optional[List[str]] = None,
+    _approval_effect_context=None,
+    _approval_tool_args: Optional[dict] = None,
 ) -> str:
     """
     Execute a command in the configured terminal environment.
@@ -1736,6 +1800,12 @@ def terminal_tool(
         # Note: force parameter is internal only, not exposed to model API
     """
     try:
+        # Define receipt lifecycle state before any configuration/import work
+        # so even an early handler exception can be reported without masking
+        # the original error with an unbound local.
+        approval_effect_claim = None
+        approval_effect_invocation_started = False
+        approval_effect_final_status = None
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",
@@ -1833,6 +1903,131 @@ def terminal_tool(
                     "status": "error",
                 }, ensure_ascii=False)
 
+        try:
+            from elevate_cli.beta_provider_policy import beta_provider_policy_active
+
+            exact_beta = beta_provider_policy_active()
+        except Exception:
+            exact_beta = os.getenv("ELEVATE_RELEASE_CHANNEL") == "beta"
+
+        if exact_beta:
+            try:
+                from tools.approval import ApprovalEffectContext
+
+                has_durable_effect_context = isinstance(
+                    _approval_effect_context,
+                    ApprovalEffectContext,
+                )
+            except Exception:
+                has_durable_effect_context = False
+            if not has_durable_effect_context:
+                return json.dumps(
+                    {
+                        "output": "",
+                        "exit_code": -1,
+                        "status": "effect_context_block",
+                        "error": (
+                            "No command was run. Realtor Beta requires a "
+                            "prepared durable terminal invocation context."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+
+        approval_note = None
+        approval_checked_early = False
+        if exact_beta:
+            # Exact Beta must bind the human decision and effect claim before
+            # environment creation or command invocation. ``force`` is not a
+            # durable grant and therefore cannot bypass this path.
+            approval = _check_all_guards(
+                command,
+                env_type,
+                approval_effect_context=_approval_effect_context,
+            )
+            approval_checked_early = True
+            if not approval["approved"]:
+                desc = approval.get("description", "command flagged")
+                fallback_msg = (
+                    f"Command denied: {desc}. Use the approval prompt to allow "
+                    "it, or rephrase the command."
+                )
+                return json.dumps(
+                    {
+                        "output": "",
+                        "exit_code": -1,
+                        "error": approval.get("message", fallback_msg),
+                        "status": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
+            if approval.get("user_approved"):
+                if env_type != "local":
+                    return json.dumps(
+                        {
+                            "output": "",
+                            "exit_code": -1,
+                            "status": "blocked",
+                            "error": (
+                                "No command was run. Durable Approval Grant "
+                                "consumption is currently enforced only for the "
+                                "local terminal backend in Realtor Beta."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                if workdir:
+                    workdir_error = _validate_workdir(workdir)
+                    if workdir_error:
+                        return json.dumps(
+                            {
+                                "output": "",
+                                "exit_code": -1,
+                                "error": workdir_error,
+                                "status": "blocked",
+                            },
+                            ensure_ascii=False,
+                        )
+                effect_entry = approval.get("_approval_effect_entry")
+                try:
+                    from tools.approval import claim_approved_effect
+
+                    approval_effect_claim = claim_approved_effect(
+                        effect_entry,
+                        _approval_effect_context,
+                        _approval_tool_args or {},
+                    )
+                except Exception:
+                    logger.error(
+                        "Approval effect claim persistence failed before execution",
+                        exc_info=True,
+                    )
+                    approval_effect_claim = None
+                if approval_effect_claim is None:
+                    return json.dumps(
+                        {
+                            "output": "",
+                            "exit_code": -1,
+                            "status": "blocked",
+                            "error": (
+                                "No command was run. The approved effect could not "
+                                "be claimed with its exact tool, policy, principal, "
+                                "and invocation identity. Do not retry automatically."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = (
+                    f"Command required approval ({desc}) and was approved "
+                    "for this exact invocation."
+                )
+            elif approval.get("smart_approved"):
+                desc = approval.get("description", "flagged as dangerous")
+                approval_note = (
+                    f"Command was flagged ({desc}) and auto-approved by smart approval."
+                )
+
         # Start cleanup thread
         _start_cleanup_thread()
 
@@ -1913,6 +2108,16 @@ def terminal_tool(
                             host_cwd=config.get("host_cwd"),
                         )
                     except ImportError as e:
+                        if approval_effect_claim is not None:
+                            approval_effect_final_status = (
+                                _finish_approval_effect_claim(
+                                    approval_effect_claim,
+                                    status="failed",
+                                    failure_code="environment_creation_exception",
+                                )
+                            )
+                            if approval_effect_final_status == "unknown":
+                                return _approval_effect_unknown_result()
                         return json.dumps({
                             "output": "",
                             "exit_code": -1,
@@ -1928,8 +2133,7 @@ def terminal_tool(
 
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
-        approval_note = None
-        if not force:
+        if not force and not approval_checked_early:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
@@ -1970,6 +2174,14 @@ def terminal_tool(
             if workdir_error:
                 logger.warning("Blocked dangerous workdir: %s (command: %s)",
                                workdir[:200], _safe_command_preview(command))
+                if approval_effect_claim is not None:
+                    approval_effect_final_status = _finish_approval_effect_claim(
+                        approval_effect_claim,
+                        status="failed",
+                        failure_code="preinvoke_workdir_rejected",
+                    )
+                    if approval_effect_final_status == "unknown":
+                        return _approval_effect_unknown_result()
                 return json.dumps({
                     "output": "",
                     "exit_code": -1,
@@ -1999,6 +2211,8 @@ def terminal_tool(
             session_key = get_current_session_key(default="")
             effective_cwd = workdir or cwd
             try:
+                if approval_effect_claim is not None:
+                    approval_effect_invocation_started = True
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
                         command=command,
@@ -2094,8 +2308,35 @@ def terminal_tool(
                     proc_session.watch_patterns = list(watch_patterns)
                     result_data["watch_patterns"] = proc_session.watch_patterns
 
+                if approval_effect_claim is not None:
+                    approval_effect_final_status = _finish_approval_effect_claim(
+                        approval_effect_claim,
+                        status="succeeded",
+                        result_identity={
+                            "background": True,
+                            "effect": "process_started",
+                        },
+                    )
+                    if approval_effect_final_status != "succeeded":
+                        return _approval_effect_unknown_result()
+
                 return json.dumps(result_data, ensure_ascii=False)
             except Exception as e:
+                if approval_effect_claim is not None:
+                    approval_effect_final_status = _finish_approval_effect_claim(
+                        approval_effect_claim,
+                        status=(
+                            "unknown"
+                            if approval_effect_invocation_started
+                            else "failed"
+                        ),
+                        failure_code=(
+                            "background_spawn_outcome_unknown"
+                            if approval_effect_invocation_started
+                            else "background_preinvoke_exception"
+                        ),
+                    )
+                    return _approval_effect_unknown_result()
                 return json.dumps({
                     "output": "",
                     "exit_code": -1,
@@ -2103,7 +2344,7 @@ def terminal_tool(
                 }, ensure_ascii=False)
         else:
             # Run foreground command with retry logic
-            max_retries = 3
+            max_retries = 0 if approval_effect_claim is not None else 3
             retry_count = 0
             result = None
             
@@ -2113,8 +2354,17 @@ def terminal_tool(
                         "timeout": effective_timeout,
                         "cwd": workdir or cwd,
                     }
+                    if approval_effect_claim is not None:
+                        approval_effect_invocation_started = True
                     result = env.execute(command, **execute_kwargs)
                 except Exception as e:
+                    if approval_effect_claim is not None:
+                        approval_effect_final_status = _finish_approval_effect_claim(
+                            approval_effect_claim,
+                            status="unknown",
+                            failure_code="foreground_execution_outcome_unknown",
+                        )
+                        return _approval_effect_unknown_result()
                     error_str = str(e).lower()
                     if "timeout" in error_str:
                         return json.dumps({
@@ -2146,6 +2396,24 @@ def terminal_tool(
             # Extract output
             output = result.get("output", "")
             returncode = result.get("returncode", 0)
+
+            if approval_effect_claim is not None:
+                desired_status = "succeeded" if returncode == 0 else "failed"
+                approval_effect_final_status = _finish_approval_effect_claim(
+                    approval_effect_claim,
+                    status=desired_status,
+                    result_identity={
+                        "background": False,
+                        "returncode": returncode,
+                    },
+                    failure_code=(
+                        None
+                        if desired_status == "succeeded"
+                        else "command_exit_nonzero"
+                    ),
+                )
+                if approval_effect_final_status != desired_status:
+                    return _approval_effect_unknown_result()
 
             # Add helpful message for sudo failures in messaging context
             output = _handle_sudo_failure(output, env_type)
@@ -2213,6 +2481,20 @@ def terminal_tool(
         import traceback
         tb_str = traceback.format_exc()
         logger.error("terminal_tool exception:\n%s", tb_str)
+        if approval_effect_claim is not None and approval_effect_final_status is None:
+            approval_effect_final_status = _finish_approval_effect_claim(
+                approval_effect_claim,
+                status=(
+                    "unknown" if approval_effect_invocation_started else "failed"
+                ),
+                failure_code=(
+                    "terminal_handler_outcome_unknown"
+                    if approval_effect_invocation_started
+                    else "terminal_preinvoke_exception"
+                ),
+            )
+            if approval_effect_final_status == "unknown":
+                return _approval_effect_unknown_result()
         return json.dumps({
             "output": "",
             "exit_code": -1,
@@ -2427,6 +2709,86 @@ TERMINAL_SCHEMA = {
 }
 
 
+_TERMINAL_EXPLICIT_READ_COMMANDS = frozenset(
+    {
+        "basename",
+        "cat",
+        "cmp",
+        "comm",
+        "df",
+        "diff",
+        "dirname",
+        "du",
+        "echo",
+        "false",
+        "grep",
+        "head",
+        "hexdump",
+        "id",
+        "jq",
+        "ls",
+        "md5",
+        "md5sum",
+        "od",
+        "pgrep",
+        "printf",
+        "ps",
+        "pwd",
+        "readlink",
+        "realpath",
+        "rg",
+        "sha256sum",
+        "shasum",
+        "stat",
+        "strings",
+        "tail",
+        "true",
+        "uname",
+        "wc",
+        "whereis",
+        "which",
+        "whoami",
+    }
+)
+_TERMINAL_SHELL_CONTROL_RE = re.compile(r"[;&|<>`$()\n\r]")
+
+
+def _terminal_command_is_explicit_read(command: str) -> bool:
+    """Recognize a deliberately small, single-process read-only shell lane."""
+    if not command.strip() or _TERMINAL_SHELL_CONTROL_RE.search(command):
+        return False
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name.lower()
+    if executable == "rg" and any(
+        token == "--pre" or token.startswith("--pre=")
+        for token in tokens[1:]
+    ):
+        return False
+    return executable in _TERMINAL_EXPLICIT_READ_COMMANDS
+
+
+def _terminal_effect_resolver(args: dict):
+    """Declare only explicit simple reads; every other shell call is destructive."""
+    from tools.approval import EffectKind
+
+    command = args.get("command") if isinstance(args, dict) else None
+    if not isinstance(command, str):
+        return {EffectKind.UNKNOWN}
+    effects = {
+        EffectKind.READ
+        if _terminal_command_is_explicit_read(command)
+        else EffectKind.DESTRUCTIVE
+    }
+    if bool(args.get("background")):
+        effects.add(EffectKind.SPAWN)
+    return effects
+
+
 def _handle_terminal(args, **kw):
     return terminal_tool(
         command=args.get("command"),
@@ -2437,6 +2799,8 @@ def _handle_terminal(args, **kw):
         pty=args.get("pty", False),
         notify_on_complete=args.get("notify_on_complete", False),
         watch_patterns=args.get("watch_patterns"),
+        _approval_effect_context=kw.get("_approval_effect_context"),
+        _approval_tool_args=dict(args),
     )
 
 
@@ -2448,4 +2812,5 @@ registry.register(
     check_fn=check_terminal_requirements,
     emoji="💻",
     max_result_size_chars=100_000,
+    effect_resolver=_terminal_effect_resolver,
 )

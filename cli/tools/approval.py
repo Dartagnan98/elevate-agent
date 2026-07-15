@@ -528,6 +528,7 @@ class _ApprovalEntry:
     __slots__ = (
         "correlation_id",
         "data",
+        "effect_context",
         "event",
         "grant_context",
         "grant_store",
@@ -545,6 +546,7 @@ class _ApprovalEntry:
         *,
         grant_store: object | None = None,
         grant_context: dict | None = None,
+        effect_context: object | None = None,
     ):
         # Never derive this identifier from a command, session, platform, or
         # caller-provided value.  It crosses the UI boundary, so it must be an
@@ -568,6 +570,7 @@ class _ApprovalEntry:
         self.resolution_reason = ""
         self.grant_store = grant_store
         self.grant_context = dict(grant_context or {})
+        self.effect_context = effect_context
         self.receipt_lock = threading.Lock()
         self.receipt_outcome: Optional[str] = None
         self.receipt_retry_scheduled = False
@@ -692,6 +695,34 @@ def _record_startup_grant_cleanup(grant: dict) -> None:
         logger.debug("approval startup cleanup projection failed", exc_info=True)
 
 
+def _record_startup_effect_cleanup(receipt: dict) -> None:
+    """Project a prior-boot crash window without calling it a failure/success."""
+    try:
+        from elevate_cli.diagnostics.session_recorder import record_session_event
+
+        record_session_event(
+            "approval.effect_receipt",
+            session_id=receipt.get("session_id") or None,
+            correlation_id=receipt.get("root_correlation_id") or None,
+            payload={
+                "request_id": receipt.get("request_id"),
+                "claim_id": receipt.get("claim_id"),
+                "invocation_id": receipt.get("invocation_id"),
+                "status": "unknown",
+                "reason": receipt.get("failure_code")
+                or "prior_boot_crash_window",
+            },
+            severity="warning",
+            source="approval",
+            component="tools.approval",
+        )
+    except Exception:
+        logger.debug(
+            "approval effect startup cleanup projection failed",
+            exc_info=True,
+        )
+
+
 def _initialize_approval_store(store: object) -> object:
     """Run exact-Beta prior-boot cleanup exactly once per state DB path."""
     key = _approval_store_key(store)
@@ -699,15 +730,28 @@ def _initialize_approval_store(store: object) -> object:
         if key in _initialized_approval_stores:
             return store
         cleanup = getattr(store, "cancel_prior_boot_approval_grants", None)
+        effect_cleanup = getattr(
+            store,
+            "mark_prior_boot_approval_effects_unknown",
+            None,
+        )
         activate = getattr(store, "activate_approval_boot", None)
-        if not callable(cleanup) or not callable(activate):
+        if (
+            not callable(cleanup)
+            or not callable(effect_cleanup)
+            or not callable(activate)
+        ):
             raise RuntimeError("approval grant persistence is unavailable")
         activate(_APPROVAL_BOOT_ID, process_id=os.getpid())
         terminal = cleanup(_APPROVAL_BOOT_ID)
+        unknown_effects = effect_cleanup(_APPROVAL_BOOT_ID)
         _initialized_approval_stores.add(key)
     for grant in terminal or []:
         if isinstance(grant, dict):
             _record_startup_grant_cleanup(grant)
+    for receipt in unknown_effects or []:
+        if isinstance(receipt, dict):
+            _record_startup_effect_cleanup(receipt)
     return store
 
 
@@ -742,26 +786,40 @@ def _prepare_durable_approval_grant(
     store = entry.grant_store
     if store is None:
         return False
+    effect_context = entry.effect_context
+    if not isinstance(effect_context, ApprovalEffectContext):
+        logger.error(
+            "Exact-Beta approval refused without a prepared tool invocation"
+        )
+        return False
     delivery = _approval_delivery_context()
     policy = get_current_execution_policy()
     policy_revision = get_current_execution_policy_revision()
-    if policy is None or policy_revision is None:
+    if (
+        not isinstance(policy, ExecutionPolicy)
+        or policy.to_dict() != effect_context.accepted_policy.to_dict()
+        or policy_revision != effect_context.policy_revision
+        or policy.accepted_turn_id != effect_context.turn_id
+    ):
         logger.error(
             "Exact-Beta approval refused without an accepted-turn policy receipt"
         )
         return False
-    if not delivery["actor_id"]:
+    if not delivery["actor_id"] or not entry.correlation_id:
         logger.error(
-            "Exact-Beta approval refused without a canonical resolver actor"
+            "Exact-Beta approval refused without canonical actor/root identity"
+        )
+        return False
+    authorization = authorize_effects(policy, effect_context.declared_effects)
+    if not authorization.allowed:
+        logger.error(
+            "Exact-Beta approval refused because declared effects exceed policy: %s",
+            authorization.reason,
         )
         return False
     accepted_policy = policy.to_dict()
     turn_id = policy.accepted_turn_id
-    effect_set = (
-        sorted(str(effect) for effect in policy.allowed_effects)
-        if policy is not None
-        else []
-    )
+    effect_set = sorted(str(effect) for effect in effect_context.declared_effects)
     created_at = time.time()
     command_identity = {"command": str(command)}
     context = {
@@ -769,7 +827,12 @@ def _prepare_durable_approval_grant(
         "session_key_digest": _approval_sha256({"session_key": session_key}),
         "root_correlation_id": entry.correlation_id,
         "turn_id": turn_id,
+        "session_id": effect_context.session_id,
+        "invocation_id": effect_context.invocation_id,
+        "tool_name": effect_context.tool_name,
         "command_digest": _approval_sha256(command_identity),
+        "canonical_args_digest": effect_context.canonical_args_digest,
+        "principal_id": delivery["actor_id"],
         "origin_message_id": delivery["origin_message_id"],
     }
     try:
@@ -777,12 +840,13 @@ def _prepare_durable_approval_grant(
             request_id=entry.request_id,
             boot_id=_APPROVAL_BOOT_ID,
             session_key_digest=context["session_key_digest"],
-            session_id=delivery["session_id"] or None,
+            session_id=effect_context.session_id,
             root_correlation_id=entry.correlation_id or None,
             turn_id=turn_id or None,
-            tool_identity="terminal",
+            invocation_id=effect_context.invocation_id,
+            tool_identity=effect_context.tool_name,
             command_digest=context["command_digest"],
-            canonical_args_digest=_approval_sha256(command_identity),
+            canonical_args_digest=effect_context.canonical_args_digest,
             accepted_policy=accepted_policy,
             policy_revision=policy_revision,
             effect_set=effect_set,
@@ -1649,6 +1713,186 @@ def authorize_effects(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalEffectContext:
+    """Immutable identity frozen before one registry tool invocation."""
+
+    session_id: str
+    invocation_id: str
+    tool_name: str
+    canonical_args_digest: str
+    accepted_policy: ExecutionPolicy
+    policy_revision: int
+    declared_effects: frozenset[Effect]
+
+    def __post_init__(self) -> None:
+        for field_name in ("session_id", "invocation_id", "tool_name"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} is required")
+            object.__setattr__(self, field_name, value.strip())
+        if not isinstance(self.canonical_args_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.canonical_args_digest
+        ):
+            raise ValueError("canonical_args_digest must be a SHA-256 digest")
+        if not isinstance(self.accepted_policy, ExecutionPolicy):
+            raise TypeError("accepted_policy must be an ExecutionPolicy")
+        if (
+            isinstance(self.policy_revision, bool)
+            or not isinstance(self.policy_revision, int)
+            or self.policy_revision < 0
+        ):
+            raise ValueError("policy_revision must be a non-negative integer")
+        effects = normalize_effects(self.declared_effects)
+        if not effects or any(
+            effect.kind is EffectKind.UNKNOWN for effect in effects
+        ):
+            raise ValueError("declared_effects must be explicit and non-empty")
+        object.__setattr__(self, "declared_effects", effects)
+
+    @property
+    def turn_id(self) -> str:
+        return self.accepted_policy.accepted_turn_id
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalEffectClaim:
+    """One durable claim token; possession never implies effect success."""
+
+    request_id: str
+    claim_id: str
+    boot_id: str
+    context: ApprovalEffectContext
+    store: object
+
+
+def approval_effect_context_from_prepared(prepared: object) -> ApprovalEffectContext:
+    """Freeze the narrow effect identity exported by registry preparation."""
+    context = getattr(prepared, "context", None)
+    policy = getattr(prepared, "execution_policy", None)
+    effects = getattr(prepared, "resolved_effects", None)
+    if getattr(prepared, "preparation_error", None) is not None:
+        raise ValueError("prepared tool call is invalid")
+    if getattr(prepared, "effect_resolution_error", None) is not None:
+        raise ValueError("prepared tool effects are unresolved")
+    if context is None:
+        raise ValueError("prepared tool call has no durable context")
+    if not isinstance(policy, ExecutionPolicy):
+        raise ValueError("prepared tool call has no accepted policy")
+    return ApprovalEffectContext(
+        session_id=getattr(context, "session_id", ""),
+        invocation_id=getattr(context, "invocation_id", ""),
+        tool_name=getattr(prepared, "tool_name", ""),
+        canonical_args_digest=getattr(prepared, "args_digest", ""),
+        accepted_policy=policy,
+        policy_revision=getattr(context, "policy_revision", -1),
+        declared_effects=normalize_effects(effects),
+    )
+
+
+def claim_approved_effect(
+    entry: object,
+    effect_context: ApprovalEffectContext,
+    tool_args: Mapping[str, object],
+) -> Optional[ApprovalEffectClaim]:
+    """Revalidate and claim one exact-Beta approved effect before invocation."""
+    if not _beta_approval_policy_active():
+        return None
+    if not isinstance(entry, _ApprovalEntry):
+        return None
+    if not isinstance(effect_context, ApprovalEffectContext):
+        return None
+    if entry.effect_context != effect_context:
+        return None
+    store = entry.grant_store
+    grant = entry.grant_context
+    if store is None or not grant:
+        return None
+    policy = get_current_execution_policy()
+    revision = get_current_execution_policy_revision()
+    if (
+        not isinstance(policy, ExecutionPolicy)
+        or policy.to_dict() != effect_context.accepted_policy.to_dict()
+        or revision != effect_context.policy_revision
+    ):
+        return None
+    try:
+        current_args_digest = _approval_sha256(dict(tool_args))
+    except Exception:
+        return None
+    if current_args_digest != effect_context.canonical_args_digest:
+        return None
+    authorization = authorize_effects(policy, effect_context.declared_effects)
+    if not authorization.allowed:
+        return None
+    delivery = _approval_delivery_context()
+    principal_id = delivery["actor_id"]
+    root_correlation_id = _opaque_approval_lineage_id(
+        _current_approval_correlation_id()
+    )
+    if (
+        not principal_id
+        or not root_correlation_id
+        or principal_id != (grant.get("principal_id") or "")
+        or root_correlation_id != (grant.get("root_correlation_id") or "")
+    ):
+        return None
+    claim_id = uuid.uuid4().hex
+    receipt = store.claim_approval_effect(
+        request_id=entry.request_id,
+        claim_id=claim_id,
+        boot_id=grant["boot_id"],
+        session_key_digest=grant["session_key_digest"],
+        session_id=effect_context.session_id,
+        root_correlation_id=root_correlation_id,
+        turn_id=effect_context.turn_id,
+        invocation_id=effect_context.invocation_id,
+        tool_name=effect_context.tool_name,
+        command_digest=grant["command_digest"],
+        canonical_args_digest=effect_context.canonical_args_digest,
+        accepted_policy=policy.to_dict(),
+        policy_revision=effect_context.policy_revision,
+        principal_id=principal_id,
+        effect_set=sorted(str(effect) for effect in effect_context.declared_effects),
+        expected_origin_message_id=grant.get("origin_message_id") or None,
+    )
+    if not isinstance(receipt, dict) or receipt.get("status") != "claimed":
+        return None
+    return ApprovalEffectClaim(
+        request_id=entry.request_id,
+        claim_id=claim_id,
+        boot_id=grant["boot_id"],
+        context=effect_context,
+        store=store,
+    )
+
+
+def complete_approved_effect_claim(
+    claim: ApprovalEffectClaim,
+    *,
+    status: str,
+    result_identity: object = None,
+    failure_code: Optional[str] = None,
+) -> bool:
+    """Persist a final effect receipt; ``False`` is never success."""
+    if not isinstance(claim, ApprovalEffectClaim):
+        raise TypeError("claim must be an ApprovalEffectClaim")
+    result_digest = (
+        _approval_sha256(result_identity)
+        if result_identity is not None
+        else None
+    )
+    count = claim.store.complete_approval_effect(
+        claim_id=claim.claim_id,
+        request_id=claim.request_id,
+        boot_id=claim.boot_id,
+        status=status,
+        result_digest=result_digest,
+        failure_code=failure_code,
+    )
+    return isinstance(count, int) and not isinstance(count, bool) and count == 1
+
+
 # ---------------------------------------------------------------------------
 # Permission mode (Claude-style): default | acceptEdits | plan | bypassPermissions
 # ---------------------------------------------------------------------------
@@ -2394,7 +2638,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None, *,
+                             approval_effect_context: object | None = None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -2581,22 +2826,84 @@ def check_all_command_guards(command: str, env_type: str,
             entry = _ApprovalEntry(
                 approval_data,
                 grant_store=grant_store,
+                effect_context=approval_effect_context,
             )
-            if _beta_approval_policy_active() and not _prepare_durable_approval_grant(
-                entry,
-                session_key,
-                command,
-                timeout_seconds=timeout,
-            ):
-                return {
-                    "approved": False,
-                    "message": (
-                        "BLOCKED: Approval persistence is unavailable; no approval "
-                        "request was sent. Do NOT retry this command."
-                    ),
-                    "pattern_key": primary_key,
-                    "description": combined_desc,
-                }
+            if _beta_approval_policy_active():
+                effect_context = entry.effect_context
+                policy = get_current_execution_policy()
+                revision = get_current_execution_policy_revision()
+                if not isinstance(effect_context, ApprovalEffectContext):
+                    return {
+                        "approved": False,
+                        "status": "effect_context_block",
+                        "message": (
+                            "BLOCKED: This command has no prepared durable tool "
+                            "invocation identity. No approval request was sent."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                    }
+                if (
+                    not isinstance(policy, ExecutionPolicy)
+                    or policy.to_dict()
+                    != effect_context.accepted_policy.to_dict()
+                    or revision != effect_context.policy_revision
+                    or policy.accepted_turn_id != effect_context.turn_id
+                ):
+                    return {
+                        "approved": False,
+                        "status": "effect_context_block",
+                        "message": (
+                            "BLOCKED: The accepted-turn policy identity changed "
+                            "before approval. No approval request was sent."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                    }
+                delivery = _approval_delivery_context()
+                if not delivery["actor_id"] or not entry.correlation_id:
+                    return {
+                        "approved": False,
+                        "status": "effect_context_block",
+                        "message": (
+                            "BLOCKED: The approval principal or root invocation "
+                            "identity is unavailable. No approval request was sent."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                    }
+                authorization = authorize_effects(
+                    policy,
+                    effect_context.declared_effects,
+                )
+                if not authorization.allowed:
+                    return {
+                        "approved": False,
+                        "status": "effect_policy_block",
+                        "message": (
+                            "BLOCKED: The command's declared effects are not "
+                            "allowed by the accepted-turn policy. No approval "
+                            "request was sent."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                    }
+                if not _prepare_durable_approval_grant(
+                    entry,
+                    session_key,
+                    command,
+                    timeout_seconds=timeout,
+                ):
+                    return {
+                        "approved": False,
+                        "status": "approval_persistence_block",
+                        "message": (
+                            "BLOCKED: Approval persistence is unavailable; no "
+                            "approval request was sent. Do NOT retry this command."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                    }
             with _lock:
                 _gateway_queues.setdefault(session_key, []).append(entry)
 
@@ -2774,8 +3081,15 @@ def check_all_command_guards(command: str, env_type: str,
                 # choice == "once": no persistence — command allowed this
                 # single time only, matching the CLI's behavior.
 
-            return {"approved": True, "message": None,
-                    "user_approved": True, "description": combined_desc}
+            result = {
+                "approved": True,
+                "message": None,
+                "user_approved": True,
+                "description": combined_desc,
+            }
+            if _beta_approval_policy_active():
+                result["_approval_effect_entry"] = entry
+            return result
 
         # Fallback: no gateway callback registered (e.g. cron, batch).
         # Stable returns approval_required for backward compatibility. Exact

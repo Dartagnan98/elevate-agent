@@ -173,6 +173,102 @@ def test_denied_authorization_is_observed_but_not_enforced() -> None:
     assert outcome.prepared.authorization.reason == "effect_not_allowed"
 
 
+def test_exact_beta_terminal_denial_blocks_before_handler(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "terminal",
+        "terminal",
+        _schema("terminal"),
+        lambda args: calls.append(args) or "unexpected",
+        effects={"destructive"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    outcome = registry.execute_shadow(
+        "terminal",
+        {"command": "rm -rf /tmp/example"},
+        context=_context("call-beta-terminal"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.started is False
+    assert calls == []
+    assert json.loads(outcome.result)["shadow_status"] == "effect_policy_block"
+
+
+def test_exact_beta_terminal_unknown_effect_blocks_before_handler(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "terminal",
+        "terminal",
+        _schema("terminal"),
+        lambda args: calls.append(args) or "unexpected",
+        effect_resolver=lambda _args: {"unknown"},
+    )
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    outcome = registry.execute_shadow(
+        "terminal",
+        {"command": "opaque shell input"},
+        context=_context("call-beta-terminal-unknown"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.started is False
+    assert calls == []
+    assert outcome.prepared.authorization.reason == "unknown_effect"
+    assert json.loads(outcome.result)["shadow_status"] == "effect_policy_block"
+
+
+def test_stable_terminal_denial_remains_observational(monkeypatch) -> None:
+    registry = ToolRegistry()
+    calls = []
+    registry.register(
+        "terminal",
+        "terminal",
+        _schema("terminal"),
+        lambda args: calls.append(args) or "stable-result",
+        effects={"destructive"},
+    )
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+
+    outcome = registry.execute_shadow(
+        "terminal",
+        {"command": "rm -rf /tmp/example"},
+        context=_context("call-stable-terminal"),
+        execution_policy=_policy(ExecutionPolicyMode.READ_ONLY),
+    )
+
+    assert outcome.started is True
+    assert outcome.result == "stable-result"
+    assert calls == [{"command": "rm -rf /tmp/example"}]
+    assert outcome.prepared.authorization.allowed is False
+
+
+def test_caught_handler_exception_has_explicit_execution_error() -> None:
+    registry = ToolRegistry()
+
+    def fail(_args):
+        raise RuntimeError("handler failed")
+
+    registry.register("failing", "core", _schema("failing"), fail, effects={"read"})
+
+    outcome = registry.execute_shadow(
+        "failing",
+        {},
+        context=_context("call-handler-error"),
+        execution_policy=_policy(),
+    )
+
+    assert outcome.started is True
+    assert outcome.execution_error == "handler_exception:RuntimeError"
+    payload = json.loads(outcome.result)
+    assert "handler failed" in payload["error"]
+    assert "shadow_status" not in payload
+
+
 def test_context_turn_identity_must_match_captured_policy() -> None:
     registry = ToolRegistry()
     calls = []
