@@ -152,12 +152,13 @@ def test_rejects_unknown_keys_and_algorithm_confusion(
         {"iss": "https://attacker.example.test"},
         {"aud": "elevate-stable"},
         {"email": "Agent@Example.test"},
-        {"email": "not-an-email"},
         {"tier": "Pro"},
+        {"tier": "enterprise"},
         {"entitlements": ["real_estate_sales", "real_estate_admin"]},
         {"entitlements": ["real_estate_admin", "real_estate_admin"]},
         {"nbf": 2_000_000_001},
         {"exp": 2_000_007_200},
+        {"unsupported": "claim"},
         {"sub": ""},
         {"license_id": ""},
         {"jti": ""},
@@ -172,9 +173,7 @@ def test_rejects_wrong_or_noncanonical_required_claims(claim_overrides: dict) ->
     ("claim_overrides", "now"),
     [
         ({"iat": 2_000_000_500, "nbf": 2_000_000_500}, 2_000_000_100),
-        ({"nbf": 2_000_000_500}, 2_000_000_100),
         ({"exp": 2_000_000_050}, 2_000_000_100),
-        ({"exp": 1_999_999_999}, 2_000_000_100),
     ],
 )
 def test_rejects_expired_and_future_assertions(
@@ -184,6 +183,30 @@ def test_rejects_expired_and_future_assertions(
     with pytest.raises(EntitlementAssertionError) as exc_info:
         _verify(_signed_assertion(claim_overrides=claim_overrides), now=now)
 
+    assert exc_info.value.code == "beta_entitlement_assertion_not_current"
+
+
+def test_historical_mode_accepts_expired_signature_but_never_future_assertion() -> None:
+    expired = _signed_assertion(now=2_000_000_000)
+    claims = verify_entitlement_assertion(
+        expired,
+        access_token="access-token",
+        refresh_token="refresh-token",
+        now=2_000_007_200,
+        trusted_keys={ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY},
+        require_current=False,
+    )
+
+    assert claims.expires_at == 2_000_003_600
+    with pytest.raises(EntitlementAssertionError) as exc_info:
+        verify_entitlement_assertion(
+            _signed_assertion(now=2_000_008_000),
+            access_token="access-token",
+            refresh_token="refresh-token",
+            now=2_000_007_200,
+            trusted_keys={ENTITLEMENT_ASSERTION_KID: TEST_PUBLIC_KEY},
+            require_current=False,
+        )
     assert exc_info.value.code == "beta_entitlement_assertion_not_current"
 
 

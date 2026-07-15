@@ -140,6 +140,7 @@ def _signed_payload(
         "tier": tier,
         "email": email.strip().lower(),
         "expires_at": expiry,
+        "expires_in": 3600,
         "entitlements": granted,
         "entitlement_assertion": assertion,
     }
@@ -609,7 +610,7 @@ def test_exact_beta_invalid_snapshot_overrides_stale_config_grants_to_core_only(
         license_mod.LICENSE_PATH.write_text("not-json")
         license_mod.LICENSE_PATH.chmod(0o600)
     elif snapshot == "expired":
-        expired_at = int(time.time()) - 10
+        expired_at = int(time.time()) - 120
         expired = _signed_payload(
             access_token=_access_token(expires_at=expired_at),
             refresh_token="refresh",
@@ -846,6 +847,55 @@ def test_exact_beta_refresh_accepts_and_persists_only_rotated_signed_snapshot(
     assert license_mod.load() == rotated
 
 
+def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    expired_at = int(time.time()) - 120
+    expired_payload = _signed_payload(
+        access_token="expired-access",
+        refresh_token="historical-refresh",
+        email="returning@example.test",
+        entitlements=["real_estate_sales"],
+        expires_at=expired_at,
+    )
+    license_mod.LICENSE_PATH.write_text(
+        json.dumps(expired_payload),
+        encoding="utf-8",
+    )
+    license_mod.LICENSE_PATH.chmod(0o600)
+
+    historical = license_mod.load()
+    assert historical is not None
+    assert historical.is_expired(margin=0) is True
+    assert elevate_constants.get_account_key() == (
+        "acct_" + hashlib.sha1(b"returning@example.test").hexdigest()[:16]
+    )
+    assert web_auth.license_signed_in(license_path=license_mod.LICENSE_PATH) is False
+    assert dashboard_access_status()["packs"]["realEstateAny"] is False
+
+    refreshed_payload = _signed_payload(
+        access_token="refreshed-access",
+        refresh_token="refreshed-refresh",
+        email="returning@example.test",
+        entitlements=["real_estate_admin"],
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _SuccessClient(calls, refreshed_payload, **kwargs),
+    )
+
+    refreshed = license_mod.ensure_valid()
+
+    assert refreshed.access_token == "refreshed-access"
+    assert refreshed.entitlements == ["real_estate_admin"]
+    assert web_auth.license_signed_in(license_path=license_mod.LICENSE_PATH) is True
+    assert dashboard_access_status()["packs"]["realEstateAdmin"] is True
+    assert dashboard_access_status()["packs"]["realEstateSales"] is False
+
+
 def test_exact_beta_device_link_accepts_only_signed_approved_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1019,6 +1069,7 @@ def test_exact_beta_web_tui_and_account_identity_fail_closed_on_unsafe_snapshot(
         ("license_id", "attacker-license"),
         ("tier", "builder"),
         ("expires_at", 4_102_444_800),
+        ("expires_in", 7200),
         ("entitlements", ["real_estate_admin"]),
         ("access_token", "different-access"),
         ("refresh_token", "different-refresh"),
@@ -1200,7 +1251,7 @@ def test_exact_beta_activation_skill_failure_is_typed_and_never_complete(
     assert exc_info.value.code == expected_code
 
 
-def test_stable_activation_keeps_legacy_warning_success_semantics(
+def test_stable_activation_keeps_incomplete_warning_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
@@ -1222,10 +1273,10 @@ def test_stable_activation_keeps_legacy_warning_success_semantics(
     activation = license_mod.activate_install(lic)
 
     assert activation["skill_sync_warnings"] == ["legacy warning"]
-    assert activation["activation_complete"] is True
+    assert activation["activation_complete"] is False
 
 
-def test_stable_cli_keeps_legacy_zero_exit_for_skill_warning(
+def test_stable_cli_keeps_incomplete_nonzero_exit_for_skill_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
@@ -1252,4 +1303,4 @@ def test_stable_cli_keeps_legacy_zero_exit_for_skill_warning(
         skip_skill_sync=False,
     )
 
-    assert license_mod.cmd_activate(args) == 0
+    assert license_mod.cmd_activate(args) == 1

@@ -413,6 +413,7 @@ def _canonical_beta_license(
     access_token: str,
     refresh_token: str,
     entitlement_assertion: str,
+    require_current: bool = True,
 ) -> License:
     """Derive every Beta paid field from one verified signed assertion."""
     try:
@@ -431,6 +432,7 @@ def _canonical_beta_license(
             entitlement_assertion,
             access_token=access_token,
             refresh_token=refresh_token,
+            require_current=require_current,
         )
     except EntitlementAssertionError as exc:
         raise LicenseError(str(exc), code=exc.code) from exc
@@ -476,6 +478,11 @@ def _require_beta_response_duplicates_match(
             "The Realtor Beta subject field did not match its signed assertion.",
             code="beta_entitlement_response_mismatch",
         )
+    if "expires_in" in raw and raw.get("expires_in") != 3600:
+        raise LicenseError(
+            "The Realtor Beta expiry field did not match its signed assertion.",
+            code="beta_entitlement_response_mismatch",
+        )
     for name in ("entitlements", "packs", "features"):
         if name not in raw:
             continue
@@ -487,7 +494,11 @@ def _require_beta_response_duplicates_match(
             )
 
 
-def _beta_license_from_mapping(raw: object) -> License:
+def _beta_license_from_mapping(
+    raw: object,
+    *,
+    require_current: bool = True,
+) -> License:
     """Build a canonical Beta license from an HQ response or local snapshot."""
     if not isinstance(raw, dict):
         raise LicenseError(
@@ -514,6 +525,7 @@ def _beta_license_from_mapping(raw: object) -> License:
         access_token=access_token,
         refresh_token=refresh_token,
         entitlement_assertion=assertion,
+        require_current=require_current,
     )
     _require_beta_response_duplicates_match(raw, canonical)
     return canonical
@@ -544,7 +556,10 @@ def _complete_entitlements_from_response(
 def _validate_complete_beta_license(lic: License, *, require_current: bool) -> None:
     if not _exact_realtor_beta_active():
         return
-    canonical = _beta_license_from_mapping(lic.to_dict())
+    canonical = _beta_license_from_mapping(
+        lic.to_dict(),
+        require_current=require_current,
+    )
     if canonical.to_dict() != lic.to_dict():
         raise LicenseError(
             "The Realtor Beta account snapshot did not match its signed assertion.",
@@ -584,12 +599,11 @@ def _parse_license_payload(raw: object) -> License:
 
 
 def read_verified_beta_license_snapshot(*, require_current: bool) -> License:
-    """Read a signature-verified, current local Beta snapshot or raise typed.
+    """Read a signature-verified local Beta snapshot or raise typed.
 
-    ``require_current`` remains in the public signature for compatibility, but
-    signed Realtor Beta assertions are never accepted outside their validity
-    window.  An expired assertion requires a fresh sign-in instead of becoming
-    a local identity oracle.
+    Historical mode authenticates an expired snapshot only so its bound refresh
+    token and account identity can be continued. Paid access gates always call
+    this reader with ``require_current=True``.
     """
     preflight_beta_license_store(require_writable=False)
     try:
@@ -599,7 +613,7 @@ def read_verified_beta_license_snapshot(*, require_current: bool) -> License:
             "The Realtor Beta account snapshot is missing or unreadable.",
             code="beta_license_snapshot_invalid",
         ) from exc
-    lic = _beta_license_from_mapping(raw)
+    lic = _beta_license_from_mapping(raw, require_current=require_current)
     _validate_complete_beta_license(lic, require_current=require_current)
     return lic
 
@@ -710,7 +724,7 @@ def _invalidate_beta_snapshot_if_matches(lic: License, message: str) -> bool:
     if not _exact_realtor_beta_active():
         return False
     try:
-        current = read_verified_beta_license_snapshot(require_current=True)
+        current = read_verified_beta_license_snapshot(require_current=False)
     except LicenseError:
         _invalidate_beta_snapshot(message)
         return True
@@ -921,7 +935,7 @@ def _license_from_auth_response(
             code="beta_entitlement_response_mismatch",
         )
     if existing is not None:
-        _validate_complete_beta_license(existing, require_current=True)
+        _validate_complete_beta_license(existing, require_current=False)
         if (
             existing.license_id != lic.license_id
             or existing.email != lic.email
@@ -1119,7 +1133,10 @@ def login_with_code(email: str, code: str, device_label: Optional[str] = None) -
 def refresh(lic: License) -> License:
     """POST /api/license/refresh. Rotates the refresh token."""
     if _exact_realtor_beta_active():
-        _validate_complete_beta_license(lic, require_current=True)
+        # A cryptographically valid historical assertion may use its bound
+        # refresh token, but cannot grant local access while expired. Every
+        # successful response must replace it with a new current assertion.
+        _validate_complete_beta_license(lic, require_current=False)
     base_url = backend_url()
     resp = _post_hq(
         base_url,
@@ -1262,12 +1279,11 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
             "Realtor Beta could not verify every signed skill during activation.",
             code="beta_skill_sync_incomplete",
         )
-    if beta_active:
-        result["activation_complete"] = True
-    else:
-        # Stable historically treated skill failures as visible warnings and
-        # still returned successful activation. Preserve that compatibility.
-        result["activation_complete"] = True
+    result["activation_complete"] = not bool(
+        result.get("access_error")
+        or result.get("skill_error")
+        or result.get("skill_sync_warnings")
+    )
     return result
 
 
@@ -1325,7 +1341,7 @@ def cmd_activate(args) -> int:
         for warning in activation.get("skill_sync_warnings") or []:
             print(f"paid skill warning: {warning}", file=sys.stderr)
     print("next: run `elevate` or `elevate dashboard`.")
-    if _exact_realtor_beta_active() and not activation.get("activation_complete"):
+    if not activation.get("activation_complete"):
         print("activation_incomplete: account saved but setup did not finish.", file=sys.stderr)
         return 1
     return 0
@@ -1518,7 +1534,7 @@ def cmd_link(args) -> int:
         for warning in activation.get("skill_sync_warnings") or []:
             print(f"paid skill warning: {warning}", file=sys.stderr)
     print("next: run `elevate` or `elevate dashboard`.")
-    if _exact_realtor_beta_active() and not activation.get("activation_complete"):
+    if not activation.get("activation_complete"):
         print("activation_incomplete: account saved but setup did not finish.", file=sys.stderr)
         return 1
     return 0

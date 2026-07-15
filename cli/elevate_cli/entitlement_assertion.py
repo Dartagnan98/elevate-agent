@@ -35,7 +35,22 @@ ENTITLEMENT_ASSERTION_PUBLIC_KEYS: dict[str, str] = {
 
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TIER_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_CLAIM_KEYS = frozenset({
+    "ath",
+    "aud",
+    "email",
+    "entitlements",
+    "exp",
+    "iat",
+    "iss",
+    "jti",
+    "license_id",
+    "nbf",
+    "rth",
+    "schema",
+    "sub",
+    "tier",
+})
 _MAX_ASSERTION_BYTES = 128 * 1024
 _CLOCK_SKEW_SECONDS = 30
 
@@ -154,7 +169,7 @@ def _required_text(
 
 def _required_time(claims: Mapping[str, Any], name: str) -> int:
     value = claims.get(name)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise EntitlementAssertionError(
             f"The entitlement assertion has an invalid {name} claim.",
             code="beta_entitlement_claim_invalid",
@@ -195,6 +210,7 @@ def verify_entitlement_assertion(
     refresh_token: str,
     now: int | None = None,
     trusted_keys: Mapping[str, str] | None = None,
+    require_current: bool = True,
 ) -> EntitlementAssertionClaims:
     """Verify and return one strict EdDSA compact entitlement assertion."""
     if (
@@ -266,6 +282,11 @@ def verify_entitlement_assertion(
         _decode_base64url(payload_segment, label="payload"),
         label="payload",
     )
+    if set(claims) != _CLAIM_KEYS:
+        raise EntitlementAssertionError(
+            "The entitlement assertion has unsupported schema 1 claims.",
+            code="beta_entitlement_claim_invalid",
+        )
     if claims.get("schema") != ENTITLEMENT_ASSERTION_SCHEMA or isinstance(
         claims.get("schema"), bool
     ):
@@ -288,13 +309,13 @@ def verify_entitlement_assertion(
     license_id = _required_text(claims, "license_id")
     assertion_id = _required_text(claims, "jti")
     email = _required_text(claims, "email", max_length=320)
-    if email != email.lower() or not _EMAIL_RE.fullmatch(email):
+    if email != email.lower():
         raise EntitlementAssertionError(
             "The entitlement assertion email is not normalized.",
             code="beta_entitlement_claim_invalid",
         )
     tier = _required_text(claims, "tier", max_length=64)
-    if not _TIER_RE.fullmatch(tier):
+    if not _TIER_RE.fullmatch(tier) or tier not in {"pro", "builder"}:
         raise EntitlementAssertionError(
             "The entitlement assertion tier is not normalized.",
             code="beta_entitlement_claim_invalid",
@@ -323,6 +344,15 @@ def verify_entitlement_assertion(
     not_before = _required_time(claims, "nbf")
     expires_at = _required_time(claims, "exp")
     current = int(time.time()) if now is None else int(now)
+    if (
+        not_before != issued_at
+        or expires_at <= issued_at
+        or expires_at - issued_at > 3600
+    ):
+        raise EntitlementAssertionError(
+            "The entitlement assertion validity window is not schema 1 canonical.",
+            code="beta_entitlement_claim_invalid",
+        )
     if issued_at > current + _CLOCK_SKEW_SECONDS:
         raise EntitlementAssertionError(
             "The entitlement assertion was issued in the future.",
@@ -333,15 +363,10 @@ def verify_entitlement_assertion(
             "The entitlement assertion is not active yet.",
             code="beta_entitlement_assertion_not_current",
         )
-    if expires_at <= current or expires_at <= issued_at or expires_at <= not_before:
+    if require_current and expires_at <= current - _CLOCK_SKEW_SECONDS:
         raise EntitlementAssertionError(
-            "The entitlement assertion is expired or has an invalid lifetime.",
+            "The entitlement assertion has expired.",
             code="beta_entitlement_assertion_not_current",
-        )
-    if not_before != issued_at or expires_at - issued_at != 3600:
-        raise EntitlementAssertionError(
-            "The entitlement assertion validity window is not schema 1 canonical.",
-            code="beta_entitlement_claim_invalid",
         )
 
     access_hash = _required_text(claims, "ath", max_length=64)

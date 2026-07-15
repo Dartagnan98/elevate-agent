@@ -87,7 +87,7 @@ def get_account_key() -> str:
         try:
             from elevate_cli.license import read_verified_beta_license_snapshot
 
-            beta_license = read_verified_beta_license_snapshot(require_current=True)
+            beta_license = read_verified_beta_license_snapshot(require_current=False)
             email = beta_license.email
         except Exception:
             return "default"
