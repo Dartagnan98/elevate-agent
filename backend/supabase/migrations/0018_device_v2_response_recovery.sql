@@ -102,14 +102,14 @@ begin
     raise exception 'device approver is not active' using errcode = 'P0001';
   end if;
 
-  select grant.device_label,
-         grant.user_code,
-         grant.proposed_refresh_token_hash,
-         grant.status,
-         grant.expires_at,
-         grant.user_id,
-         grant.license_id,
-         grant.refresh_token_plain is null
+  select device_grant.device_label,
+         device_grant.user_code,
+         device_grant.proposed_refresh_token_hash,
+         device_grant.status,
+         device_grant.expires_at,
+         device_grant.user_id,
+         device_grant.license_id,
+         device_grant.refresh_token_plain is null
     into v_device_label,
          v_user_code,
          v_proposed_hash,
@@ -118,8 +118,8 @@ begin
          v_user_id,
          v_existing_license_id,
          v_plaintext_is_clear
-    from public.device_grants as grant
-   where grant.id = p_grant_id
+    from public.device_grants as device_grant
+   where device_grant.id = p_grant_id
    for update;
 
   if not found then
@@ -266,20 +266,20 @@ begin
       using errcode = '22023';
   end if;
 
-  select grant.id,
-         grant.proposed_refresh_token_hash,
-         grant.status,
-         grant.expires_at,
-         grant.license_id,
-         grant.refresh_token_plain is null
+  select device_grant.id,
+         device_grant.proposed_refresh_token_hash,
+         device_grant.status,
+         device_grant.expires_at,
+         device_grant.license_id,
+         device_grant.refresh_token_plain is null
     into v_grant_id,
          v_proposed_hash,
          v_status,
          v_expires_at,
          v_license_id,
          v_plaintext_is_clear
-    from public.device_grants as grant
-   where grant.device_code_hash = p_device_code_hash
+    from public.device_grants as device_grant
+   where device_grant.device_code_hash = p_device_code_hash
    for update;
 
   if not found then
@@ -363,14 +363,14 @@ begin
     raise exception 'invalid device v2 claim token material' using errcode = '22023';
   end if;
 
-  select grant.id,
-         grant.proposed_refresh_token_hash,
-         grant.status,
-         grant.expires_at,
-         grant.claim_retry_until,
-         grant.user_id,
-         grant.license_id,
-         grant.refresh_token_plain is null
+  select device_grant.id,
+         device_grant.proposed_refresh_token_hash,
+         device_grant.status,
+         device_grant.expires_at,
+         device_grant.claim_retry_until,
+         device_grant.user_id,
+         device_grant.license_id,
+         device_grant.refresh_token_plain is null
     into v_grant_id,
          v_proposed_hash,
          v_status,
@@ -379,8 +379,8 @@ begin
          v_user_id,
          v_license_id,
          v_plaintext_is_clear
-    from public.device_grants as grant
-   where grant.device_code_hash = p_device_code_hash
+    from public.device_grants as device_grant
+   where device_grant.device_code_hash = p_device_code_hash
    for update;
 
   if not found then
@@ -530,12 +530,12 @@ declare
   v_count integer := 0;
 begin
   for v_grant in
-    select grant.id, grant.status, grant.license_id
-      from public.device_grants as grant
-     where grant.proposed_refresh_token_hash is not null
-       and grant.status in ('pending', 'approved')
-       and grant.expires_at <= clock_timestamp()
-     order by grant.id
+    select device_grant.id, device_grant.status, device_grant.license_id
+      from public.device_grants as device_grant
+     where device_grant.proposed_refresh_token_hash is not null
+       and device_grant.status in ('pending', 'approved')
+       and device_grant.expires_at <= clock_timestamp()
+     order by device_grant.id
      for update
   loop
     if v_grant.status = 'approved' and v_grant.license_id is not null then

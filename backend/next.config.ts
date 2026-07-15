@@ -1,5 +1,12 @@
 import type { NextConfig } from "next";
 
+const backendBuildId = process.env.ELEVATE_BACKEND_BUILD_ID || "development";
+if (!/^[A-Za-z0-9._-]{1,128}$/.test(backendBuildId)) {
+  throw new Error(
+    "ELEVATE_BACKEND_BUILD_ID must be a safe public build identifier",
+  );
+}
+
 // Security response headers applied to every route (guide §4.3, checklist #12).
 // Conservative set that won't break the admin UI: HSTS, anti-clickjacking,
 // MIME-sniff protection, referrer + permissions policy. A strict
@@ -27,6 +34,13 @@ const securityHeaders = [
 const config: NextConfig = {
   // Don't leak the framework/version in the Server header.
   poweredByHeader: false,
+  // This value is deliberately public and immutable inside the compiled
+  // server bundle. The deployer supplies its release id at build time so the
+  // post-cutover health gate can prove it reached the new worker rather than
+  // an old process with an otherwise-compatible signer configuration.
+  env: {
+    ELEVATE_BACKEND_BUILD_ID: backendBuildId,
+  },
   async headers() {
     return [
       {

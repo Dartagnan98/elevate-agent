@@ -2768,6 +2768,23 @@ async function runAfterNamedRpcHook(name: string): Promise<void> {
   await hook.run();
 }
 
+function fakeSchemaReadinessResult(): Record<string, unknown> {
+  return {
+    contract: "elevate-hq-schema-readiness-v1",
+    schema_version: "0020",
+    ready: true,
+    tables_ready: true,
+    columns_ready: true,
+    constraints_ready: true,
+    indexes_ready: true,
+    rpcs_ready: true,
+    triggers_ready: true,
+    privileges_ready: true,
+    data_invariants_ready: true,
+    initial_issuance_v2_ready: true,
+  };
+}
+
 async function fakeSupabaseFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const request = input instanceof Request ? input : null;
   const url = new URL(request ? request.url : String(input));
@@ -2778,6 +2795,10 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
   const body = bodyText ? JSON.parse(bodyText) : null;
   const parts = url.pathname.split("/").filter(Boolean);
   const table = parts.at(-1) || "";
+
+  if (url.pathname.includes("/rpc/elevate_hq_schema_readiness_v1")) {
+    return okJson(fakeSchemaReadinessResult());
+  }
 
   if (url.pathname.includes("/rpc/check_rate_limit")) {
     return okJson({ allowed: true, remaining: 100, retry_after: 0 });

@@ -31,4 +31,9 @@ create index if not exists app_crash_reports_kind_created_idx
 
 alter table app_crash_reports enable row level security;
 
--- no policies: anon/authenticated get nothing. service_role bypasses RLS.
+-- No policies: public clients get nothing. BYPASSRLS does not itself grant
+-- table privileges, so keep the backend's exact operations self-contained.
+revoke all on table public.app_crash_reports
+  from public, anon, authenticated, service_role;
+grant select, insert on table public.app_crash_reports
+  to service_role;

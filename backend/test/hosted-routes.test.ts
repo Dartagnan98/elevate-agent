@@ -269,9 +269,14 @@ describe("hosted route handlers", () => {
     assert.deepEqual(body, {
       ok: true,
       service: "elevate-backend",
+      backend_build_id: "development",
       entitlement_signer_ready: true,
       entitlement_signing_active_kid: "ent-2026-07-a",
       entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+      database_schema_ready: true,
+      database_schema_contract: "elevate-hq-schema-readiness-v1",
+      database_schema_version: "0020",
+      initial_issuance_v2_ready: true,
     });
 
     await withTestEntitlementSigningRing(TEST_ENTITLEMENT_KEY_B, async () => {
@@ -280,9 +285,14 @@ describe("hosted route handlers", () => {
       assert.deepEqual(await responseJson(ringResponse), {
         ok: true,
         service: "elevate-backend",
+        backend_build_id: "development",
         entitlement_signer_ready: true,
         entitlement_signing_active_kid: TEST_ENTITLEMENT_KEY_B,
         entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+        database_schema_ready: true,
+        database_schema_contract: "elevate-hq-schema-readiness-v1",
+        database_schema_version: "0020",
+        initial_issuance_v2_ready: true,
       });
     });
   });
@@ -334,12 +344,41 @@ describe("hosted route handlers", () => {
         assert.deepEqual(body, {
           ok: false,
           service: "elevate-backend",
+          backend_build_id: "development",
           entitlement_signer_ready: false,
           entitlement_signing_active_kid: scenario.activeKid,
           entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+          database_schema_ready: true,
+          database_schema_contract: "elevate-hq-schema-readiness-v1",
+          database_schema_version: "0020",
+          initial_issuance_v2_ready: true,
         });
         assert.equal(JSON.stringify(body).includes(String(legacySecret)), false);
       });
+    }
+  });
+
+  it("health is 503 when the read-only 0011-0020 schema probe cannot run", async () => {
+    const route = await loadRoute<{ GET: () => Promise<Response> }>("health");
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    Reflect.deleteProperty(process.env, "SUPABASE_SERVICE_ROLE_KEY");
+    try {
+      const response = await route.GET();
+      const body = await responseJson(response);
+      assert.equal(response.status, 503);
+      assert.equal(body.ok, false);
+      assert.equal(body.entitlement_signer_ready, true);
+      assert.equal(body.database_schema_ready, false);
+      assert.equal(
+        body.database_schema_contract,
+        "elevate-hq-schema-readiness-v1",
+      );
+      assert.equal(body.database_schema_version, "0020");
+      assert.equal(body.initial_issuance_v2_ready, false);
+    } finally {
+      if (serviceRoleKey !== undefined) {
+        process.env.SUPABASE_SERVICE_ROLE_KEY = serviceRoleKey;
+      }
     }
   });
 

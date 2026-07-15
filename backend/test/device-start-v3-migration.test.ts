@@ -39,6 +39,24 @@ function assertOrdered(definition: string, ...fragments: string[]): void {
 }
 
 describe("device start v3 migration contract", () => {
+  it("does not use the reserved SQL keyword grant as a table alias", () => {
+    for (const [name, source] of [
+      ["device v2", deviceV2Migration],
+      ["device v3", migration],
+    ] as const) {
+      const executableSql = source
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*--/.test(line))
+        .join("\n");
+      assert.doesNotMatch(
+        executableSql,
+        /\bas\s+grant\b|\bgrant\./i,
+        `${name} migration uses reserved alias grant`,
+      );
+    }
+    assert.match(migration, /from public\.device_grants as device_grant/);
+  });
+
   it("accepts and persists hashes only behind a service-role RPC", () => {
     const start = functionDefinition("public.start_device_grant_atomic_v3");
     assert.match(start, /security invoker/);
@@ -162,10 +180,12 @@ describe("device start v3 migration contract", () => {
 
   it("locks approval B then grant then user before sampling the internal clock", () => {
     const approval = functionDefinition("public.approve_device_grant_atomic_v2");
-    const firstRead = approval.indexOf("select grant.proposed_refresh_token_hash");
+    const firstRead = approval.indexOf(
+      "select device_grant.proposed_refresh_token_hash",
+    );
     const capabilityLock = approval.indexOf("lock_refresh_capability_v1");
     const lockedRead = approval.indexOf(
-      "select grant.proposed_refresh_token_hash",
+      "select device_grant.proposed_refresh_token_hash",
       capabilityLock,
     );
     const grantRowLock = approval.indexOf("for update", lockedRead);
@@ -185,7 +205,7 @@ describe("device start v3 migration contract", () => {
     assert.ok(lockedRead > capabilityLock);
     assert.match(
       approval.slice(lockedRead, grantRowLock),
-      /grant\.proposed_refresh_token_hash,[\s\S]*?grant\.status/,
+      /device_grant\.proposed_refresh_token_hash,[\s\S]*?device_grant\.status/,
     );
     assert.ok(grantRowLock > lockedRead);
     assert.ok(exactRevalidation > grantRowLock);
@@ -211,7 +231,7 @@ describe("device start v3 migration contract", () => {
     );
     const internalUserLock = originalApproval.indexOf("select app_user.status");
     const internalGrantLock = originalApproval.indexOf(
-      "select grant.device_label",
+      "select device_grant.device_label",
       internalUserLock,
     );
     assert.ok(internalClock >= 0);

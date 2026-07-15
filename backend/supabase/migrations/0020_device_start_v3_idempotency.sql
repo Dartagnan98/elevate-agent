@@ -142,15 +142,15 @@ begin
 
   for v_attempt in 1..2 loop
     v_grant_id := null;
-    select grant.id,
-           grant.proposed_refresh_token_hash,
-           grant.user_code,
-           grant.status,
-           grant.expires_at,
-           grant.user_id,
-           grant.license_id,
-           grant.refresh_token_plain is null,
-           grant.claim_retry_until
+    select device_grant.id,
+           device_grant.proposed_refresh_token_hash,
+           device_grant.user_code,
+           device_grant.status,
+           device_grant.expires_at,
+           device_grant.user_id,
+           device_grant.license_id,
+           device_grant.refresh_token_plain is null,
+           device_grant.claim_retry_until
       into v_grant_id,
            v_proposed_hash,
            v_user_code,
@@ -160,8 +160,8 @@ begin
            v_license_id,
            v_plaintext_is_clear,
            v_claim_retry_until
-      from public.device_grants as grant
-     where grant.device_code_hash = p_device_code_hash
+      from public.device_grants as device_grant
+     where device_grant.device_code_hash = p_device_code_hash
      for update;
     -- A direct v2 update can also make the row lock wait after the advisory
     -- locks were acquired.
@@ -277,8 +277,8 @@ begin
     -- slot in a license lineage. Never reveal which collision occurred.
     if exists (
       select 1
-        from public.device_grants as grant
-       where grant.proposed_refresh_token_hash = p_proposed_refresh_token_hash
+        from public.device_grants as device_grant
+       where device_grant.proposed_refresh_token_hash = p_proposed_refresh_token_hash
     ) or exists (
       select 1
         from public.licenses as license
@@ -290,8 +290,8 @@ begin
 
     if exists (
       select 1
-        from public.device_grants as grant
-       where grant.user_code = p_user_code
+        from public.device_grants as device_grant
+       where device_grant.user_code = p_user_code
     ) then
       return jsonb_build_object('result', 'user_code_conflict');
     end if;
@@ -399,8 +399,8 @@ begin
 
   if not exists (
     select 1
-      from public.device_grants as grant
-     where grant.proposed_refresh_token_hash = p_next_refresh_token_hash
+      from public.device_grants as device_grant
+     where device_grant.proposed_refresh_token_hash = p_next_refresh_token_hash
   ) then
     return elevate_internal.rotate_license_refresh_v2(
       p_current_refresh_token_hash,
@@ -464,10 +464,10 @@ begin
 
   -- This first read is deliberately not a row lock. B must be acquired before
   -- any durable grant/user/license row lock.
-  select grant.proposed_refresh_token_hash
+  select device_grant.proposed_refresh_token_hash
     into v_proposed_hash
-    from public.device_grants as grant
-   where grant.id = p_grant_id;
+    from public.device_grants as device_grant
+   where device_grant.id = p_grant_id;
 
   if found and v_proposed_hash ~ '^[0-9a-f]{64}$' then
     perform elevate_internal.lock_refresh_capability_v1(v_proposed_hash);
@@ -483,12 +483,12 @@ begin
   -- proposal update may have committed while the wrapper waited for B;
   -- the original implementation must never approve that replacement B under
   -- the stale lock.
-  select grant.proposed_refresh_token_hash,
-         grant.status
+  select device_grant.proposed_refresh_token_hash,
+         device_grant.status
     into v_locked_proposed_hash,
          v_locked_status
-    from public.device_grants as grant
-   where grant.id = p_grant_id
+    from public.device_grants as device_grant
+   where device_grant.id = p_grant_id
    for update;
 
   if found
@@ -543,8 +543,8 @@ begin
   perform elevate_internal.lock_refresh_capability_v1(p_refresh_token_hash);
   if exists (
     select 1
-      from public.device_grants as grant
-     where grant.proposed_refresh_token_hash = p_refresh_token_hash
+      from public.device_grants as device_grant
+     where device_grant.proposed_refresh_token_hash = p_refresh_token_hash
   ) then
     return jsonb_build_object('result', 'collision');
   end if;
@@ -596,8 +596,8 @@ begin
   perform elevate_internal.lock_refresh_capability_v1(p_refresh_token_hash);
   if exists (
     select 1
-      from public.device_grants as grant
-     where grant.proposed_refresh_token_hash = p_refresh_token_hash
+      from public.device_grants as device_grant
+     where device_grant.proposed_refresh_token_hash = p_refresh_token_hash
   ) then
     return jsonb_build_object('result', 'collision');
   end if;
@@ -635,8 +635,8 @@ begin
   perform elevate_internal.lock_refresh_capability_v1(p_refresh_token_hash);
   if exists (
     select 1
-      from public.device_grants as grant
-     where grant.proposed_refresh_token_hash = p_refresh_token_hash
+      from public.device_grants as device_grant
+     where device_grant.proposed_refresh_token_hash = p_refresh_token_hash
   ) then
     return jsonb_build_object('result', 'invalid');
   end if;
@@ -705,4 +705,358 @@ grant execute on function elevate_internal.signup_with_license_v2(text, text, te
 revoke execute on function elevate_internal.replay_signup_license_v2(uuid, text, text)
   from public, anon, authenticated;
 grant execute on function elevate_internal.replay_signup_license_v2(uuid, text, text)
+  to service_role;
+
+-- One service-role-only, read-only deployment gate. The application health
+-- route calls this instead of attempting a write or inferring readiness from
+-- a successful connection. Every result field is a boolean/public version
+-- label; no row contents or configuration values leave PostgreSQL.
+create or replace function public.elevate_hq_schema_readiness_v1()
+returns jsonb
+language plpgsql
+stable
+security invoker
+set search_path = pg_catalog, public, pg_temp
+as $$
+declare
+  function_signature text;
+  v_tables_ready boolean;
+  v_columns_ready boolean;
+  v_constraints_ready boolean;
+  v_indexes_ready boolean;
+  v_rpcs_ready boolean := true;
+  v_triggers_ready boolean;
+  v_privileges_ready boolean;
+  v_data_invariants_ready boolean;
+  v_initial_issuance_v2_ready boolean;
+  v_ready boolean;
+begin
+  v_tables_ready :=
+    to_regclass('public.session_diagnostic_events') is not null
+    and to_regclass('public.app_crash_reports') is not null
+    and coalesce((
+      select relation.relrowsecurity
+        from pg_catalog.pg_class as relation
+       where relation.oid = to_regclass('public.session_diagnostic_events')
+    ), false)
+    and coalesce((
+      select relation.relrowsecurity
+        from pg_catalog.pg_class as relation
+       where relation.oid = to_regclass('public.app_crash_reports')
+    ), false);
+
+  v_columns_ready := (
+    select count(*) = 6
+      from information_schema.columns
+     where table_schema = 'public'
+       and (
+         (table_name = 'licenses' and column_name in (
+           'previous_refresh_token_hash',
+           'previous_refresh_attempt_hash',
+           'refresh_family_expires_at',
+           'initial_issuance_kind'
+         ))
+         or
+         (table_name = 'device_grants' and column_name in (
+           'proposed_refresh_token_hash',
+           'claim_retry_until'
+         ))
+       )
+  ) and coalesce((
+    select attribute.attnotnull
+      from pg_catalog.pg_attribute as attribute
+     where attribute.attrelid = to_regclass('public.licenses')
+       and attribute.attname = 'refresh_family_expires_at'
+       and not attribute.attisdropped
+  ), false);
+
+  v_constraints_ready := (
+    select count(*) = 4
+      from pg_catalog.pg_constraint as constraint_row
+     where (
+       (
+         constraint_row.conrelid = to_regclass('public.licenses')
+         and constraint_row.conname = 'licenses_initial_issuance_kind_check'
+       ) or (
+         constraint_row.conrelid = to_regclass('public.device_grants')
+         and constraint_row.conname in (
+           'device_grants_proposed_refresh_hash_format_ck',
+           'device_grants_v2_plaintext_exclusive_ck',
+           'device_grants_claim_retry_window_ck'
+         )
+       )
+     )
+     and constraint_row.convalidated
+  );
+
+  v_indexes_ready := (
+    select count(*) = 9
+      from pg_catalog.pg_class as relation
+      join pg_catalog.pg_namespace as namespace
+        on namespace.oid = relation.relnamespace
+      join pg_catalog.pg_index as index_row
+        on index_row.indexrelid = relation.oid
+     where namespace.nspname = 'public'
+       and relation.relkind = 'i'
+       and index_row.indisvalid
+       and index_row.indisready
+       and relation.relname in (
+         'session_diagnostic_events_user_created_idx',
+         'session_diagnostic_events_session_created_idx',
+         'session_diagnostic_events_event_created_idx',
+         'app_crash_reports_user_created_idx',
+         'app_crash_reports_version_created_idx',
+         'app_crash_reports_kind_created_idx',
+         'login_codes_one_unconsumed_per_user_idx',
+         'licenses_previous_refresh_token_hash_idx',
+         'device_grants_proposed_refresh_token_hash_uidx'
+       )
+       and (
+         relation.relname not in (
+           'login_codes_one_unconsumed_per_user_idx',
+           'device_grants_proposed_refresh_token_hash_uidx'
+         )
+         or index_row.indisunique
+       )
+       and (
+         relation.relname not in (
+           'login_codes_one_unconsumed_per_user_idx',
+           'licenses_previous_refresh_token_hash_idx',
+           'device_grants_proposed_refresh_token_hash_uidx'
+         )
+         or index_row.indpred is not null
+       )
+  );
+
+  foreach function_signature in array array[
+    'public.check_rate_limit(text,integer,integer)',
+    'public.approve_device_grant_atomic(uuid,uuid,text,text)',
+    'public.issue_login_code_atomic(uuid,text,timestamp with time zone,text,text)',
+    'public.record_login_code_attempt_atomic(uuid,uuid,text,integer)',
+    'public.redeem_login_code_atomic(uuid,uuid,text,uuid,text,text,integer)',
+    'public.add_org_membership_atomic(uuid,uuid,public.org_role)',
+    'public.create_org_with_owner_atomic(uuid,uuid,text,text)',
+    'public.accept_invitation_atomic(uuid,text,uuid,text,uuid,text)',
+    'public.start_device_grant_atomic_v3(text,text,text,text,text,text,timestamp with time zone)',
+    'public.rotate_license_refresh_v2(text,text,text)',
+    'public.approve_device_grant_atomic_v2(uuid,uuid)',
+    'public.poll_device_grant_pending_v2(text,text)',
+    'public.claim_device_grant_atomic_v2(text,text)',
+    'public.expire_stale_device_grants_v2()',
+    'public.issue_existing_user_license_v2(uuid,text,text,text)',
+    'public.signup_with_license_v2(text,text,text,text,text,text)',
+    'public.replay_signup_license_v2(uuid,text,text)',
+    'public.elevate_hq_schema_readiness_v1()',
+    'elevate_internal.lock_refresh_capability_v1(text)',
+    'elevate_internal.lock_device_grant_capability_v1()',
+    'elevate_internal.rotate_license_refresh_v2(text,text,text)',
+    'elevate_internal.approve_device_grant_atomic_v2(uuid,uuid)',
+    'elevate_internal.issue_existing_user_license_v2(uuid,text,text,text)',
+    'elevate_internal.signup_with_license_v2(text,text,text,text,text,text)',
+    'elevate_internal.replay_signup_license_v2(uuid,text,text)'
+  ]
+  loop
+    if to_regprocedure(function_signature) is null then
+      v_rpcs_ready := false;
+    end if;
+  end loop;
+
+  foreach function_signature in array array[
+    'rotate_license_refresh_v2(text,text,text)',
+    'approve_device_grant_atomic_v2(uuid,uuid)',
+    'issue_existing_user_license_v2(uuid,text,text,text)',
+    'signup_with_license_v2(text,text,text,text,text,text)',
+    'replay_signup_license_v2(uuid,text,text)'
+  ]
+  loop
+    if to_regprocedure('public.' || function_signature) is null
+       or to_regprocedure('elevate_internal.' || function_signature) is null
+       or position(
+         'elevate_internal.' in pg_catalog.pg_get_functiondef(
+           to_regprocedure('public.' || function_signature)
+         )
+       ) = 0 then
+      v_rpcs_ready := false;
+    end if;
+  end loop;
+
+  v_triggers_ready :=
+    to_regnamespace('elevate_internal') is not null
+    and exists (
+      select 1
+        from pg_catalog.pg_trigger as trigger_row
+       where trigger_row.tgrelid = to_regclass('public.device_grants')
+         and trigger_row.tgname = 'device_grants_capability_lock_v1'
+         and not trigger_row.tgisinternal
+         and trigger_row.tgenabled in ('O', 'A')
+         and trigger_row.tgfoid = to_regprocedure(
+           'elevate_internal.lock_device_grant_capability_v1()'
+         )
+    );
+
+  v_privileges_ready :=
+    pg_catalog.has_schema_privilege('service_role', 'elevate_internal', 'USAGE')
+    and not pg_catalog.has_schema_privilege('anon', 'elevate_internal', 'USAGE')
+    and not pg_catalog.has_schema_privilege('authenticated', 'elevate_internal', 'USAGE');
+
+  if v_tables_ready then
+    v_privileges_ready := v_privileges_ready
+      and pg_catalog.has_table_privilege(
+        'service_role', 'public.session_diagnostic_events', 'SELECT'
+      )
+      and pg_catalog.has_table_privilege(
+        'service_role', 'public.session_diagnostic_events', 'INSERT'
+      )
+      and pg_catalog.has_table_privilege(
+        'service_role', 'public.app_crash_reports', 'SELECT'
+      )
+      and pg_catalog.has_table_privilege(
+        'service_role', 'public.app_crash_reports', 'INSERT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'anon', 'public.session_diagnostic_events', 'SELECT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'anon', 'public.session_diagnostic_events', 'INSERT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'authenticated', 'public.session_diagnostic_events', 'SELECT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'authenticated', 'public.session_diagnostic_events', 'INSERT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'anon', 'public.app_crash_reports', 'SELECT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'anon', 'public.app_crash_reports', 'INSERT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'authenticated', 'public.app_crash_reports', 'SELECT'
+      )
+      and not pg_catalog.has_table_privilege(
+        'authenticated', 'public.app_crash_reports', 'INSERT'
+      );
+  else
+    v_privileges_ready := false;
+  end if;
+
+  foreach function_signature in array array[
+    'public.check_rate_limit(text,integer,integer)',
+    'public.approve_device_grant_atomic(uuid,uuid,text,text)',
+    'public.issue_login_code_atomic(uuid,text,timestamp with time zone,text,text)',
+    'public.record_login_code_attempt_atomic(uuid,uuid,text,integer)',
+    'public.redeem_login_code_atomic(uuid,uuid,text,uuid,text,text,integer)',
+    'public.add_org_membership_atomic(uuid,uuid,public.org_role)',
+    'public.create_org_with_owner_atomic(uuid,uuid,text,text)',
+    'public.accept_invitation_atomic(uuid,text,uuid,text,uuid,text)',
+    'public.start_device_grant_atomic_v3(text,text,text,text,text,text,timestamp with time zone)',
+    'public.rotate_license_refresh_v2(text,text,text)',
+    'public.approve_device_grant_atomic_v2(uuid,uuid)',
+    'public.poll_device_grant_pending_v2(text,text)',
+    'public.claim_device_grant_atomic_v2(text,text)',
+    'public.expire_stale_device_grants_v2()',
+    'public.issue_existing_user_license_v2(uuid,text,text,text)',
+    'public.signup_with_license_v2(text,text,text,text,text,text)',
+    'public.replay_signup_license_v2(uuid,text,text)',
+    'public.elevate_hq_schema_readiness_v1()',
+    'elevate_internal.lock_refresh_capability_v1(text)',
+    'elevate_internal.lock_device_grant_capability_v1()',
+    'elevate_internal.rotate_license_refresh_v2(text,text,text)',
+    'elevate_internal.approve_device_grant_atomic_v2(uuid,uuid)',
+    'elevate_internal.issue_existing_user_license_v2(uuid,text,text,text)',
+    'elevate_internal.signup_with_license_v2(text,text,text,text,text,text)',
+    'elevate_internal.replay_signup_license_v2(uuid,text,text)'
+  ]
+  loop
+    if to_regprocedure(function_signature) is null
+       or not pg_catalog.has_function_privilege(
+         'service_role', function_signature, 'EXECUTE'
+       )
+       or pg_catalog.has_function_privilege('anon', function_signature, 'EXECUTE')
+       or pg_catalog.has_function_privilege(
+         'authenticated', function_signature, 'EXECUTE'
+       ) then
+      v_privileges_ready := false;
+    end if;
+  end loop;
+
+  v_data_invariants_ready := false;
+  if to_regclass('public.licenses') is not null
+     and to_regclass('public.login_codes') is not null
+     and to_regclass('public.device_grants') is not null then
+    v_data_invariants_ready :=
+      not exists (
+        select 1
+          from public.licenses
+         where refresh_family_expires_at is null
+      )
+      and not exists (
+        select 1
+          from public.login_codes
+         where consumed_at is null
+         group by user_id
+        having count(*) > 1
+      )
+      and not exists (
+        select 1
+          from public.device_grants
+         where proposed_refresh_token_hash is not null
+           and refresh_token_plain is not null
+      );
+  end if;
+
+  v_initial_issuance_v2_ready :=
+    v_columns_ready
+    and v_constraints_ready
+    and to_regprocedure(
+      'public.issue_existing_user_license_v2(uuid,text,text,text)'
+    ) is not null
+    and to_regprocedure(
+      'public.signup_with_license_v2(text,text,text,text,text,text)'
+    ) is not null
+    and to_regprocedure(
+      'public.replay_signup_license_v2(uuid,text,text)'
+    ) is not null
+    and to_regprocedure(
+      'elevate_internal.issue_existing_user_license_v2(uuid,text,text,text)'
+    ) is not null
+    and to_regprocedure(
+      'elevate_internal.signup_with_license_v2(text,text,text,text,text,text)'
+    ) is not null
+    and to_regprocedure(
+      'elevate_internal.replay_signup_license_v2(uuid,text,text)'
+    ) is not null;
+
+  v_ready :=
+    v_tables_ready
+    and v_columns_ready
+    and v_constraints_ready
+    and v_indexes_ready
+    and v_rpcs_ready
+    and v_triggers_ready
+    and v_privileges_ready
+    and v_data_invariants_ready
+    and v_initial_issuance_v2_ready;
+
+  return pg_catalog.jsonb_build_object(
+    'contract', 'elevate-hq-schema-readiness-v1',
+    'schema_version', '0020',
+    'ready', v_ready,
+    'tables_ready', v_tables_ready,
+    'columns_ready', v_columns_ready,
+    'constraints_ready', v_constraints_ready,
+    'indexes_ready', v_indexes_ready,
+    'rpcs_ready', v_rpcs_ready,
+    'triggers_ready', v_triggers_ready,
+    'privileges_ready', v_privileges_ready,
+    'data_invariants_ready', v_data_invariants_ready,
+    'initial_issuance_v2_ready', v_initial_issuance_v2_ready
+  );
+end;
+$$;
+
+revoke execute on function public.elevate_hq_schema_readiness_v1()
+  from public, anon, authenticated;
+grant execute on function public.elevate_hq_schema_readiness_v1()
   to service_role;
