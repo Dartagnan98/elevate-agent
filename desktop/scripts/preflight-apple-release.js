@@ -119,17 +119,22 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import elevate_cli.main
 from run_agent import AIAgent
-AIAgent(
-    model="dependency-smoke",
-    provider="custom",
-    base_url="http://127.0.0.1:9/v1",
-    api_key="dependency-smoke",
+provider = sys.argv[2]
+agent_options = dict(
+    model=sys.argv[3],
+    provider=provider,
     enabled_toolsets=[],
     quiet_mode=True,
     skip_context_files=True,
     skip_memory=True,
     persist_session=False,
 )
+if provider == "custom":
+    agent_options.update(
+        base_url="http://127.0.0.1:9/v1",
+        api_key="dependency-smoke",
+    )
+AIAgent(**agent_options)
 `;
 
 function summarizeProbe(result, successDetail) {
@@ -145,10 +150,31 @@ function probeBundledRuntime(relativePython) {
   const runtimePython = path.join(REPO, relativePython);
   const cliRoot = path.join(REPO, "cli");
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "elevate-runtime-preflight-"));
+  const elevateHome = path.join(tempHome, releaseProfile.elevateHomeName);
+  const provider = releaseProfile.isBeta ? releaseProfile.allowedProvider : "custom";
+  const model = releaseProfile.isBeta ? releaseProfile.allowedModels[0] : "dependency-smoke";
+  fs.mkdirSync(elevateHome, { recursive: true });
+  if (releaseProfile.isBeta) {
+    fs.writeFileSync(
+      path.join(elevateHome, "auth.json"),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          [provider]: {
+            tokens: {
+              access_token: "dependency-smoke",
+              refresh_token: "dependency-smoke-refresh",
+            },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+  }
   const env = {
     ...process.env,
     HOME: tempHome,
-    ELEVATE_HOME: path.join(tempHome, ".elevate"),
+    ELEVATE_HOME: elevateHome,
     NO_COLOR: "1",
   };
   for (const key of Object.keys(env)) {
@@ -173,7 +199,7 @@ function probeBundledRuntime(relativePython) {
         "pip check passed",
       ),
       agent: summarizeProbe(
-        run(["-I", "-B", "-c", RUNTIME_AGENT_PROBE, cliRoot]),
+        run(["-I", "-B", "-c", RUNTIME_AGENT_PROBE, cliRoot, provider, model]),
         "backend and AIAgent initialized",
       ),
     };

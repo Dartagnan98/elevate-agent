@@ -328,6 +328,20 @@ test("the real build runner exports one verified source ID into both builder con
   assert.doesNotMatch(scripts["smoke:mac:live"], /--skip-sidecar/);
 });
 
+test("Beta release preflight probes the signed Codex-only runtime policy", () => {
+  const preflight = fs.readFileSync(
+    path.resolve(__dirname, "..", "scripts", "preflight-apple-release.js"),
+    "utf8",
+  );
+
+  assert.match(preflight, /releaseProfile\.allowedProvider/);
+  assert.match(preflight, /releaseProfile\.allowedModels\[0\]/);
+  assert.match(preflight, /releaseProfile\.elevateHomeName/);
+  assert.match(preflight, /path\.join\(elevateHome, "auth\.json"\)/);
+  assert.match(preflight, /provider = sys\.argv\[2\]/);
+  assert.doesNotMatch(preflight, /provider="custom"/);
+});
+
 test("electron-builder numeric architecture enums normalize to release names", () => {
   assert.equal(normalizeArchitecture(1), "x64");
   assert.equal(normalizeArchitecture(3), "arm64");
