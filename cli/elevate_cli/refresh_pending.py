@@ -461,20 +461,180 @@ def _open_device_pending(
             unsafe_code="beta_device_state_unsafe",
             state_label="Device authorization",
         )
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(4096, MAX_MARKER_BYTES + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > MAX_MARKER_BYTES:
-                break
-        return fd, opened, parse_device_pending(b"".join(chunks))
+        return fd, opened, _read_device_pending_fd(fd)
     except Exception:
         os.close(fd)
         raise
+
+
+def _read_bounded_fd(fd: int) -> bytes:
+    """Reread one marker-sized regular file from its already-open inode."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = os.read(fd, min(4096, MAX_MARKER_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_MARKER_BYTES:
+            break
+    return b"".join(chunks)
+
+
+def _read_device_pending_fd(fd: int) -> PendingDevice:
+    """Reread and parse one already-authenticated Device marker inode."""
+    return parse_device_pending(_read_bounded_fd(fd))
+
+
+def _assert_device_lock_guard(
+    lock_guard: RefreshLockGuard,
+    dir_fd: int,
+) -> None:
+    """Require a live shared-lock guard for this exact profile directory."""
+    try:
+        if not isinstance(lock_guard, RefreshLockGuard):
+            raise TypeError("invalid refresh lock guard")
+        lock_guard.assert_held()
+        guarded_dir = os.fstat(lock_guard.dir_fd)
+        target_dir = os.fstat(dir_fd)
+        if (
+            not stat.S_ISDIR(guarded_dir.st_mode)
+            or not stat.S_ISDIR(target_dir.st_mode)
+            or guarded_dir.st_dev != target_dir.st_dev
+            or guarded_dir.st_ino != target_dir.st_ino
+        ):
+            raise OSError("refresh lock guard belongs to another profile")
+        _prove_refresh_flock_owner(lock_guard)
+    except Exception as exc:
+        raise _error(
+            "beta_device_state_unsafe",
+            "Realtor Beta could not verify the Device authorization lock.",
+            exc,
+        )
+
+
+def _prove_refresh_flock_owner(lock_guard: RefreshLockGuard) -> None:
+    """Prove this exact guard fd, rather than another opener, owns ``flock``."""
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    probe_fd = os.open(LOCK_NAME, flags, dir_fd=lock_guard.dir_fd)
+    probe_acquired = False
+    try:
+        probe_opened = _validate_private_file(
+            probe_fd,
+            artifact="lock",
+            empty=True,
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        _verify_named_fd(
+            lock_guard.dir_fd,
+            LOCK_NAME,
+            probe_opened,
+            artifact="lock",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        while True:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                probe_acquired = True
+                break
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    break
+                raise
+        if probe_acquired:
+            raise OSError("refresh lock guard no longer owns the advisory lock")
+
+        # The probe being blocked proves only that *someone* owns the lock.
+        # Reasserting through the guard fd distinguishes our open file
+        # description from a competing process or a forged live descriptor.
+        while True:
+            try:
+                fcntl.flock(lock_guard.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                raise
+    finally:
+        if probe_acquired:
+            try:
+                fcntl.flock(probe_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        os.close(probe_fd)
+
+
+def _assert_no_refresh_pending_fd(dir_fd: int) -> None:
+    """Keep Refresh and Device credential transitions mutually exclusive."""
+    opened_refresh: tuple[int, os.stat_result, PendingRefresh] | None = None
+    try:
+        try:
+            opened_refresh = _open_pending(dir_fd)
+        except RefreshPendingError:
+            raise
+        except Exception as exc:
+            raise _error(
+                "beta_refresh_state_unsafe",
+                "Realtor Beta could not safely read its pending refresh state.",
+                exc,
+            )
+        if opened_refresh is not None:
+            raise _error(
+                "beta_device_state_conflict",
+                "A Realtor Beta refresh attempt already exists.",
+            )
+    finally:
+        if opened_refresh is not None:
+            os.close(opened_refresh[0])
+
+
+def _read_device_pending_from_dir_fd(dir_fd: int) -> PendingDevice | None:
+    try:
+        opened_marker = _open_device_pending(dir_fd)
+    except RefreshPendingError:
+        raise
+    except Exception as exc:
+        raise _error(
+            "beta_device_state_unsafe",
+            "Realtor Beta could not safely read its pending Device authorization state.",
+            exc,
+        )
+    try:
+        return None if opened_marker is None else opened_marker[2]
+    finally:
+        if opened_marker is not None:
+            os.close(opened_marker[0])
+
+
+def _safe_unlink_open_inode(
+    dir_fd: int,
+    name: str,
+    opened: os.stat_result,
+) -> bool:
+    """Unlink *name* only when it still resolves to the opened temp inode."""
+    try:
+        named = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    if (
+        not stat.S_ISREG(named.st_mode)
+        or named.st_dev != opened.st_dev
+        or named.st_ino != opened.st_ino
+    ):
+        return False
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return True
 
 
 def read_pending(root: Path) -> PendingRefresh | None:
@@ -716,6 +876,250 @@ def write_device_pending(
         except OSError:
             pass
         os.close(dir_fd)
+
+
+def _validated_device_value(value: PendingDevice) -> PendingDevice:
+    if not isinstance(value, PendingDevice):
+        raise _error(
+            "beta_device_state_corrupt",
+            "The Realtor Beta expected Device authorization state is invalid.",
+        )
+    try:
+        return parse_device_pending(value.to_bytes())
+    except RefreshPendingError:
+        raise
+    except Exception as exc:
+        raise _error(
+            "beta_device_state_corrupt",
+            "The Realtor Beta expected Device authorization state is invalid.",
+            exc,
+        )
+
+
+def replace_device_pending(
+    root: Path,
+    expected: PendingDevice,
+    replacement: PendingDevice,
+    *,
+    lock_guard: RefreshLockGuard,
+) -> bool:
+    """Atomically CAS-replace one exact Device marker for explicit start-over.
+
+    The caller must hold the shared :func:`refresh_lock` and pass its live
+    guard.  A missing or already-superseded valid marker returns ``False``.
+    All unsafe paths and persistence ambiguity fail closed without removing a
+    marker: the old value remains before the single rename linearization point,
+    and the replacement remains after it.
+    """
+    expected = _validated_device_value(expected)
+    replacement = _validated_device_value(replacement)
+    payload = replacement.to_bytes()
+    try:
+        dir_fd = _directory_fd(root)
+    except Exception as exc:
+        raise _error(
+            "beta_device_state_unsafe",
+            "Realtor Beta could not open its protected Device authorization state.",
+            exc,
+        )
+
+    opened_marker: tuple[int, os.stat_result, PendingDevice] | None = None
+    temp_fd: int | None = None
+    temp_opened: os.stat_result | None = None
+    temp_name = f".license-device-pending-{uuid.uuid4().hex}.tmp"
+    try:
+        _assert_device_lock_guard(lock_guard, dir_fd)
+        _assert_no_refresh_pending_fd(dir_fd)
+        try:
+            opened_marker = _open_device_pending(dir_fd)
+        except RefreshPendingError:
+            raise
+        except Exception as exc:
+            raise _error(
+                "beta_device_state_unsafe",
+                "Realtor Beta could not safely read its pending Device authorization state.",
+                exc,
+            )
+        if opened_marker is None or opened_marker[2] != expected:
+            return False
+
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
+        temp_opened = _validate_private_file(
+            temp_fd,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        offset = 0
+        while offset < len(payload):
+            written = os.write(temp_fd, payload[offset:])
+            if written <= 0:
+                raise OSError("pending Device replacement write made no progress")
+            offset += written
+        os.fchmod(temp_fd, 0o600)
+        os.fsync(temp_fd)
+        temp_opened = _validate_private_file(
+            temp_fd,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        _verify_named_fd(
+            dir_fd,
+            temp_name,
+            temp_opened,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        temp_raw = _read_bounded_fd(temp_fd)
+        temp_after_read = _validate_private_file(
+            temp_fd,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        if (
+            temp_after_read.st_dev != temp_opened.st_dev
+            or temp_after_read.st_ino != temp_opened.st_ino
+            or temp_after_read.st_size != len(payload)
+            or temp_raw != payload
+            or parse_device_pending(temp_raw) != replacement
+        ):
+            raise _error(
+                "beta_device_persistence_failed",
+                "Realtor Beta could not verify its replacement Device authorization state.",
+            )
+
+        # Recheck every cooperative exclusion and both open inodes at the
+        # mutation boundary.  Keep the expected marker fd open from the first
+        # read so a path swap cannot turn this into an unchecked overwrite.
+        _assert_device_lock_guard(lock_guard, dir_fd)
+        _assert_no_refresh_pending_fd(dir_fd)
+        temp_opened = _validate_private_file(
+            temp_fd,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        _verify_named_fd(
+            dir_fd,
+            temp_name,
+            temp_opened,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        boundary_temp_raw = _read_bounded_fd(temp_fd)
+        boundary_temp_opened = _validate_private_file(
+            temp_fd,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        if (
+            boundary_temp_opened.st_dev != temp_opened.st_dev
+            or boundary_temp_opened.st_ino != temp_opened.st_ino
+            or boundary_temp_opened.st_size != len(payload)
+            or boundary_temp_raw != payload
+            or parse_device_pending(boundary_temp_raw) != replacement
+        ):
+            raise _error(
+                "beta_device_persistence_failed",
+                "Realtor Beta could not verify its replacement Device authorization state.",
+            )
+        temp_opened = boundary_temp_opened
+        _verify_named_fd(
+            dir_fd,
+            temp_name,
+            temp_opened,
+            artifact="replacement",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        expected_opened = _validate_private_file(
+            opened_marker[0],
+            artifact="marker",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        _verify_named_fd(
+            dir_fd,
+            DEVICE_MARKER_NAME,
+            expected_opened,
+            artifact="marker",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        if _read_device_pending_fd(opened_marker[0]) != expected:
+            return False
+        expected_after_read = _validate_private_file(
+            opened_marker[0],
+            artifact="marker",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+        _verify_named_fd(
+            dir_fd,
+            DEVICE_MARKER_NAME,
+            expected_after_read,
+            artifact="marker",
+            unsafe_code="beta_device_state_unsafe",
+            state_label="Device authorization",
+        )
+
+        # Linearization point: there is no remove-then-create gap.
+        os.replace(
+            temp_name,
+            DEVICE_MARKER_NAME,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+        )
+        os.fsync(dir_fd)
+        persisted = _read_device_pending_from_dir_fd(dir_fd)
+        if persisted != replacement:
+            raise _error(
+                "beta_device_persistence_failed",
+                "Realtor Beta could not verify its replaced Device authorization state.",
+            )
+        return True
+    except RefreshPendingError:
+        raise
+    except Exception as exc:
+        raise _error(
+            "beta_device_persistence_failed",
+            "Realtor Beta could not durably replace its pending Device authorization state.",
+            exc,
+        )
+    finally:
+        if opened_marker is not None:
+            try:
+                os.close(opened_marker[0])
+            except OSError:
+                pass
+        removed_temp = False
+        if temp_opened is not None:
+            removed_temp = _safe_unlink_open_inode(dir_fd, temp_name, temp_opened)
+        if removed_temp:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+        if temp_fd is not None:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        try:
+            os.close(dir_fd)
+        except OSError:
+            pass
 
 
 def remove_device_pending(root: Path, expected: PendingDevice) -> bool:
