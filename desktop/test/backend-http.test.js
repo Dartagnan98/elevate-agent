@@ -10,6 +10,8 @@ const EXPECTED_BETA_RUNTIME = Object.freeze({
   elevateHome: "/Users/tester/.elevate-beta",
   providerPolicyVersion: "realtor-beta-codex-v1",
   allowedModelsVersion: "2026-07-14-v1",
+  entitlementAssertionSchema: 1,
+  entitlementAssertionKeyId: "ent-2026-07-a",
   allowedProvider: "openai-codex",
   allowedModels: [
     "gpt-5.5",
@@ -29,6 +31,9 @@ function runtimeReceipt(overrides = {}) {
     elevateHome: "/Users/tester/.elevate-beta",
     providerPolicyVersion: "realtor-beta-codex-v1",
     allowedModelsVersion: "2026-07-14-v1",
+    entitlementAssertionSchema: 1,
+    entitlementAssertionKeyId: "ent-2026-07-a",
+    entitlementVerifierReady: true,
     allowedProvider: "openai-codex",
     configuredProvider: "openai-codex",
     configuredModel: "gpt-5.5",
@@ -117,6 +122,21 @@ test("Beta readiness rejects wrong home and stale policy versions", async () => 
   );
 });
 
+test("Beta readiness rejects the wrong entitlement verifier contract", async () => {
+  assert.equal(
+    await ready(statusPayload(runtimeReceipt({ entitlementAssertionSchema: 2 }))),
+    false,
+  );
+  assert.equal(
+    await ready(statusPayload(runtimeReceipt({ entitlementAssertionKeyId: "unknown-key" }))),
+    false,
+  );
+  assert.equal(
+    await ready(statusPayload(runtimeReceipt({ entitlementVerifierReady: false }))),
+    false,
+  );
+});
+
 test("Beta readiness rejects hostile providers and unready auth", async () => {
   assert.equal(
     await ready(statusPayload(runtimeReceipt({ configuredProvider: "anthropic" }))),
@@ -166,6 +186,18 @@ test("onboarding compatibility still rejects wrong channel, home, or policy", as
   );
   assert.equal(
     await compatible(statusPayload(runtimeReceipt({ providerPolicyVersion: "old-policy" }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ entitlementAssertionSchema: 2 }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ entitlementAssertionKeyId: "unknown-key" }))),
+    false,
+  );
+  assert.equal(
+    await compatible(statusPayload(runtimeReceipt({ entitlementVerifierReady: false }))),
     false,
   );
 });

@@ -36,6 +36,8 @@ const BETA = Object.freeze({
   gatewayLabel: "ai.elevate.gateway-beta",
   providerPolicyVersion: "realtor-beta-codex-v1",
   allowedModelsVersion: "2026-07-14-v1",
+  entitlementAssertionSchema: 1,
+  entitlementAssertionKeyId: "ent-2026-07-a",
   allowedProvider: "openai-codex",
   allowedModels: Object.freeze([
     "gpt-5.5",
@@ -102,6 +104,8 @@ function backendRuntimeExpectation({ profile, paths }) {
     elevateHome: path.resolve(paths.elevateHome),
     providerPolicyVersion: profile.providerPolicyVersion,
     allowedModelsVersion: profile.allowedModelsVersion,
+    entitlementAssertionSchema: profile.entitlementAssertionSchema,
+    entitlementAssertionKeyId: profile.entitlementAssertionKeyId,
     allowedProvider: profile.allowedProvider,
     allowedModels: profile.allowedModels,
   });

@@ -124,6 +124,8 @@ test("desktop requires the exact Beta runtime receipt and leaves Stable legacy-c
       elevateHome: "/Users/tester/.elevate-beta",
       providerPolicyVersion: "realtor-beta-codex-v1",
       allowedModelsVersion: "2026-07-14-v1",
+      entitlementAssertionSchema: 1,
+      entitlementAssertionKeyId: "ent-2026-07-a",
       allowedProvider: "openai-codex",
       allowedModels: [
         "gpt-5.5",

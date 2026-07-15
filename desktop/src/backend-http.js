@@ -68,6 +68,9 @@ function betaRuntimeMatches(payload, expectedRuntime) {
       receipt.elevateHome === expectedRuntime.elevateHome &&
       receipt.providerPolicyVersion === expectedRuntime.providerPolicyVersion &&
       receipt.allowedModelsVersion === expectedRuntime.allowedModelsVersion &&
+      receipt.entitlementAssertionSchema === expectedRuntime.entitlementAssertionSchema &&
+      receipt.entitlementAssertionKeyId === expectedRuntime.entitlementAssertionKeyId &&
+      receipt.entitlementVerifierReady === true &&
       receipt.allowedProvider === expectedRuntime.allowedProvider &&
       receipt.configuredProvider === expectedRuntime.allowedProvider &&
       typeof receipt.configuredModel === "string" &&
@@ -89,6 +92,9 @@ function betaRuntimeCompatible(payload, expectedRuntime) {
       receipt.elevateHome === expectedRuntime.elevateHome &&
       receipt.providerPolicyVersion === expectedRuntime.providerPolicyVersion &&
       receipt.allowedModelsVersion === expectedRuntime.allowedModelsVersion &&
+      receipt.entitlementAssertionSchema === expectedRuntime.entitlementAssertionSchema &&
+      receipt.entitlementAssertionKeyId === expectedRuntime.entitlementAssertionKeyId &&
+      receipt.entitlementVerifierReady === true &&
       receipt.allowedProvider === expectedRuntime.allowedProvider &&
       typeof receipt.configuredProvider === "string" &&
       typeof receipt.configuredModel === "string" &&

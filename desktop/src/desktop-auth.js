@@ -3,6 +3,12 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const {
+  EntitlementAssertionError,
+  productionKeyset,
+  verifyEntitlementAssertion,
+} = require("./entitlement-assertion");
+
 const SIGNED_HQ_BASE_URL = "https://api.elevationrealestatehq.com";
 
 class DesktopAuthError extends Error {
@@ -36,6 +42,7 @@ function createDesktopAuth({
   fsImpl = fs,
   env = process.env,
   processImpl = process,
+  entitlementKeyset = productionKeyset(),
 }) {
   const effectiveHqBaseUrl = (
     isBeta ? SIGNED_HQ_BASE_URL : hqBaseUrl || SIGNED_HQ_BASE_URL
@@ -43,6 +50,10 @@ function createDesktopAuth({
   const resolvedProfileRoot = path.resolve(profileRoot);
   const resolvedLicensePath = path.resolve(licensePath);
   const expectedBetaProfileRoot = path.resolve(home, ".elevate-beta");
+  let licenseRevision = 0;
+  let loginInFlight = 0;
+  let refreshInFlight = null;
+  let sessionOperationSequence = 0;
 
   function storeError(code, message) {
     return new DesktopAuthError(code, message);
@@ -216,15 +227,8 @@ function createDesktopAuth({
   }
 
   function validateCompleteLicense(license, { current = true } = {}) {
-    if (!isBeta) return;
-    const entitlements = normalizeEntitlements(license && license.entitlements);
-    if (!entitlements) {
-      throw storeError(
-        "beta_entitlement_snapshot_missing",
-        "Elevation HQ did not return a complete entitlement snapshot.",
-      );
-    }
-    for (const key of ["access_token", "refresh_token", "license_id", "email"]) {
+    if (!isBeta) return license;
+    for (const key of ["access_token", "refresh_token"]) {
       if (!String((license && license[key]) || "").trim()) {
         throw storeError(
           "beta_license_snapshot_invalid",
@@ -232,14 +236,71 @@ function createDesktopAuth({
         );
       }
     }
-    const expiresAt = Number(license.expires_at) || 0;
-    if (expiresAt <= 0 || (current && Date.now() >= expiresAt * 1000)) {
+    if (!String((license && license.entitlement_assertion) || "").trim()) {
       throw storeError(
-        current ? "beta_license_snapshot_expired" : "beta_license_snapshot_invalid",
-        "The Realtor Beta account snapshot has no usable expiry.",
+        "beta_entitlement_assertion_invalid",
+        "The Realtor Beta account snapshot has no signed entitlement assertion.",
       );
     }
-    license.entitlements = entitlements;
+    let claims;
+    try {
+      claims = verifyEntitlementAssertion({
+        assertion: license.entitlement_assertion,
+        accessToken: license.access_token,
+        refreshToken: license.refresh_token,
+        keyset: entitlementKeyset,
+        requireCurrent: current,
+      });
+    } catch (error) {
+      if (error instanceof EntitlementAssertionError) {
+        throw storeError(error.code, error.message);
+      }
+      throw storeError(
+        "beta_entitlement_assertion_invalid",
+        "The Realtor Beta entitlement assertion could not be verified.",
+      );
+    }
+    const entitlements = normalizeEntitlements(license.entitlements);
+    if (
+      !entitlements ||
+      JSON.stringify(entitlements) !== JSON.stringify(claims.entitlements) ||
+      license.license_id !== claims.license_id ||
+      license.email !== claims.email ||
+      license.tier !== claims.tier ||
+      (Object.prototype.hasOwnProperty.call(license, "expires_at") &&
+        Number(license.expires_at) !== claims.exp)
+    ) {
+      throw storeError(
+        "beta_entitlement_assertion_mismatch",
+        "The Realtor Beta account snapshot does not match its signed entitlement assertion.",
+      );
+    }
+    license.license_id = claims.license_id;
+    license.email = claims.email;
+    license.tier = claims.tier;
+    license.entitlements = [...claims.entitlements];
+    license.expires_at = claims.exp;
+    return license;
+  }
+
+  function licenseFromResponse(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw storeError(
+        "beta_license_response_invalid",
+        "Elevation HQ returned an invalid account response.",
+      );
+    }
+    if (!isBeta) return data;
+    const license = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      entitlement_assertion: data.entitlement_assertion,
+      license_id: data.license_id,
+      tier: data.tier,
+      email: data.email,
+      entitlements: extractEntitlements(data),
+    };
+    return validateCompleteLicense(license, { current: true });
   }
 
   function readLicenseBytesUnchecked() {
@@ -299,6 +360,16 @@ function createDesktopAuth({
     }
   }
 
+  function readCurrentLicense() {
+    const license = readLicense();
+    if (!license) return null;
+    try {
+      return validateCompleteLicense(license, { current: true });
+    } catch {
+      return null;
+    }
+  }
+
   function atomicBetaReplace(bytes) {
     const tempPath = path.join(
       resolvedProfileRoot,
@@ -340,6 +411,7 @@ function createDesktopAuth({
     if (!isBeta) {
       fsImpl.mkdirSync(path.dirname(licensePath), { recursive: true });
       fsImpl.writeFileSync(licensePath, JSON.stringify(license, null, 2), { mode: 0o600 });
+      licenseRevision += 1;
       return license;
     }
     validateCompleteLicense(license, { current: true });
@@ -355,6 +427,7 @@ function createDesktopAuth({
           "Realtor Beta could not verify its saved account snapshot.",
         );
       }
+      licenseRevision += 1;
       return persisted;
     } catch (err) {
       try {
@@ -382,9 +455,11 @@ function createDesktopAuth({
       } catch {
         // Stable keeps its legacy already-gone behavior.
       }
+      licenseRevision += 1;
       return;
     }
     preflightLicenseStore({ writable: true });
+    licenseRevision += 1;
     try {
       fsImpl.unlinkSync(resolvedLicensePath);
     } catch (err) {
@@ -429,8 +504,52 @@ function createDesktopAuth({
     };
   }
 
-  async function refreshLicense(license) {
+  function betaRefreshSuperseded(
+    attemptedRefreshToken,
+    startingRevision,
+    operationSequence,
+  ) {
+    if (!isBeta) return { superseded: false, current: null };
+    const current = readLicense();
+    return {
+      superseded:
+        operationSequence !== sessionOperationSequence ||
+        licenseRevision !== startingRevision ||
+        !current ||
+        current.refresh_token !== attemptedRefreshToken,
+      current,
+    };
+  }
+
+  function betaLoginSuperseded({
+    operationSequence,
+    startingRefreshToken,
+    startingRevision,
+  }) {
+    if (!isBeta) return { superseded: false, current: null };
+    const current = readLicense();
+    return {
+      superseded:
+        operationSequence !== sessionOperationSequence ||
+        licenseRevision !== startingRevision ||
+        (current ? current.refresh_token : null) !== startingRefreshToken,
+      current,
+    };
+  }
+
+  async function refreshLicenseOnce(license) {
     if (!license || !license.refresh_token) return null;
+    const attemptedRefreshToken = license.refresh_token;
+    const operationSequence = isBeta ? ++sessionOperationSequence : 0;
+    const startingRevision = licenseRevision;
+    let writeAttempted = false;
+    if (isBeta) {
+      const current = readLicense();
+      if (!current) return null;
+      if (current.refresh_token !== attemptedRefreshToken) {
+        return current;
+      }
+    }
     let requestId = "preflight";
     let successfulResponseReceived = false;
     try {
@@ -443,7 +562,7 @@ function createDesktopAuth({
         method: "POST",
         headers: request.headers,
         ...(isBeta ? { redirect: "error" } : {}),
-        body: JSON.stringify({ refresh_token: license.refresh_token }),
+        body: JSON.stringify({ refresh_token: attemptedRefreshToken }),
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
@@ -451,6 +570,12 @@ function createDesktopAuth({
           `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
         );
         if (isBeta && (res.status === 401 || res.status === 402)) {
+          const state = betaRefreshSuperseded(
+            attemptedRefreshToken,
+            startingRevision,
+            operationSequence,
+          );
+          if (state.superseded) return state.current;
           clearLicense();
           throw storeError(
             "beta_license_revoked",
@@ -477,24 +602,26 @@ function createDesktopAuth({
         log.warn(`[license] refresh response missing tokens request_id=${requestId}`);
         return null;
       }
-      const entitlements = isBeta
-        ? extractEntitlements(data)
-        : data.entitlements;
-      if (isBeta && !entitlements) {
-        throw storeError(
-          "beta_entitlement_snapshot_missing",
-          "Elevation HQ did not return a complete entitlement snapshot.",
+      const next = isBeta
+        ? licenseFromResponse(data)
+        : {
+            ...license,
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            license_id: data.license_id || license.license_id,
+            tier: data.tier || license.tier,
+            entitlements: data.entitlements || license.entitlements,
+            expires_at: decodeJwtExp(data.access_token),
+          };
+      if (isBeta) {
+        const state = betaRefreshSuperseded(
+          attemptedRefreshToken,
+          startingRevision,
+          operationSequence,
         );
+        if (state.superseded) return state.current;
       }
-      const next = {
-        ...license,
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        license_id: data.license_id || license.license_id,
-        tier: data.tier || license.tier,
-        entitlements: entitlements || license.entitlements,
-        expires_at: decodeJwtExp(data.access_token),
-      };
+      writeAttempted = true;
       const persisted = writeLicense(next);
       log.info(`[license] refresh succeeded request_id=${requestId}`);
       return persisted;
@@ -504,6 +631,15 @@ function createDesktopAuth({
         `[license] refresh threw request_id=${requestId}${code}: ${err && err.message ? err.message : err}`,
       );
       if (isBeta) {
+        if (err instanceof DesktopAuthError && err.code === "beta_license_revoked") {
+          throw err;
+        }
+        const state = betaRefreshSuperseded(
+          attemptedRefreshToken,
+          startingRevision,
+          operationSequence,
+        );
+        if (state.superseded && !writeAttempted) return state.current;
         if (successfulResponseReceived) {
           try {
             clearLicense();
@@ -525,6 +661,18 @@ function createDesktopAuth({
       }
       return null;
     }
+  }
+
+  function refreshLicense(license) {
+    if (!isBeta) return refreshLicenseOnce(license);
+    if (loginInFlight > 0) return Promise.resolve(readCurrentLicense());
+    if (refreshInFlight) return refreshInFlight;
+    const pending = refreshLicenseOnce(license);
+    const wrapped = pending.finally(() => {
+      if (refreshInFlight === wrapped) refreshInFlight = null;
+    });
+    refreshInFlight = wrapped;
+    return wrapped;
   }
 
   async function refreshLicenseWithRetry(license, attempts = 3) {
@@ -572,9 +720,20 @@ function createDesktopAuth({
       };
     }
     let requestId = "preflight";
-    let successfulResponseReceived = false;
+    let operationSequence = 0;
+    let registeredLogin = false;
+    let startingRefreshToken = null;
+    let startingRevision = licenseRevision;
     try {
       preflightLicenseStore({ writable: true });
+      if (isBeta) {
+        const current = readLicense();
+        startingRefreshToken = current ? current.refresh_token : null;
+        startingRevision = licenseRevision;
+        loginInFlight += 1;
+        registeredLogin = true;
+        operationSequence = ++sessionOperationSequence;
+      }
       const request = hqJsonRequestHeaders("auth-login");
       requestId = request.requestId;
       const res = await fetchImpl(`${effectiveHqBaseUrl}/api/auth/login`, {
@@ -617,49 +776,35 @@ function createDesktopAuth({
         };
       }
 
-      successfulResponseReceived = true;
       const data = await responseJson(res);
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw storeError(
-          "beta_license_response_invalid",
-          "Elevation HQ returned an invalid sign-in response.",
-        );
+      const license = isBeta
+        ? licenseFromResponse(data)
+        : {
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            license_id: data.license_id,
+            tier: data.tier,
+            email: String(email).trim().toLowerCase(),
+            expires_at: decodeJwtExp(data.access_token),
+            entitlements: data.entitlements || [],
+          };
+      if (isBeta && betaLoginSuperseded({
+        operationSequence,
+        startingRefreshToken,
+        startingRevision,
+      }).superseded) {
+        return {
+          ok: false,
+          activation_complete: false,
+          code: "beta_auth_superseded",
+          error: "A newer account session replaced this sign-in attempt.",
+        };
       }
-      const entitlements = isBeta
-        ? extractEntitlements(data)
-        : data.entitlements;
-      if (isBeta && !entitlements) {
-        throw storeError(
-          "beta_entitlement_snapshot_missing",
-          "Elevation HQ did not return a complete entitlement snapshot.",
-        );
-      }
-      const license = {
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        license_id: data.license_id,
-        tier: data.tier,
-        email: String(email).trim().toLowerCase(),
-        expires_at: decodeJwtExp(data.access_token),
-        entitlements: entitlements || [],
-      };
       const persisted = writeLicense(license);
       log.info(`[auth] login succeeded request_id=${requestId}`);
       return { ok: true, activation_complete: true, license: persisted };
     } catch (err) {
-      let failure = err;
-      if (isBeta && successfulResponseReceived) {
-        try {
-          clearLicense();
-        } catch (invalidateError) {
-          failure = invalidateError instanceof DesktopAuthError
-            ? invalidateError
-            : storeError(
-                "beta_license_persistence_failed",
-                "Realtor Beta could not invalidate incomplete sign-in state.",
-              );
-        }
-      }
+      const failure = err;
       const code = failure && failure.code
         ? failure.code
         : isBeta
@@ -677,6 +822,8 @@ function createDesktopAuth({
             ? failure.message
             : `Could not reach ${effectiveHqBaseUrl}. Check your connection and try again.`,
       };
+    } finally {
+      if (registeredLogin) loginInFlight -= 1;
     }
   }
 
