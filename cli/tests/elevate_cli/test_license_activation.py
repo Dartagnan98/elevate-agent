@@ -1652,3 +1652,959 @@ def test_stable_cli_keeps_incomplete_nonzero_exit_for_skill_warning(
     )
 
     assert license_mod.cmd_activate(args) == 1
+
+
+CANONICAL_DEVICE_D = _b64url(b"D" * 32)
+CANONICAL_DEVICE_I = _b64url(b"I" * 32)
+
+
+def _write_device_pending() -> Any:
+    from elevate_cli import refresh_pending
+
+    root = license_mod._beta_profile_root()
+    with refresh_pending.refresh_lock(root):
+        return refresh_pending.write_device_pending(
+            root,
+            device_code=CANONICAL_DEVICE_D,
+            initial_refresh_token=CANONICAL_REFRESH_B,
+            recovery_refresh_token=CANONICAL_REFRESH_C,
+            recovery_attempt_id=CANONICAL_DEVICE_I,
+        )
+
+
+def _install_beta_snapshot(lic: license_mod.License) -> None:
+    license_mod._atomic_beta_replace(
+        json.dumps(lic.to_dict(), separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _write_overlapping_refresh_marker() -> Any:
+    from elevate_cli import refresh_pending
+
+    pending = refresh_pending.PendingRefresh(
+        schema=1,
+        operation="refresh",
+        license_id="license-1",
+        current_refresh_token=CANONICAL_REFRESH_A,
+        successor_refresh_token=CANONICAL_DEVICE_D,
+        attempt_id=CANONICAL_DEVICE_I,
+        created_at=int(time.time()),
+    )
+    path = license_mod._beta_profile_root() / refresh_pending.MARKER_NAME
+    path.write_bytes(pending.to_bytes())
+    path.chmod(0o600)
+    return pending
+
+
+def test_exact_beta_device_reconciliation_retains_resumable_prelicense_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    pending = _write_device_pending()
+
+    outcome = license_mod.reconcile_device_pending()
+
+    assert outcome.status == "pending"
+    assert outcome.license is None
+    assert outcome.pending == pending
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+@pytest.mark.parametrize("refresh_token", [CANONICAL_REFRESH_B, CANONICAL_REFRESH_C])
+def test_exact_beta_device_reconciliation_cleans_only_verified_current_b_or_c(
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_token: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    lic = _beta_license(refresh_token=refresh_token, entitlements=[])
+    _install_beta_snapshot(lic)
+    real_sync = license_mod.sync_license_entitlements
+    events: list[str] = []
+
+    def verify_mirror(candidate: license_mod.License) -> None:
+        assert refresh_pending.read_device_pending(
+            license_mod._beta_profile_root()
+        ) is not None
+        assert license_mod.read_verified_beta_license_snapshot(
+            require_current=True
+        ) == candidate
+        real_sync(candidate)
+        events.append("mirror")
+
+    monkeypatch.setattr(license_mod, "sync_license_entitlements", verify_mirror)
+
+    outcome = license_mod.reconcile_device_pending()
+
+    assert outcome.status == "already_persisted"
+    assert outcome.license == lic
+    assert outcome.pending is None
+    assert events == ["mirror"]
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+
+
+def test_exact_beta_device_reconciliation_retains_marker_when_mirror_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    pending = _write_device_pending()
+    lic = _beta_license(refresh_token=CANONICAL_REFRESH_B, entitlements=[])
+    _install_beta_snapshot(lic)
+
+    def fail_mirror(_candidate: license_mod.License) -> None:
+        raise license_mod.LicenseError(
+            "mirror mismatch",
+            code="beta_entitlement_persistence_mismatch",
+        )
+
+    monkeypatch.setattr(license_mod, "sync_license_entitlements", fail_mirror)
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.reconcile_device_pending()
+
+    assert caught.value.code == "beta_entitlement_persistence_mismatch"
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
+    assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
+
+
+def test_exact_beta_expired_explicit_auth_snapshot_supersedes_stale_device_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    expired = license_mod._beta_license_from_mapping(
+        _signed_payload(
+            refresh_token=CANONICAL_REFRESH_A,
+            entitlements=["real_estate_admin"],
+            expires_at=int(time.time()) - 30,
+        ),
+        require_current=False,
+    )
+    _install_beta_snapshot(expired)
+
+    outcome = license_mod.reconcile_device_pending()
+
+    assert outcome.status == "beta_auth_superseded"
+    assert outcome.license == expired
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=False
+    ) == expired
+
+
+def test_exact_beta_expired_paid_supersession_clears_device_then_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    expired = license_mod._beta_license_from_mapping(
+        _signed_payload(
+            refresh_token=CANONICAL_REFRESH_A,
+            entitlements=["real_estate_admin"],
+            expires_at=int(time.time()) - 30,
+        ),
+        require_current=False,
+    )
+    _install_beta_snapshot(expired)
+    calls: list[str] = []
+    fresh_payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _SuccessClient(calls, fresh_payload, **kwargs),
+    )
+
+    fresh = license_mod.ensure_valid()
+
+    assert calls == [f"{license_mod.DEFAULT_BACKEND}/api/license/refresh"]
+    assert fresh.entitlements == ["real_estate_admin"]
+    assert fresh.expires_at > int(time.time())
+    assert fresh.refresh_token != CANONICAL_REFRESH_A
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
+
+
+@pytest.mark.parametrize("corrupt", ["marker", "license"])
+def test_exact_beta_device_reconciliation_fails_closed_on_corrupt_state(
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    pending = _write_device_pending()
+    marker_path = license_mod._beta_profile_root() / refresh_pending.DEVICE_MARKER_NAME
+    if corrupt == "marker":
+        marker_path.write_bytes(b"{}\n")
+        marker_path.chmod(0o600)
+    else:
+        license_mod.LICENSE_PATH.write_bytes(b"{}\n")
+        license_mod.LICENSE_PATH.chmod(0o600)
+    before_marker = marker_path.read_bytes()
+    before_license = (
+        license_mod.LICENSE_PATH.read_bytes()
+        if license_mod.LICENSE_PATH.exists()
+        else None
+    )
+
+    with pytest.raises((license_mod.LicenseError, refresh_pending.RefreshPendingError)):
+        license_mod.reconcile_device_pending()
+
+    assert marker_path.read_bytes() == before_marker
+    assert (
+        license_mod.LICENSE_PATH.read_bytes()
+        if license_mod.LICENSE_PATH.exists()
+        else None
+    ) == before_license
+    if corrupt == "license":
+        assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
+
+
+def test_exact_beta_device_reconciliation_rejects_dual_markers_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    _write_overlapping_refresh_marker()
+    root = license_mod._beta_profile_root()
+    device_path = root / refresh_pending.DEVICE_MARKER_NAME
+    refresh_path = root / refresh_pending.MARKER_NAME
+    before = (device_path.read_bytes(), refresh_path.read_bytes())
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.reconcile_device_pending()
+
+    assert caught.value.code == "beta_device_state_conflict"
+    assert (device_path.read_bytes(), refresh_path.read_bytes()) == before
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+def test_exact_beta_explicit_auth_clears_device_only_after_readback_and_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    payload = _signed_payload(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], payload),
+    )
+    real_sync = license_mod.sync_license_entitlements
+    events: list[str] = []
+
+    def verify_mirror(candidate: license_mod.License) -> None:
+        assert license_mod.read_verified_beta_license_snapshot(
+            require_current=True
+        ) == candidate
+        assert refresh_pending.read_device_pending(
+            license_mod._beta_profile_root()
+        ) is not None
+        events.append("mirror")
+        real_sync(candidate)
+
+    monkeypatch.setattr(license_mod, "sync_license_entitlements", verify_mirror)
+
+    lic = license_mod.login("agent@example.test", "secret-password")
+
+    assert events == ["mirror"]
+    assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+
+
+def test_exact_beta_failed_explicit_auth_retains_device_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    pending = _write_device_pending()
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient([], status_code=401, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "wrong-password")
+
+    assert caught.value.code == "beta_invalid_credentials"
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+def test_exact_beta_logout_clears_license_refresh_then_exact_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    _write_overlapping_refresh_marker()
+    lic = _beta_license(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    _install_beta_snapshot(lic)
+    root = license_mod._beta_profile_root()
+    events: list[str] = []
+    real_replace = license_mod._atomic_beta_replace
+    real_remove_refresh = refresh_pending.remove_pending
+    real_remove_device = refresh_pending.remove_device_pending
+
+    def record_replace(data: bytes | None) -> None:
+        assert data is None
+        real_replace(data)
+        events.append("license")
+
+    def record_remove_refresh(marker_root: Path) -> None:
+        assert not license_mod.LICENSE_PATH.exists()
+        real_remove_refresh(marker_root)
+        events.append("refresh")
+
+    def record_remove_device(marker_root: Path, expected: Any) -> bool:
+        assert not (root / refresh_pending.MARKER_NAME).exists()
+        removed = real_remove_device(marker_root, expected)
+        events.append("device")
+        return removed
+
+    monkeypatch.setattr(license_mod, "_atomic_beta_replace", record_replace)
+    monkeypatch.setattr(refresh_pending, "remove_pending", record_remove_refresh)
+    monkeypatch.setattr(
+        refresh_pending,
+        "remove_device_pending",
+        record_remove_device,
+    )
+
+    assert license_mod.clear() is True
+    assert events == ["license", "refresh", "device"]
+    assert not license_mod.LICENSE_PATH.exists()
+    assert refresh_pending.read_pending(root) is None
+    assert refresh_pending.read_device_pending(root) is None
+
+
+def test_exact_beta_device_cas_never_clears_a_replaced_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    lic = _beta_license(refresh_token=CANONICAL_REFRESH_B, entitlements=[])
+    _install_beta_snapshot(lic)
+    replacement = refresh_pending.PendingDevice(
+        schema=1,
+        operation="device",
+        device_code=_b64url(b"E" * 32),
+        initial_refresh_token=_b64url(b"F" * 32),
+        recovery_refresh_token=_b64url(b"G" * 32),
+        recovery_attempt_id=_b64url(b"H" * 32),
+        created_at=int(time.time()) + 1,
+    )
+
+    def replace_instead_of_remove(_root: Path, _expected: Any) -> bool:
+        marker_path = (
+            license_mod._beta_profile_root() / refresh_pending.DEVICE_MARKER_NAME
+        )
+        marker_path.write_bytes(replacement.to_bytes())
+        marker_path.chmod(0o600)
+        return False
+
+    monkeypatch.setattr(
+        refresh_pending,
+        "remove_device_pending",
+        replace_instead_of_remove,
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.reconcile_device_pending()
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == replacement
+    assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
+
+
+def test_exact_beta_readiness_keeps_valid_superseding_auth_signed_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    lic = _beta_license(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    _install_beta_snapshot(lic)
+
+    assert license_mod.ensure_valid() == lic
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+
+
+def test_exact_beta_explicit_auth_cas_failure_rolls_back_only_its_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    payload = _signed_payload(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], payload),
+    )
+    replacement = refresh_pending.PendingDevice(
+        schema=1,
+        operation="device",
+        device_code=_b64url(b"J" * 32),
+        initial_refresh_token=_b64url(b"K" * 32),
+        recovery_refresh_token=_b64url(b"L" * 32),
+        recovery_attempt_id=_b64url(b"M" * 32),
+        created_at=int(time.time()) + 1,
+    )
+
+    def replace_instead_of_remove(_root: Path, _expected: Any) -> bool:
+        marker_path = (
+            license_mod._beta_profile_root() / refresh_pending.DEVICE_MARKER_NAME
+        )
+        marker_path.write_bytes(replacement.to_bytes())
+        marker_path.chmod(0o600)
+        return False
+
+    monkeypatch.setattr(
+        refresh_pending,
+        "remove_device_pending",
+        replace_instead_of_remove,
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert not license_mod.LICENSE_PATH.exists()
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == replacement
+
+
+def test_exact_beta_historical_supersession_skips_current_only_access_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    _write_device_pending()
+    expired = license_mod._beta_license_from_mapping(
+        _signed_payload(
+            refresh_token=CANONICAL_REFRESH_A,
+            entitlements=["real_estate_admin"],
+            expires_at=int(time.time()) - 30,
+        ),
+        require_current=False,
+    )
+    _install_beta_snapshot(expired)
+
+    def fail_if_projected(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("historical supersession must not require current access")
+
+    monkeypatch.setattr(
+        license_mod,
+        "_verify_beta_entitlement_mirror",
+        fail_if_projected,
+    )
+
+    outcome = license_mod.reconcile_device_pending()
+
+    assert outcome.status == "beta_auth_superseded"
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=False
+    ) == expired
+
+
+def test_exact_beta_pre_rename_auth_failure_invalidates_paid_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    _install_beta_snapshot(prior)
+    response_payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=[],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], response_payload),
+    )
+    real_replace = license_mod._atomic_beta_replace
+
+    def fail_before_rename(data: bytes | None) -> None:
+        if data is not None:
+            raise OSError("injected pre-rename EIO")
+        real_replace(None)
+
+    monkeypatch.setattr(license_mod, "_atomic_beta_replace", fail_before_rename)
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_license_persistence_failed"
+    assert not license_mod.LICENSE_PATH.exists()
+    assert license_mod.load() is None
+
+
+def test_exact_beta_pre_rename_auth_failure_preserves_third_signed_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    _install_beta_snapshot(prior)
+    response_payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=[],
+    )
+    winner = _beta_license(
+        refresh_token=CANONICAL_REFRESH_C,
+        entitlements=["real_estate_sales"],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], response_payload),
+    )
+    real_replace = license_mod._atomic_beta_replace
+
+    def install_winner_then_fail(data: bytes | None) -> None:
+        if data is not None:
+            real_replace(json.dumps(winner.to_dict()).encode("utf-8"))
+            raise OSError("injected post-winner EIO")
+        real_replace(None)
+
+    monkeypatch.setattr(
+        license_mod,
+        "_atomic_beta_replace",
+        install_winner_then_fail,
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_license_persistence_failed"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+
+
+@pytest.mark.parametrize("flow", ["login", "create_account", "login_with_code"])
+def test_exact_beta_delayed_explicit_auth_cannot_overwrite_full_snapshot_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        access_token="prior-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    winner = _beta_license(
+        access_token="winner-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_sales"],
+    )
+    stale_payload = _signed_payload(
+        access_token="stale-response-access",
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=[],
+    )
+    _install_beta_snapshot(prior)
+
+    class _DelayedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            assert json["email"] == "agent@example.test"
+            _install_beta_snapshot(winner)
+            return _SuccessResponse(stale_payload)
+
+    monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _DelayedClient())
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        if flow == "login":
+            license_mod.login("agent@example.test", "secret-password")
+        elif flow == "create_account":
+            license_mod.create_account("agent@example.test", "secret-password")
+        else:
+            license_mod.login_with_code("agent@example.test", "123456")
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+
+
+@pytest.mark.parametrize(
+    "winner_refresh_token",
+    [CANONICAL_REFRESH_C, CANONICAL_REFRESH_A],
+    ids=["new-token", "same-token-different-assertion"],
+)
+def test_exact_beta_delayed_device_approval_cannot_overwrite_newer_login(
+    monkeypatch: pytest.MonkeyPatch,
+    winner_refresh_token: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(license_mod.time, "sleep", lambda _seconds: None)
+    prior = _beta_license(
+        access_token="prior-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    winner = _beta_license(
+        access_token="winner-access",
+        refresh_token=winner_refresh_token,
+        entitlements=["real_estate_sales"],
+    )
+    stale_approval = {
+        "status": "approved",
+        **_signed_payload(
+            access_token="stale-device-access",
+            refresh_token=CANONICAL_REFRESH_B,
+            entitlements=[],
+        ),
+    }
+    start_payload = {
+        "device_code": "device-code",
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://example.test/link",
+        "expires_in": 60,
+        "interval": 1,
+    }
+    _install_beta_snapshot(prior)
+    pending_device = _write_device_pending()
+
+    class _DelayedDeviceClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            assert json
+            if url.endswith("/api/device/start"):
+                return _SuccessResponse(start_payload)
+            assert url.endswith("/api/device/poll")
+            _install_beta_snapshot(winner)
+            return _SuccessResponse(stale_approval)
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _DelayedDeviceClient(),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.link_device("Realtor Mac", interval_override=1)
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+    assert refresh_pending.read_device_pending(
+        license_mod._beta_profile_root()
+    ) == pending_device
+
+
+def test_exact_beta_precondition_mismatch_preserves_winner_identical_to_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        access_token="prior-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    response_payload = _signed_payload(
+        access_token="winner-access",
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=["real_estate_sales"],
+    )
+    winner = license_mod._beta_license_from_mapping(response_payload)
+    _install_beta_snapshot(prior)
+
+    class _IdenticalWinnerClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            assert json["email"] == "agent@example.test"
+            _install_beta_snapshot(winner)
+            return _SuccessResponse(response_payload)
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _IdenticalWinnerClient(),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+
+
+def test_exact_beta_prewrite_marker_failure_preserves_response_identical_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        access_token="prior-access",
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    response_payload = _signed_payload(
+        access_token="winner-access",
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=["real_estate_sales"],
+    )
+    winner = license_mod._beta_license_from_mapping(response_payload)
+    _install_beta_snapshot(prior)
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], response_payload),
+    )
+
+    def install_winner_then_fail(_root: Path) -> tuple[Any | None, Any | None]:
+        _install_beta_snapshot(winner)
+        raise license_mod.LicenseError(
+            "injected marker failure",
+            code="beta_device_state_corrupt",
+        )
+
+    monkeypatch.setattr(
+        license_mod,
+        "_read_beta_credential_markers_unlocked",
+        install_winner_then_fail,
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_device_state_corrupt"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+
+
+def test_exact_beta_explicit_auth_repairs_unchanged_private_corrupt_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    license_mod.LICENSE_PATH.write_bytes(b'{"partial":')
+    license_mod.LICENSE_PATH.chmod(0o600)
+    payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=["real_estate_admin"],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], payload),
+    )
+
+    repaired = license_mod.login("agent@example.test", "secret-password")
+
+    assert repaired.entitlements == ["real_estate_admin"]
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == repaired
+
+
+def test_exact_beta_invalid_predecessor_write_failure_preserves_signed_third_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    license_mod.LICENSE_PATH.write_bytes(b'{"partial":')
+    license_mod.LICENSE_PATH.chmod(0o600)
+    response_payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=[],
+    )
+    winner = _beta_license(
+        access_token="winner-access",
+        refresh_token=CANONICAL_REFRESH_C,
+        entitlements=["real_estate_sales"],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], response_payload),
+    )
+    real_replace = license_mod._atomic_beta_replace
+
+    def install_winner_then_fail(data: bytes | None) -> None:
+        if data is not None:
+            real_replace(json.dumps(winner.to_dict()).encode("utf-8"))
+            raise OSError("injected valid third winner")
+        real_replace(None)
+
+    monkeypatch.setattr(license_mod, "_atomic_beta_replace", install_winner_then_fail)
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_license_persistence_failed"
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == winner
+
+
+@pytest.mark.parametrize("corrupt_marker", ["refresh", "device"])
+def test_exact_beta_logout_clears_license_and_other_marker_despite_corrupt_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    corrupt_marker: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    _install_beta_snapshot(prior)
+    _write_device_pending()
+    _write_overlapping_refresh_marker()
+    root = license_mod._beta_profile_root()
+    refresh_path = root / refresh_pending.MARKER_NAME
+    device_path = root / refresh_pending.DEVICE_MARKER_NAME
+    corrupt_path = refresh_path if corrupt_marker == "refresh" else device_path
+    other_path = device_path if corrupt_marker == "refresh" else refresh_path
+    corrupt_path.write_bytes(b"{}\n")
+    corrupt_path.chmod(0o600)
+    before = corrupt_path.read_bytes()
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.clear()
+
+    assert caught.value.code.startswith("beta_")
+    assert not license_mod.LICENSE_PATH.exists()
+    assert license_mod.load() is None
+    assert corrupt_path.read_bytes() == before
+    assert not other_path.exists()
+
+
+@pytest.mark.parametrize("marker_fault", ["corrupt_device", "dual_valid"])
+def test_exact_beta_signed_auth_marker_failure_invalidates_captured_paid_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    marker_fault: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    prior = _beta_license(
+        refresh_token=CANONICAL_REFRESH_A,
+        entitlements=["real_estate_admin"],
+    )
+    _install_beta_snapshot(prior)
+    _write_device_pending()
+    root = license_mod._beta_profile_root()
+    device_path = root / refresh_pending.DEVICE_MARKER_NAME
+    if marker_fault == "corrupt_device":
+        device_path.write_bytes(b"{}\n")
+        device_path.chmod(0o600)
+        marker_paths = [device_path]
+    else:
+        _write_overlapping_refresh_marker()
+        marker_paths = [device_path, root / refresh_pending.MARKER_NAME]
+    before = {path: path.read_bytes() for path in marker_paths}
+    response_payload = _signed_payload(
+        refresh_token=CANONICAL_REFRESH_B,
+        entitlements=[],
+    )
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], response_payload),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == (
+        "beta_device_state_conflict"
+        if marker_fault == "dual_valid"
+        else "beta_device_state_corrupt"
+    )
+    assert not license_mod.LICENSE_PATH.exists()
+    assert license_mod.load() is None
+    assert {path: path.read_bytes() for path in marker_paths} == before
+
+
+def test_exact_beta_auth_and_refresh_never_read_or_surface_upstream_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    canary = "HQ-SECRET-BODY-CANARY"
+
+    class _NoBodyResponse:
+        status_code = 503
+        is_success = False
+
+        @property
+        def text(self) -> str:
+            raise AssertionError(f"exact Beta read secret body: {canary}")
+
+    class _NoBodyClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _NoBodyResponse:
+            assert json
+            return _NoBodyResponse()
+
+    monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _NoBodyClient())
+
+    with pytest.raises(license_mod.LicenseError) as login_error:
+        license_mod.login("agent@example.test", "secret-password")
+    assert login_error.value.code == "beta_auth_upstream_failed"
+    assert canary not in str(login_error.value)
+
+    current = _beta_license(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    _install_beta_snapshot(current)
+    with pytest.raises(license_mod.LicenseError) as refresh_error:
+        license_mod.refresh(current)
+    assert refresh_error.value.code == "beta_auth_upstream_failed"
+    assert canary not in str(refresh_error.value)

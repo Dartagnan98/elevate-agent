@@ -15,6 +15,7 @@ const {
 
 const SIGNED_HQ_BASE_URL = "https://api.elevationrealestatehq.com";
 const SIGNED_SUBJECT = Symbol("signed-entitlement-subject");
+const INVALID_SNAPSHOT = Symbol("invalid-license-snapshot");
 
 class DesktopAuthError extends Error {
   constructor(code, message) {
@@ -440,6 +441,62 @@ function createDesktopAuth({
     );
   }
 
+  function invalidSnapshotFingerprint(bytes) {
+    const fingerprint = {
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+      size: bytes.length,
+    };
+    Object.defineProperty(fingerprint, INVALID_SNAPSHOT, {
+      value: true,
+      enumerable: false,
+    });
+    return Object.freeze(fingerprint);
+  }
+
+  function isInvalidSnapshot(value) {
+    return Boolean(value && value[INVALID_SNAPSHOT]);
+  }
+
+  function readBetaLocalSnapshotState() {
+    preflightLicenseStore({ writable: false });
+    if (!fsImpl.existsSync(resolvedLicensePath)) return null;
+    let bytes;
+    try {
+      bytes = readLicenseBytesUnchecked();
+    } catch (err) {
+      if (err && err.code === "ENOENT") return null;
+      throw err;
+    }
+    preflightLicenseStore({ writable: false });
+    const fingerprint = invalidSnapshotFingerprint(bytes);
+    let parsed;
+    try {
+      parsed = JSON.parse(bytes.toString("utf8"));
+      return validateCompleteLicense(parsed, { current: false });
+    } catch (err) {
+      if (
+        err instanceof DesktopAuthError &&
+        err.code === "beta_entitlement_verifier_unavailable"
+      ) {
+        throw err;
+      }
+      return fingerprint;
+    }
+  }
+
+  function sameLocalSnapshotState(left, right) {
+    if (left === null || right === null) return left === null && right === null;
+    if (isInvalidSnapshot(left) || isInvalidSnapshot(right)) {
+      return Boolean(
+        isInvalidSnapshot(left) &&
+        isInvalidSnapshot(right) &&
+        left.sha256 === right.sha256 &&
+        left.size === right.size
+      );
+    }
+    return sameSignedSnapshot(left, right);
+  }
+
   function sameSignedIdentity(left, right) {
     return Boolean(
       left &&
@@ -448,6 +505,96 @@ function createDesktopAuth({
       left.email === right.email &&
       left[SIGNED_SUBJECT] === right[SIGNED_SUBJECT]
     );
+  }
+
+  function reconciliationOutcome(status, license = null, pending = null) {
+    return Object.freeze({ status, license, pending });
+  }
+
+  function verifyDesktopEntitlementMirror(license, { current = true } = {}) {
+    const persisted = readBetaLicenseStrict({ current });
+    if (JSON.stringify(persisted) !== JSON.stringify(license)) {
+      throw storeError(
+        "beta_entitlement_persistence_mismatch",
+        "The Realtor Beta entitlement mirror did not match its signed account snapshot.",
+      );
+    }
+    return persisted;
+  }
+
+  function readCredentialMarkersStrict() {
+    const pendingRefresh = refreshPending.read();
+    const pendingDevice = refreshPending.readDevice();
+    if (pendingRefresh && pendingDevice) {
+      throw storeError(
+        "beta_device_state_conflict",
+        "Realtor Beta found overlapping credential transitions. No account state was changed.",
+      );
+    }
+    return { pendingRefresh, pendingDevice };
+  }
+
+  function removeExactDevicePending(pendingDevice, {
+    failureCode,
+    failureMessage,
+  }) {
+    if (!refreshPending.removeDevice(pendingDevice)) {
+      throw storeError(failureCode, failureMessage);
+    }
+  }
+
+  function reconcileDevicePendingUnlocked(guard) {
+    const { pendingDevice } = readCredentialMarkersStrict();
+    if (!pendingDevice) return reconciliationOutcome("none");
+    if (!fsImpl.existsSync(resolvedLicensePath)) {
+      return reconciliationOutcome("pending", null, pendingDevice);
+    }
+
+    const historical = readBetaLicenseStrict({ current: false });
+    const belongsToDevice = [
+      pendingDevice.initial_refresh_token,
+      pendingDevice.recovery_refresh_token,
+    ].includes(historical.refresh_token);
+    if (belongsToDevice) {
+      const current = readBetaLicenseStrict({ current: true });
+      verifyDesktopEntitlementMirror(current, { current: true });
+      guard.assertHeld();
+      removeExactDevicePending(pendingDevice, {
+        failureCode: "beta_auth_superseded",
+        failureMessage:
+          "A newer Realtor Beta Device authorization replaced the recovery state before it could be completed.",
+      });
+      return reconciliationOutcome("already_persisted", current);
+    }
+
+    // A different signature-verified token is a later explicit auth commit.
+    // Historical validity is sufficient so normal expiry cannot strand a
+    // stale Device marker. Paid access remains fail-closed while expired;
+    // readiness refreshes and validates the current entitlement projection.
+    guard.assertHeld();
+    removeExactDevicePending(pendingDevice, {
+      failureCode: "beta_auth_superseded",
+      failureMessage:
+        "A newer Realtor Beta Device authorization replaced the stale recovery state.",
+    });
+    return reconciliationOutcome("beta_auth_superseded", historical);
+  }
+
+  function reconcileDevicePending() {
+    if (!isBeta) return Promise.resolve(reconciliationOutcome("none"));
+    preflightLicenseStore({ writable: true });
+    return refreshPending
+      .withLock(async (guard) => {
+        preflightLicenseStore({ writable: true });
+        guard.assertHeld();
+        return reconcileDevicePendingUnlocked(guard);
+      })
+      .catch((err) => {
+        if (err instanceof RefreshPendingError) {
+          throw storeError(err.code, err.message);
+        }
+        throw err;
+      });
   }
 
   function atomicBetaReplace(bytes) {
@@ -487,7 +634,7 @@ function createDesktopAuth({
     }
   }
 
-  function writeLicenseUnlocked(license) {
+  function writeLicenseUnlocked(license, { startingSnapshot = null } = {}) {
     if (!isBeta) {
       fsImpl.mkdirSync(path.dirname(licensePath), { recursive: true });
       fsImpl.writeFileSync(licensePath, JSON.stringify(license, null, 2), { mode: 0o600 });
@@ -512,8 +659,17 @@ function createDesktopAuth({
     } catch (err) {
       try {
         // Never restore the previous paid snapshot after HQ returned a newer
-        // one: that older state may be exactly what HQ just revoked.
-        clearLicenseUnlocked();
+        // one: that older state may be exactly what HQ just revoked. A valid
+        // different signed snapshot, however, is a newer concurrent winner
+        // and must never be erased by this late failure.
+        const installed = readBetaLocalSnapshotState();
+        if (
+          (isInvalidSnapshot(installed) && !isInvalidSnapshot(startingSnapshot)) ||
+          sameLocalSnapshotState(installed, license) ||
+          sameLocalSnapshotState(installed, startingSnapshot)
+        ) {
+          clearLicenseUnlocked();
+        }
       } catch {
         throw storeError(
           "beta_license_persistence_failed",
@@ -600,6 +756,16 @@ function createDesktopAuth({
     return true;
   }
 
+  function invalidateBetaSnapshotIfMatchesUnlocked(...expectedSnapshots) {
+    const current = readBetaLocalSnapshotState();
+    if (current === null) return false;
+    if (!expectedSnapshots.some(
+      (expected) => expected && sameLocalSnapshotState(current, expected),
+    )) return false;
+    clearLicenseUnlocked();
+    return true;
+  }
+
   function writeLicense(license, options) {
     if (!isBeta) return writeLicenseUnlocked(license);
     const expected = options?.expected ?? null;
@@ -635,7 +801,9 @@ function createDesktopAuth({
           }
         }
         guard.assertHeld();
-        const persisted = writeLicenseUnlocked(license);
+        const persisted = writeLicenseUnlocked(license, {
+          startingSnapshot: current,
+        });
         if (
           pending &&
           !(
@@ -662,9 +830,33 @@ function createDesktopAuth({
     return refreshPending
       .withLock(async (guard) => {
         guard.assertHeld();
-        const pending = refreshPending.read();
         const cleared = clearLicenseUnlocked();
-        if (pending) refreshPending.remove();
+        let cleanupFailure = null;
+        try {
+          guard.assertHeld();
+          const pending = refreshPending.read();
+          if (pending) {
+            guard.assertHeld();
+            refreshPending.remove();
+          }
+        } catch (err) {
+          cleanupFailure = err;
+        }
+        try {
+          guard.assertHeld();
+          const pendingDevice = refreshPending.readDevice();
+          if (pendingDevice) {
+            guard.assertHeld();
+            removeExactDevicePending(pendingDevice, {
+              failureCode: "beta_device_state_superseded",
+              failureMessage:
+                "A newer Realtor Beta Device authorization replaced the state being cleared.",
+            });
+          }
+        } catch (err) {
+          if (!cleanupFailure) cleanupFailure = err;
+        }
+        if (cleanupFailure) throw cleanupFailure;
         return cleared;
       })
       .catch((err) => {
@@ -788,9 +980,8 @@ function createDesktopAuth({
           });
 
           if (!res.ok) {
-            const body = await res.text().catch(() => "");
             log.warn(
-              `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
+              `[license] refresh failed request_id=${requestId}: HTTP ${res.status}`,
             );
             if (res.status === 401 || res.status === 402) {
               const latest = readBetaLicenseStrict({ current: false });
@@ -916,9 +1107,11 @@ function createDesktopAuth({
         body: JSON.stringify({ refresh_token: attemptedRefreshToken }),
       });
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
+        const body = isBeta ? "" : await res.text().catch(() => "");
         log.warn(
-          `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
+          isBeta
+            ? `[license] refresh failed request_id=${requestId}: HTTP ${res.status}`
+            : `[license] refresh failed request_id=${requestId}: HTTP ${res.status} ${body.slice(0, 200)}`,
         );
         if (isBeta && (res.status === 401 || res.status === 402)) {
           const state = betaRefreshSuperseded(
@@ -1051,7 +1244,10 @@ function createDesktopAuth({
   }
 
   async function ensureValidLicense({ retry = false } = {}) {
-    let license = readLicense();
+    const reconciliation = isBeta ? await reconcileDevicePending() : null;
+    let license = reconciliation && reconciliation.license
+      ? reconciliation.license
+      : readLicense();
     if (!license || !license.access_token) return null;
 
     const expMs = (Number(license.expires_at) || 0) * 1000;
@@ -1077,6 +1273,7 @@ function createDesktopAuth({
     let registeredLogin = false;
     let abort = { signal: undefined, cancel() {} };
     let startingRefreshToken = null;
+    let startingSnapshot = null;
     let startingRevision = licenseRevision;
     try {
       if (isBeta && refreshInFlight) {
@@ -1088,8 +1285,11 @@ function createDesktopAuth({
       }
       preflightLicenseStore({ writable: true });
       if (isBeta) {
-        const current = readLicense();
-        startingRefreshToken = current ? current.refresh_token : null;
+        startingSnapshot = readBetaLocalSnapshotState();
+        startingRefreshToken =
+          startingSnapshot && !isInvalidSnapshot(startingSnapshot)
+            ? startingSnapshot.refresh_token
+            : null;
         startingRevision = licenseRevision;
         loginInFlight += 1;
         registeredLogin = true;
@@ -1128,17 +1328,36 @@ function createDesktopAuth({
         };
       }
       if (!res.ok) {
-        const text = await res.text();
-        log.warn(`[auth] login failed request_id=${requestId}: HTTP ${res.status} ${text.slice(0, 160)}`);
+        const text = isBeta ? "" : await res.text();
+        log.warn(
+          isBeta
+            ? `[auth] login failed request_id=${requestId}: HTTP ${res.status}`
+            : `[auth] login failed request_id=${requestId}: HTTP ${res.status} ${text.slice(0, 160)}`,
+        );
         return {
           ok: false,
           activation_complete: false,
           code: "auth_upstream_failed",
-          error: `Sign-in failed (${res.status}): ${text.slice(0, 160)}`,
+          error: isBeta
+            ? `Sign-in failed (${res.status}).`
+            : `Sign-in failed (${res.status}): ${text.slice(0, 160)}`,
         };
       }
 
       const data = await responseJson(res);
+      if (isBeta && betaLoginSuperseded({
+        operationSequence,
+        startingRefreshToken,
+        startingRevision,
+      }).superseded) {
+        return {
+          ok: false,
+          activation_complete: false,
+          code: "beta_auth_superseded",
+          error: "A newer account session replaced this sign-in attempt.",
+        };
+      }
+      const requestedEmail = String(email).trim().toLowerCase();
       const license = isBeta
         ? licenseFromResponse(data)
         : {
@@ -1150,6 +1369,12 @@ function createDesktopAuth({
             expires_at: decodeJwtExp(data.access_token),
             entitlements: data.entitlements || [],
           };
+      if (isBeta && license.email !== requestedEmail) {
+        throw storeError(
+          "beta_entitlement_response_mismatch",
+          "The signed Realtor Beta account did not match the requested email.",
+        );
+      }
       if (isBeta && betaLoginSuperseded({
         operationSequence,
         startingRefreshToken,
@@ -1166,20 +1391,60 @@ function createDesktopAuth({
       if (isBeta) {
         persisted = await refreshPending.withLock(async (guard) => {
           guard.assertHeld();
-          const pending = refreshPending.read();
-          if (betaLoginSuperseded({
-            operationSequence,
-            startingRefreshToken,
-            startingRevision,
-          }).superseded) {
-            throw storeError(
-              "beta_auth_superseded",
-              "A newer account session replaced this sign-in attempt.",
+          let installedBefore = null;
+          let saved = null;
+          let predecessorAuthorized = false;
+          let writeAttempted = false;
+          try {
+            installedBefore = readBetaLocalSnapshotState();
+            const predecessorMatches = sameLocalSnapshotState(
+              installedBefore,
+              startingSnapshot,
             );
+            if (!predecessorMatches) {
+              throw storeError(
+                "beta_auth_superseded",
+                "A newer account session replaced this sign-in attempt.",
+              );
+            }
+            predecessorAuthorized = true;
+            const { pendingRefresh, pendingDevice } = readCredentialMarkersStrict();
+            guard.assertHeld();
+            writeAttempted = true;
+            saved = writeLicenseUnlocked(license, {
+              startingSnapshot: installedBefore,
+            });
+            const verified = verifyDesktopEntitlementMirror(saved, { current: true });
+            if (pendingRefresh) {
+              guard.assertHeld();
+              refreshPending.remove();
+            }
+            if (pendingDevice) {
+              guard.assertHeld();
+              removeExactDevicePending(pendingDevice, {
+                failureCode: "beta_auth_superseded",
+                failureMessage:
+                  "A newer Realtor Beta Device authorization superseded this sign-in result.",
+              });
+            }
+            return verified;
+          } catch (err) {
+            if (predecessorAuthorized) {
+              guard.assertHeld();
+              try {
+                invalidateBetaSnapshotIfMatchesUnlocked(
+                  ...(writeAttempted ? [license] : []),
+                  startingSnapshot,
+                );
+              } catch {
+                throw storeError(
+                  "beta_license_persistence_failed",
+                  "Realtor Beta could not roll back an incomplete sign-in.",
+                );
+              }
+            }
+            throw err;
           }
-          const saved = writeLicenseUnlocked(license);
-          if (pending) refreshPending.remove();
-          return saved;
         });
       } else {
         persisted = writeLicenseUnlocked(license);
@@ -1221,6 +1486,7 @@ function createDesktopAuth({
     preflightLicenseStore,
     performLogin,
     readLicense,
+    reconcileDevicePending,
     refreshLicense,
     refreshLicenseWithRetry,
     writeLicense,
