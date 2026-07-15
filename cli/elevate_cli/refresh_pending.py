@@ -5,7 +5,10 @@ schemas, and BSD ``flock`` lock.  The markers contain bearer credentials, so
 every path is opened without following symlinks and must remain a private,
 single-link file owned by the current account.  Refresh and pre-license Device
 operations use separate markers but one lock, so callers can recover either
-operation without allowing the credential transitions to overlap.
+operation without allowing the credential transitions to overlap. Initial
+password auth reuses the refresh schema with a non-plaintext
+``initial-auth-v1:<kind>`` scope in ``license_id`` until HQ returns the real
+signed license identity.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import base64
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -29,6 +33,8 @@ from typing import Iterator
 LOCK_NAME = ".license-refresh.lock"
 MARKER_NAME = ".license-refresh-pending.json"
 DEVICE_MARKER_NAME = ".license-device-pending.json"
+INITIAL_AUTH_LICENSE_PREFIX = "initial-auth-v1:"
+INITIAL_AUTH_KINDS = frozenset({"login", "signup"})
 SCHEMA_KEYS = frozenset(
     {
         "schema",
@@ -131,6 +137,53 @@ def canonical_token32(value: object) -> bool:
 
 def generate_token32() -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+
+
+def _canonical_initial_auth_kind(auth_kind: object) -> str:
+    kind = str(auth_kind or "").strip().lower()
+    if kind not in INITIAL_AUTH_KINDS:
+        raise _error(
+            "beta_refresh_state_corrupt",
+            "The Realtor Beta pending password-authentication kind is invalid.",
+        )
+    return kind
+
+
+def initial_auth_license_id(email: object, *, auth_kind: object) -> str:
+    """Return the non-plaintext marker scope for one password-auth operation."""
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        raise _error(
+            "beta_auth_input_required",
+            "Realtor Beta requires an email before starting account sign-in.",
+        )
+    kind = _canonical_initial_auth_kind(auth_kind)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"{INITIAL_AUTH_LICENSE_PREFIX}{kind}:{digest}"
+
+
+def is_initial_auth_pending(value: object) -> bool:
+    return bool(
+        isinstance(value, PendingRefresh)
+        and re.fullmatch(
+            rf"{re.escape(INITIAL_AUTH_LICENSE_PREFIX)}"
+            rf"(?:login|signup):[0-9a-f]{{64}}",
+            value.license_id,
+        )
+    )
+
+
+def initial_auth_pending_matches(
+    value: object,
+    email: object,
+    *,
+    auth_kind: object,
+) -> bool:
+    return bool(
+        is_initial_auth_pending(value)
+        and value.license_id
+        == initial_auth_license_id(email, auth_kind=auth_kind)
+    )
 
 
 def _error(
@@ -763,6 +816,22 @@ def create_pending(
         except OSError:
             pass
         os.close(dir_fd)
+
+
+def create_initial_auth_pending(
+    root: Path,
+    *,
+    email: str,
+    auth_kind: str,
+    created_at: int | None = None,
+) -> PendingRefresh:
+    """Durably stage caller-owned B/C/I for initial password authentication."""
+    return create_pending(
+        root,
+        license_id=initial_auth_license_id(email, auth_kind=auth_kind),
+        current_refresh_token=generate_token32(),
+        created_at=created_at,
+    )
 
 
 def remove_pending(root: Path) -> None:

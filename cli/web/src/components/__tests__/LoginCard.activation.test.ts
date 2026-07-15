@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { LicenseActivateResponse } from "@/lib/api-types";
-import { applyActivationOutcome } from "../LoginCard";
+import type {
+  LicenseActivateResponse,
+  LicenseStatusResponse,
+} from "@/lib/api-types";
+import { applyActivationOutcome, needsRequiredSetup } from "../LoginCard";
 
 function response(
   overrides: Partial<LicenseActivateResponse> = {},
@@ -39,6 +42,26 @@ describe("LoginCard activation boundary", () => {
     expect(accepted).toBe(true);
     expect(confirmed).toHaveBeenCalledOnce();
     expect(incomplete).not.toHaveBeenCalled();
+  });
+
+  it("routes a verified-but-incomplete status to required setup", () => {
+    const status = {
+      authenticated: false,
+      account_verified: true,
+      activation_complete: false,
+    } as LicenseStatusResponse;
+
+    expect(needsRequiredSetup(status)).toBe(true);
+    expect(
+      needsRequiredSetup({
+        ...status,
+        authenticated: true,
+        activation_complete: true,
+      }),
+    ).toBe(false);
+    expect(
+      needsRequiredSetup({ ...status, account_verified: false }),
+    ).toBe(false);
   });
 
   it.each([

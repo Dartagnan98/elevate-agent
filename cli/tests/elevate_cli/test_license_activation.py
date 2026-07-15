@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from elevate_cli import cloud_skills
 from elevate_cli import access as access_mod
+from elevate_cli import beta_skill_bundle as bundle_mod
 from elevate_cli import entitlement_assertion as assertion_mod
 from elevate_cli import license as license_mod
 from elevate_cli import web_auth
@@ -156,6 +157,34 @@ def _beta_license(**kwargs: Any) -> license_mod.License:
     return license_mod._beta_license_from_mapping(_signed_payload(**kwargs))
 
 
+def _rebind_signed_payload_refresh_token(
+    payload: dict[str, Any],
+    refresh_token: str,
+) -> dict[str, Any]:
+    """Re-sign a test response for a caller-proposed refresh token.
+
+    Preserve unsigned duplicate fields so drift/fail-closed tests keep testing
+    the same mismatch after the protocol's token-binding precondition.
+    """
+    assertion = str(payload["entitlement_assertion"])
+    encoded_claims = assertion.split(".")[1]
+    padding = "=" * (-len(encoded_claims) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(encoded_claims + padding))
+    rebound = _signed_payload(
+        access_token=payload["access_token"],
+        refresh_token=refresh_token,
+        license_id=claims["license_id"],
+        email=claims["email"],
+        tier=claims["tier"],
+        entitlements=claims["entitlements"],
+        expires_at=claims["exp"],
+    )
+    result = dict(payload)
+    result["refresh_token"] = refresh_token
+    result["entitlement_assertion"] = rebound["entitlement_assertion"]
+    return result
+
+
 class _SuccessResponse:
     status_code = 200
     text = ""
@@ -182,16 +211,17 @@ class _SuccessClient:
     def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
         self._calls.append(url)
         payload = self._payload
-        if url.endswith("/api/license/refresh") and "next_refresh_token" in json:
-            payload = _signed_payload(
-                access_token=payload["access_token"],
-                refresh_token=json["next_refresh_token"],
-                license_id=payload["license_id"],
-                email=payload["email"],
-                tier=payload["tier"],
-                entitlements=payload["entitlements"],
-                expires_at=payload["expires_at"],
-            )
+        if "entitlement_assertion" in payload:
+            if url.endswith("/api/license/refresh") and "next_refresh_token" in json:
+                payload = _rebind_signed_payload_refresh_token(
+                    payload,
+                    json["next_refresh_token"],
+                )
+            elif "initial_refresh_token" in json:
+                payload = _rebind_signed_payload_refresh_token(
+                    payload,
+                    json["initial_refresh_token"],
+                )
         return _SuccessResponse(payload)
 
 
@@ -528,7 +558,11 @@ def test_exact_beta_success_persists_one_complete_verified_entitlement_snapshot(
     monkeypatch.setattr(
         cloud_skills,
         "sync_all",
-        lambda: {"skill_count": 0, "skill_names": [], "errors": []},
+        lambda *, license_override=None: {
+            "skill_count": 0,
+            "skill_names": [],
+            "errors": [],
+        },
     )
     lic = license_mod.login("agent@example.test", "secret-password")
     activation = license_mod.activate_install(lic, sync_skills=False)
@@ -542,6 +576,545 @@ def test_exact_beta_success_persists_one_complete_verified_entitlement_snapshot(
     assert activation["skill_sync_warnings"] == []
     assert activation["packs"]["realEstateSales"] is True
     assert activation["packs"]["realEstateAdmin"] is True
+
+
+@pytest.mark.parametrize("flow", ["login", "signup"])
+def test_exact_beta_password_auth_proposes_caller_owned_initial_token(
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    calls: list[dict[str, Any]] = []
+
+    class _EchoInitialTokenClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                _signed_payload(
+                    refresh_token=json["initial_refresh_token"],
+                    email=json["email"],
+                )
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _EchoInitialTokenClient)
+
+    if flow == "login":
+        lic = license_mod.login("Agent@Example.test", "secret-password")
+        expected_path = "/api/auth/login"
+    else:
+        lic = license_mod.create_account(
+            "Agent@Example.test",
+            "secret-password",
+            first_name="Agent",
+            last_name="Example",
+        )
+        expected_path = "/api/auth/signup"
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == f"{license_mod.DEFAULT_BACKEND}{expected_path}"
+    proposed = calls[0]["json"]["initial_refresh_token"]
+    assert refresh_pending.canonical_token32(proposed)
+    assert lic.refresh_token == proposed
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
+
+
+def test_exact_beta_signup_recovers_lost_initial_response_without_password_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    first_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient(first_calls, 503, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as failed:
+        license_mod.create_account(
+            "new.agent@example.test",
+            "first-secret",
+            first_name="New",
+            last_name="Agent",
+        )
+
+    assert failed.value.code == "beta_auth_upstream_failed"
+    assert len(first_calls) == 1
+    pending = refresh_pending.read_pending(license_mod._beta_profile_root())
+    assert refresh_pending.is_initial_auth_pending(pending)
+    assert first_calls[0]["json"]["initial_refresh_token"] == (
+        pending.current_refresh_token
+    )
+    marker_bytes = (
+        license_mod._beta_profile_root() / refresh_pending.MARKER_NAME
+    ).read_bytes()
+    assert b"new.agent@example.test" not in marker_bytes
+    assert b"first-secret" not in marker_bytes
+
+    ambiguous_calls: list[dict[str, Any]] = []
+
+    class _LostRecoveryResponseClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            ambiguous_calls.append({"url": url, "json": dict(json)})
+            # Model HQ committing B -> C before the response disappears.
+            raise license_mod.httpx.ReadTimeout(
+                "socket reset after recovery commit",
+                request=license_mod.httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _LostRecoveryResponseClient)
+
+    with pytest.raises(license_mod.LicenseError) as ambiguous:
+        license_mod.create_account(
+            "new.agent@example.test",
+            "this-password-must-not-be-posted",
+            first_name="New",
+            last_name="Agent",
+        )
+
+    assert ambiguous.value.code == "beta_initial_auth_recovery_ambiguous"
+    assert len(ambiguous_calls) == 1
+    assert ambiguous_calls[0]["url"].endswith("/api/license/refresh")
+    assert ambiguous_calls[0]["json"] == {
+        "refresh_token": pending.current_refresh_token,
+        "next_refresh_token": pending.successor_refresh_token,
+        "refresh_attempt_id": pending.attempt_id,
+    }
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) == pending
+    assert (
+        license_mod._beta_profile_root() / refresh_pending.MARKER_NAME
+    ).read_bytes() == marker_bytes
+
+    successful_recovery_calls: list[dict[str, Any]] = []
+
+    class _RecoveryClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            successful_recovery_calls.append({"url": url, "json": dict(json)})
+            assert url.endswith("/api/license/refresh")
+            return _SuccessResponse(
+                _signed_payload(
+                    refresh_token=json["next_refresh_token"],
+                    email="new.agent@example.test",
+                )
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _RecoveryClient)
+
+    recovered = license_mod.create_account(
+        "new.agent@example.test",
+        "this-password-is-never-replayed",
+        first_name="New",
+        last_name="Agent",
+    )
+
+    assert len(successful_recovery_calls) == 1
+    assert successful_recovery_calls[0]["json"] == {
+        "refresh_token": pending.current_refresh_token,
+        "next_refresh_token": pending.successor_refresh_token,
+        "refresh_attempt_id": pending.attempt_id,
+    }
+    assert recovered.refresh_token == pending.successor_refresh_token
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
+
+
+@pytest.mark.parametrize("status_code", [429, 503])
+def test_exact_beta_initial_recovery_http_failure_does_not_downgrade_to_password(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient([], 503, **kwargs),
+    )
+    with pytest.raises(license_mod.LicenseError):
+        license_mod.login("agent@example.test", "first-secret")
+
+    marker_path = license_mod._beta_profile_root() / refresh_pending.MARKER_NAME
+    marker_bytes = marker_path.read_bytes()
+    pending = refresh_pending.read_pending(license_mod._beta_profile_root())
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient(calls, status_code, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "must-not-be-posted")
+
+    assert caught.value.code == "beta_initial_auth_recovery_ambiguous"
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("/api/license/refresh")
+    assert calls[0]["json"] == {
+        "refresh_token": pending.current_refresh_token,
+        "next_refresh_token": pending.successor_refresh_token,
+        "refresh_attempt_id": pending.attempt_id,
+    }
+    assert marker_path.read_bytes() == marker_bytes
+
+
+@pytest.mark.parametrize(
+    ("flow", "auth_status", "expected_code"),
+    [
+        ("login", 401, "beta_invalid_credentials"),
+        ("login", 402, "beta_subscription_inactive"),
+        ("signup", 409, "beta_account_exists"),
+        ("signup", 429, "beta_auth_rate_limited"),
+    ],
+)
+def test_exact_beta_password_failure_retains_shared_initial_recovery_state(
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+    auth_status: int,
+    expected_code: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+
+    def invoke(password: str) -> license_mod.License:
+        if flow == "login":
+            return license_mod.login("agent@example.test", password)
+        return license_mod.create_account(
+            "agent@example.test",
+            password,
+            first_name="Agent",
+            last_name="Example",
+        )
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient([], 503, **kwargs),
+    )
+    with pytest.raises(license_mod.LicenseError):
+        invoke("first-secret")
+
+    root = license_mod._beta_profile_root()
+    marker_path = root / refresh_pending.MARKER_NAME
+    marker_bytes = marker_path.read_bytes()
+    pending = refresh_pending.read_pending(root)
+    race_calls: list[dict[str, Any]] = []
+
+    class _RecoveryThenPasswordFailureClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _FailedResponse:
+            race_calls.append({"url": url, "json": dict(json)})
+            return _FailedResponse(401 if len(race_calls) == 1 else auth_status)
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        _RecoveryThenPasswordFailureClient,
+    )
+    with pytest.raises(license_mod.LicenseError) as rejected:
+        invoke("second-secret")
+
+    assert rejected.value.code == expected_code
+    assert [call["url"].rsplit("/api/", 1)[1] for call in race_calls] == [
+        "license/refresh",
+        "auth/login" if flow == "login" else "auth/signup",
+    ]
+    assert race_calls[1]["json"]["initial_refresh_token"] == (
+        pending.current_refresh_token
+    )
+    assert refresh_pending.read_pending(root) == pending
+    assert marker_path.read_bytes() == marker_bytes
+
+    recovery_calls: list[dict[str, Any]] = []
+
+    class _RecoveryClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            recovery_calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                _signed_payload(
+                    refresh_token=json["next_refresh_token"],
+                    email="agent@example.test",
+                )
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _RecoveryClient)
+    recovered = invoke("must-not-be-posted")
+
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["url"].endswith("/api/license/refresh")
+    assert recovered.refresh_token == pending.successor_refresh_token
+    assert refresh_pending.read_pending(root) is None
+
+
+@pytest.mark.parametrize(
+    ("next_flow", "next_email"),
+    [
+        ("signup", "agent@example.test"),
+        ("login", "corrected@example.test"),
+    ],
+    ids=["cross-kind", "different-email"],
+)
+def test_exact_beta_initial_auth_conflict_never_posts_a_nondurable_token(
+    monkeypatch: pytest.MonkeyPatch,
+    next_flow: str,
+    next_email: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    first_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient(first_calls, 503, **kwargs),
+    )
+    with pytest.raises(license_mod.LicenseError):
+        license_mod.login("agent@example.test", "first-secret")
+
+    root = license_mod._beta_profile_root()
+    marker_path = root / refresh_pending.MARKER_NAME
+    marker_bytes = marker_path.read_bytes()
+    pending = refresh_pending.read_pending(root)
+    assert refresh_pending.initial_auth_pending_matches(
+        pending,
+        "agent@example.test",
+        auth_kind="login",
+    )
+    assert not refresh_pending.initial_auth_pending_matches(
+        pending,
+        "agent@example.test",
+        auth_kind="signup",
+    )
+
+    def fail_if_networked(**_kwargs: Any):
+        raise AssertionError("conflicting auth reached the network")
+
+    monkeypatch.setattr(license_mod.httpx, "Client", fail_if_networked)
+    with pytest.raises(license_mod.LicenseError) as caught:
+        if next_flow == "signup":
+            license_mod.create_account(next_email, "second-secret")
+        else:
+            license_mod.login(next_email, "second-secret")
+
+    assert caught.value.code == "beta_auth_transition_conflict"
+    assert refresh_pending.read_pending(root) == pending
+    assert marker_path.read_bytes() == marker_bytes
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+@pytest.mark.parametrize("flow", ["login", "signup"])
+def test_exact_beta_password_auth_rejects_response_that_ignores_initial_token(
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    calls: list[dict[str, Any]] = []
+
+    class _MismatchedInitialTokenClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            mismatch = (
+                CANONICAL_REFRESH_C
+                if json["initial_refresh_token"] == CANONICAL_REFRESH_B
+                else CANONICAL_REFRESH_B
+            )
+            return _SuccessResponse(
+                _signed_payload(refresh_token=mismatch, email=json["email"])
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _MismatchedInitialTokenClient)
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        if flow == "login":
+            license_mod.login("agent@example.test", "secret-password")
+        else:
+            license_mod.create_account(
+                "agent@example.test",
+                "secret-password",
+                first_name="Agent",
+                last_name="Example",
+            )
+
+    assert caught.value.code == "beta_refresh_successor_mismatch"
+    assert len(calls) == 1
+    pending = refresh_pending.read_pending(license_mod._beta_profile_root())
+    assert pending is not None
+    assert calls[0]["json"]["initial_refresh_token"] == pending.current_refresh_token
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+def test_exact_beta_initial_auth_recovers_over_invalid_legacy_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    invalid_bytes = json.dumps(
+        {
+            "access_token": "legacy-access",
+            "refresh_token": "legacy-refresh",
+            "license_id": "legacy-license",
+        }
+    ).encode("utf-8")
+    license_mod.LICENSE_PATH.write_bytes(invalid_bytes)
+    license_mod.LICENSE_PATH.chmod(0o600)
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient([], 503, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as failed:
+        license_mod.login("agent@example.test", "first-secret")
+
+    assert failed.value.code == "beta_auth_upstream_failed"
+    pending = refresh_pending.read_pending(license_mod._beta_profile_root())
+    assert refresh_pending.is_initial_auth_pending(pending)
+    assert license_mod.LICENSE_PATH.read_bytes() == invalid_bytes
+
+    calls: list[dict[str, Any]] = []
+
+    class _RecoveryClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                _signed_payload(
+                    refresh_token=json["next_refresh_token"],
+                    email="agent@example.test",
+                )
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _RecoveryClient)
+
+    recovered = license_mod.login("agent@example.test", "must-not-be-posted")
+
+    assert len(calls) == 1
+    assert calls[0]["url"].endswith("/api/license/refresh")
+    assert recovered.refresh_token == pending.successor_refresh_token
+    assert license_mod.LICENSE_PATH.read_bytes() != invalid_bytes
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None
+
+
+@pytest.mark.parametrize("flow", ["login", "signup"])
+def test_stable_password_auth_keeps_legacy_request_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    flow: str,
+) -> None:
+    monkeypatch.delenv("ELEVATE_RELEASE_CHANNEL", raising=False)
+    calls: list[dict[str, Any]] = []
+
+    class _StableAuthClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            calls.append({"url": url, "json": dict(json)})
+            return _SuccessResponse(
+                {
+                    "access_token": _access_token(),
+                    "refresh_token": "stable-refresh",
+                    "license_id": "stable-license",
+                    "tier": "pro",
+                    "entitlements": [],
+                }
+            )
+
+    monkeypatch.setattr(license_mod.httpx, "Client", _StableAuthClient)
+
+    if flow == "login":
+        license_mod.login("agent@example.test", "stable-password")
+        expected = {"email", "password", "device_label"}
+    else:
+        license_mod.create_account(
+            "agent@example.test",
+            "stable-password",
+            first_name="Agent",
+            last_name="Example",
+        )
+        expected = {
+            "email",
+            "password",
+            "first_name",
+            "last_name",
+            "device_label",
+        }
+
+    assert len(calls) == 1
+    assert set(calls[0]["json"]) == expected
+    assert "initial_refresh_token" not in calls[0]["json"]
 
 
 @pytest.mark.parametrize(
@@ -751,7 +1324,7 @@ def test_exact_beta_missing_snapshot_locks_every_noncore_override(
         ("login_with_code", ("agent@example.test", "123456")),
     ],
 )
-def test_exact_beta_every_token_auth_flow_rejects_incomplete_entitlement_success(
+def test_exact_beta_password_auth_requires_signout_and_code_rejects_incomplete_success(
     monkeypatch: pytest.MonkeyPatch,
     function_name: str,
     args: tuple[str, ...],
@@ -779,9 +1352,14 @@ def test_exact_beta_every_token_auth_flow_rejects_incomplete_entitlement_success
     with pytest.raises(license_mod.LicenseError) as exc_info:
         getattr(license_mod, function_name)(*args)
 
-    assert exc_info.value.code == "beta_entitlement_assertion_missing"
+    expected_code = (
+        "beta_entitlement_assertion_missing"
+        if function_name == "login_with_code"
+        else "beta_auth_sign_out_required"
+    )
+    assert exc_info.value.code == expected_code
     assert license_mod.load() == stale
-    assert len(calls) == 1
+    assert len(calls) == (1 if function_name == "login_with_code" else 0)
 
 
 def test_exact_beta_device_link_rejects_incomplete_approved_snapshot(
@@ -1041,7 +1619,15 @@ def test_exact_beta_expired_signed_snapshot_has_no_access_then_refreshes(
         lambda **kwargs: _SuccessClient(calls, refreshed_payload, **kwargs),
     )
 
-    refreshed = license_mod.ensure_valid()
+    with pytest.raises(license_mod.LicenseError) as exc_info:
+        license_mod.ensure_valid()
+
+    assert exc_info.value.code == "beta_activation_incomplete"
+    refreshed = license_mod.read_verified_beta_license_snapshot(
+        require_current=True,
+    )
+    license_mod.activate_install(refreshed)
+    assert license_mod.ensure_valid() == refreshed
 
     assert refreshed.access_token == "refreshed-access"
     assert refreshed.entitlements == ["real_estate_admin"]
@@ -1595,54 +2181,99 @@ def test_exact_beta_losing_concurrent_save_does_not_erase_new_signed_session(
     assert license_mod.load() == winner
 
 
-def test_exact_beta_forces_skill_sync_even_when_skip_was_requested(
+def test_exact_beta_validates_code_bundle_even_when_sync_was_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     lic = _beta_license(entitlements=[])
     license_mod.save(lic)
-    calls = 0
+    calls: list[str] = []
+    bundle = SimpleNamespace(
+        skills_root=Path("/signed/app/cli/skills"),
+        sha256="a" * 64,
+        file_count=9,
+        total_bytes=1234,
+        files=(
+            "skills/real-estate-admin/ROUTING.md",
+            "skills/real-estate/surface-heartbeat/SKILL.md",
+        ),
+    )
 
-    def sync_all() -> dict[str, Any]:
-        nonlocal calls
-        calls += 1
-        return {"skill_count": 0, "skill_names": [], "errors": []}
+    def load_bundle():
+        calls.append("bundle")
+        return bundle
 
-    monkeypatch.setattr(cloud_skills, "sync_all", sync_all)
+    monkeypatch.setattr(bundle_mod, "load_exact_beta_skill_bundle", load_bundle)
+    monkeypatch.setattr(
+        cloud_skills,
+        "sync_all",
+        lambda: pytest.fail("exact Beta must not fetch ignored cloud skills"),
+    )
 
     activation = license_mod.activate_install(lic, sync_skills=False)
 
-    assert calls == 1
+    assert calls == ["bundle"]
     assert activation["activation_complete"] is True
+    assert activation["skill_names"] == ["real-estate", "real-estate-admin"]
+    assert activation["skill_bundle_sha256"] == "a" * 64
+    assert activation["skill_bundle_file_count"] == 9
+    assert license_mod.beta_activation_complete(lic) is True
 
 
-@pytest.mark.parametrize("failure", ["exception", "warning"])
-def test_exact_beta_activation_skill_failure_is_typed_and_never_complete(
+def test_exact_beta_activation_bundle_failure_is_typed_and_never_complete(
     monkeypatch: pytest.MonkeyPatch,
-    failure: str,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     lic = _beta_license(entitlements=[])
     license_mod.save(lic)
 
-    if failure == "exception":
-        def fail_sync():
-            raise RuntimeError("network failed")
+    def fail_bundle():
+        raise bundle_mod.BetaSkillBundleError("missing required skill")
 
-        monkeypatch.setattr(cloud_skills, "sync_all", fail_sync)
-        expected_code = "beta_skill_sync_failed"
-    else:
-        monkeypatch.setattr(
-            cloud_skills,
-            "sync_all",
-            lambda: {"skill_count": 0, "skill_names": [], "errors": ["bad pack"]},
-        )
-        expected_code = "beta_skill_sync_incomplete"
+    monkeypatch.setattr(bundle_mod, "load_exact_beta_skill_bundle", fail_bundle)
 
     with pytest.raises(license_mod.LicenseError) as exc_info:
         license_mod.activate_install(lic, sync_skills=False)
 
-    assert exc_info.value.code == expected_code
+    assert exc_info.value.code == "beta_skill_bundle_invalid"
+    assert license_mod.beta_activation_complete(lic) is False
+
+
+def test_exact_beta_activation_receipt_is_bound_to_bundle_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    lic = _beta_license(entitlements=[])
+    license_mod.save(lic)
+    bundle = SimpleNamespace(
+        skills_root=Path("/signed/app/cli/skills"),
+        sha256="b" * 64,
+        file_count=1,
+        total_bytes=64,
+        files=("skills/real-estate-admin/ROUTING.md",),
+    )
+    monkeypatch.setattr(
+        bundle_mod,
+        "load_exact_beta_skill_bundle",
+        lambda: bundle,
+    )
+
+    activation = license_mod.activate_install(lic)
+
+    receipt_path = license_mod._beta_profile_root() / ".license-activation.json"
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt == {
+        "completed_at": receipt["completed_at"],
+        "identity_sha256": license_mod._beta_activation_identity(lic),
+        "schema": 2,
+        "skill_bundle_sha256": "b" * 64,
+    }
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+    assert activation["activation_complete"] is True
+    assert license_mod.beta_activation_complete(lic) is True
+
+    bundle.sha256 = "c" * 64
+    assert license_mod.beta_activation_complete(lic) is False
 
 
 def test_stable_activation_keeps_incomplete_warning_semantics(
@@ -1961,58 +2592,48 @@ def test_exact_beta_device_reconciliation_rejects_dual_markers_without_mutation(
     assert not license_mod.LICENSE_PATH.exists()
 
 
-def test_exact_beta_explicit_auth_clears_device_only_after_readback_and_mirror(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from elevate_cli import refresh_pending
-
-    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
-    payload = _signed_payload(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
-    monkeypatch.setattr(
-        license_mod.httpx,
-        "Client",
-        lambda **_kwargs: _SuccessClient([], payload),
-    )
-    real_sync = license_mod.sync_license_entitlements
-    events: list[str] = []
-
-    def verify_mirror(candidate: license_mod.License) -> None:
-        assert license_mod.read_verified_beta_license_snapshot(
-            require_current=True
-        ) == candidate
-        assert refresh_pending.read_device_pending(
-            license_mod._beta_profile_root()
-        ) is not None
-        events.append("mirror")
-        real_sync(candidate)
-
-    monkeypatch.setattr(license_mod, "sync_license_entitlements", verify_mirror)
-
-    lic = license_mod.login("agent@example.test", "secret-password")
-
-    assert events == ["mirror"]
-    assert license_mod.read_verified_beta_license_snapshot(require_current=True) == lic
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) is None
-
-
-def test_exact_beta_failed_explicit_auth_retains_device_marker(
+def test_exact_beta_login_blocks_pending_device_before_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
     pending = _write_device_pending()
+    calls: list[str] = []
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
-        lambda **kwargs: _RecordingClient([], status_code=401, **kwargs),
+        lambda **_kwargs: _SuccessClient(calls, _signed_payload()),
     )
 
     with pytest.raises(license_mod.LicenseError) as caught:
-        license_mod.login("agent@example.test", "wrong-password")
+        license_mod.login("agent@example.test", "secret-password")
 
-    assert caught.value.code == "beta_invalid_credentials"
+    assert caught.value.code == "beta_auth_transition_conflict"
+    assert calls == []
+    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
+    assert not license_mod.LICENSE_PATH.exists()
+
+
+def test_exact_beta_signup_blocks_pending_device_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    pending = _write_device_pending()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **kwargs: _RecordingClient(calls, status_code=401, **kwargs),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.create_account("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_auth_transition_conflict"
+    assert calls == []
     assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
     assert not license_mod.LICENSE_PATH.exists()
 
@@ -2114,54 +2735,42 @@ def test_exact_beta_readiness_keeps_valid_unordered_predecessor_and_marker(
     pending = _write_device_pending()
     lic = _beta_license(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
     _install_beta_snapshot(lic)
+    license_mod.activate_install(lic)
 
     assert license_mod.ensure_valid() == lic
     assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == pending
 
 
-def test_exact_beta_explicit_auth_cas_failure_rolls_back_only_its_snapshot(
+def test_exact_beta_password_auth_blocks_regular_refresh_marker_without_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import refresh_pending
 
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    _write_device_pending()
-    payload = _signed_payload(refresh_token=CANONICAL_REFRESH_A, entitlements=[])
+    root = license_mod._beta_profile_root()
+    with refresh_pending.refresh_lock(root):
+        pending = refresh_pending.create_pending(
+            root,
+            license_id="license-existing-refresh",
+            current_refresh_token=CANONICAL_REFRESH_A,
+        )
+    marker_path = root / refresh_pending.MARKER_NAME
+    before = marker_path.read_bytes()
+    calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
-        lambda **_kwargs: _SuccessClient([], payload),
-    )
-    replacement = refresh_pending.PendingDevice(
-        schema=1,
-        operation="device",
-        device_code=_b64url(b"J" * 32),
-        initial_refresh_token=_b64url(b"K" * 32),
-        recovery_refresh_token=_b64url(b"L" * 32),
-        recovery_attempt_id=_b64url(b"M" * 32),
-        created_at=int(time.time()) + 1,
-    )
-
-    def replace_instead_of_remove(_root: Path, _expected: Any) -> bool:
-        marker_path = (
-            license_mod._beta_profile_root() / refresh_pending.DEVICE_MARKER_NAME
-        )
-        marker_path.write_bytes(replacement.to_bytes())
-        marker_path.chmod(0o600)
-        return False
-
-    monkeypatch.setattr(
-        refresh_pending,
-        "remove_device_pending",
-        replace_instead_of_remove,
+        lambda **kwargs: _RecordingClient(calls, status_code=503, **kwargs),
     )
 
     with pytest.raises(license_mod.LicenseError) as caught:
         license_mod.login("agent@example.test", "secret-password")
 
-    assert caught.value.code == "beta_auth_superseded"
+    assert caught.value.code == "beta_auth_transition_conflict"
+    assert calls == []
     assert not license_mod.LICENSE_PATH.exists()
-    assert refresh_pending.read_device_pending(license_mod._beta_profile_root()) == replacement
+    assert refresh_pending.read_pending(root) == pending
+    assert marker_path.read_bytes() == before
 
 
 def test_exact_beta_historical_unordered_predecessor_skips_current_projection(
@@ -2201,15 +2810,12 @@ def test_exact_beta_historical_unordered_predecessor_skips_current_projection(
     ) == expired
 
 
-def test_exact_beta_pre_rename_auth_failure_invalidates_paid_predecessor(
+def test_exact_beta_pre_rename_auth_failure_invalidates_invalid_predecessor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    prior = _beta_license(
-        refresh_token=CANONICAL_REFRESH_A,
-        entitlements=["real_estate_admin"],
-    )
-    _install_beta_snapshot(prior)
+    license_mod.LICENSE_PATH.write_bytes(b'{"partial":')
+    license_mod.LICENSE_PATH.chmod(0o600)
     response_payload = _signed_payload(
         refresh_token=CANONICAL_REFRESH_B,
         entitlements=[],
@@ -2240,11 +2846,8 @@ def test_exact_beta_pre_rename_auth_failure_preserves_third_signed_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    prior = _beta_license(
-        refresh_token=CANONICAL_REFRESH_A,
-        entitlements=["real_estate_admin"],
-    )
-    _install_beta_snapshot(prior)
+    license_mod.LICENSE_PATH.write_bytes(b'{"partial":')
+    license_mod.LICENSE_PATH.chmod(0o600)
     response_payload = _signed_payload(
         refresh_token=CANONICAL_REFRESH_B,
         entitlements=[],
@@ -2282,7 +2885,7 @@ def test_exact_beta_pre_rename_auth_failure_preserves_third_signed_winner(
 
 
 @pytest.mark.parametrize("flow", ["login", "create_account", "login_with_code"])
-def test_exact_beta_delayed_explicit_auth_cannot_overwrite_full_snapshot_winner(
+def test_exact_beta_password_auth_blocks_signed_session_and_code_uses_snapshot_cas(
     monkeypatch: pytest.MonkeyPatch,
     flow: str,
 ) -> None:
@@ -2314,7 +2917,15 @@ def test_exact_beta_delayed_explicit_auth_cannot_overwrite_full_snapshot_winner(
         def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
             assert json["email"] == "agent@example.test"
             _install_beta_snapshot(winner)
-            return _SuccessResponse(stale_payload)
+            response_payload = (
+                _rebind_signed_payload_refresh_token(
+                    stale_payload,
+                    json["initial_refresh_token"],
+                )
+                if "initial_refresh_token" in json
+                else stale_payload
+            )
+            return _SuccessResponse(response_payload)
 
     monkeypatch.setattr(license_mod.httpx, "Client", lambda **_kwargs: _DelayedClient())
 
@@ -2326,10 +2937,15 @@ def test_exact_beta_delayed_explicit_auth_cannot_overwrite_full_snapshot_winner(
         else:
             license_mod.login_with_code("agent@example.test", "123456")
 
-    assert caught.value.code == "beta_auth_superseded"
+    if flow == "login_with_code":
+        assert caught.value.code == "beta_auth_superseded"
+        expected = winner
+    else:
+        assert caught.value.code == "beta_auth_sign_out_required"
+        expected = prior
     assert license_mod.read_verified_beta_license_snapshot(
         require_current=True
-    ) == winner
+    ) == expected
 
 
 @pytest.mark.parametrize(
@@ -2418,18 +3034,12 @@ def test_exact_beta_precondition_mismatch_preserves_winner_identical_to_response
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    prior = _beta_license(
-        access_token="prior-access",
-        refresh_token=CANONICAL_REFRESH_A,
-        entitlements=["real_estate_admin"],
-    )
     response_payload = _signed_payload(
         access_token="winner-access",
         refresh_token=CANONICAL_REFRESH_B,
         entitlements=["real_estate_sales"],
     )
-    winner = license_mod._beta_license_from_mapping(response_payload)
-    _install_beta_snapshot(prior)
+    installed_winner: list[license_mod.License] = []
 
     class _IdenticalWinnerClient:
         def __enter__(self):
@@ -2440,8 +3050,14 @@ def test_exact_beta_precondition_mismatch_preserves_winner_identical_to_response
 
         def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
             assert json["email"] == "agent@example.test"
+            bound_payload = _rebind_signed_payload_refresh_token(
+                response_payload,
+                json["initial_refresh_token"],
+            )
+            winner = license_mod._beta_license_from_mapping(bound_payload)
+            installed_winner.append(winner)
             _install_beta_snapshot(winner)
-            return _SuccessResponse(response_payload)
+            return _SuccessResponse(bound_payload)
 
     monkeypatch.setattr(
         license_mod.httpx,
@@ -2455,25 +3071,19 @@ def test_exact_beta_precondition_mismatch_preserves_winner_identical_to_response
     assert caught.value.code == "beta_auth_superseded"
     assert license_mod.read_verified_beta_license_snapshot(
         require_current=True
-    ) == winner
+    ) == installed_winner[0]
 
 
 def test_exact_beta_prewrite_marker_failure_preserves_response_identical_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
-    prior = _beta_license(
-        access_token="prior-access",
-        refresh_token=CANONICAL_REFRESH_A,
-        entitlements=["real_estate_admin"],
-    )
     response_payload = _signed_payload(
         access_token="winner-access",
         refresh_token=CANONICAL_REFRESH_B,
         entitlements=["real_estate_sales"],
     )
     winner = license_mod._beta_license_from_mapping(response_payload)
-    _install_beta_snapshot(prior)
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
@@ -2600,7 +3210,7 @@ def test_exact_beta_logout_clears_license_and_other_marker_despite_corrupt_marke
 
 
 @pytest.mark.parametrize("marker_fault", ["corrupt_device", "dual_valid"])
-def test_exact_beta_signed_auth_marker_failure_invalidates_captured_paid_snapshot(
+def test_exact_beta_signed_session_blocks_password_auth_before_marker_mutation(
     monkeypatch: pytest.MonkeyPatch,
     marker_fault: str,
 ) -> None:
@@ -2623,26 +3233,21 @@ def test_exact_beta_signed_auth_marker_failure_invalidates_captured_paid_snapsho
         _write_overlapping_refresh_marker()
         marker_paths = [device_path, root / refresh_pending.MARKER_NAME]
     before = {path: path.read_bytes() for path in marker_paths}
-    response_payload = _signed_payload(
-        refresh_token=CANONICAL_REFRESH_B,
-        entitlements=[],
-    )
+    calls: list[str] = []
     monkeypatch.setattr(
         license_mod.httpx,
         "Client",
-        lambda **_kwargs: _SuccessClient([], response_payload),
+        lambda **_kwargs: _SuccessClient(calls, _signed_payload()),
     )
 
     with pytest.raises(license_mod.LicenseError) as caught:
         license_mod.login("agent@example.test", "secret-password")
 
-    assert caught.value.code == (
-        "beta_device_state_conflict"
-        if marker_fault == "dual_valid"
-        else "beta_device_state_corrupt"
-    )
-    assert not license_mod.LICENSE_PATH.exists()
-    assert license_mod.load() is None
+    assert caught.value.code == "beta_auth_sign_out_required"
+    assert calls == []
+    assert license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    ) == prior
     assert {path: path.read_bytes() for path in marker_paths} == before
 
 
@@ -2684,3 +3289,95 @@ def test_exact_beta_auth_and_refresh_never_read_or_surface_upstream_body(
         license_mod.refresh(current)
     assert refresh_error.value.code == "beta_auth_upstream_failed"
     assert canary not in str(refresh_error.value)
+
+
+@pytest.mark.parametrize("replacement", ["cancelled", "signup"])
+def test_exact_beta_late_password_response_cannot_revive_cancelled_or_replaced_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    root = license_mod._beta_profile_root()
+    replacement_marker: list[Any] = []
+
+    class _ReplacedDuringRequestClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def post(self, _url: str, *, json: dict[str, Any]) -> _SuccessResponse:
+            with refresh_pending.refresh_lock(root) as guard:
+                guard.assert_held()
+                current = refresh_pending.read_pending(root)
+                assert current is not None
+                refresh_pending.remove_pending(root)
+                if replacement == "signup":
+                    replacement_marker.append(
+                        refresh_pending.create_initial_auth_pending(
+                            root,
+                            email="agent@example.test",
+                            auth_kind="signup",
+                        )
+                    )
+            payload = _rebind_signed_payload_refresh_token(
+                _signed_payload(entitlements=["real_estate_admin"]),
+                json["initial_refresh_token"],
+            )
+            return _SuccessResponse(payload)
+
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _ReplacedDuringRequestClient(),
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_auth_superseded"
+    assert license_mod.load() is None
+    current = refresh_pending.read_pending(root)
+    assert current == (replacement_marker[0] if replacement_marker else None)
+
+
+def test_exact_beta_post_unlink_marker_fsync_failure_preserves_verified_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from elevate_cli import refresh_pending
+
+    monkeypatch.setenv("ELEVATE_RELEASE_CHANNEL", "beta")
+    payload = _signed_payload(entitlements=["real_estate_admin"])
+    monkeypatch.setattr(
+        license_mod.httpx,
+        "Client",
+        lambda **_kwargs: _SuccessClient([], payload),
+    )
+    real_remove = refresh_pending.remove_pending
+
+    def remove_then_report_directory_fsync_failure(root: Path) -> None:
+        real_remove(root)
+        raise refresh_pending.RefreshPendingError(
+            "beta_refresh_persistence_failed",
+            "injected post-unlink directory fsync failure",
+        )
+
+    monkeypatch.setattr(
+        refresh_pending,
+        "remove_pending",
+        remove_then_report_directory_fsync_failure,
+    )
+
+    with pytest.raises(license_mod.LicenseError) as caught:
+        license_mod.login("agent@example.test", "secret-password")
+
+    assert caught.value.code == "beta_refresh_persistence_failed"
+    persisted = license_mod.read_verified_beta_license_snapshot(
+        require_current=True
+    )
+    assert persisted.email == "agent@example.test"
+    assert persisted.entitlements == ["real_estate_admin"]
+    assert refresh_pending.read_pending(license_mod._beta_profile_root()) is None

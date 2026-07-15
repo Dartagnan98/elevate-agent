@@ -42,7 +42,12 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             status = 503
         elif code == "beta_backend_override_not_allowed" or code.startswith(
             "beta_license_store_"
-        ):
+        ) or code in {
+            "beta_activation_incomplete",
+            "beta_auth_sign_out_required",
+            "beta_auth_transition_conflict",
+            "beta_auth_superseded",
+        }:
             status = 409
         elif code in {
             "beta_invalid_credentials",
@@ -108,6 +113,8 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             )
             return {
                 "authenticated": False,
+                "account_verified": False,
+                "activation_complete": False,
                 "email": None,
                 "tier": None,
                 "license_id": None,
@@ -117,15 +124,26 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
                 "status_text": status_text,
                 "packs": dashboard_access_status().get("packs", {}),
             }
+        activation_complete = (
+            lic_mod.beta_activation_complete(lic)
+            if lic_mod._exact_realtor_beta_active()
+            else True
+        )
         return {
-            "authenticated": True,
+            "authenticated": activation_complete,
+            "account_verified": True,
+            "activation_complete": activation_complete,
             "email": lic.email,
             "tier": lic.tier,
             "license_id": lic.license_id,
             "entitlements": list(lic.entitlements or []),
             "expires_at": lic.expires_at,
             "expired": lic.is_expired(margin=0),
-            "status_text": lic_mod.status_text(lic),
+            "status_text": (
+                lic_mod.status_text(lic)
+                if activation_complete
+                else "Account verified. Finish required Realtor Beta skill setup."
+            ),
             "packs": dashboard_access_status().get("packs", {}),
         }
 
@@ -273,7 +291,25 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             raise _license_http_exception(exc, default_status=401)
 
         try:
-            sync_result = cloud_skills.sync_all()
+            if lic_mod._exact_realtor_beta_active():
+                activation = lic_mod.activate_install(lic, sync_skills=True)
+                sync_result = {
+                    "skill_count": activation.get("skill_count", 0),
+                    "skill_names": activation.get("skill_names", []),
+                    "path": activation.get("skills_path"),
+                    "removed": [],
+                    "errors": activation.get("skill_sync_warnings", []),
+                    "activation_complete": bool(
+                        activation.get("activation_complete")
+                    ),
+                }
+            else:
+                sync_result = cloud_skills.sync_all()
+                sync_result["activation_complete"] = not bool(
+                    sync_result.get("errors")
+                )
+        except lic_mod.LicenseError as exc:
+            raise _license_http_exception(exc, default_status=409)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Skill sync failed: {exc}")
 
@@ -283,6 +319,9 @@ def create_license_router(*, require_token: RequireToken) -> APIRouter:
             "path": sync_result.get("path"),
             "removed": sync_result.get("removed", []),
             "errors": sync_result.get("errors", []),
+            "activation_complete": bool(
+                sync_result.get("activation_complete")
+            ),
             "packs": dashboard_access_status().get("packs", {}),
         }
 

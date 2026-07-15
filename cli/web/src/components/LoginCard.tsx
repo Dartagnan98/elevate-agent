@@ -39,6 +39,18 @@ function activationIncompleteMessage(result: LicenseActivateResponse): string {
   return detail ? `${prefix} ${detail} Try again.` : `${prefix} Try again.`;
 }
 
+function requiredSetupMessage(status?: LicenseStatusResponse | null): string {
+  const detail = status?.status_text?.trim();
+  return detail || "Your account is verified. Finish required Realtor Beta setup to open the workspace.";
+}
+
+// Keep polling/focus changes fail-closed when HQ credentials were accepted but
+// the device has not durably completed its required signed-skill setup.
+// eslint-disable-next-line react-refresh/only-export-components
+export function needsRequiredSetup(status: LicenseStatusResponse): boolean {
+  return status.account_verified === true && status.activation_complete !== true;
+}
+
 /**
  * Keep the security-sensitive activation decision independently testable.
  * Older or partial server responses must never fall through to the success path.
@@ -80,12 +92,16 @@ export function LoginCard({ onAuthChange }: Props) {
     try {
       const status = await api.getLicenseStatus();
       setLicenseStatus(status);
-      if (status.authenticated && incompleteActivation.current) {
+      if (needsRequiredSetup(status)) {
+        incompleteActivation.current = true;
+        setError(requiredSetupMessage(status));
         setPhase("error");
         onAuthChange?.(false, status.packs);
         return;
       }
       if (status.authenticated) {
+        incompleteActivation.current = false;
+        setError(null);
         setPhase("authenticated");
         onAuthChange?.(true, status.packs);
       } else {
@@ -152,7 +168,7 @@ export function LoginCard({ onAuthChange }: Props) {
     await loadStatus();
   };
 
-  const showAuthError = (err: unknown, invalidMsg: string) => {
+  const showAuthError = async (err: unknown, invalidMsg: string) => {
     setPhase("error");
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("401") || message.includes("Invalid")) {
@@ -161,6 +177,18 @@ export function LoginCard({ onAuthChange }: Props) {
       setError("No active subscription. Contact Elevation Real Estate HQ.");
     } else {
       setError(message);
+    }
+    try {
+      const status = await api.getLicenseStatus();
+      if (needsRequiredSetup(status)) {
+        incompleteActivation.current = true;
+        setLicenseStatus(status);
+        setError(requiredSetupMessage(status));
+        setPhase("error");
+        onAuthChange?.(false, status.packs);
+      }
+    } catch {
+      // Preserve the original actionable authentication error.
     }
   };
 
@@ -182,7 +210,7 @@ export function LoginCard({ onAuthChange }: Props) {
       const result = await api.activateLicense(email.trim(), password);
       await completeActivation(result);
     } catch (err: unknown) {
-      showAuthError(err, "Invalid email or password.");
+      await showAuthError(err, "Invalid email or password.");
     }
   };
 
@@ -215,10 +243,7 @@ export function LoginCard({ onAuthChange }: Props) {
       );
       await completeActivation(result);
     } catch (err: unknown) {
-      setPhase("error");
-      const message = err instanceof Error ? err.message : String(err);
-      // The dashboard surfaces the real reason as "<status>: <detail>".
-      setError(message.replace(/^\d+:\s*/, "") || "Could not create the account.");
+      await showAuthError(err, "Could not create the account.");
     }
   };
 
@@ -276,7 +301,7 @@ export function LoginCard({ onAuthChange }: Props) {
       const result = await api.activateWithCode(email.trim(), code.trim());
       await completeActivation(result);
     } catch (err: unknown) {
-      showAuthError(err, "Invalid or expired code.");
+      await showAuthError(err, "Invalid or expired code.");
     }
   };
 
@@ -294,8 +319,49 @@ export function LoginCard({ onAuthChange }: Props) {
       setCodeSent(false);
       onAuthChange?.(false, result.packs);
       window.dispatchEvent(new Event("elevate:auth-changed"));
-    } catch {
-      setPhase("logged_out");
+    } catch (err: unknown) {
+      setPhase("error");
+      const detail = err instanceof Error ? err.message : String(err);
+      setError(detail || "Elevate could not clear the pending sign-in. Try again.");
+      onAuthChange?.(false, licenseStatus?.packs);
+    }
+  };
+
+  const handleRetryRequiredSetup = async () => {
+    incompleteActivation.current = true;
+    setPhase("syncing");
+    setError(null);
+    onAuthChange?.(false, licenseStatus?.packs);
+    try {
+      const result = await api.syncLicenseSkills();
+      if (result.activation_complete !== true || result.errors.length > 0) {
+        const detail = result.errors.find((item) => item.trim());
+        throw new Error(
+          detail || "Elevate could not verify every required Realtor Beta skill.",
+        );
+      }
+      incompleteActivation.current = false;
+      setLicenseStatus((current) => current
+        ? {
+            ...current,
+            authenticated: true,
+            activation_complete: true,
+            packs: result.packs,
+            status_text: "Required Realtor Beta setup complete.",
+          }
+        : current);
+      setError(null);
+      setPhase("authenticated");
+      onAuthChange?.(true, result.packs);
+      window.dispatchEvent(new Event("elevate:auth-changed"));
+      await loadStatus();
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setError(
+        detail || "Elevate could not finish required Realtor Beta setup. Try again.",
+      );
+      setPhase("error");
+      onAuthChange?.(false, licenseStatus?.packs);
     }
   };
 
@@ -304,6 +370,51 @@ export function LoginCard({ onAuthChange }: Props) {
       <Card>
         <CardContent className="flex items-center justify-center py-12">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (licenseStatus && needsRequiredSetup(licenseStatus)) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Finish Realtor Beta setup</CardTitle>
+          <CardDescription>
+            Account verified as {licenseStatus.email}. Workspace access stays locked until required skills finish installing.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {error && (
+            <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
+              {error}
+            </p>
+          )}
+          <Button
+            type="button"
+            className="w-full"
+            onClick={handleRetryRequiredSetup}
+            disabled={phase === "syncing"}
+          >
+            {phase === "syncing" ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Installing required skills...
+              </>
+            ) : (
+              "Retry required setup"
+            )}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            className="w-full text-muted-foreground"
+            onClick={handleLogout}
+            disabled={phase === "syncing"}
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out and start over
+          </Button>
         </CardContent>
       </Card>
     );
@@ -558,9 +669,20 @@ export function LoginCard({ onAuthChange }: Props) {
           )}
 
           {error && (
-            <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
-              {error}
-            </p>
+            <div className="space-y-2">
+              <p className="rounded-sm border border-border bg-card px-3 py-2 text-xs font-medium text-destructive">
+                {error}
+              </p>
+              {phase === "error" && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="text-[0.72rem] text-muted-foreground/70 underline underline-offset-2 transition-colors hover:text-muted-foreground"
+                >
+                  Clear this sign-in and start over
+                </button>
+              )}
+            </div>
           )}
 
           {mode === "password" && (

@@ -11,6 +11,8 @@ const {
 const {
   RefreshPendingError,
   createRefreshPendingStore,
+  initialAuthPendingMatches,
+  isInitialAuthPending,
 } = require("./refresh-pending");
 
 const SIGNED_HQ_BASE_URL = "https://api.elevationrealestatehq.com";
@@ -59,6 +61,10 @@ function createDesktopAuth({
   ).replace(/\/+$/, "");
   const resolvedProfileRoot = path.resolve(profileRoot);
   const resolvedLicensePath = path.resolve(licensePath);
+  const resolvedActivationReceiptPath = path.join(
+    resolvedProfileRoot,
+    ".license-activation.json",
+  );
   const expectedBetaProfileRoot = path.resolve(home, ".elevate-beta");
   let licenseRevision = 0;
   let loginInFlight = 0;
@@ -382,6 +388,12 @@ function createDesktopAuth({
       return await response.json();
     } catch (err) {
       if (isBeta) {
+        if (err && err.name === "AbortError") {
+          throw storeError(
+            "beta_auth_upstream_unavailable",
+            "Elevation HQ did not finish the account response in time.",
+          );
+        }
         throw storeError(
           "beta_license_response_invalid",
           "Elevation HQ returned an invalid account response.",
@@ -756,6 +768,43 @@ function createDesktopAuth({
     return true;
   }
 
+  function clearActivationReceiptUnlocked() {
+    if (!isBeta) return false;
+    let removed = false;
+    try {
+      fsImpl.unlinkSync(resolvedActivationReceiptPath);
+      removed = true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") {
+        throw storeError(
+          "beta_activation_receipt_failed",
+          "Realtor Beta could not clear required setup completion.",
+        );
+      }
+    }
+    if (fsImpl.existsSync(resolvedActivationReceiptPath)) {
+      throw storeError(
+        "beta_activation_receipt_failed",
+        "Realtor Beta could not verify required setup revocation.",
+      );
+    }
+    if (removed) {
+      let directoryFd = null;
+      try {
+        directoryFd = fsImpl.openSync(resolvedProfileRoot, "r");
+        fsImpl.fsyncSync(directoryFd);
+      } catch {
+        throw storeError(
+          "beta_activation_receipt_failed",
+          "Realtor Beta could not durably clear required setup completion.",
+        );
+      } finally {
+        if (directoryFd !== null) fsImpl.closeSync(directoryFd);
+      }
+    }
+    return removed;
+  }
+
   function invalidateBetaSnapshotIfMatchesUnlocked(...expectedSnapshots) {
     const current = readBetaLocalSnapshotState();
     if (current === null) return false;
@@ -830,8 +879,13 @@ function createDesktopAuth({
     return refreshPending
       .withLock(async (guard) => {
         guard.assertHeld();
-        const cleared = clearLicenseUnlocked();
+        let cleared = false;
         let cleanupFailure = null;
+        try {
+          cleared = clearLicenseUnlocked();
+        } catch (err) {
+          cleanupFailure = err;
+        }
         try {
           guard.assertHeld();
           const pending = refreshPending.read();
@@ -853,6 +907,12 @@ function createDesktopAuth({
                 "A newer Realtor Beta Device authorization replaced the state being cleared.",
             });
           }
+        } catch (err) {
+          if (!cleanupFailure) cleanupFailure = err;
+        }
+        try {
+          guard.assertHeld();
+          clearActivationReceiptUnlocked();
         } catch (err) {
           if (!cleanupFailure) cleanupFailure = err;
         }
@@ -922,6 +982,15 @@ function createDesktopAuth({
         preflightLicenseStore({ writable: true });
         let current = readBetaLicenseStrict({ current: false });
         let pending = refreshPending.read();
+
+        if (pending && isInitialAuthPending(pending)) {
+          // A complete signed snapshot is an authoritative later commit. It
+          // safely supersedes a pre-license initial-auth marker left behind by
+          // a discarded response or another runtime.
+          guard.assertHeld();
+          refreshPending.remove();
+          pending = null;
+        }
 
         if (pending) {
           if (
@@ -1259,6 +1328,11 @@ function createDesktopAuth({
     return license;
   }
 
+  function samePendingMarker(left, right) {
+    return Boolean(left) && Boolean(right) &&
+      JSON.stringify(left) === JSON.stringify(right);
+  }
+
   async function performLogin({ email, password }) {
     if (!email || !password) {
       return {
@@ -1275,6 +1349,9 @@ function createDesktopAuth({
     let startingRefreshToken = null;
     let startingSnapshot = null;
     let startingRevision = licenseRevision;
+    let initialAuthPending = null;
+    let recoverInitialAuth = false;
+    let responseWasRecovery = false;
     try {
       if (isBeta && refreshInFlight) {
         try {
@@ -1284,30 +1361,171 @@ function createDesktopAuth({
         }
       }
       preflightLicenseStore({ writable: true });
+      const requestedEmail = String(email).trim().toLowerCase();
       if (isBeta) {
-        startingSnapshot = readBetaLocalSnapshotState();
+        const prepared = await refreshPending.withLock(async (guard) => {
+          guard.assertHeld();
+          const snapshot = readBetaLocalSnapshotState();
+          if (snapshot !== null && !isInvalidSnapshot(snapshot)) {
+            throw storeError(
+              "beta_auth_sign_out_required",
+              "Sign out of the current Realtor Beta account before starting another email-and-password sign-in.",
+            );
+          }
+          let deviceTransitionExists = false;
+          try {
+            fsImpl.lstatSync(refreshPending.deviceMarkerPath);
+            deviceTransitionExists = true;
+          } catch (err) {
+            if (!err || err.code !== "ENOENT") deviceTransitionExists = true;
+          }
+          if (deviceTransitionExists) {
+            throw storeError(
+              "beta_auth_transition_conflict",
+              "Finish or cancel the pending Realtor Beta Device sign-in before using email and password.",
+            );
+          }
+          const pendingRefresh = refreshPending.read();
+          if (
+            pendingRefresh &&
+            initialAuthPendingMatches(pendingRefresh, requestedEmail, {
+              authKind: "login",
+            })
+          ) {
+            return {
+              snapshot,
+              pending: pendingRefresh,
+              recover: true,
+            };
+          }
+          if (!pendingRefresh) {
+            guard.assertHeld();
+            return {
+              snapshot,
+              pending: refreshPending.createInitialAuth({
+                email: requestedEmail,
+                authKind: "login",
+              }),
+              recover: false,
+            };
+          }
+          throw storeError(
+            "beta_auth_transition_conflict",
+            isInitialAuthPending(pendingRefresh)
+              ? "A different Realtor Beta password sign-in is awaiting recovery. Finish it with the same email and Sign in/Create account action before starting another one."
+              : "Realtor Beta is already recovering another account session. Let it finish before signing in with a password.",
+          );
+        });
+        startingSnapshot = prepared.snapshot;
+        initialAuthPending = prepared.pending;
+        recoverInitialAuth = prepared.recover;
+        loginInFlight += 1;
+        registeredLogin = true;
+        operationSequence = ++sessionOperationSequence;
         startingRefreshToken =
           startingSnapshot && !isInvalidSnapshot(startingSnapshot)
             ? startingSnapshot.refresh_token
             : null;
         startingRevision = licenseRevision;
-        loginInFlight += 1;
-        registeredLogin = true;
-        operationSequence = ++sessionOperationSequence;
       }
-      abort = betaRequestAbort();
-      const request = hqJsonRequestHeaders("auth-login");
-      requestId = request.requestId;
-      const res = await fetchImpl(`${effectiveHqBaseUrl}/api/auth/login`, {
-        method: "POST",
-        headers: request.headers,
-        ...(isBeta ? { redirect: "error", signal: abort.signal } : {}),
-        body: JSON.stringify({
-          email: String(email).trim().toLowerCase(),
-          password,
-          device_label: `Elevate Desktop (${os.hostname()})`,
-        }),
-      });
+
+      const postBeta = async (pathName, scope, body) => {
+        abort.cancel();
+        abort = betaRequestAbort();
+        const request = hqJsonRequestHeaders(scope);
+        requestId = request.requestId;
+        return fetchImpl(`${effectiveHqBaseUrl}${pathName}`, {
+          method: "POST",
+          headers: request.headers,
+          redirect: "error",
+          signal: abort.signal,
+          body: JSON.stringify(body),
+        });
+      };
+
+      let res = null;
+      if (isBeta && recoverInitialAuth) {
+        try {
+          const recovery = await postBeta(
+            "/api/license/refresh",
+            "auth-initial-recovery",
+            {
+              refresh_token: initialAuthPending.current_refresh_token,
+              next_refresh_token: initialAuthPending.successor_refresh_token,
+              refresh_attempt_id: initialAuthPending.attempt_id,
+            },
+          );
+          if (recovery.ok) {
+            res = recovery;
+            responseWasRecovery = true;
+          } else if (recovery.status === 401) {
+            // HQ definitively rejected B. Password auth may safely retry with
+            // the exact same caller-owned token.
+          } else if (recovery.status === 402) {
+            if (operationSequence === sessionOperationSequence) {
+              await refreshPending.withLock(async (guard) => {
+                guard.assertHeld();
+                const currentPending = refreshPending.read();
+                if (samePendingMarker(currentPending, initialAuthPending)) {
+                  refreshPending.remove();
+                }
+              });
+            }
+            return {
+              ok: false,
+              activation_complete: false,
+              code: "subscription_inactive",
+              error: "Your account has no active subscription. Upgrade in your browser, then sign in.",
+            };
+          } else {
+            log.warn(
+              `[auth] initial recovery ambiguous request_id=${requestId}: HTTP ${recovery.status}`,
+            );
+            return {
+              ok: false,
+              activation_complete: false,
+              code: "beta_initial_auth_recovery_ambiguous",
+              error: "Realtor Beta could not confirm the pending sign-in. Try again to resume it safely.",
+            };
+          }
+        } catch (recoveryError) {
+          const code = recoveryError && recoveryError.code
+            ? recoveryError.code
+            : "beta_auth_upstream_unavailable";
+          log.warn(
+            `[auth] initial recovery unavailable request_id=${requestId} code=${code}`,
+          );
+          return {
+            ok: false,
+            activation_complete: false,
+            code: "beta_initial_auth_recovery_ambiguous",
+            error: "Realtor Beta could not confirm the pending sign-in. Try again to resume it safely.",
+          };
+        }
+      }
+
+      if (!res) {
+        if (isBeta) {
+          res = await postBeta("/api/auth/login", "auth-login", {
+            email: requestedEmail,
+            password,
+            device_label: `Elevate Desktop (${os.hostname()})`,
+            initial_refresh_token: initialAuthPending.current_refresh_token,
+          });
+        } else {
+          const request = hqJsonRequestHeaders("auth-login");
+          requestId = request.requestId;
+          res = await fetchImpl(`${effectiveHqBaseUrl}/api/auth/login`, {
+            method: "POST",
+            headers: request.headers,
+            body: JSON.stringify({
+              email: requestedEmail,
+              password,
+              device_label: `Elevate Desktop (${os.hostname()})`,
+            }),
+          });
+        }
+      }
 
       if (res.status === 401) {
         log.warn(`[auth] login rejected request_id=${requestId}: HTTP 401`);
@@ -1357,7 +1575,6 @@ function createDesktopAuth({
           error: "A newer account session replaced this sign-in attempt.",
         };
       }
-      const requestedEmail = String(email).trim().toLowerCase();
       const license = isBeta
         ? licenseFromResponse(data)
         : {
@@ -1369,6 +1586,19 @@ function createDesktopAuth({
             expires_at: decodeJwtExp(data.access_token),
             entitlements: data.entitlements || [],
           };
+      if (
+        isBeta &&
+        license.refresh_token !== (
+          responseWasRecovery
+            ? initialAuthPending.successor_refresh_token
+            : initialAuthPending.current_refresh_token
+        )
+      ) {
+        throw storeError(
+          "beta_refresh_successor_mismatch",
+          "Elevation HQ returned an account token that did not match the protected sign-in recovery.",
+        );
+      }
       if (isBeta && license.email !== requestedEmail) {
         throw storeError(
           "beta_entitlement_response_mismatch",
@@ -1395,6 +1625,7 @@ function createDesktopAuth({
           let saved = null;
           let predecessorAuthorized = false;
           let writeAttempted = false;
+          let verifiedCommit = false;
           try {
             installedBefore = readBetaLocalSnapshotState();
             const predecessorMatches = sameLocalSnapshotState(
@@ -1409,12 +1640,26 @@ function createDesktopAuth({
             }
             predecessorAuthorized = true;
             const { pendingRefresh, pendingDevice } = readCredentialMarkersStrict();
+            if (!samePendingMarker(pendingRefresh, initialAuthPending)) {
+              // A cross-process cancel/replacement owns the local transition.
+              // Never install this stale HQ result or erase the newer marker.
+              predecessorAuthorized = false;
+              throw storeError(
+                "beta_auth_superseded",
+                "A newer Realtor Beta sign-in replaced this attempt.",
+              );
+            }
             guard.assertHeld();
             writeAttempted = true;
             saved = writeLicenseUnlocked(license, {
               startingSnapshot: installedBefore,
             });
             const verified = verifyDesktopEntitlementMirror(saved, { current: true });
+            // The signed account is now the authoritative commit. Cleanup
+            // durability failures may leave retry state behind or report an
+            // error, but must not erase the verified account after the marker
+            // was already unlinked.
+            verifiedCommit = true;
             if (pendingRefresh) {
               guard.assertHeld();
               refreshPending.remove();
@@ -1429,7 +1674,7 @@ function createDesktopAuth({
             }
             return verified;
           } catch (err) {
-            if (predecessorAuthorized) {
+            if (predecessorAuthorized && !verifiedCommit) {
               guard.assertHeld();
               try {
                 invalidateBetaSnapshotIfMatchesUnlocked(

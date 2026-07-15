@@ -13,7 +13,10 @@ const {
   ENTITLEMENT_ASSERTION,
   tokenHash,
 } = require("../src/entitlement-assertion");
-const { createRefreshPendingStore } = require("../src/refresh-pending");
+const {
+  createRefreshPendingStore,
+  isInitialAuthPending,
+} = require("../src/refresh-pending");
 
 const log = { info() {}, warn() {} };
 const entitlementKeys = crypto.generateKeyPairSync("ed25519");
@@ -75,6 +78,7 @@ function profile() {
 function successfulPayload(
   entitlements = [],
   {
+    accessToken,
     refreshToken,
     expiresAt,
     email = "agent@example.test",
@@ -84,10 +88,10 @@ function successfulPayload(
   const now = Math.floor(Date.now() / 1000);
   const expiry = expiresAt === undefined ? now + 3600 : expiresAt;
   const issuedAt = expiry - 3600;
-  const accessToken = token(expiry);
+  const signedAccessToken = accessToken || token(expiry);
   const signedRefreshToken = refreshToken || crypto.randomBytes(32).toString("base64url");
   const payload = {
-    access_token: accessToken,
+    access_token: signedAccessToken,
     refresh_token: signedRefreshToken,
     email: String(email).trim().toLowerCase(),
     license_id: licenseId,
@@ -112,7 +116,7 @@ function successfulPayload(
     nbf: issuedAt,
     exp: expiry,
     jti: crypto.randomUUID(),
-    ath: tokenHash(accessToken),
+    ath: tokenHash(signedAccessToken),
     rth: tokenHash(signedRefreshToken),
   })).toString("base64url");
   const input = `${header}.${claims}`;
@@ -121,6 +125,31 @@ function successfulPayload(
     .toString("base64url")}`;
   payload.expires_at = expiry;
   return payload;
+}
+
+function rebindSuccessfulPayloadRefreshToken(payload, refreshToken) {
+  const encodedClaims = String(payload.entitlement_assertion).split(".")[1];
+  const claims = JSON.parse(Buffer.from(encodedClaims, "base64url").toString("utf8"));
+  const rebound = successfulPayload(claims.entitlements, {
+    accessToken: payload.access_token,
+    refreshToken,
+    expiresAt: claims.exp,
+    email: claims.email,
+    licenseId: claims.license_id,
+  });
+  return {
+    ...rebound,
+    ...payload,
+    refresh_token: refreshToken,
+    entitlement_assertion: rebound.entitlement_assertion,
+  };
+}
+
+function bindPasswordAuthPayload(payload, options) {
+  const body = JSON.parse(options.body);
+  return body.initial_refresh_token
+    ? rebindSuccessfulPayloadRefreshToken(payload, body.initial_refresh_token)
+    : payload;
 }
 
 test("exact Beta desktop login and refresh ignore attacker backend and verify atomic snapshot", async () => {
@@ -149,7 +178,7 @@ test("exact Beta desktop login and refresh ignore attacker backend and verify at
         return response(
           url.endsWith("/api/license/refresh")
             ? successfulPayload([], { refreshToken: body.next_refresh_token })
-            : initialPayload,
+            : bindPasswordAuthPayload(initialPayload, options),
         );
       },
     });
@@ -185,8 +214,343 @@ test("exact Beta desktop login and refresh ignore attacker backend and verify at
       "refresh_attempt_id",
       "refresh_token",
     ]);
-    assert.equal(calls[1].body.refresh_token, initialPayload.refresh_token);
+    assert.equal(calls[1].body.refresh_token, login.license.refresh_token);
     assert.equal(refreshed.refresh_token, calls[1].body.next_refresh_token);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("exact Beta desktop recovers a lost initial login without replaying password", async () => {
+  const state = profile();
+  const firstCalls = [];
+  const recoveryCalls = [];
+  const markerPath = path.join(state.root, ".license-refresh-pending.json");
+  try {
+    const first = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (url, options) => {
+        firstCalls.push({ url, body: JSON.parse(options.body) });
+        return response({}, 503);
+      },
+    });
+
+    const failed = await first.performLogin({
+      email: "Agent@Example.test",
+      password: "first-secret",
+    });
+
+    assert.equal(failed.ok, false);
+    assert.equal(failed.code, "auth_upstream_failed");
+    assert.equal(firstCalls.length, 1);
+    assert.equal(firstCalls[0].url, `${SIGNED_HQ_BASE_URL}/api/auth/login`);
+    assert.match(firstCalls[0].body.initial_refresh_token, /^[A-Za-z0-9_-]{43}$/);
+    const pendingStore = createRefreshPendingStore({ root: state.root });
+    const pending = pendingStore.read();
+    assert.equal(isInitialAuthPending(pending), true);
+    assert.equal(firstCalls[0].body.initial_refresh_token, pending.current_refresh_token);
+    const markerBytes = fs.readFileSync(markerPath, "utf8");
+    assert.equal(markerBytes.includes("agent@example.test"), false);
+    assert.equal(markerBytes.includes("first-secret"), false);
+
+    const ambiguous = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (url, options) => {
+        recoveryCalls.push({ url, body: JSON.parse(options.body) });
+        // Model HQ committing B -> C before the response disappears.
+        throw new TypeError("socket reset after recovery commit");
+      },
+    });
+
+    const uncertain = await ambiguous.performLogin({
+      email: "agent@example.test",
+      password: "this-password-must-not-be-posted",
+    });
+
+    assert.equal(uncertain.ok, false);
+    assert.equal(uncertain.code, "beta_initial_auth_recovery_ambiguous");
+    assert.equal(recoveryCalls.length, 1);
+    assert.equal(recoveryCalls[0].url, `${SIGNED_HQ_BASE_URL}/api/license/refresh`);
+    assert.deepEqual(recoveryCalls[0].body, {
+      refresh_token: pending.current_refresh_token,
+      next_refresh_token: pending.successor_refresh_token,
+      refresh_attempt_id: pending.attempt_id,
+    });
+    assert.deepEqual(pendingStore.read(), pending);
+    assert.equal(fs.readFileSync(markerPath, "utf8"), markerBytes);
+
+    const successfulRecoveryCalls = [];
+    const resumed = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        successfulRecoveryCalls.push({ url, body });
+        assert.equal(url, `${SIGNED_HQ_BASE_URL}/api/license/refresh`);
+        return response(successfulPayload([], {
+          refreshToken: body.next_refresh_token,
+        }));
+      },
+    });
+
+    const recovered = await resumed.performLogin({
+      email: "agent@example.test",
+      password: "this-password-is-not-replayed",
+    });
+
+    assert.equal(recovered.ok, true);
+    assert.equal(successfulRecoveryCalls.length, 1);
+    assert.deepEqual(successfulRecoveryCalls[0].body, {
+      refresh_token: pending.current_refresh_token,
+      next_refresh_token: pending.successor_refresh_token,
+      refresh_attempt_id: pending.attempt_id,
+    });
+    assert.equal(recovered.license.refresh_token, pending.successor_refresh_token);
+    assert.equal(fs.existsSync(markerPath), false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+for (const status of [429, 503]) {
+  test(`exact Beta desktop does not downgrade initial recovery HTTP ${status} to password auth`, async () => {
+    const state = profile();
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+    try {
+      const first = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async () => response({}, 503),
+      });
+      await first.performLogin({
+        email: "agent@example.test",
+        password: "first-secret",
+      });
+      const markerBytes = fs.readFileSync(markerPath, "utf8");
+      const calls = [];
+      const retry = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async (url, options) => {
+          calls.push({ url, body: JSON.parse(options.body) });
+          return response({}, status);
+        },
+      });
+
+      const result = await retry.performLogin({
+        email: "agent@example.test",
+        password: "must-not-be-posted",
+      });
+
+      assert.equal(result.code, "beta_initial_auth_recovery_ambiguous");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, `${SIGNED_HQ_BASE_URL}/api/license/refresh`);
+      assert.equal(fs.readFileSync(markerPath, "utf8"), markerBytes);
+    } finally {
+      state.cleanup();
+    }
+  });
+}
+
+for (const authStatus of [400, 401, 402, 409, 429]) {
+  test(`exact Beta desktop retains B/C/I across recovery-401 then auth-${authStatus}`, async () => {
+    const state = profile();
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+    try {
+      const first = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async () => response({}, 503),
+      });
+      await first.performLogin({
+        email: "agent@example.test",
+        password: "first-secret",
+      });
+      const pendingStore = createRefreshPendingStore({ root: state.root });
+      const pending = pendingStore.read();
+      const markerBytes = fs.readFileSync(markerPath, "utf8");
+      const raceCalls = [];
+      const raced = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async (url, options) => {
+          const body = JSON.parse(options.body);
+          raceCalls.push({ url, body });
+          return url.endsWith("/api/license/refresh")
+            ? response({}, 401)
+            : response({}, authStatus);
+        },
+      });
+
+      const collision = await raced.performLogin({
+        email: "agent@example.test",
+        password: "second-secret",
+      });
+
+      assert.equal(collision.ok, false);
+      assert.deepEqual(raceCalls.map(({ url }) => url), [
+        `${SIGNED_HQ_BASE_URL}/api/license/refresh`,
+        `${SIGNED_HQ_BASE_URL}/api/auth/login`,
+      ]);
+      assert.equal(
+        raceCalls[1].body.initial_refresh_token,
+        pending.current_refresh_token,
+      );
+      assert.deepEqual(pendingStore.read(), pending);
+      assert.equal(fs.readFileSync(markerPath, "utf8"), markerBytes);
+
+      const resumed = createDesktopAuth({
+        log,
+        home: state.sandbox,
+        isBeta: true,
+        entitlementKeyset,
+        profileRoot: state.root,
+        licensePath: state.licensePath,
+        fetchImpl: async (url, options) => {
+          const body = JSON.parse(options.body);
+          assert.equal(url, `${SIGNED_HQ_BASE_URL}/api/license/refresh`);
+          return response(successfulPayload([], {
+            refreshToken: body.next_refresh_token,
+          }));
+        },
+      });
+      const recovered = await resumed.performLogin({
+        email: "agent@example.test",
+        password: "must-not-be-posted",
+      });
+
+      assert.equal(recovered.ok, true);
+      assert.equal(recovered.license.refresh_token, pending.successor_refresh_token);
+      assert.equal(fs.existsSync(markerPath), false);
+    } finally {
+      state.cleanup();
+    }
+  });
+}
+
+test("exact Beta desktop retains initial marker when password auth ignores the proposed token", async () => {
+  const state = profile();
+  const markerPath = path.join(state.root, ".license-refresh-pending.json");
+  const calls = [];
+  try {
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        calls.push({ url, body });
+        return response(successfulPayload([], {
+          refreshToken: Buffer.alloc(32, "M").toString("base64url"),
+        }));
+      },
+    });
+
+    const result = await auth.performLogin({
+      email: "agent@example.test",
+      password: "secret-password",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "beta_refresh_successor_mismatch");
+    assert.equal(calls.length, 1);
+    const pending = createRefreshPendingStore({ root: state.root }).read();
+    assert.equal(calls[0].body.initial_refresh_token, pending.current_refresh_token);
+    assert.equal(fs.existsSync(markerPath), true);
+    assert.equal(fs.existsSync(state.licensePath), false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("exact Beta desktop durably recovers initial auth over an invalid legacy snapshot", async () => {
+  const state = profile();
+  const markerPath = path.join(state.root, ".license-refresh-pending.json");
+  const invalidBytes = JSON.stringify({
+    access_token: "legacy-access",
+    refresh_token: "legacy-refresh",
+    license_id: "legacy-license",
+  });
+  try {
+    fs.writeFileSync(state.licensePath, invalidBytes, { mode: 0o600 });
+    const first = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async () => response({}, 503),
+    });
+
+    const failed = await first.performLogin({
+      email: "agent@example.test",
+      password: "first-secret",
+    });
+    assert.equal(failed.code, "auth_upstream_failed");
+    const pendingStore = createRefreshPendingStore({ root: state.root });
+    const pending = pendingStore.read();
+    assert.equal(isInitialAuthPending(pending), true);
+    assert.equal(fs.readFileSync(state.licensePath, "utf8"), invalidBytes);
+
+    const resumed = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body);
+        assert.equal(url, `${SIGNED_HQ_BASE_URL}/api/license/refresh`);
+        return response(successfulPayload([], {
+          refreshToken: body.next_refresh_token,
+        }));
+      },
+    });
+
+    const recovered = await resumed.performLogin({
+      email: "agent@example.test",
+      password: "must-not-be-posted",
+    });
+
+    assert.equal(recovered.ok, true);
+    assert.equal(recovered.license.refresh_token, pending.successor_refresh_token);
+    assert.notEqual(fs.readFileSync(state.licensePath, "utf8"), invalidBytes);
+    assert.equal(fs.existsSync(markerPath), false);
   } finally {
     state.cleanup();
   }
@@ -263,11 +627,9 @@ for (const storeKind of [
   });
 }
 
-test("exact Beta desktop rejects incomplete success without replacing its prior session", async () => {
+test("exact Beta desktop rejects incomplete initial-auth success", async () => {
   const state = profile();
   try {
-    const prior = successfulPayload(["real_estate_sales"]);
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
     const auth = createDesktopAuth({
       log,
       hqBaseUrl: "https://attacker.example.test",
@@ -291,12 +653,42 @@ test("exact Beta desktop rejects incomplete success without replacing its prior 
 
     assert.equal(result.ok, false);
     assert.equal(result.code, "beta_entitlement_assertion_invalid");
-    assert.deepEqual(auth.readLicense(), {
-      ...prior,
-      expires_at: JSON.parse(
-        Buffer.from(prior.entitlement_assertion.split(".")[1], "base64url").toString("utf8"),
-      ).exp,
+    assert.equal(auth.readLicense(), null);
+    assert.equal(fs.existsSync(path.join(state.root, ".license-refresh-pending.json")), true);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("exact Beta desktop signed session blocks password auth before network", async () => {
+  const state = profile();
+  let networked = false;
+  try {
+    const prior = successfulPayload(["real_estate_sales"]);
+    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
+    const auth = createDesktopAuth({
+      log,
+      hqBaseUrl: SIGNED_HQ_BASE_URL,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      fetchImpl: async () => {
+        networked = true;
+        return response(successfulPayload());
+      },
     });
+
+    const result = await auth.performLogin({
+      email: "agent@example.test",
+      password: "secret-password",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "beta_auth_sign_out_required");
+    assert.equal(networked, false);
+    assert.deepEqual(auth.readLicense(), prior);
   } finally {
     state.cleanup();
   }
@@ -305,12 +697,15 @@ test("exact Beta desktop rejects incomplete success without replacing its prior 
 test("exact Beta desktop persistence mismatch invalidates stale grants and never reports success", async () => {
   const state = profile();
   try {
-    let corruptNextRename = false;
+    let corruptNextLicenseRename = true;
     const fsImpl = Object.create(fs);
     fsImpl.renameSync = (source, target) => {
       fs.renameSync(source, target);
-      if (corruptNextRename) {
-        corruptNextRename = false;
+      if (
+        corruptNextLicenseRename
+        && path.resolve(target) === path.resolve(state.licensePath)
+      ) {
+        corruptNextLicenseRename = false;
         fs.writeFileSync(target, "{}");
       }
     };
@@ -322,19 +717,15 @@ test("exact Beta desktop persistence mismatch invalidates stale grants and never
       entitlementKeyset,
       profileRoot: state.root,
       licensePath: state.licensePath,
-      fetchImpl: async () => response(successfulPayload(["real_estate_sales"])),
+      fetchImpl: async (_url, options) => response(bindPasswordAuthPayload(
+        successfulPayload(["real_estate_sales"]),
+        options,
+      )),
       fsImpl,
     });
-    const original = await first.performLogin({
-      email: "agent@example.test",
-      password: "secret-password",
-    });
-    assert.equal(original.ok, true);
-    corruptNextRename = true;
-
     const result = await first.performLogin({
       email: "agent@example.test",
-      password: "new-password",
+      password: "secret-password",
     });
 
     assert.equal(result.ok, false);
@@ -582,13 +973,12 @@ test("stale Beta refresh cannot resurrect a snapshot cleared by another process"
   }
 });
 
-test("explicit Beta login waits for an older refresh and then supersedes it", async () => {
+test("explicit Beta login waits for an older refresh and then requires signout", async () => {
   const state = profile();
   const refreshResponse = deferred();
-  const loginResponse = deferred();
+  let calls = 0;
   try {
     const initial = successfulPayload(["real_estate_sales"]);
-    const signedIn = successfulPayload(["real_estate_admin"]);
     let refreshSuccessor = null;
     fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
     const auth = createDesktopAuth({
@@ -599,11 +989,12 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
       profileRoot: state.root,
       licensePath: state.licensePath,
       fetchImpl: async (url, options) => {
+        calls += 1;
         if (url.endsWith("/api/license/refresh")) {
           refreshSuccessor = JSON.parse(options.body).next_refresh_token;
           return refreshResponse.promise;
         }
-        return loginResponse.promise;
+        throw new Error("password auth must not reach the network after refresh signs in");
       },
     });
 
@@ -623,11 +1014,12 @@ test("explicit Beta login waits for an older refresh and then supersedes it", as
     assert.equal(completedRefresh.refresh_token, refreshed.refresh_token);
     assert.equal(auth.readLicense().refresh_token, refreshed.refresh_token);
 
-    loginResponse.resolve(response(signedIn));
     const loginResult = await login;
-    assert.equal(loginResult.ok, true);
-    assert.equal(auth.readLicense().refresh_token, signedIn.refresh_token);
-    assert.deepEqual(auth.readLicense().entitlements, ["real_estate_admin"]);
+    assert.equal(loginResult.ok, false);
+    assert.equal(loginResult.code, "beta_auth_sign_out_required");
+    assert.equal(auth.readLicense().refresh_token, refreshed.refresh_token);
+    assert.deepEqual(auth.readLicense().entitlements, ["real_estate_marketing"]);
+    assert.equal(calls, 1);
   } finally {
     state.cleanup();
   }
@@ -640,7 +1032,6 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
   try {
     const initial = successfulPayload(["real_estate_sales"]);
     const refreshed = successfulPayload(["real_estate_admin"]);
-    fs.writeFileSync(state.licensePath, JSON.stringify(initial), { mode: 0o600 });
     const auth = createDesktopAuth({
       log,
       home: state.sandbox,
@@ -676,10 +1067,60 @@ test("hung Beta sign-in is bounded and releases background refresh", async () =>
     assert.equal(login.ok, false);
     assert.equal(login.code, "beta_auth_upstream_unavailable");
 
+    await auth.clearLicense();
+    await auth.writeLicense(initial);
     const next = await auth.refreshLicense(auth.readLicense());
     assert.equal(next.refresh_token, successor);
     assert.deepEqual(next.entitlements, ["real_estate_admin"]);
     assert.equal(calls, 2);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("Beta sign-in timeout remains active while the response body stalls", async () => {
+  const state = profile();
+  let calls = 0;
+  try {
+    const auth = createDesktopAuth({
+      log,
+      home: state.sandbox,
+      isBeta: true,
+      entitlementKeyset,
+      profileRoot: state.root,
+      licensePath: state.licensePath,
+      authRequestTimeoutMs: 10,
+      fetchImpl: async (_url, options) => {
+        calls += 1;
+        return {
+          ok: true,
+          status: 200,
+          json() {
+            return new Promise((_resolve, reject) => {
+              options.signal.addEventListener(
+                "abort",
+                () => reject(Object.assign(new Error("aborted body"), { name: "AbortError" })),
+                { once: true },
+              );
+            });
+          },
+          async text() { return ""; },
+        };
+      },
+    });
+
+    const startedAt = Date.now();
+    const login = await auth.performLogin({
+      email: "agent@example.test",
+      password: "password",
+    });
+
+    assert.equal(login.ok, false);
+    assert.equal(login.code, "beta_auth_upstream_unavailable");
+    assert.ok(Date.now() - startedAt < 500);
+    assert.equal(calls, 1);
+    assert.equal(auth.readLicense(), null);
+    assert.equal(fs.existsSync(path.join(state.root, ".license-refresh-pending.json")), true);
   } finally {
     state.cleanup();
   }
@@ -910,11 +1351,11 @@ test("ambiguous Beta 4xx retains marker and never falls back to v1", async () =>
   }
 });
 
-test("delayed valid Beta login cannot overwrite a newer account session", async () => {
+test("different-email Beta login cannot supersede a durable initial-auth owner", async () => {
   const state = profile();
   const firstResponse = deferred();
-  const newer = successfulPayload(["real_estate_admin"]);
   let calls = 0;
+  let firstRequestOptions = null;
   try {
     const auth = createDesktopAuth({
       log,
@@ -923,9 +1364,13 @@ test("delayed valid Beta login cannot overwrite a newer account session", async 
       entitlementKeyset,
       profileRoot: state.root,
       licensePath: state.licensePath,
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
         calls += 1;
-        return calls === 1 ? firstResponse.promise : response(newer);
+        if (calls === 1) {
+          firstRequestOptions = options;
+          return firstResponse.promise;
+        }
+        throw new Error("conflicting initial auth must not reach the network");
       },
     });
 
@@ -933,29 +1378,34 @@ test("delayed valid Beta login cannot overwrite a newer account session", async 
       email: "old@example.test",
       password: "old-password",
     });
-    const latest = await auth.performLogin({
+    await waitFor(() => firstRequestOptions !== null);
+    const conflicting = await auth.performLogin({
       email: "agent@example.test",
       password: "new-password",
     });
-    assert.equal(latest.ok, true);
+    assert.equal(conflicting.ok, false);
+    assert.equal(conflicting.code, "beta_auth_transition_conflict");
+    assert.equal(calls, 1);
 
-    firstResponse.resolve(response(successfulPayload(["real_estate_sales"])));
+    firstResponse.resolve(response(bindPasswordAuthPayload(
+      successfulPayload(["real_estate_sales"], { email: "old@example.test" }),
+      firstRequestOptions,
+    )));
     const staleResult = await stale;
 
-    assert.equal(staleResult.ok, false);
-    assert.equal(staleResult.code, "beta_auth_superseded");
-    assert.deepEqual(auth.readLicense(), latest.license);
-    assert.equal(auth.readLicense().refresh_token, newer.refresh_token);
+    assert.equal(staleResult.ok, true);
+    assert.deepEqual(auth.readLicense(), staleResult.license);
+    assert.equal(auth.readLicense().email, "old@example.test");
   } finally {
     state.cleanup();
   }
 });
 
-test("delayed malformed Beta login cannot clear a newer account session", async () => {
+test("different-email conflict does not supersede a malformed initial-auth owner", async () => {
   const state = profile();
   const firstResponse = deferred();
-  const newer = successfulPayload(["real_estate_admin"]);
   let calls = 0;
+  let firstRequestOptions = null;
   try {
     const auth = createDesktopAuth({
       log,
@@ -964,9 +1414,13 @@ test("delayed malformed Beta login cannot clear a newer account session", async 
       entitlementKeyset,
       profileRoot: state.root,
       licensePath: state.licensePath,
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
         calls += 1;
-        return calls === 1 ? firstResponse.promise : response(newer);
+        if (calls === 1) {
+          firstRequestOptions = options;
+          return firstResponse.promise;
+        }
+        throw new Error("conflicting initial auth must not reach the network");
       },
     });
 
@@ -974,21 +1428,27 @@ test("delayed malformed Beta login cannot clear a newer account session", async 
       email: "old@example.test",
       password: "old-password",
     });
-    const latest = await auth.performLogin({
+    await waitFor(() => firstRequestOptions !== null);
+    const conflicting = await auth.performLogin({
       email: "agent@example.test",
       password: "new-password",
     });
-    assert.equal(latest.ok, true);
+    assert.equal(conflicting.ok, false);
+    assert.equal(conflicting.code, "beta_auth_transition_conflict");
+    assert.equal(calls, 1);
 
     firstResponse.resolve(response({
-      ...successfulPayload(["real_estate_sales"]),
+      ...bindPasswordAuthPayload(
+        successfulPayload(["real_estate_sales"], { email: "old@example.test" }),
+        firstRequestOptions,
+      ),
       email: "forged@example.test",
     }));
     const staleResult = await stale;
 
     assert.equal(staleResult.ok, false);
-    assert.deepEqual(auth.readLicense(), latest.license);
-    assert.equal(auth.readLicense().refresh_token, newer.refresh_token);
+    assert.equal(staleResult.code, "beta_entitlement_assertion_mismatch");
+    assert.equal(auth.readLicense(), null);
   } finally {
     state.cleanup();
   }
@@ -1030,6 +1490,48 @@ test("Stable write and clear preserve their synchronous return contract", () => 
     const cleared = auth.clearLicense();
     assert.equal(typeof cleared?.then, "undefined");
     assert.equal(fs.existsSync(licensePath), false);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("Stable desktop password login keeps the legacy request shape", async () => {
+  const sandbox = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "elevate-stable-login-"));
+  const licensePath = path.join(sandbox, "license.json");
+  const calls = [];
+  try {
+    const auth = createDesktopAuth({
+      log,
+      hqBaseUrl: "https://stable.example.test",
+      isBeta: false,
+      profileRoot: sandbox,
+      licensePath,
+      entitlementKeyset,
+      fetchImpl: async (url, options) => {
+        calls.push({ url, body: JSON.parse(options.body) });
+        return response({
+          access_token: token(),
+          refresh_token: "stable-refresh",
+          license_id: "stable-license",
+          tier: "pro",
+          entitlements: [],
+        });
+      },
+    });
+
+    const result = await auth.performLogin({
+      email: "Agent@Example.test",
+      password: "stable-password",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].url, "https://stable.example.test/api/auth/login");
+    assert.deepEqual(Object.keys(calls[0].body).sort(), [
+      "device_label",
+      "email",
+      "password",
+    ]);
+    assert.equal("initial_refresh_token" in calls[0].body, false);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
@@ -1247,26 +1749,18 @@ test("exact Beta desktop rejects dual credential markers without mutation", asyn
   }
 });
 
-test("exact Beta desktop explicit login clears Device only after signed readback", async () => {
+test("exact Beta desktop explicit login blocks pending Device before network", async () => {
   const state = profile();
-  const events = [];
+  let networked = false;
   try {
-    const { store } = await writeDevicePending(state.root);
-    const payload = successfulPayload([], {
-      refreshToken: Buffer.alloc(32, "A").toString("base64url"),
-    });
+    const { pending, store } = await writeDevicePending(state.root);
     const devicePath = path.join(state.root, ".license-device-pending.json");
-    const fsImpl = Object.create(fs);
-    fsImpl.unlinkSync = (target) => {
-      if (path.resolve(target) === path.resolve(devicePath)) {
-        assert.deepEqual(JSON.parse(fs.readFileSync(state.licensePath, "utf8")), payload);
-        events.push("signed-readback-before-device-clear");
-      }
-      return fs.unlinkSync(target);
-    };
+    const markerBytes = fs.readFileSync(devicePath);
     const auth = betaAuth(state, {
-      fsImpl,
-      fetchImpl: async () => response(payload),
+      fetchImpl: async () => {
+        networked = true;
+        return response(successfulPayload());
+      },
     });
 
     const result = await auth.performLogin({
@@ -1274,22 +1768,31 @@ test("exact Beta desktop explicit login clears Device only after signed readback
       password: "secret-password",
     });
 
-    assert.equal(result.ok, true);
-    assert.equal(result.activation_complete, true);
-    assert.deepEqual(auth.readLicense(), payload);
-    assert.deepEqual(events, ["signed-readback-before-device-clear"]);
-    assert.equal(store.readDevice(), null);
+    assert.equal(result.ok, false);
+    assert.equal(result.activation_complete, false);
+    assert.equal(result.code, "beta_auth_transition_conflict");
+    assert.equal(networked, false);
+    assert.deepEqual(store.readDevice(), pending);
+    assert.deepEqual(fs.readFileSync(devicePath), markerBytes);
+    assert.equal(auth.readLicense(), null);
   } finally {
     state.cleanup();
   }
 });
 
-test("exact Beta desktop failed login retains Device recovery state", async () => {
+test("exact Beta desktop corrupt Device blocks explicit login without mutation", async () => {
   const state = profile();
+  let networked = false;
   try {
-    const { pending, store } = await writeDevicePending(state.root);
+    await writeDevicePending(state.root);
+    const devicePath = path.join(state.root, ".license-device-pending.json");
+    fs.writeFileSync(devicePath, "{}\n", { mode: 0o600 });
+    const markerBytes = fs.readFileSync(devicePath);
     const auth = betaAuth(state, {
-      fetchImpl: async () => response({}, 401),
+      fetchImpl: async () => {
+        networked = true;
+        return response({}, 401);
+      },
     });
 
     const result = await auth.performLogin({
@@ -1299,8 +1802,9 @@ test("exact Beta desktop failed login retains Device recovery state", async () =
 
     assert.equal(result.ok, false);
     assert.equal(result.activation_complete, false);
-    assert.equal(result.code, "invalid_credentials");
-    assert.deepEqual(store.readDevice(), pending);
+    assert.equal(result.code, "beta_auth_transition_conflict");
+    assert.equal(networked, false);
+    assert.deepEqual(fs.readFileSync(devicePath), markerBytes);
     assert.equal(fs.existsSync(state.licensePath), false);
   } finally {
     state.cleanup();
@@ -1427,7 +1931,9 @@ test("exact Beta desktop late persistence failure preserves newer signed winner"
     };
     const auth = betaAuth(state, {
       fsImpl,
-      fetchImpl: async () => response(responsePayload),
+      fetchImpl: async (_url, options) => response(
+        bindPasswordAuthPayload(responsePayload, options),
+      ),
     });
 
     const result = await auth.performLogin({
@@ -1443,39 +1949,17 @@ test("exact Beta desktop late persistence failure preserves newer signed winner"
   }
 });
 
-test("exact Beta desktop explicit auth CAS failure rolls back only its snapshot", async () => {
+test("exact Beta desktop explicit auth blocks regular refresh marker without mutation", async () => {
   const state = profile();
+  let networked = false;
   try {
-    const { store } = await writeDevicePending(state.root);
-    const payload = successfulPayload([], {
-      refreshToken: Buffer.alloc(32, "A").toString("base64url"),
-    });
-    const devicePath = path.join(state.root, ".license-device-pending.json");
-    const replacement = {
-      schema: 1,
-      operation: "device",
-      device_code: Buffer.alloc(32, "J").toString("base64url"),
-      initial_refresh_token: Buffer.alloc(32, "K").toString("base64url"),
-      recovery_refresh_token: Buffer.alloc(32, "L").toString("base64url"),
-      recovery_attempt_id: Buffer.alloc(32, "M").toString("base64url"),
-      created_at: Math.floor(Date.now() / 1000) + 1,
-    };
-    const fsImpl = Object.create(fs);
-    let deviceOpens = 0;
-    fsImpl.openSync = (target, ...args) => {
-      if (path.resolve(target) === path.resolve(devicePath)) {
-        deviceOpens += 1;
-        if (deviceOpens === 2) {
-          const temp = `${devicePath}.replacement`;
-          fs.writeFileSync(temp, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
-          fs.renameSync(temp, devicePath);
-        }
-      }
-      return fs.openSync(target, ...args);
-    };
+    const { markerPath } = writeOverlappingRefreshMarker(state.root);
+    const markerBytes = fs.readFileSync(markerPath);
     const auth = betaAuth(state, {
-      fsImpl,
-      fetchImpl: async () => response(payload),
+      fetchImpl: async () => {
+        networked = true;
+        return response(successfulPayload());
+      },
     });
 
     const result = await auth.performLogin({
@@ -1485,9 +1969,10 @@ test("exact Beta desktop explicit auth CAS failure rolls back only its snapshot"
 
     assert.equal(result.ok, false);
     assert.equal(result.activation_complete, false);
-    assert.equal(result.code, "beta_auth_superseded");
+    assert.equal(result.code, "beta_auth_transition_conflict");
+    assert.equal(networked, false);
     assert.equal(fs.existsSync(state.licensePath), false);
-    assert.deepEqual(store.readDevice(), replacement);
+    assert.deepEqual(fs.readFileSync(markerPath), markerBytes);
   } finally {
     state.cleanup();
   }
@@ -1524,16 +2009,13 @@ test("exact Beta desktop expired paid supersession clears Device then refreshes"
   }
 });
 
-test("exact Beta desktop pre-rename auth failure invalidates paid predecessor", async () => {
+test("exact Beta desktop pre-rename auth failure invalidates an invalid predecessor", async () => {
   const state = profile();
   try {
-    const prior = successfulPayload(["real_estate_admin"], {
-      refreshToken: Buffer.alloc(32, "A").toString("base64url"),
-    });
     const next = successfulPayload([], {
       refreshToken: Buffer.alloc(32, "B").toString("base64url"),
     });
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
+    fs.writeFileSync(state.licensePath, '{"partial":', { mode: 0o600 });
     const fsImpl = Object.create(fs);
     fsImpl.renameSync = (source, target) => {
       if (path.resolve(target) === path.resolve(state.licensePath)) {
@@ -1543,7 +2025,9 @@ test("exact Beta desktop pre-rename auth failure invalidates paid predecessor", 
     };
     const auth = betaAuth(state, {
       fsImpl,
-      fetchImpl: async () => response(next),
+      fetchImpl: async (_url, options) => response(
+        bindPasswordAuthPayload(next, options),
+      ),
     });
 
     const result = await auth.performLogin({
@@ -1564,20 +2048,16 @@ test("exact Beta desktop full-snapshot CAS catches same-token cross-process winn
   const state = profile();
   try {
     const sharedRefresh = Buffer.alloc(32, "A").toString("base64url");
-    const prior = successfulPayload(["real_estate_admin"], {
-      refreshToken: sharedRefresh,
-    });
     const winner = successfulPayload(["real_estate_sales"], {
       refreshToken: sharedRefresh,
     });
     const stale = successfulPayload([], {
       refreshToken: Buffer.alloc(32, "B").toString("base64url"),
     });
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
     const auth = betaAuth(state, {
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
         fs.writeFileSync(state.licensePath, JSON.stringify(winner), { mode: 0o600 });
-        return response(stale);
+        return response(bindPasswordAuthPayload(stale, options));
       },
     });
 
@@ -1598,15 +2078,13 @@ test("exact Beta desktop precondition mismatch preserves response-identical winn
   const state = profile();
   try {
     const sharedRefresh = Buffer.alloc(32, "A").toString("base64url");
-    const prior = successfulPayload(["real_estate_admin"], {
+    const winnerTemplate = successfulPayload(["real_estate_sales"], {
       refreshToken: sharedRefresh,
     });
-    const winner = successfulPayload(["real_estate_sales"], {
-      refreshToken: sharedRefresh,
-    });
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
+    let winner = null;
     const auth = betaAuth(state, {
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
+        winner = bindPasswordAuthPayload(winnerTemplate, options);
         fs.writeFileSync(state.licensePath, JSON.stringify(winner), { mode: 0o600 });
         return response(winner);
       },
@@ -1628,27 +2106,25 @@ test("exact Beta desktop precondition mismatch preserves response-identical winn
 test("exact Beta desktop prewrite marker failure preserves response-identical winner", async () => {
   const state = profile();
   try {
-    const prior = successfulPayload(["real_estate_admin"], {
-      refreshToken: Buffer.alloc(32, "A").toString("base64url"),
-    });
-    const winner = successfulPayload(["real_estate_sales"], {
+    const winnerTemplate = successfulPayload(["real_estate_sales"], {
       refreshToken: Buffer.alloc(32, "B").toString("base64url"),
     });
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
+    let winner = null;
     const devicePath = path.join(state.root, ".license-device-pending.json");
-    fs.writeFileSync(devicePath, "{}\n", { mode: 0o600 });
     const fsImpl = Object.create(fs);
     let armed = false;
     fsImpl.openSync = (target, ...args) => {
       if (armed && path.resolve(String(target)) === path.resolve(devicePath)) {
         armed = false;
+        fs.writeFileSync(devicePath, "{}\n", { mode: 0o600 });
         fs.writeFileSync(state.licensePath, JSON.stringify(winner), { mode: 0o600 });
       }
       return fs.openSync(target, ...args);
     };
     const auth = betaAuth(state, {
       fsImpl,
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
+        winner = bindPasswordAuthPayload(winnerTemplate, options);
         armed = true;
         return response(winner);
       },
@@ -1670,13 +2146,17 @@ test("exact Beta desktop prewrite marker failure preserves response-identical wi
 
 test("exact Beta desktop repairs unchanged private corrupt license", async () => {
   const state = profile();
+  let boundPayload = null;
   try {
     fs.writeFileSync(state.licensePath, '{"partial":', { mode: 0o600 });
     const payload = successfulPayload(["real_estate_admin"], {
       refreshToken: Buffer.alloc(32, "B").toString("base64url"),
     });
     const auth = betaAuth(state, {
-      fetchImpl: async () => response(payload),
+      fetchImpl: async (_url, options) => {
+        boundPayload = bindPasswordAuthPayload(payload, options);
+        return response(boundPayload);
+      },
     });
 
     const result = await auth.performLogin({
@@ -1685,8 +2165,8 @@ test("exact Beta desktop repairs unchanged private corrupt license", async () =>
     });
 
     assert.equal(result.ok, true);
-    assert.deepEqual(result.license, payload);
-    assert.deepEqual(auth.readLicense(), payload);
+    assert.deepEqual(result.license, boundPayload);
+    assert.deepEqual(auth.readLicense(), boundPayload);
   } finally {
     state.cleanup();
   }
@@ -1712,7 +2192,9 @@ test("exact Beta desktop invalid predecessor failure preserves signed third winn
     };
     const auth = betaAuth(state, {
       fsImpl,
-      fetchImpl: async () => response(attempted),
+      fetchImpl: async (_url, options) => response(
+        bindPasswordAuthPayload(attempted, options),
+      ),
     });
 
     const result = await auth.performLogin({
@@ -1731,19 +2213,14 @@ test("exact Beta desktop invalid predecessor failure preserves signed third winn
 test("exact Beta desktop rejects signed response for another requested email", async () => {
   const state = profile();
   try {
-    const prior = successfulPayload(["real_estate_admin"], {
-      refreshToken: Buffer.alloc(32, "A").toString("base64url"),
-    });
-    fs.writeFileSync(state.licensePath, JSON.stringify(prior), { mode: 0o600 });
-    const { pending, store } = await writeDevicePending(state.root);
-    const markerPath = path.join(state.root, ".license-device-pending.json");
-    const markerBytes = fs.readFileSync(markerPath);
     const victim = successfulPayload([], {
       refreshToken: Buffer.alloc(32, "B").toString("base64url"),
       email: "victim@example.test",
     });
     const auth = betaAuth(state, {
-      fetchImpl: async () => response(victim),
+      fetchImpl: async (_url, options) => response(
+        bindPasswordAuthPayload(victim, options),
+      ),
     });
 
     const result = await auth.performLogin({
@@ -1753,9 +2230,11 @@ test("exact Beta desktop rejects signed response for another requested email", a
 
     assert.equal(result.ok, false);
     assert.equal(result.code, "beta_entitlement_response_mismatch");
-    assert.deepEqual(auth.readLicense(), prior);
-    assert.deepEqual(store.readDevice(), pending);
-    assert.deepEqual(fs.readFileSync(markerPath), markerBytes);
+    assert.equal(auth.readLicense(), null);
+    const pending = JSON.parse(
+      fs.readFileSync(path.join(state.root, ".license-refresh-pending.json"), "utf8"),
+    );
+    assert.equal(isInitialAuthPending(pending), true);
   } finally {
     state.cleanup();
   }
@@ -1795,8 +2274,9 @@ for (const corruptMarker of ["refresh", "device"]) {
 }
 
 for (const markerFault of ["corrupt_device", "dual_valid"]) {
-  test(`exact Beta desktop signed auth ${markerFault} invalidates captured paid snapshot`, async () => {
+  test(`exact Beta desktop signed auth ${markerFault} requires signout without mutation`, async () => {
     const state = profile();
+    let networked = false;
     try {
       const prior = successfulPayload(["real_estate_admin"], {
         refreshToken: Buffer.alloc(32, "A").toString("base64url"),
@@ -1816,7 +2296,10 @@ for (const markerFault of ["corrupt_device", "dual_valid"]) {
         refreshToken: Buffer.alloc(32, "B").toString("base64url"),
       });
       const auth = betaAuth(state, {
-        fetchImpl: async () => response(revoked),
+        fetchImpl: async () => {
+          networked = true;
+          return response(revoked);
+        },
       });
 
       const result = await auth.performLogin({
@@ -1825,14 +2308,9 @@ for (const markerFault of ["corrupt_device", "dual_valid"]) {
       });
 
       assert.equal(result.ok, false);
-      assert.equal(
-        result.code,
-        markerFault === "dual_valid"
-          ? "beta_device_state_conflict"
-          : "beta_device_state_corrupt",
-      );
-      assert.equal(fs.existsSync(state.licensePath), false);
-      assert.equal(auth.readLicense(), null);
+      assert.equal(result.code, "beta_auth_sign_out_required");
+      assert.equal(networked, false);
+      assert.deepEqual(auth.readLicense(), prior);
       assert.deepEqual(
         markerPaths.map((target) => fs.readFileSync(target)),
         before,
@@ -1974,3 +2452,119 @@ test("exact Beta desktop lock loss before logout clear mutates no state", async 
     state.cleanup();
   }
 });
+
+for (const replacement of ["cancelled", "signup"]) {
+  test(`exact Beta desktop late login cannot revive ${replacement} initial auth`, async () => {
+    const state = profile();
+    try {
+      const store = createRefreshPendingStore({ root: state.root });
+      let replacementMarker = null;
+      const auth = betaAuth(state, {
+        fetchImpl: async (_url, options) => {
+          await store.withLock(async () => {
+            const current = store.read();
+            assert.equal(isInitialAuthPending(current), true);
+            store.remove();
+            if (replacement === "signup") {
+              replacementMarker = store.createInitialAuth({
+                email: "agent@example.test",
+                authKind: "signup",
+              });
+            }
+          });
+          return response(bindPasswordAuthPayload(
+            successfulPayload(["real_estate_admin"]),
+            options,
+          ));
+        },
+      });
+
+      const result = await auth.performLogin({
+        email: "agent@example.test",
+        password: "secret-password",
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.code, "beta_auth_superseded");
+      assert.equal(auth.readLicense(), null);
+      assert.deepEqual(store.read(), replacementMarker);
+    } finally {
+      state.cleanup();
+    }
+  });
+}
+
+test("exact Beta desktop post-unlink marker fsync failure preserves verified account", async () => {
+  const state = profile();
+  let boundPayload = null;
+  try {
+    const markerPath = path.join(state.root, ".license-refresh-pending.json");
+    const fsImpl = Object.create(fs);
+    let failNextDirectoryFsync = false;
+    fsImpl.unlinkSync = (target, ...args) => {
+      const result = fs.unlinkSync(target, ...args);
+      if (path.resolve(String(target)) === path.resolve(markerPath)) {
+        failNextDirectoryFsync = true;
+      }
+      return result;
+    };
+    fsImpl.fsyncSync = (fd) => {
+      if (failNextDirectoryFsync) {
+        failNextDirectoryFsync = false;
+        throw new Error("injected post-unlink directory fsync failure");
+      }
+      return fs.fsyncSync(fd);
+    };
+    const auth = betaAuth(state, {
+      fsImpl,
+      fetchImpl: async (_url, options) => {
+        boundPayload = bindPasswordAuthPayload(
+          successfulPayload(["real_estate_admin"]),
+          options,
+        );
+        return response(boundPayload);
+      },
+    });
+
+    const result = await auth.performLogin({
+      email: "agent@example.test",
+      password: "secret-password",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "beta_refresh_persistence_failed");
+    assert.deepEqual(auth.readLicense(), boundPayload);
+    assert.equal(fs.existsSync(markerPath), false);
+  } finally {
+    state.cleanup();
+  }
+});
+
+for (const licensePresent of [false, true]) {
+  test(`exact Beta desktop sign-out clears setup receipt with license=${licensePresent}`, async () => {
+    const state = profile();
+    try {
+      const receiptPath = path.join(state.root, ".license-activation.json");
+      fs.writeFileSync(
+        receiptPath,
+        JSON.stringify({ schema: 1, identity_sha256: "a".repeat(64) }),
+        { mode: 0o600 },
+      );
+      if (licensePresent) {
+        fs.writeFileSync(
+          state.licensePath,
+          JSON.stringify(successfulPayload(["real_estate_admin"])),
+          { mode: 0o600 },
+        );
+      }
+      const auth = betaAuth(state);
+
+      await auth.clearLicense();
+
+      assert.equal(fs.existsSync(state.licensePath), false);
+      assert.equal(fs.existsSync(receiptPath), false);
+    } finally {
+      state.cleanup();
+    }
+  });
+}

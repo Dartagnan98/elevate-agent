@@ -59,6 +59,10 @@ LICENSE_FAIL_THRESHOLD = 3
 # Refresh when <5 minutes of access-token life remain.
 REFRESH_MARGIN_SECONDS = 300
 _STARTING_SNAPSHOT_UNSET = object()
+_EXPECTED_PENDING_UNSET = object()
+_BETA_ACTIVATION_RECEIPT_NAME = ".license-activation.json"
+_BETA_ACTIVATION_RECEIPT_SCHEMA = 2
+_BETA_ACTIVATION_RECEIPT_MAX_BYTES = 16 * 1024
 
 
 def _read_fail_count() -> int:
@@ -155,6 +159,15 @@ class _InvalidBetaSnapshotFingerprint:
 
 
 _BetaLocalSnapshotState = License | _InvalidBetaSnapshotFingerprint | None
+
+
+@dataclass(frozen=True)
+class _BetaInitialAuthAttempt:
+    """Caller-owned B/C/I retained across an ambiguous initial auth response."""
+
+    pending: Any
+    starting_snapshot: _BetaLocalSnapshotState
+    recover_first: bool
 
 
 def _exact_realtor_beta_active() -> bool:
@@ -739,6 +752,141 @@ def _atomic_beta_replace(data: bytes | None) -> None:
         os.close(dir_fd)
 
 
+def _beta_activation_identity(lic: License) -> str:
+    payload = {
+        "email": lic.email,
+        "entitlements": sorted(set(lic.entitlements or [])),
+        "license_id": lic.license_id,
+        "subject": lic.subject,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _atomic_beta_activation_receipt_replace(data: bytes | None) -> None:
+    """Replace/remove the non-secret setup receipt under the private root."""
+    root = _beta_profile_root().expanduser().absolute()
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(root, dir_flags)
+    tmp_name = f".license-activation-{uuid.uuid4().hex}.tmp"
+    try:
+        if data is None:
+            try:
+                os.unlink(_BETA_ACTIVATION_RECEIPT_NAME, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            os.fsync(dir_fd)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("activation receipt write made no progress")
+                view = view[written:]
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(
+            tmp_name,
+            _BETA_ACTIVATION_RECEIPT_NAME,
+            src_dir_fd=dir_fd,
+            dst_dir_fd=dir_fd,
+        )
+        target = os.stat(
+            _BETA_ACTIVATION_RECEIPT_NAME,
+            dir_fd=dir_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(target.st_mode) or target.st_nlink != 1:
+            raise OSError("activation receipt target is not a private regular file")
+        os.fsync(dir_fd)
+    finally:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        os.close(dir_fd)
+
+
+def _read_beta_activation_receipt_unlocked() -> dict[str, Any] | None:
+    root = _beta_profile_root().expanduser().absolute()
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(root, dir_flags)
+    fd: int | None = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            fd = os.open(_BETA_ACTIVATION_RECEIPT_NAME, flags, dir_fd=dir_fd)
+        except FileNotFoundError:
+            return None
+        file_stat = os.fstat(fd)
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or stat.S_IMODE(file_stat.st_mode) & 0o077
+            or (hasattr(os, "getuid") and file_stat.st_uid != os.getuid())
+            or file_stat.st_size > _BETA_ACTIVATION_RECEIPT_MAX_BYTES
+        ):
+            raise LicenseError(
+                "Realtor Beta could not verify its private setup receipt.",
+                code="beta_activation_receipt_invalid",
+            )
+        raw = os.read(fd, _BETA_ACTIVATION_RECEIPT_MAX_BYTES + 1)
+        if len(raw) > _BETA_ACTIVATION_RECEIPT_MAX_BYTES:
+            raise LicenseError(
+                "Realtor Beta setup receipt is too large.",
+                code="beta_activation_receipt_invalid",
+            )
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LicenseError(
+                "Realtor Beta setup receipt is invalid.",
+                code="beta_activation_receipt_invalid",
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {
+                "schema",
+                "identity_sha256",
+                "skill_bundle_sha256",
+                "completed_at",
+            }
+            or value.get("schema") != _BETA_ACTIVATION_RECEIPT_SCHEMA
+            or not isinstance(value.get("completed_at"), int)
+            or isinstance(value.get("completed_at"), bool)
+            or value.get("completed_at", -1) < 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("identity_sha256", "")))
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(value.get("skill_bundle_sha256", "")),
+            )
+        ):
+            raise LicenseError(
+                "Realtor Beta setup receipt is invalid.",
+                code="beta_activation_receipt_invalid",
+            )
+        return value
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(dir_fd)
+
+
 def _invalidate_beta_snapshot_unlocked(message: str) -> None:
     """Remove local paid state while the caller owns the refresh lock."""
     try:
@@ -822,6 +970,95 @@ def _same_beta_snapshot(left: License, right: License) -> bool:
         and left.entitlement_assertion == right.entitlement_assertion
         and left.subject == right.subject
     )
+
+
+def beta_activation_complete(lic: License) -> bool:
+    """Return true only for a receipt bound to the account and shipped skills."""
+    if not _exact_realtor_beta_active():
+        return True
+    from elevate_cli.beta_skill_bundle import load_exact_beta_skill_bundle
+    from elevate_cli import refresh_pending
+
+    try:
+        bundle = load_exact_beta_skill_bundle()
+        preflight_beta_license_store(require_writable=False)
+        root = _beta_profile_root().expanduser().absolute()
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            lock_guard.assert_held()
+            current = read_verified_beta_license_snapshot(require_current=True)
+            if not _same_beta_snapshot(current, lic):
+                return False
+            receipt = _read_beta_activation_receipt_unlocked()
+            return bool(
+                receipt
+                and receipt.get("identity_sha256")
+                == _beta_activation_identity(current)
+                and receipt.get("skill_bundle_sha256") == bundle.sha256
+            )
+    except (
+        LicenseError,
+        refresh_pending.RefreshPendingError,
+        OSError,
+        RuntimeError,
+    ):
+        return False
+
+
+def _mark_beta_activation_complete(
+    lic: License,
+    *,
+    skill_bundle_sha256: str,
+) -> None:
+    """Durably bind successful required setup to the current signed account."""
+    if not _exact_realtor_beta_active():
+        return
+    from elevate_cli import refresh_pending
+
+    if not re.fullmatch(r"[0-9a-f]{64}", skill_bundle_sha256):
+        raise LicenseError(
+            "Realtor Beta could not verify its bundled skill identity.",
+            code="beta_skill_bundle_invalid",
+        )
+
+    root = _beta_profile_root().expanduser().absolute()
+    payload = {
+        "schema": _BETA_ACTIVATION_RECEIPT_SCHEMA,
+        "identity_sha256": _beta_activation_identity(lic),
+        "skill_bundle_sha256": skill_bundle_sha256,
+        "completed_at": int(time.time()),
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    try:
+        preflight_beta_license_store(require_writable=True)
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            lock_guard.assert_held()
+            current = read_verified_beta_license_snapshot(require_current=True)
+            if not _same_beta_snapshot(current, lic):
+                raise LicenseError(
+                    "A newer Realtor Beta account replaced setup completion.",
+                    code="beta_auth_superseded",
+                )
+            _atomic_beta_activation_receipt_replace(encoded)
+            receipt = _read_beta_activation_receipt_unlocked()
+            if (
+                not receipt
+                or receipt.get("identity_sha256")
+                != _beta_activation_identity(current)
+                or receipt.get("skill_bundle_sha256") != skill_bundle_sha256
+            ):
+                raise LicenseError(
+                    "Realtor Beta could not verify required setup completion.",
+                    code="beta_activation_receipt_failed",
+                )
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+    except OSError as exc:
+        raise LicenseError(
+            "Realtor Beta could not save required setup completion.",
+            code="beta_activation_receipt_failed",
+        ) from exc
 
 
 def _invalid_beta_snapshot_fingerprint(raw: bytes) -> _InvalidBetaSnapshotFingerprint:
@@ -1304,6 +1541,12 @@ def clear() -> bool:
                 except (refresh_pending.RefreshPendingError, LicenseError) as exc:
                     if cleanup_failure is None:
                         cleanup_failure = exc
+                try:
+                    lock_guard.assert_held()
+                    _atomic_beta_activation_receipt_replace(None)
+                except (LicenseError, OSError) as exc:
+                    if cleanup_failure is None:
+                        cleanup_failure = exc
                 if cleanup_failure is not None:
                     raise cleanup_failure
                 return existed
@@ -1394,6 +1637,7 @@ def _persist_authenticated_license(
     lic: License,
     *,
     starting_snapshot: _BetaLocalSnapshotState | object = _STARTING_SNAPSHOT_UNSET,
+    expected_pending: object = _EXPECTED_PENDING_UNSET,
 ) -> None:
     if _exact_realtor_beta_active():
         from elevate_cli import refresh_pending
@@ -1407,6 +1651,7 @@ def _persist_authenticated_license(
                 installed_before: _BetaLocalSnapshotState = None
                 predecessor_authorized = False
                 write_attempted = False
+                verified_commit = False
                 try:
                     installed_before = _read_beta_local_snapshot_state_unlocked()
                     if starting_snapshot is not _STARTING_SNAPSHOT_UNSET:
@@ -1424,6 +1669,18 @@ def _persist_authenticated_license(
                     # A corrupt or impossible marker must not leave captured
                     # paid grants usable after a signed revocation response.
                     pending, pending_device = _read_beta_credential_markers_unlocked(root)
+                    if (
+                        expected_pending is not _EXPECTED_PENDING_UNSET
+                        and pending != expected_pending
+                    ):
+                        # A cancel/replacement after the request began owns the
+                        # local transition. The old HQ response must mutate no
+                        # snapshot and must not erase the newer marker.
+                        predecessor_authorized = False
+                        raise LicenseError(
+                            "A newer Realtor Beta sign-in replaced this attempt.",
+                            code="beta_auth_superseded",
+                        )
                     lock_guard.assert_held()
                     write_attempted = True
                     _save_exact_beta_unlocked(
@@ -1439,6 +1696,12 @@ def _persist_authenticated_license(
                             "A newer Realtor Beta session superseded activation.",
                             code="beta_auth_superseded",
                         )
+                    # From this point forward the signed account snapshot is
+                    # the authoritative commit. Marker cleanup is important
+                    # recovery hygiene, but a post-unlink directory-fsync
+                    # failure must never erase both the verified account and
+                    # the already-unlinked recovery record.
+                    verified_commit = True
                     if pending is not None:
                         lock_guard.assert_held()
                         refresh_pending.remove_pending(root)
@@ -1457,7 +1720,7 @@ def _persist_authenticated_license(
                     # Do not inspect marker state during rollback: corrupt or
                     # replaced markers are retained as recovery evidence. Only
                     # the attempted snapshot or captured predecessor may go.
-                    if predecessor_authorized:
+                    if predecessor_authorized and not verified_commit:
                         lock_guard.assert_held()
                         predecessor: _BetaLocalSnapshotState = (
                             starting_snapshot
@@ -1519,8 +1782,230 @@ def _accept_hq_response(
     )
 
 
+def _prepare_beta_initial_auth(
+    email: str,
+    *,
+    auth_kind: str,
+) -> _BetaInitialAuthAttempt:
+    """Stage or resume a private caller-owned initial-auth B/C/I triplet."""
+    from elevate_cli import refresh_pending
+
+    root = _beta_profile_root().expanduser().absolute()
+    try:
+        preflight_beta_license_store(require_writable=True)
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            lock_guard.assert_held()
+            snapshot = _read_beta_local_snapshot_state_unlocked()
+            if isinstance(snapshot, License):
+                raise LicenseError(
+                    "Sign out of the current Realtor Beta account before "
+                    "starting another email-and-password sign-in.",
+                    code="beta_auth_sign_out_required",
+                )
+            device_path = root / refresh_pending.DEVICE_MARKER_NAME
+            if device_path.exists() or device_path.is_symlink():
+                raise LicenseError(
+                    "Finish or cancel the pending Realtor Beta Device sign-in "
+                    "before using email and password.",
+                    code="beta_auth_transition_conflict",
+                )
+            pending_refresh = refresh_pending.read_pending(root)
+            if (
+                pending_refresh is not None
+                and refresh_pending.initial_auth_pending_matches(
+                    pending_refresh,
+                    email,
+                    auth_kind=auth_kind,
+                )
+            ):
+                return _BetaInitialAuthAttempt(
+                    pending=pending_refresh,
+                    starting_snapshot=snapshot,
+                    recover_first=True,
+                )
+            if pending_refresh is None:
+                lock_guard.assert_held()
+                pending = refresh_pending.create_initial_auth_pending(
+                    root,
+                    email=email,
+                    auth_kind=auth_kind,
+                )
+                return _BetaInitialAuthAttempt(
+                    pending=pending,
+                    starting_snapshot=snapshot,
+                    recover_first=False,
+                )
+            if refresh_pending.is_initial_auth_pending(pending_refresh):
+                message = (
+                    "A different Realtor Beta password sign-in is awaiting "
+                    "recovery. Finish it with the same email and Sign in/Create "
+                    "account action before starting another one."
+                )
+            else:
+                message = (
+                    "Realtor Beta is already recovering another account "
+                    "session. Let it finish before signing in with a password."
+                )
+            raise LicenseError(
+                message,
+                code="beta_auth_transition_conflict",
+            )
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _discard_beta_initial_auth(attempt: _BetaInitialAuthAttempt) -> None:
+    """CAS-remove one definitive failed attempt without erasing a replacement."""
+    from elevate_cli import refresh_pending
+
+    root = _beta_profile_root().expanduser().absolute()
+    try:
+        with refresh_pending.refresh_lock(root) as lock_guard:
+            lock_guard.assert_held()
+            current = refresh_pending.read_pending(root)
+            if current == attempt.pending:
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+    except refresh_pending.RefreshPendingError as exc:
+        raise LicenseError(str(exc), code=exc.code) from exc
+
+
+def _accept_beta_initial_auth_response(
+    response: Any,
+    *,
+    attempt: _BetaInitialAuthAttempt,
+    email: str,
+    expected_refresh_token: str | None = None,
+) -> License:
+    data = _response_json(response)
+    lic = _license_from_auth_response(data, email=email)
+    if (
+        expected_refresh_token is not None
+        and lic.refresh_token != expected_refresh_token
+    ):
+        raise LicenseError(
+            "Elevation HQ returned an account token that did not match the "
+            "protected sign-in recovery.",
+            code="beta_refresh_successor_mismatch",
+        )
+    _persist_authenticated_license(
+        lic,
+        starting_snapshot=attempt.starting_snapshot,
+        expected_pending=attempt.pending,
+    )
+    return lic
+
+
+def _try_recover_beta_initial_auth(
+    attempt: _BetaInitialAuthAttempt,
+    *,
+    email: str,
+) -> License | None:
+    """Recover an ambiguous password-auth commit using only retained B/C/I."""
+    if not attempt.recover_first:
+        return None
+    try:
+        response = _post_hq(
+            backend_url(),
+            "/api/license/refresh",
+            {
+                "refresh_token": attempt.pending.current_refresh_token,
+                "next_refresh_token": attempt.pending.successor_refresh_token,
+                "refresh_attempt_id": attempt.pending.attempt_id,
+            },
+        )
+    except LicenseError as exc:
+        if exc.code == "beta_auth_upstream_unavailable":
+            raise LicenseError(
+                "Realtor Beta could not confirm the pending sign-in. "
+                "Try again to resume it safely.",
+                code="beta_initial_auth_recovery_ambiguous",
+            ) from exc
+        raise
+    if response.status_code == 401:
+        # HQ definitively rejected B. It is safe to retry password auth with
+        # the exact same caller-owned token instead of risking a second
+        # credential chain after an ambiguous refresh commit.
+        return None
+    if response.status_code == 402:
+        _discard_beta_initial_auth(attempt)
+        raise LicenseError(
+            "No active subscription. Contact Elevation Real Estate HQ to activate Elevate.",
+            code="beta_subscription_inactive",
+        )
+    if not response.is_success:
+        raise LicenseError(
+            "Realtor Beta could not confirm the pending sign-in "
+            f"(HTTP {response.status_code}). Try again to resume it safely.",
+            code="beta_initial_auth_recovery_ambiguous",
+        )
+    return _accept_beta_initial_auth_response(
+        response,
+        attempt=attempt,
+        email=email,
+        expected_refresh_token=attempt.pending.successor_refresh_token,
+    )
+
+
+def _post_beta_password_auth(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    email: str,
+    auth_kind: str,
+) -> tuple[_BetaInitialAuthAttempt, License | None, Any | None]:
+    attempt = _prepare_beta_initial_auth(email, auth_kind=auth_kind)
+    recovered = _try_recover_beta_initial_auth(attempt, email=email)
+    if recovered is not None:
+        return attempt, recovered, None
+    request = dict(payload)
+    request["initial_refresh_token"] = attempt.pending.current_refresh_token
+    response = _post_hq(backend_url(), path, request)
+    return attempt, None, response
+
+
 def login(email: str, password: str, device_label: Optional[str] = None) -> License:
     """POST /api/auth/login, persist license."""
+    if _exact_realtor_beta_active():
+        attempt, recovered, resp = _post_beta_password_auth(
+            "/api/auth/login",
+            {
+                "email": email,
+                "password": password,
+                "device_label": device_label or os.uname().nodename,
+            },
+            email=email,
+            auth_kind="login",
+        )
+        if recovered is not None:
+            return recovered
+        assert resp is not None
+        if resp.status_code == 402:
+            raise _auth_flow_error(
+                "No active subscription. Contact Elevation Real Estate HQ to activate Elevate.",
+                beta_code="beta_subscription_inactive",
+            )
+        if resp.status_code == 401:
+            raise _auth_flow_error(
+                "Invalid email or password.",
+                beta_code="beta_invalid_credentials",
+            )
+        if not resp.is_success:
+            raise _auth_flow_error(
+                f"Login failed ({resp.status_code}).",
+                beta_code="beta_auth_upstream_failed",
+                beta_message=(
+                    "Elevation HQ could not complete sign-in "
+                    f"(HTTP {resp.status_code})."
+                ),
+            )
+        return _accept_beta_initial_auth_response(
+            resp,
+            attempt=attempt,
+            email=email,
+            expected_refresh_token=attempt.pending.current_refresh_token,
+        )
+
     base_url = backend_url()
     starting_snapshot = _capture_explicit_auth_starting_snapshot()
     resp = _post_hq(
@@ -1574,6 +2059,53 @@ def create_account(
     realtor is signed straight in. Paid packs stay locked until an admin grants
     them per person from the control panel.
     """
+    if _exact_realtor_beta_active():
+        attempt, recovered, resp = _post_beta_password_auth(
+            "/api/auth/signup",
+            {
+                "email": email,
+                "password": password,
+                "first_name": first_name,
+                "last_name": last_name,
+                "device_label": device_label or os.uname().nodename,
+            },
+            email=email,
+            auth_kind="signup",
+        )
+        if recovered is not None:
+            return recovered
+        assert resp is not None
+        if resp.status_code == 409:
+            raise _auth_flow_error(
+                "An account with this email already exists — sign in instead.",
+                beta_code="beta_account_exists",
+            )
+        if resp.status_code == 400:
+            raise _auth_flow_error(
+                "Enter a valid email and a password of at least 8 characters.",
+                beta_code="beta_signup_invalid",
+            )
+        if resp.status_code == 429:
+            raise _auth_flow_error(
+                "Too many attempts. Please wait a few minutes and try again.",
+                beta_code="beta_auth_rate_limited",
+            )
+        if not resp.is_success:
+            raise _auth_flow_error(
+                f"Account creation failed ({resp.status_code}).",
+                beta_code="beta_auth_upstream_failed",
+                beta_message=(
+                    "Elevation HQ could not create the account "
+                    f"(HTTP {resp.status_code})."
+                ),
+            )
+        return _accept_beta_initial_auth_response(
+            resp,
+            attempt=attempt,
+            email=email,
+            expected_refresh_token=attempt.pending.current_refresh_token,
+        )
+
     base_url = backend_url()
     starting_snapshot = _capture_explicit_auth_starting_snapshot()
     resp = _post_hq(
@@ -1709,6 +2241,13 @@ def _refresh_exact_beta(lic: License) -> License:
             preflight_beta_license_store(require_writable=True)
             current = read_verified_beta_license_snapshot(require_current=False)
             pending = refresh_pending.read_pending(root)
+
+            if pending is not None and refresh_pending.is_initial_auth_pending(pending):
+                # A complete signed snapshot is an authoritative later commit
+                # and safely supersedes pre-license recovery state.
+                lock_guard.assert_held()
+                refresh_pending.remove_pending(root)
+                pending = None
 
             if pending is not None:
                 # A newer signed identity/session proves this attempt was
@@ -1930,6 +2469,11 @@ def ensure_valid() -> License:
         )
     if lic.is_expired():
         lic = refresh(lic)
+    if _exact_realtor_beta_active() and not beta_activation_complete(lic):
+        raise LicenseError(
+            "Realtor Beta must finish required skill setup before use.",
+            code="beta_activation_incomplete",
+        )
     return lic
 
 
@@ -1945,9 +2489,18 @@ def status_text(lic: Optional[License] = None) -> str:
 def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any]:
     """Complete local post-login activation for the current machine."""
     beta_active = _exact_realtor_beta_active()
+    beta_bundle = None
     if beta_active:
         _validate_complete_beta_license(lic, require_current=True)
-        sync_skills = True
+        try:
+            from elevate_cli.beta_skill_bundle import load_exact_beta_skill_bundle
+
+            beta_bundle = load_exact_beta_skill_bundle()
+        except Exception as exc:
+            raise LicenseError(
+                "Realtor Beta could not verify its code-bundled skills.",
+                code="beta_skill_bundle_invalid",
+            ) from exc
     sync_license_entitlements(lic)
     result: dict[str, Any] = {
         "email": lic.email,
@@ -1960,6 +2513,9 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
         "skill_names": [],
         "skill_error": None,
         "skill_sync_warnings": [],
+        "skill_bundle_sha256": None,
+        "skill_bundle_file_count": 0,
+        "skill_bundle_bytes": 0,
         "activation_complete": False,
     }
 
@@ -1977,7 +2533,21 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
             ) from exc
         result["access_error"] = str(exc)
 
-    if sync_skills:
+    if beta_bundle is not None:
+        skill_roots = sorted(
+            {
+                label.split("/", 2)[1]
+                for label in beta_bundle.files
+                if label.startswith("skills/") and label.count("/") >= 2
+            }
+        )
+        result["skills_path"] = str(beta_bundle.skills_root)
+        result["skill_count"] = len(skill_roots)
+        result["skill_names"] = skill_roots
+        result["skill_bundle_sha256"] = beta_bundle.sha256
+        result["skill_bundle_file_count"] = beta_bundle.file_count
+        result["skill_bundle_bytes"] = beta_bundle.total_bytes
+    elif sync_skills:
         try:
             from elevate_cli import cloud_skills
 
@@ -1994,16 +2564,16 @@ def activate_install(lic: License, *, sync_skills: bool = True) -> dict[str, Any
                 ) from exc
             result["skill_error"] = str(exc)
 
-    if beta_active and result.get("skill_sync_warnings"):
-        raise LicenseError(
-            "Realtor Beta could not verify every signed skill during activation.",
-            code="beta_skill_sync_incomplete",
-        )
     result["activation_complete"] = not bool(
         result.get("access_error")
         or result.get("skill_error")
         or result.get("skill_sync_warnings")
     )
+    if beta_active and result["activation_complete"]:
+        _mark_beta_activation_complete(
+            lic,
+            skill_bundle_sha256=beta_bundle.sha256,
+        )
     return result
 
 

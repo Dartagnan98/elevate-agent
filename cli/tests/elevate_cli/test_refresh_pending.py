@@ -65,6 +65,50 @@ def test_shared_fixture_schema_and_atomic_round_trip(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("auth_kind", ["login", "signup"])
+def test_initial_auth_marker_is_scoped_by_email_and_kind(
+    tmp_path: Path,
+    auth_kind: str,
+) -> None:
+    root = private_root(tmp_path)
+    other_kind = "signup" if auth_kind == "login" else "login"
+
+    with refresh_pending.refresh_lock(root):
+        pending = refresh_pending.create_initial_auth_pending(
+            root,
+            email=" Agent@Example.Test ",
+            auth_kind=auth_kind,
+            created_at=1784080000,
+        )
+        assert refresh_pending.is_initial_auth_pending(pending)
+        assert refresh_pending.initial_auth_pending_matches(
+            pending,
+            "agent@example.test",
+            auth_kind=auth_kind,
+        )
+        assert not refresh_pending.initial_auth_pending_matches(
+            pending,
+            "agent@example.test",
+            auth_kind=other_kind,
+        )
+        assert not refresh_pending.initial_auth_pending_matches(
+            pending,
+            "different@example.test",
+            auth_kind=auth_kind,
+        )
+        assert pending.license_id == refresh_pending.initial_auth_license_id(
+            "AGENT@example.test",
+            auth_kind=auth_kind,
+        )
+        assert re.fullmatch(
+            rf"initial-auth-v1:{auth_kind}:[0-9a-f]{{64}}",
+            pending.license_id,
+        )
+        refresh_pending.remove_pending(root)
+
+    assert not (root / refresh_pending.MARKER_NAME).exists()
+
+
 @pytest.mark.parametrize("artifact", ["lock", "marker"])
 @pytest.mark.parametrize("attack", ["symlink", "hardlink", "public", "nonempty-lock"])
 def test_refresh_artifacts_fail_closed(

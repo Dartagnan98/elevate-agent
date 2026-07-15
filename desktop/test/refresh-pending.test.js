@@ -12,6 +12,9 @@ const {
   RefreshPendingError,
   canonicalToken32,
   createRefreshPendingStore,
+  initialAuthLicenseId,
+  initialAuthPendingMatches,
+  isInitialAuthPending,
   parseDevicePending,
 } = require("../src/refresh-pending");
 
@@ -440,6 +443,100 @@ test("Python and Desktop round-trip the same Device marker under the shared lock
     await store.withLock(async () => {
       assert.deepEqual(store.readDevice(), DEVICE_VALUE);
       assert.equal(store.removeDevice(DEVICE_VALUE), true);
+    });
+  } finally {
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test("Python and Desktop share kind-scoped initial-auth marker identity", async () => {
+  const profile = root();
+  const cliRoot = path.resolve(__dirname, "../../cli");
+  const pythonEnv = { ...process.env, PYTHONPATH: cliRoot };
+  const store = createRefreshPendingStore({ root: profile });
+  const markerPath = path.join(profile, MARKER_NAME);
+  try {
+    let desktopLogin = null;
+    await store.withLock(async (guard) => {
+      guard.assertHeld();
+      desktopLogin = store.createInitialAuth({
+        email: " Agent@Example.Test ",
+        authKind: "login",
+        createdAt: 1784080000,
+      });
+    });
+    assert.match(desktopLogin.license_id, /^initial-auth-v1:login:[0-9a-f]{64}$/);
+    assert.equal(initialAuthPendingMatches(
+      desktopLogin,
+      "agent@example.test",
+      { authKind: "login" },
+    ), true);
+    assert.equal(initialAuthPendingMatches(
+      desktopLogin,
+      "agent@example.test",
+      { authKind: "signup" },
+    ), false);
+
+    const pythonRead = childProcess.spawnSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import sys",
+          "from pathlib import Path",
+          "from elevate_cli import refresh_pending as rp",
+          "root = Path(sys.argv[1])",
+          "with rp.refresh_lock(root):",
+          "    pending = rp.read_pending(root)",
+          "    assert rp.is_initial_auth_pending(pending)",
+          "    assert rp.initial_auth_pending_matches(pending, 'AGENT@example.test', auth_kind='login')",
+          "    assert not rp.initial_auth_pending_matches(pending, 'agent@example.test', auth_kind='signup')",
+          "    sys.stdout.buffer.write(pending.to_bytes())",
+        ].join("\n"),
+        profile,
+      ],
+      { cwd: cliRoot, env: pythonEnv },
+    );
+    assert.equal(pythonRead.status, 0, pythonRead.stderr.toString("utf8"));
+    assert.deepEqual(pythonRead.stdout, fs.readFileSync(markerPath));
+    await store.withLock(async () => assert.equal(store.remove(), true));
+
+    const pythonWrite = childProcess.spawnSync(
+      "python3",
+      [
+        "-c",
+        [
+          "import sys",
+          "from pathlib import Path",
+          "from elevate_cli import refresh_pending as rp",
+          "root = Path(sys.argv[1])",
+          "with rp.refresh_lock(root):",
+          "    rp.create_initial_auth_pending(root, email='Agent@Example.Test', auth_kind='signup', created_at=1784080001)",
+        ].join("\n"),
+        profile,
+      ],
+      { cwd: cliRoot, env: pythonEnv },
+    );
+    assert.equal(pythonWrite.status, 0, pythonWrite.stderr.toString("utf8"));
+    await store.withLock(async (guard) => {
+      guard.assertHeld();
+      const pythonSignup = store.read();
+      assert.equal(isInitialAuthPending(pythonSignup), true);
+      assert.equal(
+        pythonSignup.license_id,
+        initialAuthLicenseId(" agent@example.test ", { authKind: "signup" }),
+      );
+      assert.equal(initialAuthPendingMatches(
+        pythonSignup,
+        "agent@example.test",
+        { authKind: "signup" },
+      ), true);
+      assert.equal(initialAuthPendingMatches(
+        pythonSignup,
+        "agent@example.test",
+        { authKind: "login" },
+      ), false);
+      assert.equal(store.remove(), true);
     });
   } finally {
     fs.rmSync(profile, { recursive: true, force: true });

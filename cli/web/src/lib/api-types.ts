@@ -2,6 +2,8 @@ import type { DashboardTheme } from "@/themes/types";
 
 export interface LicenseStatusResponse {
   authenticated: boolean;
+  account_verified: boolean;
+  activation_complete: boolean;
   email: string | null;
   tier: string | null;
   license_id: string | null;
@@ -33,6 +35,7 @@ export interface LicenseSyncSkillsResponse {
   path: string | null;
   removed: string[];
   errors: string[];
+  activation_complete: boolean;
   packs: AccessStatusResponse["packs"];
 }
 

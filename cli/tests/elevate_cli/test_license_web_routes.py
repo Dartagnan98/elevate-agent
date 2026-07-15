@@ -409,9 +409,8 @@ def test_exact_beta_fails_closed_when_signed_backend_identity_is_missing(
     _assert_profile_unchanged(protected_profile)
 
 
-def test_exact_beta_web_skill_sync_never_sends_bearer_token_to_stale_backend(
+def test_exact_beta_web_skill_setup_validates_bundle_without_cloud_request(
     client: TestClient,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from elevate_cli import cloud_skills
@@ -429,25 +428,37 @@ def test_exact_beta_web_skill_sync_never_sends_bearer_token_to_stale_backend(
         entitlements=[],
     )
     monkeypatch.setattr(license_mod, "load", lambda: lic)
-    monkeypatch.setattr(cloud_skills, "cloud_skills_dir", lambda: tmp_path / "skills")
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(
         cloud_skills.httpx,
         "Client",
         lambda **kwargs: _CloudRecordingClient(calls, **kwargs),
     )
+    activations: list[tuple[license_mod.License, bool]] = []
+
+    def activate_install(
+        value: license_mod.License,
+        *,
+        sync_skills: bool,
+    ) -> dict[str, Any]:
+        activations.append((value, sync_skills))
+        return {
+            "skill_count": 6,
+            "skill_names": ["real-estate", "real-estate-admin"],
+            "skills_path": "/signed/app/cli/skills",
+            "skill_sync_warnings": [],
+            "activation_complete": True,
+        }
+
+    monkeypatch.setattr(license_mod, "activate_install", activate_install)
 
     response = client.post("/api/license/sync-skills")
 
     assert response.status_code == 200
-    assert calls == [
-        {
-            "base_url": license_mod.DEFAULT_BACKEND,
-            "path": "/api/skills/list",
-            "headers": {"authorization": "Bearer bearer-secret"},
-        }
-    ]
-    assert calls[0]["base_url"] != ATTACKER_BACKEND
+    assert activations == [(lic, True)]
+    assert calls == []
+    assert response.json()["activation_complete"] is True
+    assert response.json()["skill_count"] == 6
     assert license_mod.BACKEND_URL == ATTACKER_BACKEND
     assert os.environ["ELEVATE_BACKEND_URL"] == ATTACKER_BACKEND
 

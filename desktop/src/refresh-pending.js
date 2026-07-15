@@ -2,6 +2,9 @@
 
 // Shared with cli/elevate_cli/refresh_pending.py. Keep names and schemas exact:
 // both runtimes coordinate through the same BSD flock and durable markers.
+// Initial password auth uses the refresh schema with an
+// initial-auth-v1:<kind> email hash in license_id, allowing B/C/I recovery
+// before HQ returns a real ID without confusing login and signup.
 const childProcess = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -10,6 +13,8 @@ const path = require("node:path");
 const LOCK_NAME = ".license-refresh.lock";
 const MARKER_NAME = ".license-refresh-pending.json";
 const DEVICE_MARKER_NAME = ".license-device-pending.json";
+const INITIAL_AUTH_LICENSE_PREFIX = "initial-auth-v1:";
+const INITIAL_AUTH_KINDS = new Set(["login", "signup"]);
 const READY_LINE = "ELEVATE_REFRESH_LOCK_READY_V1\n";
 const MAX_MARKER_BYTES = 16 * 1024;
 const SCHEMA_KEYS = [
@@ -53,6 +58,53 @@ function canonicalToken32(value) {
 
 function generateToken32() {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+function normalizeInitialAuthEmail(email) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) {
+    throw new RefreshPendingError(
+      "beta_auth_input_required",
+      "Realtor Beta requires an email before starting account sign-in.",
+    );
+  }
+  return normalized;
+}
+
+function canonicalInitialAuthKind(authKind) {
+  const kind = String(authKind || "").trim().toLowerCase();
+  if (!INITIAL_AUTH_KINDS.has(kind)) {
+    throw new RefreshPendingError(
+      "beta_refresh_state_corrupt",
+      "The Realtor Beta pending password-authentication kind is invalid.",
+    );
+  }
+  return kind;
+}
+
+function initialAuthLicenseId(email, { authKind } = {}) {
+  const kind = canonicalInitialAuthKind(authKind);
+  const digest = crypto
+    .createHash("sha256")
+    .update(normalizeInitialAuthEmail(email), "utf8")
+    .digest("hex");
+  return `${INITIAL_AUTH_LICENSE_PREFIX}${kind}:${digest}`;
+}
+
+function isInitialAuthPending(value) {
+  return Boolean(
+      value &&
+      typeof value === "object" &&
+      typeof value.license_id === "string" &&
+      new RegExp(`^${INITIAL_AUTH_LICENSE_PREFIX}(?:login|signup):[0-9a-f]{64}$`).test(
+        value.license_id,
+      ),
+  );
+}
+
+function initialAuthPendingMatches(value, email, { authKind } = {}) {
+  return isInitialAuthPending(value) &&
+    value.license_id === initialAuthLicenseId(email, { authKind });
 }
 
 function scanJsonString(text, start) {
@@ -655,6 +707,18 @@ function createRefreshPendingStore({
     }
   }
 
+  function createInitialAuth({
+    email,
+    authKind,
+    createdAt = Math.floor(Date.now() / 1000),
+  }) {
+    return create({
+      licenseId: initialAuthLicenseId(email, { authKind }),
+      currentRefreshToken: generateToken32(),
+      createdAt,
+    });
+  }
+
   function remove() {
     let openedMarker = null;
     try {
@@ -818,6 +882,7 @@ function createRefreshPendingStore({
 
   return {
     create,
+    createInitialAuth,
     deviceMarkerPath,
     lockPath,
     markerPath,
@@ -833,11 +898,15 @@ function createRefreshPendingStore({
 
 module.exports = {
   DEVICE_MARKER_NAME,
+  INITIAL_AUTH_LICENSE_PREFIX,
   LOCK_NAME,
   MARKER_NAME,
   RefreshPendingError,
   canonicalToken32,
   createRefreshPendingStore,
   generateToken32,
+  initialAuthLicenseId,
+  initialAuthPendingMatches,
+  isInitialAuthPending,
   parseDevicePending,
 };
