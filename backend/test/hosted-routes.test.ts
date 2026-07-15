@@ -26,8 +26,11 @@ import {
   refreshHash,
   responseJson,
   seedLicense,
+  TEST_ENTITLEMENT_KEY_B,
   useFakeDb,
+  withTestEntitlementSigningRing,
 } from "./route-harness";
+import { ENTITLEMENT_ASSERTION_KEYSET_SHA256 } from "../src/lib/entitlement-assertion";
 
 function patchStripeResource<T>(
   select: (stripe: Stripe) => Record<string, T>,
@@ -69,6 +72,35 @@ function assertCredentialFree(body: Record<string, unknown>): void {
   assert.equal("access_token" in body, false);
   assert.equal("refresh_token" in body, false);
   assert.equal("entitlement_assertion" in body, false);
+}
+
+const ENTITLEMENT_SIGNING_ENV_NAMES = [
+  "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64",
+  "ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID",
+  "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON",
+] as const;
+
+async function withEntitlementSigningEnvironment<T>(
+  values: Partial<Record<(typeof ENTITLEMENT_SIGNING_ENV_NAMES)[number], string | undefined>>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = Object.fromEntries(
+    ENTITLEMENT_SIGNING_ENV_NAMES.map((name) => [name, process.env[name]]),
+  ) as Record<(typeof ENTITLEMENT_SIGNING_ENV_NAMES)[number], string | undefined>;
+  for (const name of ENTITLEMENT_SIGNING_ENV_NAMES) {
+    if (!Object.prototype.hasOwnProperty.call(values, name)) continue;
+    const value = values[name];
+    if (value === undefined) Reflect.deleteProperty(process.env, name);
+    else process.env[name] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const name of ENTITLEMENT_SIGNING_ENV_NAMES) {
+      if (previous[name] === undefined) Reflect.deleteProperty(process.env, name);
+      else process.env[name] = previous[name];
+    }
+  }
 }
 
 async function requestDevLoginCode(
@@ -166,7 +198,81 @@ describe("hosted route handlers", () => {
     const body = await responseJson(response);
 
     assert.equal(response.status, 200);
-    assert.deepEqual(body, { ok: true, service: "elevate-backend" });
+    assert.deepEqual(body, {
+      ok: true,
+      service: "elevate-backend",
+      entitlement_signer_ready: true,
+      entitlement_signing_active_kid: "ent-2026-07-a",
+      entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+    });
+
+    await withTestEntitlementSigningRing(TEST_ENTITLEMENT_KEY_B, async () => {
+      const ringResponse = await route.GET();
+      assert.equal(ringResponse.status, 200);
+      assert.deepEqual(await responseJson(ringResponse), {
+        ok: true,
+        service: "elevate-backend",
+        entitlement_signer_ready: true,
+        entitlement_signing_active_kid: TEST_ENTITLEMENT_KEY_B,
+        entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+      });
+    });
+  });
+
+  it("health is secret-safe and 503 for missing, partial, or malformed signer config", async () => {
+    const route = await loadRoute<{ GET: () => Promise<Response> }>("health");
+    const legacySecret = process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64;
+    assert.equal(typeof legacySecret, "string");
+
+    for (const scenario of [
+      {
+        values: {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: undefined,
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: undefined,
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
+        },
+        activeKid: "ent-2026-07-a",
+      },
+      {
+        values: {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: legacySecret,
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: "ent-2026-07-a",
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
+        },
+        activeKid: "ent-2026-07-a",
+      },
+      {
+        values: {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: legacySecret,
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: TEST_ENTITLEMENT_KEY_B,
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: "not-json",
+        },
+        activeKid: TEST_ENTITLEMENT_KEY_B,
+      },
+      {
+        values: {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: legacySecret,
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID:
+            "unknown-value-that-must-not-be-reflected",
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: "{}",
+        },
+        activeKid: null,
+      },
+    ] as const) {
+      await withEntitlementSigningEnvironment(scenario.values, async () => {
+        const response = await route.GET();
+        const body = await responseJson(response);
+        assert.equal(response.status, 503);
+        assert.deepEqual(body, {
+          ok: false,
+          service: "elevate-backend",
+          entitlement_signer_ready: false,
+          entitlement_signing_active_kid: scenario.activeKid,
+          entitlement_public_keyset_sha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+        });
+        assert.equal(JSON.stringify(body).includes(String(legacySecret)), false);
+      });
+    }
   });
 
   it("login returns the desktop token envelope for an active user", async () => {
@@ -174,12 +280,16 @@ describe("hosted route handlers", () => {
     db.users.push(await makeUser());
     const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/login");
 
-    const response = await route.POST(
-      jsonRequest("/api/auth/login", {
-        email: "agent@example.com",
-        password: "secret",
-        device_label: "MacBook",
-      }),
+    const response = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () =>
+        route.POST(
+          jsonRequest("/api/auth/login", {
+            email: "agent@example.com",
+            password: "secret",
+            device_label: "MacBook",
+          }),
+        ),
     );
     const body = await responseJson(response);
 
@@ -198,6 +308,7 @@ describe("hosted route handlers", () => {
       email: "agent@example.com",
       tier: "pro",
       entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
   });
 
@@ -234,12 +345,16 @@ describe("hosted route handlers", () => {
       const forgot = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/forgot");
       const reset = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/reset");
 
-      const signupResponse = await signup.POST(
-        jsonRequest("/api/auth/signup", {
-          email: "New.Agent@Example.COM",
-          password: "old-secret",
-          device_label: "New Mac",
-        }),
+      const signupResponse = await withTestEntitlementSigningRing(
+        TEST_ENTITLEMENT_KEY_B,
+        () =>
+          signup.POST(
+            jsonRequest("/api/auth/signup", {
+              email: "New.Agent@Example.COM",
+              password: "old-secret",
+              device_label: "New Mac",
+            }),
+          ),
       );
       const signupBody = await responseJson(signupResponse);
 
@@ -260,6 +375,7 @@ describe("hosted route handlers", () => {
         email: "new.agent@example.com",
         tier: "pro",
         entitlements: [],
+        kid: TEST_ENTITLEMENT_KEY_B,
       });
 
       const originalHash = db.users[0].password_hash;
@@ -411,8 +527,12 @@ describe("hosted route handlers", () => {
     });
     const route = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("license/refresh");
 
-    const okResponse = await route.POST(
-      jsonRequest("/api/license/refresh", { refresh_token: "old-refresh" }),
+    const okResponse = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () =>
+        route.POST(
+          jsonRequest("/api/license/refresh", { refresh_token: "old-refresh" }),
+        ),
     );
     const okBody = await responseJson(okResponse);
 
@@ -431,6 +551,7 @@ describe("hosted route handlers", () => {
       email: active.email,
       tier: "pro",
       entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
 
     const inactiveResponse = await route.POST(
@@ -580,8 +701,9 @@ describe("hosted route handlers", () => {
     const familyExpiry = license.refresh_family_expires_at;
     const route = await loadRoute<PostRoute>("license/refresh");
 
-    const firstResponse = await route.POST(
-      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    const firstResponse = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current))),
     );
     const firstBody = await responseJson(firstResponse);
     assert.equal(firstResponse.status, 200);
@@ -592,6 +714,7 @@ describe("hosted route handlers", () => {
       email: user.email,
       tier: "pro",
       entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
     assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
     assert.equal(license.previous_refresh_token_hash, refreshHash(current));
@@ -600,8 +723,9 @@ describe("hosted route handlers", () => {
 
     // Treat the first successful response as lost and send the durable A/B/I
     // marker again. The refresh bearer is identical; access/assertion is new.
-    const retryResponse = await route.POST(
-      jsonRequest("/api/license/refresh", refreshV2Body(current)),
+    const retryResponse = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => route.POST(jsonRequest("/api/license/refresh", refreshV2Body(current))),
     );
     const retryBody = await responseJson(retryResponse);
     assert.equal(retryResponse.status, 200);
@@ -612,6 +736,7 @@ describe("hosted route handlers", () => {
       email: user.email,
       tier: "pro",
       entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
     assert.notEqual(retryBody.entitlement_assertion, firstBody.entitlement_assertion);
     assert.equal(license.refresh_token_hash, refreshHash(REFRESH_V2_B));
@@ -959,97 +1084,181 @@ describe("hosted route handlers", () => {
     }
   });
 
-  it("license issuance fails closed before creating or rotating credentials", async () => {
-    const previousKey = process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64;
+  it("every issuance route fails with zero credential mutation for a partial ring", async () => {
+    const legacyKey = process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64;
+    assert.equal(typeof legacyKey, "string");
     const previousConsoleError = console.error;
     console.error = () => {};
     try {
-      Reflect.deleteProperty(process.env, "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64");
-      const loginDb = useFakeDb();
-      loginDb.users.push(await makeUser());
-      const login = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("auth/login");
+      await withEntitlementSigningEnvironment(
+        {
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64: legacyKey,
+          ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID: "ent-2026-07-a",
+          ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON: undefined,
+        },
+        async () => {
+          const loginDb = useFakeDb();
+          loginDb.users.push(await makeUser());
+          const login = await loadRoute<PostRoute>("auth/login");
+          const loginResponse = await login.POST(
+            jsonRequest("/api/auth/login", {
+              email: "agent@example.com",
+              password: "secret",
+            }),
+          );
+          const loginBody = await responseJson(loginResponse);
+          assert.equal(loginResponse.status, 503);
+          assert.deepEqual(loginBody, { error: "license issuance unavailable" });
+          assertCredentialFree(loginBody);
+          assert.equal(loginDb.licenses.length, 0);
 
-      const loginResponse = await login.POST(
-        jsonRequest("/api/auth/login", {
-          email: "agent@example.com",
-          password: "secret",
-        }),
-      );
-      assert.equal(loginResponse.status, 503);
-      assert.deepEqual(await responseJson(loginResponse), {
-        error: "license issuance unavailable",
-      });
-      assert.equal(loginDb.licenses.length, 0);
+          const signupDb = useFakeDb();
+          const signup = await loadRoute<PostRoute>("auth/signup");
+          const signupResponse = await signup.POST(
+            jsonRequest("/api/auth/signup", {
+              email: "signer-unavailable@example.com",
+              password: "password-1",
+            }),
+          );
+          const signupBody = await responseJson(signupResponse);
+          assert.equal(signupResponse.status, 503);
+          assert.deepEqual(signupBody, { error: "license issuance unavailable" });
+          assertCredentialFree(signupBody);
+          assert.equal(signupDb.users.length, 0);
+          assert.equal(signupDb.licenses.length, 0);
 
-      Reflect.set(
-        process.env,
-        "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64",
-        "malformed signing key",
-      );
-      const refreshDb = useFakeDb();
-      const active = await makeUser({ id: "refresh-order-user" });
-      refreshDb.users.push(active);
-      const originalHash = refreshHash("refresh-before-signing-error");
-      const license = seedLicense({
-        id: "refresh-order-license",
-        user_id: active.id,
-        refresh_token_hash: originalHash,
-      });
-      const refresh = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
-        "license/refresh",
-      );
+          const refreshDb = useFakeDb();
+          const active = await makeUser({ id: "refresh-order-user" });
+          refreshDb.users.push(active);
+          const originalHash = refreshHash("refresh-before-signing-error");
+          const license = seedLicense({
+            id: "refresh-order-license",
+            user_id: active.id,
+            refresh_token_hash: originalHash,
+          });
+          const refresh = await loadRoute<PostRoute>("license/refresh");
+          const refreshResponse = await refresh.POST(
+            jsonRequest("/api/license/refresh", {
+              refresh_token: "refresh-before-signing-error",
+            }),
+          );
+          const refreshBody = await responseJson(refreshResponse);
+          assert.equal(refreshResponse.status, 503);
+          assert.deepEqual(refreshBody, { error: "license issuance unavailable" });
+          assertCredentialFree(refreshBody);
+          assert.equal(license.refresh_token_hash, originalHash);
+          assert.equal(license.last_used_at, null);
 
-      const refreshResponse = await refresh.POST(
-        jsonRequest("/api/license/refresh", {
-          refresh_token: "refresh-before-signing-error",
-        }),
-      );
-      assert.equal(refreshResponse.status, 503);
-      assert.deepEqual(await responseJson(refreshResponse), {
-        error: "license issuance unavailable",
-      });
-      assert.equal(license.refresh_token_hash, originalHash);
-      assert.equal(license.last_used_at, null);
+          const inviteDb = useFakeDb();
+          const invitee = await makeUser({
+            id: "invite-signing-order-user",
+            email: "invite-signing-order@example.com",
+          });
+          inviteDb.users.push(invitee);
+          const inviteOrg = seedTestOrg(inviteDb, {
+            id: "invite-signing-order-org",
+            seatLimit: 1,
+          });
+          const invitation = seedTestInvitation(inviteDb, {
+            id: "invite-signing-order-invite",
+            orgId: inviteOrg.id,
+            email: invitee.email,
+            token: "invite-signing-order-token",
+          });
+          const accept = await loadRoute<PostRoute>("invitations/accept");
+          const inviteResponse = await accept.POST(
+            jsonRequest("/api/invitations/accept", { token: "invite-signing-order-token" }),
+          );
+          const inviteBody = await responseJson(inviteResponse);
+          assert.equal(inviteResponse.status, 503);
+          assert.deepEqual(inviteBody, { error: "license issuance unavailable" });
+          assertCredentialFree(inviteBody);
+          assert.equal(invitation.status, "pending");
+          assert.equal(inviteDb.memberships.length, 0);
+          assert.equal(inviteDb.licenses.length, 0);
 
-      const inviteDb = useFakeDb();
-      const invitee = await makeUser({
-        id: "invite-signing-order-user",
-        email: "invite-signing-order@example.com",
-      });
-      inviteDb.users.push(invitee);
-      const inviteOrg = seedTestOrg(inviteDb, {
-        id: "invite-signing-order-org",
-        seatLimit: 1,
-      });
-      const invitation = seedTestInvitation(inviteDb, {
-        id: "invite-signing-order-invite",
-        orgId: inviteOrg.id,
-        email: invitee.email,
-        token: "invite-signing-order-token",
-      });
-      const accept = await loadRoute<PostRoute>("invitations/accept");
+          const codeDb = useFakeDb();
+          const codeUser = await makeUser({
+            id: "code-signing-order-user",
+            email: "code-signing-order@example.com",
+          });
+          codeDb.users.push(codeUser);
+          const code = "123456";
+          codeDb.login_codes.push({
+            id: "code-signing-order-code",
+            user_id: codeUser.id,
+            code_hash: crypto.createHash("sha256").update(code).digest("hex"),
+            created_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+            consumed_at: null,
+            attempts: 0,
+            ip_addr: null,
+            user_agent: null,
+          });
+          const verifyCode = await loadRoute<PostRoute>("auth/login-code/verify");
+          const codeResponse = await verifyCode.POST(
+            jsonRequest("/api/auth/login-code/verify", {
+              email: codeUser.email,
+              code,
+            }),
+          );
+          const codeBody = await responseJson(codeResponse);
+          assert.equal(codeResponse.status, 503);
+          assert.deepEqual(codeBody, { error: "license issuance unavailable" });
+          assertCredentialFree(codeBody);
+          assert.equal(codeDb.login_codes[0].consumed_at, null);
+          assert.equal(codeDb.login_codes[0].attempts, 0);
+          assert.equal(codeDb.licenses.length, 0);
 
-      const inviteResponse = await accept.POST(
-        jsonRequest("/api/invitations/accept", { token: "invite-signing-order-token" }),
+          const deviceDb = useFakeDb();
+          const deviceUser = await makeUser({ id: "device-signing-order-user" });
+          deviceDb.users.push(deviceUser);
+          const browserLicense = seedLicense({
+            id: "device-signing-order-browser",
+            user_id: deviceUser.id,
+          });
+          const bearer = await issueAccessToken(deviceUser, browserLicense);
+          const start = await loadRoute<PostRoute>("device/start");
+          const approve = await loadRoute<PostRoute>("device/approve");
+          const poll = await loadRoute<PostRoute>("device/poll");
+          const startBody = await responseJson(
+            await start.POST(
+              jsonRequest("/api/device/start", { device_label: "Signer unavailable CLI" }),
+            ),
+          );
+          assert.equal(
+            (
+              await approve.POST(
+                jsonRequest(
+                  "/api/device/approve",
+                  { user_code: startBody.user_code },
+                  { headers: { authorization: `Bearer ${bearer}` } },
+                ),
+              )
+            ).status,
+            200,
+          );
+          const grant = deviceDb.device_grants[0];
+          const stashedRefresh = grant.refresh_token_plain;
+          const deviceLicense = deviceDb.licenses.find(
+            (candidate) => candidate.id !== browserLicense.id,
+          );
+          assert.ok(deviceLicense);
+          const pollResponse = await poll.POST(
+            jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+          );
+          const pollBody = await responseJson(pollResponse);
+          assert.equal(pollResponse.status, 503);
+          assert.deepEqual(pollBody, { error: "license issuance unavailable" });
+          assertCredentialFree(pollBody);
+          assert.equal(grant.status, "approved");
+          assert.equal(grant.refresh_token_plain, stashedRefresh);
+          assert.equal(deviceLicense.revoked, false);
+          assert.equal(deviceLicense.last_used_at, null);
+        },
       );
-      assert.equal(inviteResponse.status, 503);
-      assert.deepEqual(await responseJson(inviteResponse), {
-        error: "license issuance unavailable",
-      });
-      assert.equal(invitation.status, "pending");
-      assert.equal(inviteDb.memberships.length, 0);
-      assert.equal(inviteDb.licenses.length, 0);
     } finally {
       console.error = previousConsoleError;
-      if (previousKey === undefined) {
-        Reflect.deleteProperty(process.env, "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64");
-      } else {
-        Reflect.set(
-          process.env,
-          "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64",
-          previousKey,
-        );
-      }
     }
   });
 
@@ -1836,8 +2045,9 @@ describe("hosted route handlers", () => {
       "invitations/accept",
     );
 
-    const response = await route.POST(
-      jsonRequest("/api/invitations/accept", { token }),
+    const response = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => route.POST(jsonRequest("/api/invitations/accept", { token })),
     );
     const body = await responseJson(response);
 
@@ -1853,6 +2063,7 @@ describe("hosted route handlers", () => {
       email: invitee.email,
       tier: "pro",
       entitlements: ["real_estate_admin", "real_estate_cma", "real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
   });
 
@@ -2593,8 +2804,9 @@ describe("hosted route handlers", () => {
     assert.equal(db.device_grants[0].license_id, "license-1");
     assert.equal(typeof db.device_grants[0].refresh_token_plain, "string");
 
-    const pollResponse = await poll.POST(
-      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    const pollResponse = await withTestEntitlementSigningRing(
+      TEST_ENTITLEMENT_KEY_B,
+      () => poll.POST(jsonRequest("/api/device/poll", { device_code: startBody.device_code })),
     );
     const pollBody = await responseJson(pollResponse);
 
@@ -2611,6 +2823,7 @@ describe("hosted route handlers", () => {
       email: user.email,
       tier: "pro",
       entitlements: ["real_estate_sales"],
+      kid: TEST_ENTITLEMENT_KEY_B,
     });
 
     const secondPoll = await poll.POST(
@@ -3289,12 +3502,16 @@ describe("hosted route handlers", () => {
       assert.deepEqual(rejectedBody, { error: "invalid code" });
       assert.equal(db.login_codes[0].attempts, 1);
 
-      const accepted = await verifyRoute.POST(
-        jsonRequest("/api/auth/login-code/verify", {
-          email: "login-code@example.com",
-          code,
-          device_label: "Admin Web",
-        }),
+      const accepted = await withTestEntitlementSigningRing(
+        TEST_ENTITLEMENT_KEY_B,
+        () =>
+          verifyRoute.POST(
+            jsonRequest("/api/auth/login-code/verify", {
+              email: "login-code@example.com",
+              code,
+              device_label: "Admin Web",
+            }),
+          ),
       );
       const acceptedBody = await responseJson(accepted);
 
@@ -3313,6 +3530,7 @@ describe("hosted route handlers", () => {
         email: user.email,
         tier: "pro",
         entitlements: ["real_estate_sales"],
+        kid: TEST_ENTITLEMENT_KEY_B,
       });
     } finally {
       if (previousNodeEnv === undefined) {

@@ -4,18 +4,55 @@ import { pathToFileURL } from "node:url";
 import bcrypt from "bcryptjs";
 
 const testEntitlementKeyPair = crypto.generateKeyPairSync("ed25519");
+const testEntitlementKeyPairB = crypto.generateKeyPairSync("ed25519");
 const TEST_ENTITLEMENT_PRIVATE_KEY_PKCS8_DER_B64 = testEntitlementKeyPair.privateKey
   .export({ format: "der", type: "pkcs8" })
   .toString("base64");
 const TEST_ENTITLEMENT_PUBLIC_KEY_SPKI_DER_B64 = testEntitlementKeyPair.publicKey
   .export({ format: "der", type: "spki" })
   .toString("base64");
+const TEST_ENTITLEMENT_PRIVATE_KEY_B_PKCS8_DER_B64 = testEntitlementKeyPairB.privateKey
+  .export({ format: "der", type: "pkcs8" })
+  .toString("base64");
+const TEST_ENTITLEMENT_PUBLIC_KEY_B_SPKI_DER_B64 = testEntitlementKeyPairB.publicKey
+  .export({ format: "der", type: "spki" })
+  .toString("base64");
+
+export const TEST_ENTITLEMENT_KEY_A = "ent-2026-07-a";
+export const TEST_ENTITLEMENT_KEY_B = "ent-2026-07-b";
+const TEST_ENTITLEMENT_PUBLIC_KEYS = {
+  [TEST_ENTITLEMENT_KEY_A]: TEST_ENTITLEMENT_PUBLIC_KEY_SPKI_DER_B64,
+  [TEST_ENTITLEMENT_KEY_B]: TEST_ENTITLEMENT_PUBLIC_KEY_B_SPKI_DER_B64,
+} as const;
 
 process.env.JWT_SECRET ||= "test-secret-for-hosted-route-handler-harness";
 process.env.SUPABASE_URL ||= "https://example.supabase.test";
 process.env.SUPABASE_SERVICE_ROLE_KEY ||= "test-service-role-key";
 process.env.ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64 ||=
   TEST_ENTITLEMENT_PRIVATE_KEY_PKCS8_DER_B64;
+
+export async function withTestEntitlementSigningRing<T>(
+  activeKeyId: typeof TEST_ENTITLEMENT_KEY_A | typeof TEST_ENTITLEMENT_KEY_B,
+  run: () => Promise<T>,
+): Promise<T> {
+  const activeEnvironment = "ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID";
+  const ringEnvironment = "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON";
+  const previousActive = process.env[activeEnvironment];
+  const previousRing = process.env[ringEnvironment];
+  process.env[activeEnvironment] = activeKeyId;
+  process.env[ringEnvironment] = JSON.stringify({
+    [TEST_ENTITLEMENT_KEY_A]: TEST_ENTITLEMENT_PRIVATE_KEY_PKCS8_DER_B64,
+    [TEST_ENTITLEMENT_KEY_B]: TEST_ENTITLEMENT_PRIVATE_KEY_B_PKCS8_DER_B64,
+  });
+  try {
+    return await run();
+  } finally {
+    if (previousActive === undefined) Reflect.deleteProperty(process.env, activeEnvironment);
+    else process.env[activeEnvironment] = previousActive;
+    if (previousRing === undefined) Reflect.deleteProperty(process.env, ringEnvironment);
+    else process.env[ringEnvironment] = previousRing;
+  }
+}
 
 type UserStatus = "active" | "trialing" | "inactive" | "canceled" | "past_due";
 type Tier = "pro" | "builder";
@@ -429,6 +466,7 @@ export function assertEntitlementEnvelope(
     email: string;
     tier: Tier;
     entitlements: string[];
+    kid?: typeof TEST_ENTITLEMENT_KEY_A | typeof TEST_ENTITLEMENT_KEY_B;
   },
 ): void {
   assert.equal(typeof body.access_token, "string");
@@ -446,14 +484,15 @@ export function assertEntitlementEnvelope(
     string,
     unknown
   >;
+  const expectedKeyId = expected.kid ?? TEST_ENTITLEMENT_KEY_A;
   assert.deepEqual(header, {
     alg: "EdDSA",
     typ: "elevate-entitlement+jwt",
-    kid: "ent-2026-07-a",
+    kid: expectedKeyId,
   });
 
   const publicKey = crypto.createPublicKey({
-    key: Buffer.from(TEST_ENTITLEMENT_PUBLIC_KEY_SPKI_DER_B64, "base64"),
+    key: Buffer.from(TEST_ENTITLEMENT_PUBLIC_KEYS[expectedKeyId], "base64"),
     format: "der",
     type: "spki",
   });

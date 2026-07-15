@@ -1,21 +1,37 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
+import crypto, { type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import {
   createEntitlementEnvelope,
   ENTITLEMENT_ASSERTION,
+  ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS,
+  ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+  ENTITLEMENT_ASSERTION_PUBLIC_KEYS,
+  entitlementAssertionKeysetSha256,
   EntitlementSigningConfigurationError,
+  entitlementSignerReadiness,
   loadEntitlementSigner,
+  type EntitlementSigningEnvironment,
 } from "../src/lib/entitlement-assertion";
 
-const PRIVATE_KEY_ENV = "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64";
-const ephemeralKeyPair = crypto.generateKeyPairSync("ed25519");
-const EPHEMERAL_PUBLIC_KEY = ephemeralKeyPair.publicKey;
-const EPHEMERAL_PRIVATE_KEY_B64 = ephemeralKeyPair.privateKey
-  .export({ format: "der", type: "pkcs8" })
-  .toString("base64");
+const LEGACY_PRIVATE_KEY_ENV = "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEY_B64";
+const ACTIVE_KID_ENV = "ELEVATE_ENTITLEMENT_SIGNING_ACTIVE_KID";
+const PRIVATE_KEY_RING_ENV = "ELEVATE_ENTITLEMENT_SIGNING_PRIVATE_KEYS_B64_JSON";
+const KEY_A = "ent-2026-07-a";
+const KEY_B = "ent-2026-07-b";
+
+function generatePrivateKey(): { privateKey: KeyObject; privateKeyB64: string } {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  return {
+    privateKey,
+    privateKeyB64: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
+  };
+}
+
+const signingA = generatePrivateKey();
+const signingB = generatePrivateKey();
 
 type GoldenFixture = {
   fixture: string;
@@ -29,9 +45,53 @@ type GoldenFixture = {
   compact_jws: string;
 };
 
+type KeysetFixture = {
+  schema: number;
+  accepted_key_ids: string[];
+  public_keys_spki_der_b64: Record<string, string>;
+  keyset_sha256: string;
+  future_key_public_spki_sha256: string;
+};
+
 const golden = JSON.parse(
   readFileSync(new URL("./fixtures/entitlement-assertion-v1.json", import.meta.url), "utf8"),
 ) as GoldenFixture;
+
+// This is the same fixture consumed by the Python verifier tests. Reading it
+// directly prevents backend fingerprint expectations from drifting into a
+// second, independently maintained copy.
+const keysetFixture = JSON.parse(
+  readFileSync(
+    new URL("../../cli/tests/fixtures/entitlement-keyset-v1.json", import.meta.url),
+    "utf8",
+  ),
+) as KeysetFixture;
+
+function legacyEnvironment(
+  privateKeyB64: string | undefined,
+  nodeEnv = "test",
+): EntitlementSigningEnvironment {
+  return {
+    NODE_ENV: nodeEnv,
+    [LEGACY_PRIVATE_KEY_ENV]: privateKeyB64,
+  };
+}
+
+function ringEnvironment(
+  activeKeyId: string,
+  values: Record<string, string> = {
+    [KEY_A]: signingA.privateKeyB64,
+    [KEY_B]: signingB.privateKeyB64,
+  },
+  extra: EntitlementSigningEnvironment = {},
+): EntitlementSigningEnvironment {
+  return {
+    NODE_ENV: "test",
+    [ACTIVE_KID_ENV]: activeKeyId,
+    [PRIVATE_KEY_RING_ENV]: JSON.stringify(values),
+    ...extra,
+  };
+}
 
 function decodeCompact(jws: string): {
   header: Record<string, unknown>;
@@ -49,29 +109,65 @@ function decodeCompact(jws: string): {
   };
 }
 
-function withSigningEnvironment<T>(
-  privateKey: string | undefined,
-  nodeEnv: string | undefined,
-  run: () => T,
-): T {
-  const previousKey = process.env[PRIVATE_KEY_ENV];
-  const previousNodeEnv = process.env.NODE_ENV;
-  if (privateKey === undefined) Reflect.deleteProperty(process.env, PRIVATE_KEY_ENV);
-  else Reflect.set(process.env, PRIVATE_KEY_ENV, privateKey);
-  if (nodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
-  else Reflect.set(process.env, "NODE_ENV", nodeEnv);
+function envelopeWith(environment: EntitlementSigningEnvironment) {
+  return createEntitlementEnvelope(
+    {
+      access_token: "access-exact\nbytes",
+      refresh_token: "refresh-exact\nbytes",
+      sub: "user-1",
+      license_id: "license-1",
+      email: " Agent@Example.COM ",
+      tier: "builder",
+      entitlements: [],
+    },
+    loadEntitlementSigner(environment),
+    { nowSeconds: 1000, jti: "jti-1" },
+  );
+}
+
+function assertSignedBy(
+  compact: string,
+  keyId: string,
+  privateKey: KeyObject,
+): ReturnType<typeof decodeCompact> {
+  const decoded = decodeCompact(compact);
+  assert.deepEqual(decoded.header, {
+    alg: "EdDSA",
+    typ: "elevate-entitlement+jwt",
+    kid: keyId,
+  });
+  assert.equal(
+    crypto.verify(
+      null,
+      decoded.signingInput,
+      crypto.createPublicKey(privateKey),
+      decoded.signature,
+    ),
+    true,
+  );
+  return decoded;
+}
+
+function assertConfigurationFailure(
+  environment: EntitlementSigningEnvironment,
+  expected?: RegExp,
+): EntitlementSigningConfigurationError {
+  let failure: unknown;
   try {
-    return run();
-  } finally {
-    if (previousKey === undefined) Reflect.deleteProperty(process.env, PRIVATE_KEY_ENV);
-    else Reflect.set(process.env, PRIVATE_KEY_ENV, previousKey);
-    if (previousNodeEnv === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
-    else Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
+    loadEntitlementSigner(environment);
+  } catch (error) {
+    failure = error;
   }
+  assert.ok(failure instanceof EntitlementSigningConfigurationError);
+  if (expected) assert.match(failure.message, expected);
+  for (const secret of [signingA.privateKeyB64, signingB.privateKeyB64]) {
+    assert.equal(failure.message.includes(secret), false);
+  }
+  return failure;
 }
 
 describe("signed entitlement assertions", () => {
-  it("matches the deterministic cross-runtime golden fixture", () => {
+  it("matches the deterministic assertion golden fixture", () => {
     assert.equal(
       golden.production_public_key_spki_der_b64,
       ENTITLEMENT_ASSERTION.PRODUCTION_PUBLIC_KEY_SPKI_DER_B64,
@@ -96,112 +192,255 @@ describe("signed entitlement assertions", () => {
     assert.equal(crypto.verify(null, decoded.signingInput, publicKey, decoded.signature), true);
   });
 
-  it("binds exact tokens, normalizes duplicates, and supports empty entitlements", () => {
-    const envelope = withSigningEnvironment(
-      EPHEMERAL_PRIVATE_KEY_B64,
-      "test",
-      () =>
-        createEntitlementEnvelope(
-          {
-            access_token: "access-exact\nbytes",
-            refresh_token: "refresh-exact\nbytes",
-            sub: "user-1",
-            license_id: "license-1",
-            email: " Agent@Example.COM ",
-            tier: "builder",
-            entitlements: [],
-          },
-          loadEntitlementSigner(),
-          { nowSeconds: 1000, jti: "jti-1" },
-        ),
+  it("matches the shared Python/Desktop A+B keyset fixture and fingerprint", () => {
+    assert.equal(keysetFixture.schema, 1);
+    assert.deepEqual(
+      [...ENTITLEMENT_ASSERTION_ACCEPTED_KEY_IDS],
+      keysetFixture.accepted_key_ids,
     );
-    const decoded = decodeCompact(envelope.entitlement_assertion);
-
-    assert.deepEqual(decoded.header, golden.header);
+    assert.deepEqual(
+      ENTITLEMENT_ASSERTION_PUBLIC_KEYS,
+      keysetFixture.public_keys_spki_der_b64,
+    );
+    assert.equal(ENTITLEMENT_ASSERTION_KEYSET_SHA256, keysetFixture.keyset_sha256);
+    assert.equal(entitlementAssertionKeysetSha256(), keysetFixture.keyset_sha256);
     assert.equal(
-      crypto.verify(null, decoded.signingInput, EPHEMERAL_PUBLIC_KEY, decoded.signature),
-      true,
+      crypto
+        .createHash("sha256")
+        .update(Buffer.from(ENTITLEMENT_ASSERTION_PUBLIC_KEYS[KEY_B], "base64"))
+        .digest("hex"),
+      keysetFixture.future_key_public_spki_sha256,
     );
+  });
+
+  it("keeps the legacy signer on A when both ring variables are absent", () => {
+    const signer = loadEntitlementSigner(legacyEnvironment(signingA.privateKeyB64));
+    assert.equal(signer.keyId, KEY_A);
+    const envelope = envelopeWith(legacyEnvironment(signingA.privateKeyB64));
+    const decoded = assertSignedBy(envelope.entitlement_assertion, KEY_A, signingA.privateKey);
+
     assert.equal(envelope.email, "agent@example.com");
     assert.deepEqual(envelope.entitlements, []);
     assert.equal(decoded.payload.email, envelope.email);
-    assert.deepEqual(decoded.payload.entitlements, envelope.entitlements);
-    assert.equal(decoded.payload.tier, envelope.tier);
-    assert.equal(decoded.payload.license_id, envelope.license_id);
     assert.equal(decoded.payload.iat, 1000);
     assert.equal(decoded.payload.nbf, 1000);
     assert.equal(decoded.payload.exp, 4600);
-    assert.equal(
-      decoded.payload.ath,
-      crypto.createHash("sha256").update(envelope.access_token).digest("base64url"),
-    );
-    assert.equal(
-      decoded.payload.rth,
-      crypto.createHash("sha256").update(envelope.refresh_token).digest("base64url"),
-    );
-
-    withSigningEnvironment(EPHEMERAL_PRIVATE_KEY_B64, "test", () => {
-      const signer = loadEntitlementSigner();
-      const normalized = createEntitlementEnvelope(
-        {
-          access_token: "access",
-          refresh_token: "refresh",
-          sub: "user-1",
-          license_id: "license-1",
-          email: "agent@example.com",
-          tier: "pro",
-          entitlements: [" real_estate_sales ", "real_estate_admin", "real_estate_sales"],
-        },
-        signer,
-      );
-      assert.deepEqual(normalized.entitlements, ["real_estate_admin", "real_estate_sales"]);
-      assert.throws(
-        () =>
-          createEntitlementEnvelope(
-            {
-              access_token: "access",
-              refresh_token: "refresh",
-              sub: "user-1",
-              license_id: "license-1",
-              email: "agent@example.com",
-              tier: "pro",
-              entitlements: ["   "],
-            },
-            signer,
-          ),
-        /must not contain empty names/,
-      );
-    });
   });
 
-  it("fails closed when the signer is missing, malformed, wrong-type, or not the production key", () => {
-    assert.throws(
-      () => withSigningEnvironment(undefined, "test", () => loadEntitlementSigner()),
-      (error: unknown) =>
-        error instanceof EntitlementSigningConfigurationError &&
-        error.message === `${PRIVATE_KEY_ENV} is not set`,
+  it("selects A or B from a complete ring and signs with only that private key", () => {
+    for (const [keyId, key] of [
+      [KEY_A, signingA],
+      [KEY_B, signingB],
+    ] as const) {
+      const signer = loadEntitlementSigner(ringEnvironment(keyId));
+      assert.equal(signer.keyId, keyId);
+      const envelope = envelopeWith(ringEnvironment(keyId));
+      assertSignedBy(envelope.entitlement_assertion, keyId, key.privateKey);
+    }
+  });
+
+  it("normalizes entitlement names without changing the selected signer", () => {
+    const signer = loadEntitlementSigner(ringEnvironment(KEY_B));
+    const normalized = createEntitlementEnvelope(
+      {
+        access_token: "access",
+        refresh_token: "refresh",
+        sub: "user-1",
+        license_id: "license-1",
+        email: "agent@example.com",
+        tier: "pro",
+        entitlements: [" real_estate_sales ", "real_estate_admin", "real_estate_sales"],
+      },
+      signer,
     );
+    assert.deepEqual(normalized.entitlements, ["real_estate_admin", "real_estate_sales"]);
+    assertSignedBy(normalized.entitlement_assertion, KEY_B, signingB.privateKey);
     assert.throws(
-      () => withSigningEnvironment("not base64", "test", () => loadEntitlementSigner()),
-      EntitlementSigningConfigurationError,
+      () =>
+        createEntitlementEnvelope(
+          {
+            access_token: "access",
+            refresh_token: "refresh",
+            sub: "user-1",
+            license_id: "license-1",
+            email: "agent@example.com",
+            tier: "pro",
+            entitlements: ["   "],
+          },
+          signer,
+        ),
+      /must not contain empty names/,
+    );
+  });
+
+  it("never falls back to legacy when either new variable is present", () => {
+    const validLegacy = { [LEGACY_PRIVATE_KEY_ENV]: signingA.privateKeyB64, NODE_ENV: "test" };
+    assertConfigurationFailure(
+      { ...validLegacy, [ACTIVE_KID_ENV]: KEY_A },
+      /must be configured together/,
+    );
+    assertConfigurationFailure(
+      {
+        ...validLegacy,
+        [PRIVATE_KEY_RING_ENV]: JSON.stringify({
+          [KEY_A]: signingA.privateKeyB64,
+          [KEY_B]: signingB.privateKeyB64,
+        }),
+      },
+      /must be configured together/,
+    );
+    assertConfigurationFailure(
+      {
+        ...validLegacy,
+        [ACTIVE_KID_ENV]: KEY_A,
+        [PRIVATE_KEY_RING_ENV]: "not-json",
+      },
+      /must be a JSON object/,
+    );
+    assertConfigurationFailure(
+      {
+        ...validLegacy,
+        [ACTIVE_KID_ENV]: KEY_A,
+        [PRIVATE_KEY_RING_ENV]: `\u00a0${JSON.stringify({
+          [KEY_A]: signingA.privateKeyB64,
+          [KEY_B]: signingB.privateKeyB64,
+        })}`,
+      },
+      /must be a JSON object/,
+    );
+  });
+
+  it("strictly rejects duplicate, partial, and unknown ring keys", () => {
+    const duplicate = `{"${KEY_A}":"${signingA.privateKeyB64}","${KEY_A}":"${signingA.privateKeyB64}","${KEY_B}":"${signingB.privateKeyB64}"}`;
+    assertConfigurationFailure(
+      {
+        NODE_ENV: "test",
+        [ACTIVE_KID_ENV]: KEY_A,
+        [PRIVATE_KEY_RING_ENV]: duplicate,
+      },
+      /duplicate key id/,
+    );
+
+    const escapedDuplicate = `{"${KEY_A}":"${signingA.privateKeyB64}","ent-2026-07-\\u0061":"${signingA.privateKeyB64}","${KEY_B}":"${signingB.privateKeyB64}"}`;
+    assertConfigurationFailure(
+      {
+        NODE_ENV: "test",
+        [ACTIVE_KID_ENV]: KEY_A,
+        [PRIVATE_KEY_RING_ENV]: escapedDuplicate,
+      },
+      /duplicate key id/,
+    );
+
+    const unterminatedAfterComma = `{"${KEY_A}":"${signingA.privateKeyB64}","${KEY_B}":"${signingB.privateKeyB64}",`;
+    assertConfigurationFailure(
+      {
+        NODE_ENV: "test",
+        [ACTIVE_KID_ENV]: KEY_A,
+        [PRIVATE_KEY_RING_ENV]: unterminatedAfterComma,
+      },
+      /must be a JSON object/,
+    );
+
+    assertConfigurationFailure(
+      ringEnvironment(KEY_A, { [KEY_A]: signingA.privateKeyB64 }),
+      /missing a compiled entitlement key id/,
+    );
+    assertConfigurationFailure(
+      ringEnvironment(KEY_A, {
+        [KEY_A]: signingA.privateKeyB64,
+        [KEY_B]: signingB.privateKeyB64,
+        "ent-2026-07-c": signingB.privateKeyB64,
+      }),
+      /unknown key id/,
+    );
+    assertConfigurationFailure(ringEnvironment("ent-2026-07-c"), /not a compiled/);
+  });
+
+  it("rejects malformed, non-Ed25519, and production-mismatched rings", () => {
+    assertConfigurationFailure(
+      ringEnvironment(KEY_A, {
+        [KEY_A]: "not base64",
+        [KEY_B]: signingB.privateKeyB64,
+      }),
+      /canonical padded base64/,
     );
 
     const { privateKey: rsaPrivateKey } = crypto.generateKeyPairSync("rsa", {
       modulusLength: 2048,
     });
     const rsa = rsaPrivateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
-    assert.throws(
-      () => withSigningEnvironment(rsa, "test", () => loadEntitlementSigner()),
+    assertConfigurationFailure(
+      ringEnvironment(KEY_A, {
+        [KEY_A]: rsa,
+        [KEY_B]: signingB.privateKeyB64,
+      }),
       /must contain an Ed25519 private key/,
     );
-    assert.throws(
-      () =>
-        withSigningEnvironment(
-          EPHEMERAL_PRIVATE_KEY_B64,
-          "production",
-          () => loadEntitlementSigner(),
-        ),
-      new RegExp(`does not match entitlement key ${ENTITLEMENT_ASSERTION.KEY_ID}`),
+
+    const nonCanonicalPrivateKey = Buffer.concat([
+      Buffer.from(signingA.privateKeyB64, "base64"),
+      Buffer.from([0]),
+    ]).toString("base64");
+    assertConfigurationFailure(
+      ringEnvironment(KEY_A, {
+        [KEY_A]: nonCanonicalPrivateKey,
+        [KEY_B]: signingB.privateKeyB64,
+      }),
+      /must contain canonical Ed25519 PKCS#8 DER/,
     );
+
+    assertConfigurationFailure(
+      ringEnvironment(
+        KEY_A,
+        {
+          [KEY_A]: signingA.privateKeyB64,
+          [KEY_B]: signingB.privateKeyB64,
+        },
+        { NODE_ENV: "production" },
+      ),
+      /does not match entitlement key/,
+    );
+    assertConfigurationFailure(
+      legacyEnvironment(signingA.privateKeyB64, "production"),
+      /does not match entitlement key ent-2026-07-a/,
+    );
+  });
+
+  it("reports secret-safe readiness with the compiled fingerprint", () => {
+    assert.deepEqual(entitlementSignerReadiness(legacyEnvironment(signingA.privateKeyB64)), {
+      ready: true,
+      activeKid: KEY_A,
+      publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+    });
+    assert.deepEqual(entitlementSignerReadiness(ringEnvironment(KEY_B)), {
+      ready: true,
+      activeKid: KEY_B,
+      publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+    });
+    assert.deepEqual(
+      entitlementSignerReadiness({ NODE_ENV: "test", [ACTIVE_KID_ENV]: KEY_A }),
+      {
+        ready: false,
+        activeKid: KEY_A,
+        publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+      },
+    );
+    assert.deepEqual(
+      entitlementSignerReadiness({
+        NODE_ENV: "test",
+        [ACTIVE_KID_ENV]: "unknown-value-that-must-not-be-reflected",
+        [PRIVATE_KEY_RING_ENV]: "{}",
+      }),
+      {
+        ready: false,
+        activeKid: null,
+        publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+      },
+    );
+    assert.deepEqual(entitlementSignerReadiness({ NODE_ENV: "test" }), {
+      ready: false,
+      activeKid: KEY_A,
+      publicKeysetSha256: ENTITLEMENT_ASSERTION_KEYSET_SHA256,
+    });
   });
 });
