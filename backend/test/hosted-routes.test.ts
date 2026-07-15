@@ -6,8 +6,11 @@ import Stripe from "stripe";
 import {
   assertEntitlementEnvelope,
   assertNoRawDiagnosticsText,
+  barrierNextDeviceGrantDecisions,
   barrierNextSupabasePatches,
+  barrierNextSupabaseRpcs,
   createFakeDb,
+  failNextAtomicDeviceApproval,
   failNextSupabaseInsert,
   failNextSupabasePatch,
   failNextSupabaseSelect,
@@ -1781,6 +1784,305 @@ describe("hosted route handlers", () => {
     assert.deepEqual(secondBody, { error: "already_claimed", status: "claimed" });
   });
 
+  it("device approval has one account-bound winner under concurrent approvers", async () => {
+    const db = useFakeDb();
+    const firstUser = await makeUser({
+      id: "first-device-approver",
+      email: "first-approver@example.com",
+    });
+    const secondUser = await makeUser({
+      id: "second-device-approver",
+      email: "second-approver@example.com",
+    });
+    db.users.push(firstUser, secondUser);
+    const firstBrowserLicense = seedLicense({
+      id: "first-browser-license",
+      user_id: firstUser.id,
+    });
+    const secondBrowserLicense = seedLicense({
+      id: "second-browser-license",
+      user_id: secondUser.id,
+    });
+    const firstBearer = await issueAccessToken(firstUser, firstBrowserLicense);
+    const secondBearer = await issueAccessToken(secondUser, secondBrowserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Contested CLI" })),
+    );
+
+    barrierNextSupabaseRpcs("approve_device_grant_atomic");
+    const responses = await Promise.all([
+      approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${firstBearer}` } },
+        ),
+      ),
+      approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${secondBearer}` } },
+        ),
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+    const winnerIndex = responses.findIndex((response) => response.status === 200);
+    const loserIndex = responses.findIndex((response) => response.status === 409);
+
+    assert.notEqual(winnerIndex, -1);
+    assert.notEqual(loserIndex, -1);
+    assert.notEqual(winnerIndex, loserIndex);
+    assert.deepEqual(bodies[winnerIndex], { ok: true });
+    assert.deepEqual(bodies[loserIndex], { error: "already approved" });
+    assert.equal("access_token" in bodies[loserIndex], false);
+    assert.equal("refresh_token" in bodies[loserIndex], false);
+    assert.equal("entitlement_assertion" in bodies[loserIndex], false);
+
+    const winningUser = winnerIndex === 0 ? firstUser : secondUser;
+    const grant = db.device_grants[0];
+    const deviceLicenses = db.licenses.filter(
+      (license) =>
+        license.id !== firstBrowserLicense.id && license.id !== secondBrowserLicense.id,
+    );
+    assert.equal(deviceLicenses.length, 1);
+    assert.equal(grant.status, "approved");
+    assert.equal(grant.user_id, winningUser.id);
+    assert.equal(grant.license_id, deviceLicenses[0].id);
+    assert.equal(deviceLicenses[0].user_id, winningUser.id);
+    assert.equal(refreshHash(String(grant.refresh_token_plain)), deviceLicenses[0].refresh_token_hash);
+    assert.equal(db.audit_log.length, 1);
+    assert.equal(
+      (db.audit_log[0] as { actor_user_id?: string }).actor_user_id,
+      winningUser.id,
+    );
+
+    const pollResponse = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const pollBody = await responseJson(pollResponse);
+    assert.equal(pollResponse.status, 200);
+    assertEntitlementEnvelope(pollBody, {
+      sub: winningUser.id,
+      license_id: deviceLicenses[0].id,
+      email: winningUser.email,
+      tier: "pro",
+      entitlements: ["real_estate_sales"],
+    });
+    assert.equal(grant.refresh_token_plain, null);
+  });
+
+  it("device approve and deny decisions cannot overwrite each other", async () => {
+    const db = useFakeDb();
+    const approvingUser = await makeUser({
+      id: "approve-race-user",
+      email: "approve-race@example.com",
+    });
+    const denyingUser = await makeUser({
+      id: "deny-race-user",
+      email: "deny-race@example.com",
+    });
+    db.users.push(approvingUser, denyingUser);
+    const approvingBrowser = seedLicense({
+      id: "approve-race-browser",
+      user_id: approvingUser.id,
+    });
+    const denyingBrowser = seedLicense({
+      id: "deny-race-browser",
+      user_id: denyingUser.id,
+    });
+    const approvingBearer = await issueAccessToken(approvingUser, approvingBrowser);
+    const denyingBearer = await issueAccessToken(denyingUser, denyingBrowser);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const deny = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/deny");
+    const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Decision race CLI" })),
+    );
+
+    barrierNextDeviceGrantDecisions();
+    const responses = await Promise.all([
+      approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${approvingBearer}` } },
+        ),
+      ),
+      deny.POST(
+        jsonRequest(
+          "/api/device/deny",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${denyingBearer}` } },
+        ),
+      ),
+    ]);
+    const bodies = await Promise.all(responses.map(responseJson));
+
+    assert.equal(responses.filter((response) => response.status === 200).length, 1);
+    assert.equal(responses.filter((response) => response.status === 409).length, 1);
+    for (const [index, response] of responses.entries()) {
+      if (response.status === 409) {
+        assert.equal("access_token" in bodies[index], false);
+        assert.equal("refresh_token" in bodies[index], false);
+        assert.equal("entitlement_assertion" in bodies[index], false);
+      }
+    }
+
+    const grant = db.device_grants[0];
+    const decisionStatus = grant.status;
+    const deviceLicenses = db.licenses.filter(
+      (license) => license.id !== approvingBrowser.id && license.id !== denyingBrowser.id,
+    );
+    const pollResponse = await poll.POST(
+      jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+    );
+    const pollBody = await responseJson(pollResponse);
+
+    if (decisionStatus === "approved") {
+      assert.equal(responses[0].status, 200);
+      assert.equal(responses[1].status, 409);
+      assert.equal(grant.user_id, approvingUser.id);
+      assert.equal(deviceLicenses.length, 1);
+      assert.equal(deviceLicenses[0].user_id, approvingUser.id);
+      assert.equal(pollResponse.status, 200);
+      assertEntitlementEnvelope(pollBody, {
+        sub: approvingUser.id,
+        license_id: deviceLicenses[0].id,
+        email: approvingUser.email,
+        tier: "pro",
+        entitlements: ["real_estate_sales"],
+      });
+    } else {
+      assert.equal(grant.status, "denied");
+      assert.equal(responses[0].status, 409);
+      assert.equal(responses[1].status, 200);
+      assert.equal(grant.user_id, denyingUser.id);
+      assert.equal(grant.license_id, null);
+      assert.equal(grant.refresh_token_plain, null);
+      assert.equal(deviceLicenses.length, 0);
+      assert.equal(pollResponse.status, 403);
+      assert.deepEqual(pollBody, { error: "access_denied", status: "denied" });
+    }
+    assert.equal(db.audit_log.length, 1);
+  });
+
+  for (const failureStage of [
+    "after_license_insert",
+    "after_grant_update",
+    "after_audit_insert",
+  ] as const) {
+    it(`device approval rolls back every write when ${failureStage} fails`, async () => {
+      const db = useFakeDb();
+      const user = await makeUser({
+        id: `atomic-failure-${failureStage}`,
+        email: `${failureStage.replaceAll("_", "-")}@example.com`,
+      });
+      db.users.push(user);
+      const browserLicense = seedLicense({
+        id: `browser-${failureStage}`,
+        user_id: user.id,
+      });
+      const bearer = await issueAccessToken(user, browserLicense);
+      const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+      const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+        "device/approve",
+      );
+      const poll = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/poll");
+
+      const startBody = await responseJson(
+        await start.POST(jsonRequest("/api/device/start", { device_label: "Transactional CLI" })),
+      );
+      failNextAtomicDeviceApproval(failureStage);
+      const failedResponse = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      const failedBody = await responseJson(failedResponse);
+      const grant = db.device_grants[0];
+
+      assert.equal(failedResponse.status, 500);
+      assert.deepEqual(failedBody, { error: "approval_failed" });
+      assert.equal("access_token" in failedBody, false);
+      assert.equal("refresh_token" in failedBody, false);
+      assert.equal("entitlement_assertion" in failedBody, false);
+      assert.equal(grant.status, "pending");
+      assert.equal(grant.user_id, null);
+      assert.equal(grant.license_id, null);
+      assert.equal(grant.refresh_token_plain, null);
+      assert.deepEqual(db.licenses.map((license) => license.id), [browserLicense.id]);
+      assert.equal(db.audit_log.length, 0);
+
+      const stillPending = await poll.POST(
+        jsonRequest("/api/device/poll", { device_code: startBody.device_code }),
+      );
+      const pendingBody = await responseJson(stillPending);
+      assert.equal(stillPending.status, 200);
+      assert.deepEqual(pendingBody, { status: "pending", interval: 5 });
+
+      const retry = await approve.POST(
+        jsonRequest(
+          "/api/device/approve",
+          { user_code: startBody.user_code },
+          { headers: { authorization: `Bearer ${bearer}` } },
+        ),
+      );
+      assert.equal(retry.status, 200);
+      assert.equal(grant.status, "approved");
+      assert.equal(db.licenses.length, 2);
+      assert.equal(db.audit_log.length, 1);
+    });
+  }
+
+  it("device approval expires stale plaintext without creating a license", async () => {
+    const db = useFakeDb();
+    const user = await makeUser({ id: "expired-approval-user" });
+    db.users.push(user);
+    const browserLicense = seedLicense({
+      id: "expired-approval-browser",
+      user_id: user.id,
+    });
+    const bearer = await issueAccessToken(user, browserLicense);
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    const approve = await loadRoute<{ POST: (req: Request) => Promise<Response> }>(
+      "device/approve",
+    );
+    const startBody = await responseJson(
+      await start.POST(jsonRequest("/api/device/start", { device_label: "Expired approval" })),
+    );
+    const grant = db.device_grants[0];
+    grant.expires_at = new Date(Date.now() - 1000).toISOString();
+    grant.refresh_token_plain = "defensive-stale-plaintext";
+
+    const response = await approve.POST(
+      jsonRequest(
+        "/api/device/approve",
+        { user_code: startBody.user_code },
+        { headers: { authorization: `Bearer ${bearer}` } },
+      ),
+    );
+    const body = await responseJson(response);
+
+    assert.equal(response.status, 410);
+    assert.deepEqual(body, { error: "expired" });
+    assert.equal(grant.status, "expired");
+    assert.equal(grant.refresh_token_plain, null);
+    assert.deepEqual(db.licenses.map((license) => license.id), [browserLicense.id]);
+    assert.equal(db.audit_log.length, 0);
+  });
+
   it("device poll has one winner when an approved grant is claimed concurrently", async () => {
     const db = useFakeDb();
     const user = await makeUser({ id: "device-race-user", email: "device-race@example.com" });
@@ -1985,6 +2287,26 @@ describe("hosted route handlers", () => {
     assert.equal(db.device_grants[0].refresh_token_plain, null);
     assert.equal(db.device_grants[1].status, "approved");
     assert.equal(db.device_grants[1].refresh_token_plain, "fresh-plaintext-refresh");
+  });
+
+  it("starting a new device flow sweeps abandoned expired plaintext stashes", async () => {
+    const db = useFakeDb();
+    const start = await loadRoute<{ POST: (req: Request) => Promise<Response> }>("device/start");
+    await start.POST(jsonRequest("/api/device/start", { device_label: "Abandoned CLI" }));
+    const abandoned = db.device_grants[0];
+    abandoned.status = "approved";
+    abandoned.expires_at = new Date(Date.now() - 1000).toISOString();
+    abandoned.refresh_token_plain = "abandoned-plaintext-refresh";
+
+    const response = await start.POST(
+      jsonRequest("/api/device/start", { device_label: "Replacement CLI" }),
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(abandoned.status, "expired");
+    assert.equal(abandoned.refresh_token_plain, null);
+    assert.equal(db.device_grants.length, 2);
+    assert.equal(db.device_grants[1].status, "pending");
   });
 
   it("device poll does not return a one-shot refresh token when clearing it fails", async () => {

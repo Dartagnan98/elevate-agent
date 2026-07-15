@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAccess } from "@/lib/auth-guard";
-import { denyDeviceGrant, findDeviceGrantByUserCode, logAdminAction } from "@/lib/store";
+import {
+  denyDeviceGrant,
+  expireDeviceGrant,
+  findDeviceGrantByUserCode,
+  logAdminAction,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 
@@ -29,7 +34,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `already ${grant.status}` }, { status: 409 });
   }
 
-  await denyDeviceGrant(grant.id, auth.user.id);
+  const denied = await denyDeviceGrant(grant.id, auth.user.id);
+  if (!denied) {
+    const current = await findDeviceGrantByUserCode(grant.user_code);
+    if (
+      current?.status === "pending" &&
+      Date.parse(current.expires_at) <= Date.now()
+    ) {
+      await expireDeviceGrant(current.id);
+      return NextResponse.json({ error: "expired" }, { status: 410 });
+    }
+    return NextResponse.json(
+      { error: `already ${current?.status || "processed"}` },
+      { status: 409 },
+    );
+  }
 
   await logAdminAction({
     actor_user_id: auth.user.id,

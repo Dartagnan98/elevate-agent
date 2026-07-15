@@ -3,12 +3,9 @@ import { z } from "zod";
 import { requireAccess } from "@/lib/auth-guard";
 import {
   approveDeviceGrant,
-  createLicense,
   findDeviceGrantByUserCode,
-  logAdminAction,
 } from "@/lib/store";
 import { generateRefreshToken } from "@/lib/jwt";
-import { supabase } from "@/lib/supabase";
 
 export const runtime = "nodejs";
 
@@ -32,44 +29,40 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  if (new Date(grant.expires_at).getTime() < Date.now()) {
+  // The database RPC compare-and-swaps an untouched, unexpired pending grant,
+  // creates the matching license, stashes this one-shot refresh bearer, and
+  // writes the audit event in one transaction. A concurrent loser cannot
+  // create a license or overwrite the winner's account/token binding.
+  const refresh = generateRefreshToken();
+  let approval: Awaited<ReturnType<typeof approveDeviceGrant>>;
+  try {
+    approval = await approveDeviceGrant({
+      id: grant.id,
+      userId: auth.user.id,
+      refreshTokenHash: refresh.hash,
+      refreshTokenPlain: refresh.token,
+    });
+  } catch {
+    // The RPC is transactional: an error rolls back ownership, license,
+    // refresh stash, and audit state together.
+    return NextResponse.json({ error: "approval_failed" }, { status: 500 });
+  }
+
+  if (approval.result === "not_found") {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  if (approval.result === "expired") {
     return NextResponse.json({ error: "expired" }, { status: 410 });
   }
-
-  if (grant.status !== "pending") {
-    return NextResponse.json({ error: `already ${grant.status}` }, { status: 409 });
+  if (approval.result === "invalid") {
+    return NextResponse.json({ error: "invalid_grant" }, { status: 409 });
   }
-
-  // Pre-create the license so the polling CLI can claim its tokens.
-  // Stash the raw refresh token in the device_grants row — it lives there
-  // until the CLI polls successfully (typically <30s), then nulled out.
-  const refresh = generateRefreshToken();
-  const license = await createLicense(
-    auth.user.id,
-    refresh.hash,
-    grant.device_label || "linked-device",
-  );
-
-  // Update grant with raw refresh stash before flipping status to approved.
-  const { error: stashErr } = await supabase()
-    .from("device_grants")
-    .update({ refresh_token_plain: refresh.token })
-    .eq("id", grant.id);
-  if (stashErr) throw stashErr;
-
-  await approveDeviceGrant(grant.id, auth.user.id, license.id);
-
-  await logAdminAction({
-    actor_user_id: auth.user.id,
-    target_user_id: auth.user.id,
-    action: "device.link.approved",
-    payload: {
-      grant_id: grant.id,
-      user_code: grant.user_code,
-      device_label: grant.device_label,
-      license_id: license.id,
-    },
-  });
+  if (approval.result === "conflict") {
+    return NextResponse.json(
+      { error: `already ${approval.grant_status}` },
+      { status: 409 },
+    );
+  }
 
   return NextResponse.json({ ok: true });
 }

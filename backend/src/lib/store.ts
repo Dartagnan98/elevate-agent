@@ -840,6 +840,12 @@ export async function createDeviceGrant(input: {
   user_agent: string | null;
   expires_at: Date;
 }): Promise<DeviceGrant> {
+  // Clear expired one-shot refresh stashes before opening another device
+  // flow. Poll/deny/atomic approval also clear their target rows; this sweep
+  // prevents abandoned grants from accumulating plaintext while the service
+  // remains active.
+  await expireStaleDeviceGrants();
+
   const { data, error } = await supabase()
     .from("device_grants")
     .insert({
@@ -883,29 +889,65 @@ export async function touchDeviceGrantPoll(id: string): Promise<void> {
     .eq("id", id);
 }
 
-export async function approveDeviceGrant(
-  id: string,
-  userId: string,
-  licenseId: string,
-): Promise<void> {
-  const { error } = await supabase()
-    .from("device_grants")
-    .update({
-      status: "approved",
-      user_id: userId,
-      license_id: licenseId,
-      approved_at: new Date().toISOString(),
-    })
-    .eq("id", id);
+export type DeviceGrantApprovalResult =
+  | { result: "approved"; license_id: string }
+  | { result: "not_found" }
+  | { result: "expired"; grant_status: "expired" }
+  | { result: "conflict"; grant_status: DeviceGrantStatus }
+  | { result: "invalid"; grant_status: "expired" };
+
+export async function approveDeviceGrant(input: {
+  id: string;
+  userId: string;
+  refreshTokenHash: string;
+  refreshTokenPlain: string;
+}): Promise<DeviceGrantApprovalResult> {
+  const { data, error } = await supabase().rpc("approve_device_grant_atomic", {
+    p_grant_id: input.id,
+    p_user_id: input.userId,
+    p_refresh_token_hash: input.refreshTokenHash,
+    p_refresh_token_plain: input.refreshTokenPlain,
+  });
   if (error) throw error;
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("invalid atomic device approval result");
+  }
+
+  const value = data as Record<string, unknown>;
+  if (value.result === "approved" && typeof value.license_id === "string") {
+    return { result: "approved", license_id: value.license_id };
+  }
+  if (value.result === "not_found") return { result: "not_found" };
+  if (value.result === "expired" && value.grant_status === "expired") {
+    return { result: "expired", grant_status: "expired" };
+  }
+  if (value.result === "invalid" && value.grant_status === "expired") {
+    return { result: "invalid", grant_status: "expired" };
+  }
+  if (
+    value.result === "conflict" &&
+    typeof value.grant_status === "string" &&
+    ["pending", "approved", "denied", "expired", "claimed"].includes(value.grant_status)
+  ) {
+    return {
+      result: "conflict",
+      grant_status: value.grant_status as DeviceGrantStatus,
+    };
+  }
+  throw new Error("invalid atomic device approval result");
 }
 
-export async function denyDeviceGrant(id: string, userId: string): Promise<void> {
-  const { error } = await supabase()
+export async function denyDeviceGrant(id: string, userId: string): Promise<boolean> {
+  const { data, error } = await supabase()
     .from("device_grants")
     .update({ status: "denied", user_id: userId, refresh_token_plain: null })
-    .eq("id", id);
+    .eq("id", id)
+    .eq("status", "pending")
+    .gt("expires_at", new Date().toISOString())
+    .select("id");
   if (error) throw error;
+  return data?.length === 1;
 }
 
 export async function expireDeviceGrant(id: string): Promise<void> {

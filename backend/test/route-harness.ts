@@ -179,6 +179,24 @@ let nextPatchBarrier: {
   promise: Promise<void>;
   release: () => void;
 } | null = null;
+let nextRpcBarrier: {
+  name: string;
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
+let nextDeviceGrantDecisionBarrier: {
+  parties: number;
+  arrived: number;
+  promise: Promise<void>;
+  release: () => void;
+} | null = null;
+export type AtomicDeviceApprovalFailureStage =
+  | "after_license_insert"
+  | "after_grant_update"
+  | "after_audit_insert";
+let nextAtomicDeviceApprovalFailure: AtomicDeviceApprovalFailureStage | null = null;
 
 export function createFakeDb(overrides: Partial<FakeDb> = {}): FakeDb {
   return {
@@ -211,6 +229,9 @@ export function useFakeDb(db = createFakeDb()): FakeDb {
   nextInsertFailure = null;
   nextSelectFailure = null;
   nextPatchBarrier = null;
+  nextRpcBarrier = null;
+  nextDeviceGrantDecisionBarrier = null;
+  nextAtomicDeviceApprovalFailure = null;
   return activeDb;
 }
 
@@ -220,6 +241,28 @@ export function barrierNextSupabasePatches(table: string, parties = 2): void {
     release = resolve;
   });
   nextPatchBarrier = { table, parties, arrived: 0, promise, release };
+}
+
+export function barrierNextSupabaseRpcs(name: string, parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextRpcBarrier = { name, parties, arrived: 0, promise, release };
+}
+
+export function barrierNextDeviceGrantDecisions(parties = 2): void {
+  let release = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  nextDeviceGrantDecisionBarrier = { parties, arrived: 0, promise, release };
+}
+
+export function failNextAtomicDeviceApproval(
+  stage: AtomicDeviceApprovalFailureStage,
+): void {
+  nextAtomicDeviceApprovalFailure = stage;
 }
 
 export function failNextSupabasePatch(
@@ -611,12 +654,14 @@ function updateRows(
     const status = readEq(filters, "status");
     const statuses = readIn(filters, "status");
     const expiresBefore = readLessThan(filters, "expires_at");
+    const expiresAfter = readGreaterThan(filters, "expires_at");
     for (const grant of activeDb.device_grants) {
       if (
         matchesId(grant.id) &&
         (!status || grant.status === status) &&
         (!statuses || statuses.includes(grant.status)) &&
-        (!expiresBefore || grant.expires_at < expiresBefore)
+        (!expiresBefore || grant.expires_at < expiresBefore) &&
+        (!expiresAfter || grant.expires_at > expiresAfter)
       ) {
         Object.assign(grant, body);
         updated.push(grant);
@@ -835,6 +880,112 @@ function upsertDiagnostics(body: unknown): void {
   }
 }
 
+function atomicDeviceApproval(body: unknown): Response {
+  const input = (body || {}) as Record<string, unknown>;
+  const grantId = String(input.p_grant_id || "");
+  const userId = String(input.p_user_id || "");
+  const refreshHashValue = String(input.p_refresh_token_hash || "");
+  const refreshPlain = String(input.p_refresh_token_plain || "");
+
+  if (!/^[0-9a-f]{64}$/.test(refreshHashValue) || !/^[A-Za-z0-9_-]{43}$/.test(refreshPlain)) {
+    return okJson({ message: "invalid device refresh token material" }, 400);
+  }
+
+  const user = activeDb.users.find(
+    (candidate) =>
+      candidate.id === userId && ["active", "trialing"].includes(candidate.status),
+  );
+  if (!user) return okJson({ message: "device approver is not active" }, 500);
+
+  const now = Date.now();
+  const stale = activeDb.device_grants.filter(
+    (candidate) =>
+      ["pending", "approved"].includes(candidate.status) &&
+      Number.isFinite(Date.parse(candidate.expires_at)) &&
+      Date.parse(candidate.expires_at) <= now,
+  );
+  const applyStaleSweep = () => {
+    for (const candidate of stale) {
+      candidate.status = "expired";
+      candidate.refresh_token_plain = null;
+    }
+  };
+
+  const grant = activeDb.device_grants.find((candidate) => candidate.id === grantId);
+  if (!grant) {
+    applyStaleSweep();
+    return okJson({ result: "not_found" });
+  }
+
+  const effectiveStatus = stale.includes(grant) ? "expired" : grant.status;
+  if (effectiveStatus === "expired") {
+    applyStaleSweep();
+    return okJson({ result: "expired", grant_status: "expired" });
+  }
+  if (effectiveStatus !== "pending") {
+    applyStaleSweep();
+    return okJson({ result: "conflict", grant_status: effectiveStatus });
+  }
+
+  if (grant.user_id || grant.license_id || grant.refresh_token_plain) {
+    applyStaleSweep();
+    grant.status = "expired";
+    grant.refresh_token_plain = null;
+    return okJson({ result: "invalid", grant_status: "expired" });
+  }
+
+  const license: LicenseRow = {
+    id: `license-${nextLicenseId}`,
+    user_id: userId,
+    refresh_token_hash: refreshHashValue,
+    device_label: grant.device_label ?? "linked-device",
+    revoked: false,
+    last_used_at: null,
+    created_at: new Date(now).toISOString(),
+  };
+  if (nextAtomicDeviceApprovalFailure === "after_license_insert") {
+    nextAtomicDeviceApprovalFailure = null;
+    return okJson({ message: "injected atomic approval failure after license insert" }, 500);
+  }
+
+  const approvedAt = new Date(now).toISOString();
+  if (nextAtomicDeviceApprovalFailure === "after_grant_update") {
+    nextAtomicDeviceApprovalFailure = null;
+    return okJson({ message: "injected atomic approval failure after grant update" }, 500);
+  }
+
+  const audit = {
+    actor_user_id: userId,
+    target_user_id: userId,
+    action: "device.link.approved",
+    payload: {
+      grant_id: grant.id,
+      user_code: grant.user_code,
+      device_label: grant.device_label,
+      license_id: license.id,
+    },
+  };
+  if (nextAtomicDeviceApprovalFailure === "after_audit_insert") {
+    nextAtomicDeviceApprovalFailure = null;
+    return okJson({ message: "injected atomic approval failure after audit insert" }, 500);
+  }
+
+  // Commit the staged transaction only after every phase succeeded.
+  applyStaleSweep();
+  activeDb.licenses.push(license);
+  nextLicenseId += 1;
+  Object.assign(grant, {
+    status: "approved",
+    user_id: userId,
+    license_id: license.id,
+    approved_at: approvedAt,
+    refresh_token_plain: refreshPlain,
+  });
+  activeDb.audit_log.push(audit);
+
+  return okJson({ result: "approved", license_id: license.id });
+}
+
 function headerValue(headers: HeadersInit | undefined, name: string): string {
   if (!headers) return "";
   if (headers instanceof Headers) return headers.get(name) || "";
@@ -844,6 +995,18 @@ function headerValue(headers: HeadersInit | undefined, name: string): string {
   }
   const record = headers as Record<string, string>;
   return String(record[name] || record[name.toLowerCase()] || "");
+}
+
+async function waitForDeviceGrantDecisionBarrier(): Promise<void> {
+  if (!nextDeviceGrantDecisionBarrier) return;
+  const barrier = nextDeviceGrantDecisionBarrier;
+  barrier.arrived += 1;
+  if (barrier.arrived === barrier.parties) {
+    nextDeviceGrantDecisionBarrier = null;
+    barrier.release();
+    return;
+  }
+  await barrier.promise;
 }
 
 async function fakeSupabaseFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
@@ -859,6 +1022,22 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
 
   if (url.pathname.includes("/rpc/check_rate_limit")) {
     return okJson({ allowed: true, remaining: 100, retry_after: 0 });
+  }
+
+  if (url.pathname.includes("/rpc/approve_device_grant_atomic")) {
+    activeDb.calls.push({ table: "approve_device_grant_atomic", method, body });
+    await waitForDeviceGrantDecisionBarrier();
+    if (nextRpcBarrier?.name === "approve_device_grant_atomic") {
+      const barrier = nextRpcBarrier;
+      barrier.arrived += 1;
+      if (barrier.arrived === barrier.parties) {
+        nextRpcBarrier = null;
+        barrier.release();
+      } else {
+        await barrier.promise;
+      }
+    }
+    return atomicDeviceApproval(body);
   }
 
   activeDb.calls.push({ table, method, body });
@@ -884,6 +1063,12 @@ async function fakeSupabaseFetch(input: string | URL | Request, init: RequestIni
     return okJson(insertRows(table, body), 201);
   }
   if (method === "PATCH") {
+    if (
+      table === "device_grants" &&
+      (body as Record<string, unknown> | null)?.status === "denied"
+    ) {
+      await waitForDeviceGrantDecisionBarrier();
+    }
     if (nextPatchBarrier?.table === table) {
       const barrier = nextPatchBarrier;
       barrier.arrived += 1;
