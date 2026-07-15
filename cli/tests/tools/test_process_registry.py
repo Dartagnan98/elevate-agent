@@ -854,6 +854,129 @@ class TestKillProcess:
 
 
 # =========================================================================
+# Kill all
+# =========================================================================
+
+class TestKillAll:
+    @staticmethod
+    def _add_killable_session(
+        registry,
+        *,
+        sid: str,
+        task_id: str,
+        session_key: str,
+    ) -> ProcessSession:
+        session = _make_session(sid=sid, task_id=task_id)
+        session.session_key = session_key
+        session.pid = 1000 + len(registry._running)
+        session.env_ref = MagicMock()
+        registry._running[session.id] = session
+        return session
+
+    def test_session_filter_does_not_kill_sibling_with_same_task_id(self, registry):
+        session_a = self._add_killable_session(
+            registry,
+            sid="proc_a",
+            task_id="default",
+            session_key="session_a",
+        )
+        session_b = self._add_killable_session(
+            registry,
+            sid="proc_b",
+            task_id="default",
+            session_key="session_b",
+        )
+
+        with patch.object(registry, "_write_checkpoint"):
+            killed = registry.kill_all(session_key="session_a")
+
+        assert killed == 1
+        assert session_a.exited is True
+        assert session_a.id in registry._finished
+        assert session_b.exited is False
+        assert session_b.id in registry._running
+        session_a.env_ref.execute.assert_called_once()
+        session_b.env_ref.execute.assert_not_called()
+
+    @pytest.mark.parametrize("session_key", ["", "unknown"])
+    def test_empty_or_unknown_session_filter_matches_nothing(
+        self,
+        registry,
+        session_key,
+    ):
+        session = self._add_killable_session(
+            registry,
+            sid="proc_a",
+            task_id="default",
+            session_key="session_a",
+        )
+
+        with patch.object(registry, "_write_checkpoint"):
+            killed = registry.kill_all(session_key=session_key)
+
+        assert killed == 0
+        assert session.exited is False
+        assert session.id in registry._running
+        session.env_ref.execute.assert_not_called()
+
+    def test_task_filter_and_global_compatibility(self, registry):
+        session_a = self._add_killable_session(
+            registry,
+            sid="proc_a",
+            task_id="task_a",
+            session_key="session_a",
+        )
+        session_b = self._add_killable_session(
+            registry,
+            sid="proc_b",
+            task_id="task_b",
+            session_key="session_b",
+        )
+
+        with patch.object(registry, "_write_checkpoint"):
+            assert registry.kill_all(task_id="task_a") == 1
+            assert session_a.exited is True
+            assert session_b.exited is False
+            assert registry.kill_all() == 1
+
+        assert session_b.exited is True
+
+    def test_task_and_session_filters_intersect(self, registry):
+        exact_match = self._add_killable_session(
+            registry,
+            sid="proc_a",
+            task_id="default",
+            session_key="session_a",
+        )
+        wrong_session = self._add_killable_session(
+            registry,
+            sid="proc_b",
+            task_id="default",
+            session_key="session_b",
+        )
+        wrong_task = self._add_killable_session(
+            registry,
+            sid="proc_c",
+            task_id="other",
+            session_key="session_a",
+        )
+
+        with patch.object(registry, "_write_checkpoint"):
+            killed = registry.kill_all(
+                task_id="default",
+                session_key="session_a",
+            )
+
+        assert killed == 1
+        assert exact_match.exited is True
+        assert wrong_session.exited is False
+        assert wrong_task.exited is False
+        exact_match.env_ref.execute.assert_called_once()
+        wrong_session.env_ref.execute.assert_not_called()
+        wrong_task.env_ref.execute.assert_not_called()
+
+
+# =========================================================================
 # Tool handler
 # =========================================================================
 

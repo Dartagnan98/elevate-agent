@@ -1271,12 +1271,29 @@ class ProcessRegistry:
                 for s in self._running.values()
             )
 
-    def kill_all(self, task_id: str = None) -> int:
-        """Kill all running processes, optionally filtered by task_id. Returns count killed."""
+    def kill_all(
+        self,
+        task_id: str | None = None,
+        *,
+        session_key: str | None = None,
+    ) -> int:
+        """Kill matching processes and return the number terminalized.
+
+        With both filters omitted this preserves the legacy global-kill
+        behavior. When both filters are supplied, a process must match both.
+        An explicitly empty session key is never treated as a global request.
+        """
+        if session_key == "":
+            return 0
+
         with self._lock:
             targets = [
                 s for s in self._running.values()
-                if (task_id is None or s.task_id == task_id) and not s.exited
+                if (
+                    (task_id is None or s.task_id == task_id)
+                    and (session_key is None or s.session_key == session_key)
+                    and not s.exited
+                )
             ]
 
         killed = 0
